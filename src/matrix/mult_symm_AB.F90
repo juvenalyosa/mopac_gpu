@@ -19,8 +19,7 @@
 !        Use mod_vars_cuda, only: ngpus
         Use iso_c_binding
 #ifdef GPU
-        Use call_gemm_cublas
-        Use call_syrk_cublas
+        Use mopac_cublas_interfaces
         Use mamult_cuda_i
         use common_arrays_C, only : ifact
 #endif

@@ -21,7 +21,7 @@ subroutine diag_for_GPU (fao, vector, nocc, eig, norbs, mpack)
     Use mod_vars_cuda, only: lgpu, prec, ngpus
     Use iso_c_binding
     use call_rot_cuda
-    Use call_gemm_cublas
+    Use mopac_cublas_interfaces
 #endif
     implicit none
     integer, intent (in) :: nocc, mpack, norbs

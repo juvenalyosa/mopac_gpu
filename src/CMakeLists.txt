@@ -32,7 +32,6 @@ if(GPU)
     list(APPEND main_src_list
         deprecated/mod_gpu_info
         deprecated/mod_vars_cuda
-        deprecated/mod_calls_cublas
         matrix/eigenvectors_cuda
         matrix/call_rot_cuda
         matrix/density_cuda_i
@@ -40,6 +39,8 @@ if(GPU)
     )
     # Add CUDA C++ wrappers for cuBLAS/cuSOLVER interop
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/cuda_wrappers.cu)
+    # Minimal Fortran interfaces for cuBLAS wrappers
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/cublas_interfaces.F90)
 endif()
 
 #-----------------------------------------------

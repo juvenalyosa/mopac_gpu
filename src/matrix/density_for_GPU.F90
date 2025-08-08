@@ -18,8 +18,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       Use mod_vars_cuda, only: real_cuda, prec, nthreads_gpu, nblocks_gpu
       Use iso_c_binding
       Use density_cuda_i
-      Use call_gemm_cublas
-      Use call_syrk_cublas
+      Use mopac_cublas_interfaces
 #endif
       implicit none
       Integer :: ndubl, nsingl, mode, mpack, norbs, nl1, nl2, nu1, nu2, i, j, l, &
