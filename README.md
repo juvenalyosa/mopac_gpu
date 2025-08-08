@@ -87,6 +87,17 @@ or the path (`-DMOPAC_LINK_PATH=...`) and linker options (`-DMOPAC_LINK=...`) to
 
 The CTest-based testing requires an installation of Python 3.x and Numpy that can be detected by CMake.
 
+### GPU Support (CUDA)
+
+Experimental CUDA acceleration is available and can be enabled at configure time:
+
+```
+cmake -DGPU=ON ..
+make
+```
+
+This builds CUDA wrappers for selected linear algebra routines (GEMM, SYRK) and an accelerated eigenvector rotation used in the SCF procedure. If multiple compatible NVIDIA GPUs are present, MOPAC will use up to two devices to speed up the rotation step. Use keyword `NOGPU` to disable GPU at runtime, or environment variable `MOPAC_FORCEGPU=1` to force-enable when supported.
+
 ## Documentation
 
 The main source for MOPAC documentation is presently its old [online user manual](http://openmopac.net/manual/index.html).

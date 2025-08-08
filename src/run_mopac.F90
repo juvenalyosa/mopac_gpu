@@ -300,8 +300,8 @@
           end do
           lgpu_ref = (j >= 1)
         end if
-        ngpus = 1  ! in this version only single-GPU calculation are performed. This variable control it.
-!       ngpus = j ! in future versions of MOPAC Multi-GPUs calculations should be allowed
+        ! Enable multiple GPUs when available; current kernels use up to 2
+        ngpus = min(j, 2)
 
         l = 0; k = 0
         if (lgpu_ref) then

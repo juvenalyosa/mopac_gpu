@@ -397,7 +397,7 @@ contains
         end do
         if (any(gpu_ok)) then
           lgpu = .true.
-          ngpus = 1
+          ngpus = min(2, count(gpu_ok))
           do j = 1, nDevices
             if (gpu_ok(j)) then
               gpu_id = j - 1
@@ -419,7 +419,7 @@ contains
       end do
       if (any(gpu_ok)) then
         lgpu = .true.
-        ngpus = 1
+        ngpus = min(2, count(gpu_ok))
         do j = 1, nDevices
           if (gpu_ok(j)) then
             gpu_id = j - 1
