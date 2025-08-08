@@ -35,6 +35,7 @@ subroutine diag_for_GPU (fao, vector, nocc, eig, norbs, mpack)
     double precision, allocatable, dimension(:,:)  :: fck
 #ifdef GPU
     double precision, allocatable, dimension(:,:)  :: ci0,ca0 ! alp,bet
+    real(c_double), pointer :: F_full(:,:), Fmo_nv(:,:), Vec_occ(:,:), Vec_virt(:,:)
 #endif
     integer :: kk
 !
@@ -115,7 +116,6 @@ subroutine diag_for_GPU (fao, vector, nocc, eig, norbs, mpack)
 #ifdef GPU
     if (lgpu) then
   !  PERFORMS BOTH MULTIPLICATIONS USING CUBLAS (with pointer remaps)
-      real(c_double), pointer :: F_full(:,:), Fmo_nv(:,:), Vec_occ(:,:), Vec_virt(:,:)
       F_full(1:n,1:n) => fmo
       if (nocc < nvirt) then
         Vec_occ(1:n,1:nocc) => vector
