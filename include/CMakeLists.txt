@@ -13,5 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-target_sources(mopac-api-test PRIVATE mopac_wrapper.F90)
-target_sources(mopac-api-test PRIVATE mopac_wrapper_internal.F90)
+# Build the Fortran API wrapper once in the core library
+target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mopac_wrapper.F90)
+target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mopac_wrapper_internal.F90)
