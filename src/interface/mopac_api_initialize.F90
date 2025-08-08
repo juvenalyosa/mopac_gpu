@@ -61,6 +61,11 @@ submodule (mopac_api:mopac_api_operations) mopac_api_initialize
     zs, & ! s-type STO exponents of elements
     eheat, eheat_sparkles, eisol ! heat of formation reference values (data)
   use symmetry_C, only : state_Irred_Rep, name
+#ifdef GPU
+  use mod_vars_cuda, only: lgpu, ngpus, gpu_id
+  use gpu_info
+  use settingGPUcard
+#endif
   implicit none
 
 contains
@@ -345,6 +350,86 @@ contains
     atheat = atheat + C_triple_bond_C()
     ! setup MOZYME calculations
     if (mozyme) call set_up_MOZYME_arrays()
+
+#ifdef GPU
+    ! Optionally configure GPU usage for API path
+    call api_setup_gpu()
+#endif
   end subroutine mopac_initialize
+
+#ifdef GPU
+  subroutine api_setup_gpu()
+    use iso_c_binding
+    implicit none
+    logical(c_bool)    :: hasGpu
+    logical(c_bool)    :: hasDouble(6)
+    integer(c_int)     :: nDevices
+    character*256      :: gpuName(6)
+    integer(c_size_t)  :: totalMem(6)
+    logical            :: gpu_ok(6)
+    integer(c_int)     :: clockRate(6), major(6), minor(6), name_size(6)
+    character(len=32)  :: env
+    integer            :: i, j, lstat
+
+    gpuName = '' ; name_size = 0 ; totalMem = 0 ; clockRate = 0
+    hasDouble = .false. ; gpu_ok = .false.
+    major = 0 ; minor = 0
+    call gpuInfo(hasGpu, hasDouble, nDevices, gpuName, name_size, totalMem, clockRate, major, minor)
+    ngpus = 0
+    lgpu = .false.
+
+    call get_environment_variable('MOPAC_NOGPU', env, status=i)
+    if (i == 0) then
+      if (trim(adjustl(env)) /= '') then
+        lgpu = .false.
+        return
+      end if
+    end if
+
+    call get_environment_variable('MOPAC_FORCEGPU', env, status=i)
+    if (i == 0) then
+      if (trim(adjustl(env)) /= '') then
+        ! Force-enable if any suitable GPU exists
+        do j = 1, nDevices
+          if (major(j) >= 2 .and. hasDouble(j)) then
+            gpu_ok(j) = .true.
+          end if
+        end do
+        if (any(gpu_ok)) then
+          lgpu = .true.
+          ngpus = 1
+          do j = 1, nDevices
+            if (gpu_ok(j)) then
+              gpu_id = j - 1
+              call setGPU(gpu_id, lstat)
+              exit
+            end if
+          end do
+        end if
+        return
+      end if
+    end if
+
+    ! Default behavior: enable GPU if present
+    if (hasGpu) then
+      do j = 1, nDevices
+        if (major(j) >= 2 .and. hasDouble(j)) then
+          gpu_ok(j) = .true.
+        end if
+      end do
+      if (any(gpu_ok)) then
+        lgpu = .true.
+        ngpus = 1
+        do j = 1, nDevices
+          if (gpu_ok(j)) then
+            gpu_id = j - 1
+            call setGPU(gpu_id, lstat)
+            exit
+          end if
+        end do
+      end if
+    end if
+  end subroutine api_setup_gpu
+#endif
 
 end submodule mopac_api_initialize

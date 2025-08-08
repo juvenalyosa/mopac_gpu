@@ -20,6 +20,7 @@
         Use iso_c_binding
 #ifdef GPU
         Use call_gemm_cublas
+        Use call_syrk_cublas
         Use mamult_cuda_i
         use common_arrays_C, only : ifact
 #endif
@@ -30,14 +31,17 @@
         integer :: igrid, iblock
         real :: tt
 #endif
+! Make arguments C_LOC-able for address comparison
 #if CC12
-        real(c_float), dimension(mdim) :: a, b, c
+        real(c_float), dimension(mdim), target :: a, b, c
 #else
-        real(c_double), dimension(mdim) :: a, b, c
+        real(c_double), dimension(mdim), target :: a, b, c
 #endif
         double precision, allocatable, dimension(:,:) :: xa, xb, xc
 
         double precision :: alpha,beta
+        logical :: same_ab
+        type(c_ptr) :: pa, pb
 
         continue
 
@@ -53,7 +57,7 @@
             tt = 0.0
             call mamult_gpu(a, b, c, ndim, mdim, ifact, beta, igrid, iblock, tt, 0)
 #endif
-          case (3) ! dgemm
+          case (3) ! CPU path: prefer DSYRK when A==B
             allocate (xa(ndim,ndim), xb(ndim,ndim), xc(ndim,ndim),stat=i)
 
 !            forall (i=1:ndim,j=1:ndim)
@@ -84,15 +88,22 @@
               end do
             end if
 
-            call dgemm ("N", "N", ndim, ndim, ndim, alpha, xa, ndim, xb, ndim, beta, xc, &
-                       & ndim)
+            pa = c_loc(a(1)); pb = c_loc(b(1))
+            same_ab = (pa == pb)
+
+            if (same_ab) then
+              call dsyrk('U','N', ndim, ndim, alpha, xa, ndim, beta, xc, ndim)
+            else
+              call dgemm ("N", "N", ndim, ndim, ndim, alpha, xa, ndim, xb, ndim, beta, xc, &
+                         & ndim)
+            end if
 
             call dtrttp('u', ndim, xc, ndim, c, i )
 
             deallocate (xa,xb,xc,stat=i)
 
 #ifdef GPU
-          case (4) ! dgemm_gpu
+          case (4) ! GPU path: prefer cuBLAS SYRK when A==B
 
             allocate (xa(ndim,ndim), xb(ndim,ndim), xc(ndim,ndim),stat=i)
 
@@ -124,16 +135,15 @@
               end do
             end if
 
-!            if (ngpus > 1 .and. ndim > 100) then
-!
-!               call gemm_cublas_mgpu ("N", "N", ndim, ndim, ndim, alpha, xa, ndim, xb, ndim, beta, xc, &
-!                           & ndim)
-!
-!            else
+            pa = c_loc(a(1)); pb = c_loc(b(1))
+            same_ab = (pa == pb)
+
+            if (same_ab) then
+               call syrk_cublas('U', 'N', ndim, ndim, alpha, xa, ndim, beta, xc, ndim)
+            else
                call gemm_cublas ("N", "N", ndim, ndim, ndim, alpha, xa, ndim, xb, ndim, beta, xc, &
                            & ndim)
-
-!            end if
+            end if
 
             call dtrttp('u', ndim, xc, ndim, c, i )
 

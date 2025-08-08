@@ -17,6 +17,7 @@
       USE chanel_C, only : iw
 #ifdef GPU
       Use mod_vars_cuda, only: lgpu, ngpus, prec
+      use eigenvectors_cuda, only: eigenvectors_CUDA
 #endif
 #if (MAGMA)
       Use magma
@@ -62,6 +63,13 @@ end if
 #endif
 #endif
       if (i /= 0) stop 'error in dtpttr'
+
+#ifdef GPU
+      if (lgpu) then
+        call eigenvectors_CUDA(eigenvecs, xmat, eigvals, ndim)
+        return
+      end if
+#endif
 
       j = i ! Dummy - to make FORCHECK not complain about "j"
       i = j ! Dummy

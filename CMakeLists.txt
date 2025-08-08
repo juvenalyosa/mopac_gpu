@@ -49,7 +49,7 @@ endif()
 message(STATUS "Build type is ${CMAKE_BUILD_TYPE}")
 
 # Specify project name & programming languages
-project(openmopac VERSION ${CMAKE_MATCH_1} LANGUAGES Fortran)
+project(openmopac VERSION ${CMAKE_MATCH_1} LANGUAGES Fortran C)
 
 # Enable C language support for MKL?  (C is only needed for auto-detection of MKL by find_package)
 option(ENABLE_MKL "Turn on C language support for MKL" ON)
@@ -270,6 +270,13 @@ endif()
 option(GPU "GPU build flag" OFF)
 if(GPU)
   add_definitions(-DGPU)
+  # Enable CUDA language support
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  # Link CUDA runtime and math libraries needed by wrappers
+  target_link_libraries(mopac-core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver)
+  # Ensure position independent code for shared targets
+  set_target_properties(mopac-core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 # Add tests
@@ -286,6 +293,16 @@ if(TESTS)
   enable_testing()
   add_executable(mopac-api-test)
   target_link_libraries(mopac-api-test mopac-core)
+  if(GPU)
+    add_executable(mopac-gpu-verify tests/gpu_verify.F90)
+    target_link_libraries(mopac-gpu-verify mopac-core)
+    add_executable(mopac-gpu-density-verify tests/gpu_density_verify.F90)
+    target_link_libraries(mopac-gpu-density-verify mopac-core)
+    add_executable(mopac-gpu-rot-verify tests/gpu_rot_verify.F90)
+    target_link_libraries(mopac-gpu-rot-verify mopac-core)
+    add_executable(mopac-gpu-scf-compare tests/gpu_scf_compare.F90)
+    target_link_libraries(mopac-gpu-scf-compare mopac-core)
+  endif()
   add_subdirectory(include)
   add_subdirectory(tests)
 endif()

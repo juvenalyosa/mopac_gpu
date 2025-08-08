@@ -248,7 +248,19 @@
       call mult (c, work, vecs, norbs)
       i = -1
       nlower = (norbs*(norbs + 1))/2
+      ! Choose GPU/CPU density path based on runtime flags
+#ifdef GPU
+      Use mod_vars_cuda, only: lgpu
+      if (lgpu .and. abs(fract) < 1.d-2) then
+        call density_for_GPU (vecs, fract, nclose, nopen, 2.d0, nlower, norbs, 2, pb, 4)
+      else if (lgpu) then
+        call density_for_GPU (vecs, fract, nclose, nopen, 2.d0, nlower, norbs, 2, pb, 2)
+      else
+        call density_for_GPU (vecs, fract, nclose, nopen, 2.d0, nlower, norbs, 2, pb, 3)
+      end if
+#else
       call density_for_GPU (vecs, fract, nclose, nopen, 2.d0, nlower, norbs, 2, pb, 3)
+#endif
 !
       pb(:ifact(norbs+1)) = pb(:ifact(norbs+1))*store(:ifact(norbs+1))
       summ = 0.D0
