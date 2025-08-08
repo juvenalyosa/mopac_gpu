@@ -1,4 +1,5 @@
 program gpu_rot_verify
+  use call_rot_cuda
   implicit none
   integer, parameter :: wp = kind(1.0d0)
   integer, parameter :: n = 96

@@ -302,6 +302,10 @@ if(TESTS)
     target_link_libraries(mopac-gpu-rot-verify mopac-core)
     add_executable(mopac-gpu-scf-compare tests/gpu_scf_compare.F90)
     target_link_libraries(mopac-gpu-scf-compare mopac-core)
+    # The Fortran API module (mopac_api_f) is defined in include/
+    # and is needed by gpu_scf_compare; add sources here too
+    target_sources(mopac-gpu-scf-compare PRIVATE ${CMAKE_SOURCE_DIR}/include/mopac_wrapper.F90)
+    target_sources(mopac-gpu-scf-compare PRIVATE ${CMAKE_SOURCE_DIR}/include/mopac_wrapper_internal.F90)
   endif()
   add_subdirectory(include)
   add_subdirectory(tests)
