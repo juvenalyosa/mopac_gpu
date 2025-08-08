@@ -35,7 +35,7 @@ subroutine diag_for_GPU (fao, vector, nocc, eig, norbs, mpack)
     double precision, allocatable, dimension(:,:)  :: fck
 #ifdef GPU
     double precision, allocatable, dimension(:,:)  :: ci0,ca0 ! alp,bet
-    real(c_double), pointer :: F_full(:,:), Fmo_nv(:,:), Vec_occ(:,:), Vec_virt(:,:)
+    real(c_double), pointer :: F_full(:,:), Fmo_nv(:,:)
 #endif
     integer :: kk
 !
@@ -115,23 +115,18 @@ subroutine diag_for_GPU (fao, vector, nocc, eig, norbs, mpack)
 ! here, performs matrix multiplications to form FMO
 #ifdef GPU
     if (lgpu) then
-  !  PERFORMS BOTH MULTIPLICATIONS USING CUBLAS (with pointer remaps)
+  !  PERFORMS BOTH MULTIPLICATIONS USING CUBLAS (with pointer remaps for fmo only)
       F_full(1:n,1:n) => fmo
+      Fmo_nv(1:nvirt,1:nocc) => fmo
       if (nocc < nvirt) then
-        Vec_occ(1:n,1:nocc) => vector
-        call gemm_cublas('N', 'N', n, nocc, n, 1.0d0, F_full, n, Vec_occ , mdim, 0.0d0, fck, &
+        call gemm_cublas('N', 'N', n, nocc, n, 1.0d0, F_full, n, vector , mdim, 0.0d0, fck, &
         & norbs)
-        Vec_virt(1:n,1:nvirt) => vector(1:n, lumo:n)
-        Fmo_nv(1:nvirt,1:nocc) => fmo
-        call gemm_cublas('T', 'N', nvirt, nocc, n, 1.0d0, Vec_virt, mdim, fck, &
+        call gemm_cublas('T', 'N', nvirt, nocc, n, 1.0d0, vector(1:n, lumo:n), mdim, fck, &
         & norbs, 0.0d0, Fmo_nv, nvirt)
       else
-        Vec_virt(1:n,1:nvirt) => vector(1:n, lumo:n)
-        call gemm_cublas ('N', 'N', n, nvirt, n, 1.0d0, F_full, n, Vec_virt, mdim, &
+        call gemm_cublas ('N', 'N', n, nvirt, n, 1.0d0, F_full, n, vector(1:n, lumo:n), mdim, &
         & 0.0d0, fck, norbs)
-        Vec_occ(1:n,1:nocc) => vector
-        Fmo_nv(1:nvirt,1:nocc) => fmo
-        call gemm_cublas ('T', 'N', nvirt, nocc, n, 1.0d0, fck, norbs, Vec_occ, mdim, &
+        call gemm_cublas ('T', 'N', nvirt, nocc, n, 1.0d0, fck, norbs, vector, mdim, &
         & 0.0d0, Fmo_nv, nvirt)
       end if
     else
