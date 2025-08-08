@@ -149,6 +149,10 @@ endif()
 # MOPAC shared library ABI compatibility version
 set_target_properties(mopac-core PROPERTIES SOVERSION 2)
 set_target_properties(mopac-core PROPERTIES Fortran_MODULE_DIRECTORY "${CMAKE_BINARY_DIR}/mod/core")
+target_include_directories(mopac-core
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/mod/core>
+)
 
 # Adjust legacy PGI compiler behavior: disable C-style backslash characters & warn about CRLF handling
 if(CMAKE_Fortran_COMPILER_ID MATCHES "PGI|Flang")
@@ -295,16 +299,21 @@ if(TESTS)
   add_executable(mopac-api-test)
   set_target_properties(mopac-api-test PROPERTIES Fortran_MODULE_DIRECTORY "${CMAKE_BINARY_DIR}/mod/api-test")
   target_link_libraries(mopac-api-test mopac-core)
+  add_dependencies(mopac-api-test mopac-core)
   if(GPU)
     add_executable(mopac-gpu-verify tests/gpu_verify.F90)
     target_link_libraries(mopac-gpu-verify mopac-core)
+    add_dependencies(mopac-gpu-verify mopac-core)
     add_executable(mopac-gpu-density-verify tests/gpu_density_verify.F90)
     target_link_libraries(mopac-gpu-density-verify mopac-core)
+    add_dependencies(mopac-gpu-density-verify mopac-core)
     add_executable(mopac-gpu-rot-verify tests/gpu_rot_verify.F90)
     target_link_libraries(mopac-gpu-rot-verify mopac-core)
+    add_dependencies(mopac-gpu-rot-verify mopac-core)
     add_executable(mopac-gpu-scf-compare tests/gpu_scf_compare.F90)
     set_target_properties(mopac-gpu-scf-compare PROPERTIES Fortran_MODULE_DIRECTORY "${CMAKE_BINARY_DIR}/mod/gpu-scf-compare")
     target_link_libraries(mopac-gpu-scf-compare mopac-core)
+    add_dependencies(mopac-gpu-scf-compare mopac-core)
   endif()
   add_subdirectory(include)
   add_subdirectory(tests)
