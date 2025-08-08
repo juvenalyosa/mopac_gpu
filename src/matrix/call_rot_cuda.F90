@@ -4,9 +4,10 @@ module call_rot_cuda
   private
   public :: rot_cuda, rot_cuda_2gpu
 #ifdef GPU
+  use iso_c_binding, only: c_int, c_double, c_char
   interface
-    subroutine call_rot_cuda_gpu(fmo, eig, vector, ci0, ca0, nocc, lumo, n, bigeps, tiny) bind(C, name="call_rot_cuda_gpu")
-      use iso_c_binding
+    subroutine call_rot_cuda_gpu(fmo, eig, vector, ci0, ca0, nocc, lumo, n, bigeps, tiny) &
+      bind(C, name="call_rot_cuda_gpu")
       implicit none
       integer(c_int), value :: nocc, lumo, n
       real(c_double), intent(in)    :: fmo(*)
@@ -16,8 +17,8 @@ module call_rot_cuda
       real(c_double), intent(in)    :: ca0(n,*)
       real(c_double), value         :: bigeps, tiny
     end subroutine call_rot_cuda_gpu
-    subroutine call_rot_cuda_2gpu_gpu(fmo, eig, vector, ci0, ca0, nocc, lumo, n, bigeps, tiny) bind(C, name="call_rot_cuda_2gpu_gpu")
-      use iso_c_binding
+    subroutine call_rot_cuda_2gpu_gpu(fmo, eig, vector, ci0, ca0, nocc, lumo, n, bigeps, tiny) &
+      bind(C, name="call_rot_cuda_2gpu_gpu")
       implicit none
       integer(c_int), value :: nocc, lumo, n
       real(c_double), intent(in)    :: fmo(*)

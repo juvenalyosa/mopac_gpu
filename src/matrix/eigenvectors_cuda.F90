@@ -22,12 +22,11 @@ module eigenvectors_cuda
 contains
 
   subroutine eigenvectors_CUDA(eigenvecs, xmat, eigvals, ndim)
-    use iso_c_binding
     implicit none
     integer, intent(in) :: ndim
-    real(c_double), intent(out) :: eigenvecs(ndim,ndim)
-    real(c_double), intent(out) :: eigvals(ndim)
-    real(c_double), intent(inout) :: xmat((ndim*(ndim+1))/2)
+    real(c_double), intent(out)   :: eigenvecs(:,:)
+    real(c_double), intent(out)   :: eigvals(:)
+    real(c_double), intent(inout) :: xmat(:)
     integer :: info
 
     ! Unpack packed upper-triangular into full matrix (column-major)
@@ -40,4 +39,3 @@ contains
   end subroutine eigenvectors_CUDA
 
 end module eigenvectors_cuda
-
