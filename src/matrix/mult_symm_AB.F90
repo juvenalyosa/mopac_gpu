@@ -28,7 +28,7 @@
         Integer :: i
 #ifdef GPU
         integer :: igrid, iblock
-        real :: tt
+        double precision :: tt
 #endif
 ! Make arguments C_LOC-able for address comparison
 #if CC12
@@ -88,7 +88,7 @@
             end if
 
             pa = c_loc(a(1)); pb = c_loc(b(1))
-            same_ab = (pa == pb)
+            same_ab = c_associated(pa, pb)
 
             if (same_ab) then
               call dsyrk('U','N', ndim, ndim, alpha, xa, ndim, beta, xc, ndim)
@@ -135,7 +135,7 @@
             end if
 
             pa = c_loc(a(1)); pb = c_loc(b(1))
-            same_ab = (pa == pb)
+            same_ab = c_associated(pa, pb)
 
             if (same_ab) then
                call syrk_cublas('U', 'N', ndim, ndim, alpha, xa, ndim, beta, xc, ndim)
