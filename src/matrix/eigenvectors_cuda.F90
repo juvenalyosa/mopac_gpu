@@ -1,7 +1,7 @@
 ! Molecular Orbital PACkage (MOPAC)
 ! Portable CUDA-based eigensolver interop using ISO_C_BINDING
 
-module eigenvectors_cuda
+module eigenvectors_cuda_mod
   use iso_c_binding
   implicit none
   private
@@ -38,4 +38,4 @@ contains
 
   end subroutine eigenvectors_CUDA
 
-end module eigenvectors_cuda
+end module eigenvectors_cuda_mod

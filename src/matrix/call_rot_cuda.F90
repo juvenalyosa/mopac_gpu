@@ -1,10 +1,10 @@
 ! CPU fallback implementation for rot_cuda interfaces used by GPU path
 module call_rot_cuda
+  use iso_c_binding, only: c_int, c_double, c_char
   implicit none
   private
   public :: rot_cuda, rot_cuda_2gpu
 #ifdef GPU
-  use iso_c_binding, only: c_int, c_double, c_char
   interface
     subroutine call_rot_cuda_gpu(fmo, eig, vector, ci0, ca0, nocc, lumo, n, bigeps, tiny) &
       bind(C, name="call_rot_cuda_gpu")

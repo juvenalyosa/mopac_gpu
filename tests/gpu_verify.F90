@@ -1,7 +1,7 @@
 program gpu_verify
   use iso_fortran_env, only: wp => real64
 #ifdef GPU
-  use eigenvectors_cuda, only: eigenvectors_CUDA
+  use eigenvectors_cuda_mod, only: eigenvectors_CUDA
 #endif
   implicit none
   integer, parameter :: n = 64
@@ -60,4 +60,3 @@ contains
   end subroutine cpu_dsyevd
 
 end program gpu_verify
-

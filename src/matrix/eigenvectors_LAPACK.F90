@@ -17,7 +17,7 @@
       USE chanel_C, only : iw
 #ifdef GPU
       Use mod_vars_cuda, only: lgpu, ngpus, prec
-      use eigenvectors_cuda, only: eigenvectors_CUDA
+      use eigenvectors_cuda_mod, only: eigenvectors_CUDA
 #endif
 #if (MAGMA)
       Use magma
