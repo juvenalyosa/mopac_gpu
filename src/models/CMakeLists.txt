@@ -20,7 +20,7 @@ set(src_list
     parameters_for_PM7_C parameters_for_PM8_C
     parameters_for_PM6_ORG_C
     alpb_and_xfac_mndod alpb_and_xfac_mndo
-    calpar journal_references_C alpb_and_xfac_pm3
+    calpar journal_references_C alpb_and_xfac_pm3 refer
     parameters_for_AM1_C parameters_for_PM7_Sparkles_C
     parameters_for_AM1_Sparkles_C parameters_C
     alpb_and_xfac_am1 parameters_for_mndo_C

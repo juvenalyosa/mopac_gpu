@@ -32,6 +32,7 @@ if(GPU)
     list(APPEND main_src_list
         deprecated/mod_gpu_info
         deprecated/mod_vars_cuda
+        deprecated/pulay_for_gpu
         matrix/eigenvectors_cuda
         matrix/call_rot_cuda
         matrix/density_cuda_i

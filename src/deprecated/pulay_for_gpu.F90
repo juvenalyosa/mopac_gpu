@@ -17,10 +17,11 @@
                         & lfock, nfock, msize, start, pl) 
       use chanel_C, only : iw
       use molkst_C, only : numcal, keywrd, mpack
-#ifdef GPU
-      Use mult_symm_ab_I 
-      Use mod_vars_cuda, only: real_cuda, prec, ngpus
-#endif      
+! NOTE: No explicit interface module required; call has implicit interface
+!#ifdef GPU
+!      Use mult_symm_ab_I
+!      Use mod_vars_cuda, only: real_cuda, prec, ngpus
+!#endif
       Use mod_vars_cuda, only: lgpu 
       implicit none
       integer  :: n,iopc 

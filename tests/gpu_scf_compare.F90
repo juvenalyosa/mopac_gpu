@@ -1,6 +1,7 @@
 program gpu_scf_compare
   use mopac_api_f
-  use Common_arrays_C, only: f, mpack
+  use Common_arrays_C, only: f
+  use molkst_C,       only: mpack
 #ifdef GPU
   use mod_vars_cuda, only: lgpu
 #endif
@@ -79,4 +80,3 @@ contains
   end subroutine set_env
 #endif
 end program gpu_scf_compare
-

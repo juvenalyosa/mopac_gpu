@@ -6,6 +6,8 @@ program gpu_rot_verify
   integer :: lumo, i, j, ij
   real(wp), allocatable :: V_gpu(:,:), V_cpu(:,:), eig(:), fmo(:)
   real(wp) :: bigeps, tiny
+  ! Locals for rotation math (must be declared at top-level for F90)
+  real(wp) :: x, a, b, d, e, alpha, beta
 
   allocate(V_gpu(n,n), V_cpu(n,n), eig(n), fmo(nocc*(n-nocc)))
   call random_seed()
@@ -25,7 +27,6 @@ program gpu_rot_verify
   ij = 0
   do i = 1, nocc
     do j = lumo, n
-      real(wp) :: x, a, b, d, e, alpha, beta
       ij = ij + 1
       x = fmo(ij)
       if (abs(x) < tiny) cycle
@@ -44,4 +45,3 @@ program gpu_rot_verify
 
   deallocate(V_gpu, V_cpu, eig, fmo)
 end program gpu_rot_verify
-
