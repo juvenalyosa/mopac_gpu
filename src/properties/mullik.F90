@@ -32,6 +32,9 @@
       use parameters_C, only : zs, zp, zd, betas, betap, tore
 !
       use chanel_C, only : igpt, gpt_fn, iw
+#ifdef GPU
+      use mod_vars_cuda, only: lgpu
+#endif
 !
       implicit none
 !-----------------------------------------------
@@ -250,7 +253,6 @@
       nlower = (norbs*(norbs + 1))/2
       ! Choose GPU/CPU density path based on runtime flags
 #ifdef GPU
-      Use mod_vars_cuda, only: lgpu
       if (lgpu .and. abs(fract) < 1.d-2) then
         call density_for_GPU (vecs, fract, nclose, nopen, 2.d0, nlower, norbs, 2, pb, 4)
       else if (lgpu) then
