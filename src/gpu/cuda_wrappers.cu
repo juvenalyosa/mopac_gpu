@@ -173,11 +173,7 @@ __global__ void drot_cols_kernel(double *V, int n, int i_col, int j_col, double 
   }
 }
 
-static void rot_apply_pair_on_device(double *d_V, int n, int i_idx, int j_idx, double alpha, double beta) {
-  int block = 256;
-  int grid = (n + block - 1) / block;
-  drot_cols_kernel<<<grid, block>>>(d_V, n, i_idx, j_idx, alpha, beta);
-}
+// (helper was unused; removed to silence warnings)
 
 // Batched sequential rotations applied within one kernel launch
 __global__ void drot_cols_batch_kernel(double *V, int n, int npairs,

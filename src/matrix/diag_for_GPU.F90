@@ -28,7 +28,7 @@ subroutine diag_for_GPU (fao, vector, nocc, eig, norbs, mpack)
     double precision, dimension (mpack), intent (in) :: fao
     double precision, dimension (norbs, norbs), intent (inout) :: vector
     double precision, dimension (norbs), intent (in) :: eig
-    double precision, allocatable, dimension (:) :: fmo
+    double precision, allocatable, target, dimension (:) :: fmo
     integer :: lumo, mdim, n, nvirt, i, ij, in, j,  norbs2
     double precision :: bigeps = 1.5d-007
     double precision :: a, alpha, b, beta, d, e, tiny, x
@@ -114,17 +114,25 @@ subroutine diag_for_GPU (fao, vector, nocc, eig, norbs, mpack)
 ! here, performs matrix multiplications to form FMO
 #ifdef GPU
     if (lgpu) then
-  !  PERFORMS BOTH MULTIPLICATIONS USING CUBLAS	
+  !  PERFORMS BOTH MULTIPLICATIONS USING CUBLAS (with pointer remaps)
+      real(c_double), pointer :: F_full(:,:), Fmo_nv(:,:), Vec_occ(:,:), Vec_virt(:,:)
+      F_full(1:n,1:n) => fmo
       if (nocc < nvirt) then
-        call gemm_cublas('N', 'N', n, nocc, n, 1.0d0, fmo, n,vector , mdim, 0.0d0, fck, &
+        Vec_occ(1:n,1:nocc) => vector
+        call gemm_cublas('N', 'N', n, nocc, n, 1.0d0, F_full, n, Vec_occ , mdim, 0.0d0, fck, &
         & norbs)
-        call gemm_cublas('T', 'N', nvirt, nocc, n, 1.0d0, vector(1:n, lumo:n), mdim, fck, &
-        & norbs, 0.0d0, fmo, nvirt)
+        Vec_virt(1:n,1:nvirt) => vector(1:n, lumo:n)
+        Fmo_nv(1:nvirt,1:nocc) => fmo
+        call gemm_cublas('T', 'N', nvirt, nocc, n, 1.0d0, Vec_virt, mdim, fck, &
+        & norbs, 0.0d0, Fmo_nv, nvirt)
       else
-        call gemm_cublas ('N', 'N', n, nvirt, n, 1.0d0, fmo, n, vector(1:n, lumo:n), mdim, &
+        Vec_virt(1:n,1:nvirt) => vector(1:n, lumo:n)
+        call gemm_cublas ('N', 'N', n, nvirt, n, 1.0d0, F_full, n, Vec_virt, mdim, &
         & 0.0d0, fck, norbs)
-        call gemm_cublas ('T', 'N', nvirt, nocc, n, 1.0d0, fck, norbs, vector, mdim, &
-        & 0.0d0, fmo, nvirt)
+        Vec_occ(1:n,1:nocc) => vector
+        Fmo_nv(1:nvirt,1:nocc) => fmo
+        call gemm_cublas ('T', 'N', nvirt, nocc, n, 1.0d0, fck, norbs, Vec_occ, mdim, &
+        & 0.0d0, Fmo_nv, nvirt)
       end if
     else
 #endif

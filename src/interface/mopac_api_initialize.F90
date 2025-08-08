@@ -369,7 +369,8 @@ contains
     logical            :: gpu_ok(6)
     integer(c_int)     :: clockRate(6), major(6), minor(6), name_size(6)
     character(len=32)  :: env
-    integer            :: i, j, lstat
+    integer            :: i, j
+    logical(c_bool)    :: lstat
 
     gpuName = '' ; name_size = 0 ; totalMem = 0 ; clockRate = 0
     hasDouble = .false. ; gpu_ok = .false.
