@@ -3,6 +3,7 @@
 #include <cublas_v2.h>
 #include <cusolverDn.h>
 #include <cstring>
+#include <cstdlib>
 #include <cmath>
 #include <algorithm>
 
@@ -11,6 +12,20 @@ static int g_pair_dev0 = 0;
 static int g_pair_dev1 = 1;
 
 extern "C" {
+
+// Configure the default device pair used by 2-GPU MOZYME paths
+// Exposed to Fortran via bind(C, name='set_mozyme_gpu_pair') in mod_gpu_info.F90
+void set_mozyme_gpu_pair(int dev0, int dev1) {
+  int count = 0;
+  cudaGetDeviceCount(&count);
+  if (count <= 0) {
+    // No devices; leave defaults (0,1) as placeholders
+    return;
+  }
+  // Clamp to valid device indices when possible; negative values ignored
+  if (dev0 >= 0 && dev0 < count) g_pair_dev0 = dev0;
+  if (dev1 >= 0 && dev1 < count) g_pair_dev1 = dev1;
+}
 
 // Query basic GPU capabilities
 void getGPUInfo(bool *hasGpu,
@@ -522,7 +537,10 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
   int *d_i0 = nullptr, *d_j0 = nullptr, *d_i1 = nullptr, *d_j1 = nullptr;
   double *d_a0 = nullptr, *d_b0 = nullptr, *d_a1 = nullptr, *d_b1 = nullptr;
 
-  cudaSetDevice(0);
+  // Use configured device pair
+  int dev0 = g_pair_dev0;
+  int dev1 = g_pair_dev1;
+  cudaSetDevice(dev0);
   cudaMalloc((void**)&d_V0, bytes0);
   cudaMalloc((void**)&d_i0, sizeof(int) * 256);
   cudaMalloc((void**)&d_j0, sizeof(int) * 256);
@@ -535,7 +553,7 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
                     cudaMemcpyHostToDevice);
   }
 
-  cudaSetDevice(1);
+  cudaSetDevice(dev1);
   cudaMalloc((void**)&d_V1, bytes1);
   cudaMalloc((void**)&d_i1, sizeof(int) * 256);
   cudaMalloc((void**)&d_j1, sizeof(int) * 256);
@@ -575,8 +593,8 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
       h_b[batch] = beta;
       batch++;
       if (batch == max_batch) {
-        // Launch on device 0
-        cudaSetDevice(0);
+        // Launch on device dev0
+        cudaSetDevice(dev0);
         cudaMemcpy(d_i0, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice);
         cudaMemcpy(d_j0, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice);
         cudaMemcpy(d_a0, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice);
@@ -586,8 +604,8 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
           int grid = (n0 + block - 1) / block;
           drot_cols_batch_kernel_strided<<<grid, block>>>(d_V0, n0, n, batch, d_i0, d_j0, d_a0, d_b0);
         }
-        // Launch on device 1
-        cudaSetDevice(1);
+        // Launch on device dev1
+        cudaSetDevice(dev1);
         cudaMemcpy(d_i1, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice);
         cudaMemcpy(d_j1, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice);
         cudaMemcpy(d_a1, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice);
@@ -601,7 +619,7 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
       }
     }
     if (batch > 0) {
-      cudaSetDevice(0);
+      cudaSetDevice(dev0);
       cudaMemcpy(d_i0, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice);
       cudaMemcpy(d_j0, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice);
       cudaMemcpy(d_a0, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice);
@@ -611,7 +629,7 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
         int grid = (n0 + block - 1) / block;
         drot_cols_batch_kernel_strided<<<grid, block>>>(d_V0, n0, n, batch, d_i0, d_j0, d_a0, d_b0);
       }
-      cudaSetDevice(1);
+      cudaSetDevice(dev1);
       cudaMemcpy(d_i1, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice);
       cudaMemcpy(d_j1, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice);
       cudaMemcpy(d_a1, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice);
@@ -625,19 +643,19 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
   }
 
   // Synchronize both devices
-  cudaSetDevice(0);
+  cudaSetDevice(dev0);
   cudaDeviceSynchronize();
-  cudaSetDevice(1);
+  cudaSetDevice(dev1);
   cudaDeviceSynchronize();
 
   // Copy results back into host matrix
-  cudaSetDevice(0);
+  cudaSetDevice(dev0);
   for (int col = 0; col < n; ++col) {
     double *col_ptr = vector + (size_t)col * (size_t)n;
     cudaMemcpy(col_ptr, d_V0 + (size_t)col * (size_t)n0, sizeof(double) * n0,
                cudaMemcpyDeviceToHost);
   }
-  cudaSetDevice(1);
+  cudaSetDevice(dev1);
   for (int col = 0; col < n; ++col) {
     double *col_ptr = vector + (size_t)col * (size_t)n + (size_t)n0;
     cudaMemcpy(col_ptr, d_V1 + (size_t)col * (size_t)n1, sizeof(double) * n1,
@@ -664,10 +682,3 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
 }
 
 } // extern "C"
-// Allow Fortran to set the 2-GPU device pair (0-based device indices)
-void set_mozyme_gpu_pair(int dev0, int dev1) {
-  if (dev0 >= 0 && dev1 >= 0 && dev0 != dev1) {
-    g_pair_dev0 = dev0;
-    g_pair_dev1 = dev1;
-  }
-}
