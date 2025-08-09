@@ -96,7 +96,40 @@ cmake -DGPU=ON ..
 make
 ```
 
-This builds CUDA wrappers for selected linear algebra routines (GEMM, SYRK) and an accelerated eigenvector rotation used in the SCF procedure. If multiple compatible NVIDIA GPUs are present, MOPAC will use up to two devices to speed up the rotation step. Use keyword `NOGPU` to disable GPU at runtime, or environment variable `MOPAC_FORCEGPU=1` to force-enable when supported.
+This builds CUDA wrappers for selected linear algebra routines (GEMM, SYRK) and an accelerated eigenvector rotation used in the SCF procedure. If multiple compatible NVIDIA GPUs are present, MOPAC will use up to two devices to speed up select steps.
+
+MOZYME-specific GPU controls
+- MOZYME_GPU: enable MOZYME GPU acceleration (rank-1 GEMM/SYRK in density construction).
+- MOZYME_2GPU: force MOZYME density updates to use two GPUs when at least two suitable devices exist.
+- MOZYME_MINBLK=INT: minimum localized block size to offload rank-1 operations (default: 16).
+- MOZYME_GPUPAIR=a,b: explicitly select two 1-based GPU device IDs for MOZYME 2-GPU density (e.g., 1,2).
+- MOZYME_GPUIGNORE=a,b,c: 1-based device IDs to ignore for auto-selection (applies to single and multi-GPU).
+
+General GPU toggles
+- NOGPU: disable all GPU usage.
+- Environment MOPAC_FORCEGPU=1: force-enable GPU when supported (overrides small-system heuristic).
+
+Examples
+- Single GPU: `MOZYME MOZYME_GPU`
+- Force two GPUs with explicit pair: `MOZYME MOZYME_GPU MOZYME_2GPU MOZYME_GPUPAIR=1,2`
+- Increase offload threshold: `MOZYME MOZYME_GPU MOZYME_MINBLK=32`
+
+GPU verification (local)
+- With GPU=ON, a local target runs a quick MOZYME energy check across CPU, 1-GPU, and 2-GPU and enforces a tolerance:
+  - Configure: `cmake -S . -B build-gpu -DGPU=ON -DGPU_VERIFY_PAIR=1,2 -DGPU_VERIFY_TOL=1e-4`
+  - Build: `cmake --build build-gpu -j`
+  - Verify: `cmake --build build-gpu --target mozyme-gpu-verify`
+  - Optional CTest: configure with `-DENABLE_GPU_TESTS=ON` then `ctest -V -L gpu`
+
+GPU verification (CI)
+- A GitHub Actions job `gpu-verify` is included for self-hosted GPU runners. It triggers only when:
+  - Manually dispatched (workflow_dispatch), or
+  - Pushed to a designated branch (see CI.yaml for the current condition), on a runner labeled `self-hosted` and `gpu`.
+  - Customize device pair/tolerance via repository variables `GPU_VERIFY_PAIR`, `GPU_VERIFY_TOL` or edit the workflow env.
+  - From the Actions UI: select the “CI” workflow → “Run workflow”, then set inputs:
+    - GPU pair: e.g., `1,2` (optional; overrides default or env)
+    - Energy tolerance: e.g., `1e-4` (optional; default `1e-4`)
+    - Choose target branch and click “Run workflow”.
 
 ## Documentation
 

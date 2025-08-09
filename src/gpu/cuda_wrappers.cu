@@ -4,6 +4,11 @@
 #include <cusolverDn.h>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
+
+// Default device pair for 2-GPU MOZYME operations
+static int g_pair_dev0 = 0;
+static int g_pair_dev1 = 1;
 
 extern "C" {
 
@@ -126,6 +131,191 @@ void call_syrk_cublas(char uplo, char tra,
   cudaFree(d_C);
 }
 
+// 2-GPU outer product helpers and wrappers are further below.
+
+// Device kernels for outer product updates
+__global__ void outer_update_rows(double *Csub, int rows, int ncols,
+                                  const double *a, const double *b,
+                                  double alpha, double beta, int row_offset) {
+  int tid = blockDim.x * blockIdx.x + threadIdx.x;
+  int total = rows * ncols;
+  if (tid >= total) return;
+  int r = tid % rows;
+  int c = tid / rows;
+  double val = alpha * a[row_offset + r] * b[c];
+  double old = Csub[(size_t)c * (size_t)rows + r];
+  Csub[(size_t)c * (size_t)rows + r] = val + beta * old;
+}
+
+void call_gemm_cublas_2gpu(char tra, char trb,
+                           int m, int n, int k,
+                           double alpha,
+                           const double *A, int lda,
+                           const double *B, int ldb,
+                           double beta,
+                           double *C, int ldc) {
+  int dev_count = 0;
+  cudaGetDeviceCount(&dev_count);
+  if (dev_count < 2 || g_pair_dev0 >= dev_count || g_pair_dev1 >= dev_count ||
+      k != 1 || !(tra=='N'||tra=='n') || !(trb=='T'||trb=='t')) {
+    call_gemm_cublas(tra, trb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+    return;
+  }
+  int n0 = m / 2;
+  int n1 = m - n0;
+  // Device allocations and copies as above
+  double *d_a0=nullptr, *d_b0=nullptr, *d_c0=nullptr;
+  double *d_a1=nullptr, *d_b1=nullptr, *d_c1=nullptr;
+  // Device 0
+  cudaSetDevice(g_pair_dev0);
+  cudaMalloc((void**)&d_a0, sizeof(double) * (size_t)m);
+  cudaMalloc((void**)&d_b0, sizeof(double) * (size_t)n);
+  cudaMalloc((void**)&d_c0, sizeof(double) * (size_t)n0 * (size_t)ldc);
+  cudaMemcpy(d_a0, A, sizeof(double) * (size_t)m, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_b0, B, sizeof(double) * (size_t)n, cudaMemcpyHostToDevice);
+  for (int col = 0; col < n; ++col) {
+    cudaMemcpyAsync(d_c0 + (size_t)col * (size_t)n0,
+                    C + (size_t)col * (size_t)ldc,
+                    sizeof(double) * (size_t)n0,
+                    cudaMemcpyHostToDevice);
+  }
+  // Device 1
+  cudaSetDevice(g_pair_dev1);
+  cudaMalloc((void**)&d_a1, sizeof(double) * (size_t)m);
+  cudaMalloc((void**)&d_b1, sizeof(double) * (size_t)n);
+  cudaMalloc((void**)&d_c1, sizeof(double) * (size_t)n1 * (size_t)ldc);
+  cudaMemcpy(d_a1, A, sizeof(double) * (size_t)m, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_b1, B, sizeof(double) * (size_t)n, cudaMemcpyHostToDevice);
+  for (int col = 0; col < n; ++col) {
+    cudaMemcpyAsync(d_c1 + (size_t)col * (size_t)n1,
+                    C + (size_t)col * (size_t)ldc + (size_t)n0,
+                    sizeof(double) * (size_t)n1,
+                    cudaMemcpyHostToDevice);
+  }
+
+  // Launch kernels
+  cudaSetDevice(g_pair_dev0);
+  {
+    int rows = n0;
+    int total = rows * n;
+    int block = 256;
+    int grid = (total + block - 1) / block;
+    outer_update_rows<<<grid, block>>>(d_c0, rows, n, d_a0, d_b0, alpha, beta, 0);
+  }
+  cudaSetDevice(g_pair_dev1);
+  {
+    int rows = n1;
+    int total = rows * n;
+    int block = 256;
+    int grid = (total + block - 1) / block;
+    outer_update_rows<<<grid, block>>>(d_c1, rows, n, d_a1, d_b1, alpha, beta, n0);
+  }
+
+  // Sync and copy back row slices
+  cudaSetDevice(g_pair_dev0); cudaDeviceSynchronize();
+  for (int col = 0; col < n; ++col) {
+    cudaMemcpy(C + (size_t)col * (size_t)ldc,
+               d_c0 + (size_t)col * (size_t)n0,
+               sizeof(double) * (size_t)n0,
+               cudaMemcpyDeviceToHost);
+  }
+  cudaSetDevice(g_pair_dev1); cudaDeviceSynchronize();
+  for (int col = 0; col < n; ++col) {
+    cudaMemcpy(C + (size_t)col * (size_t)ldc + (size_t)n0,
+               d_c1 + (size_t)col * (size_t)n1,
+               sizeof(double) * (size_t)n1,
+               cudaMemcpyDeviceToHost);
+  }
+
+  // Free
+  cudaSetDevice(g_pair_dev0);
+  cudaFree(d_a0); cudaFree(d_b0); cudaFree(d_c0);
+  cudaSetDevice(g_pair_dev1);
+  cudaFree(d_a1); cudaFree(d_b1); cudaFree(d_c1);
+}
+
+// 2-GPU outer product for SYRK with k==1, tra=='N': C[nxn] += alpha*v*v^T + beta*C
+void call_syrk_cublas_2gpu(char uplo, char tra,
+                           int n, int k,
+                           double alpha,
+                           const double *A, int lda,
+                           double beta,
+                           double *C, int ldc) {
+  int dev_count = 0;
+  cudaGetDeviceCount(&dev_count);
+  if (dev_count < 2 || g_pair_dev0 >= dev_count || g_pair_dev1 >= dev_count ||
+      k != 1 || !(tra=='N'||tra=='n')) {
+    call_syrk_cublas(uplo, tra, n, k, alpha, A, lda, beta, C, ldc);
+    return;
+  }
+  int n0 = n / 2;
+  int n1 = n - n0;
+  // Copy full vector v to both devices and split C by rows
+  double *d_v0=nullptr, *d_c0=nullptr;
+  double *d_v1=nullptr, *d_c1=nullptr;
+  // Device 0
+  cudaSetDevice(g_pair_dev0);
+  cudaMalloc((void**)&d_v0, sizeof(double) * (size_t)n);
+  cudaMalloc((void**)&d_c0, sizeof(double) * (size_t)n0 * (size_t)ldc);
+  cudaMemcpy(d_v0, A, sizeof(double) * (size_t)n, cudaMemcpyHostToDevice);
+  for (int col = 0; col < n; ++col) {
+    cudaMemcpyAsync(d_c0 + (size_t)col * (size_t)n0,
+                    C + (size_t)col * (size_t)ldc,
+                    sizeof(double) * (size_t)n0,
+                    cudaMemcpyHostToDevice);
+  }
+  // Device 1
+  cudaSetDevice(g_pair_dev1);
+  cudaMalloc((void**)&d_v1, sizeof(double) * (size_t)n);
+  cudaMalloc((void**)&d_c1, sizeof(double) * (size_t)n1 * (size_t)ldc);
+  cudaMemcpy(d_v1, A, sizeof(double) * (size_t)n, cudaMemcpyHostToDevice);
+  for (int col = 0; col < n; ++col) {
+    cudaMemcpyAsync(d_c1 + (size_t)col * (size_t)n1,
+                    C + (size_t)col * (size_t)ldc + (size_t)n0,
+                    sizeof(double) * (size_t)n1,
+                    cudaMemcpyHostToDevice);
+  }
+
+  // Launch outer product kernels per device
+  cudaSetDevice(g_pair_dev0);
+  {
+    int rows = n0;
+    int total = rows * n;
+    int block = 256;
+    int grid = (total + block - 1) / block;
+    outer_update_rows<<<grid, block>>>(d_c0, rows, n, d_v0, d_v0, alpha, beta, 0);
+  }
+  cudaSetDevice(g_pair_dev1);
+  {
+    int rows = n1;
+    int total = rows * n;
+    int block = 256;
+    int grid = (total + block - 1) / block;
+    outer_update_rows<<<grid, block>>>(d_c1, rows, n, d_v1, d_v1, alpha, beta, n0);
+  }
+
+  // Sync and copy back row slices
+  cudaSetDevice(g_pair_dev0); cudaDeviceSynchronize();
+  for (int col = 0; col < n; ++col) {
+    cudaMemcpy(C + (size_t)col * (size_t)ldc,
+               d_c0 + (size_t)col * (size_t)n0,
+               sizeof(double) * (size_t)n0,
+               cudaMemcpyDeviceToHost);
+  }
+  cudaSetDevice(g_pair_dev1); cudaDeviceSynchronize();
+  for (int col = 0; col < n; ++col) {
+    cudaMemcpy(C + (size_t)col * (size_t)ldc + (size_t)n0,
+               d_c1 + (size_t)col * (size_t)n1,
+               sizeof(double) * (size_t)n1,
+               cudaMemcpyDeviceToHost);
+  }
+
+  // Free
+  cudaSetDevice(g_pair_dev0);
+  cudaFree(d_v0); cudaFree(d_c0);
+  cudaSetDevice(g_pair_dev1);
+  cudaFree(d_v1); cudaFree(d_c1);
+}
 // Symmetric eigensolver (upper triangle) using cuSOLVER Dsyevd; A overwritten with eigenvectors
 void mopac_cuda_dsyevd(int n, double *A, int lda, double *W, int *info) {
   cusolverDnHandle_t handle = nullptr;
@@ -474,3 +664,10 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
 }
 
 } // extern "C"
+// Allow Fortran to set the 2-GPU device pair (0-based device indices)
+void set_mozyme_gpu_pair(int dev0, int dev1) {
+  if (dev0 >= 0 && dev1 >= 0 && dev0 != dev1) {
+    g_pair_dev0 = dev0;
+    g_pair_dev1 = dev1;
+  }
+}

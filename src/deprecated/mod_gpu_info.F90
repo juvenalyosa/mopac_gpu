@@ -27,4 +27,11 @@ module gpu_info
                   integer(c_int), value     :: idevice
                 end subroutine
             end interface
+            interface setPair_C
+                subroutine setMGpuPair(dev0, dev1) bind(c, name='set_mozyme_gpu_pair')
+                  import :: c_int
+                  integer(c_int), value     :: dev0
+                  integer(c_int), value     :: dev1
+                end subroutine
+            end interface
         end module

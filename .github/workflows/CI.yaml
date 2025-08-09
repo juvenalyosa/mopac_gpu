@@ -9,6 +9,16 @@ on:
       - main
   schedule:
     - cron: "0 0 * * 0"
+  workflow_dispatch:
+    inputs:
+      gpu_pair:
+        description: "GPU pair (e.g., 1,2)"
+        required: false
+        default: ""
+      tolerance:
+        description: "Energy tolerance (e.g., 1e-4)"
+        required: false
+        default: "1e-4"
 
 # Download links for the Intel MKL library & Fortran compiler from:
 # https://www.intel.com/content/www/us/en/developer/articles/tool/oneapi-standalone-components.html
@@ -457,3 +467,44 @@ jobs:
         with:
           name: windows-dist
           path: build/mopac-*-win.*
+
+  gpu-verify:
+    # This job runs only on a self-hosted runner with a GPU.
+    # Provide a runner labeled with at least: self-hosted, gpu
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 45
+    env:
+      GPU_VERIFY_PAIR: ""
+      GPU_VERIFY_TOL: "1e-4"
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/gpu-verify') }}
+    steps:
+      - name: Show NVIDIA GPU info
+        run: |
+          if command -v nvidia-smi >/dev/null 2>&1; then
+            nvidia-smi || true
+          else
+            echo "nvidia-smi not found; ensure CUDA drivers are available" >&2
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Configure (GPU)
+        run: |
+          cmake -S . -B build-gpu \
+                -DGPU=ON \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DGPU_VERIFY_PAIR="${{ github.event.inputs.gpu_pair || env.GPU_VERIFY_PAIR }}" \
+                -DGPU_VERIFY_TOL="${{ github.event.inputs.tolerance || env.GPU_VERIFY_TOL }}"
+
+      - name: Build (GPU)
+        run: cmake --build build-gpu -j
+
+      - name: Run MOZYME GPU verification
+        run: cmake --build build-gpu --target mozyme-gpu-verify
+
+      - name: Save verification logs on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-verify-logs
+          path: build-gpu/*_testgpu.*

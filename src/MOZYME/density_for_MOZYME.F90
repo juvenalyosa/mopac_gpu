@@ -28,6 +28,10 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     use MOZYME_C, only : lijbo, nijbo, ncf, ncocc, &
       nncf, iorbs, cocc, icocc
     use chanel_C, only: iw
+#ifdef GPU
+    use mod_vars_cuda, only: lgpu, mozyme_gpu, mozyme_gpu_min_block, ngpus, mozyme_force_2gpu
+    use mopac_cublas_interfaces
+#endif
     implicit none
     integer, intent (in) :: mode, nclose_loc
     double precision, dimension (mpack), intent (in) :: partp
@@ -35,6 +39,9 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     logical :: first = .true.
     logical, save :: prnt
     integer :: i, j, j1, ja, jj, k, k1, k2, ka, kk, l, loop, nj
+    integer :: lbase, nb, nk
+    double precision, allocatable :: xmat(:,:)
+    double precision, allocatable :: xblk(:,:)
     double precision :: spinfa, sum
     integer, external :: ijbo
     if (first) then
@@ -70,25 +77,110 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
           do kk = nncf(i) + 1, nncf(i) + ncf(i)
             k = icocc(kk)
             if (j == k) then
-              l = nijbo (j, k)
-              do j1 = 1, nj
-                sum = cocc(ja+j1+loop)
-                do k1 = 1, j1
-                  k2 = ka + k1
-                  l = l + 1
-                  p(l) = p(l) + cocc(k2) * sum
+#ifdef GPU
+              if (mozyme_gpu .and. lgpu .and. (nj >= mozyme_gpu_min_block)) then
+                ! Use SYRK on GPU to form outer product v*v^T for the diagonal block
+                integer :: nb
+                double precision, allocatable :: xmat(:,:)
+                nb = nj
+                lbase = nijbo(j, k)
+                allocate(xmat(nb, nb))
+                xmat = 0.0d0
+                if (ngpus > 1 .or. mozyme_force_2gpu) then
+                  call syrk_cublas_2gpu('L','N', nb, 1, 1.0d0, cocc(ja+1+loop:ja+nb+loop), nb, 0.0d0, xmat, nb)
+                else
+                  call syrk_cublas('L','N', nb, 1, 1.0d0, cocc(ja+1+loop:ja+nb+loop), nb, 0.0d0, xmat, nb)
+                end if
+                l = lbase
+                do j1 = 1, nb
+                  do k1 = 1, j1
+                    l = l + 1
+                    p(l) = p(l) + xmat(j1, k1)
+                  end do
                 end do
-              end do
+                deallocate(xmat)
+              else if (mozyme_gpu .and. (nj >= mozyme_gpu_min_block)) then
+                integer :: nb
+                double precision, allocatable :: xmat(:,:)
+                nb = nj
+                lbase = nijbo(j, k)
+                allocate(xmat(nb, nb))
+                xmat = 0.0d0
+                call dsyrk('L','N', nb, 1, 1.0d0, cocc(ja+1+loop), nb, 0.0d0, xmat, nb)
+                l = lbase
+                do j1 = 1, nb
+                  do k1 = 1, j1
+                    l = l + 1
+                    p(l) = p(l) + xmat(j1, k1)
+                  end do
+                end do
+                deallocate(xmat)
+              else
+#endif
+                l = nijbo (j, k)
+                do j1 = 1, nj
+                  sum = cocc(ja+j1+loop)
+                  do k1 = 1, j1
+                    k2 = ka + k1
+                    l = l + 1
+                    p(l) = p(l) + cocc(k2) * sum
+                  end do
+                end do
+#ifdef GPU
+              end if
+#endif
             else if (j > k .and. nijbo (j, k) >= 0) then
               l = nijbo (j, k)
-              do j1 = 1, nj
-                sum = cocc(ja+j1+loop)
-                do k1 = 1, iorbs(k)
-                  k2 = ka + k1
-                  l = l + 1
-                  p(l) = p(l) + cocc(k2) * sum
+#ifdef GPU
+              if (mozyme_gpu .and. lgpu .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
+                ! Off-diagonal block: form outer product a(nj) * b(nk)^T with GEMM (k=1)
+                integer :: nk
+                double precision, allocatable :: xblk(:,:)
+                nk = iorbs(k)
+                allocate(xblk(nj, nk))
+                xblk = 0.0d0
+                if (ngpus > 1 .or. mozyme_force_2gpu) then
+                  call gemm_cublas_2gpu('N','T', nj, nk, 1, 1.0d0, cocc(ja+1+loop:ja+nj+loop), nj, &
+                                        cocc(ka+1:ka+nk), nk, 0.0d0, xblk, nj)
+                else
+                  call gemm_cublas('N','T', nj, nk, 1, 1.0d0, cocc(ja+1+loop:ja+nj+loop), nj, &
+                                   cocc(ka+1:ka+nk), nk, 0.0d0, xblk, nj)
+                end if
+                do j1 = 1, nj
+                  do k1 = 1, nk
+                    l = l + 1
+                    p(l) = p(l) + xblk(j1, k1)
+                  end do
                 end do
-              end do
+                deallocate(xblk)
+              else if (mozyme_gpu .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
+                integer :: nk
+                double precision, allocatable :: xblk(:,:)
+                nk = iorbs(k)
+                allocate(xblk(nj, nk))
+                xblk = 0.0d0
+                call dgemm('N','T', nj, nk, 1, 1.0d0, cocc(ja+1+loop), nj, &
+                           cocc(ka+1), nk, 0.0d0, xblk, nj)
+                do j1 = 1, nj
+                  do k1 = 1, nk
+                    l = l + 1
+                    p(l) = p(l) + xblk(j1, k1)
+                  end do
+                end do
+                deallocate(xblk)
+              else
+#endif
+                do j1 = 1, nj
+                  sum = cocc(ja+j1+loop)
+                  do k1 = 1, iorbs(k)
+                    k2 = ka + k1
+                    l = l + 1
+                    p(l) = p(l) + cocc(k2) * sum
+                  end do
+                end do
+#ifdef GPU
+              end if
+#endif
             end if
             ka = ka + iorbs(k)
           end do
@@ -103,23 +195,106 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
             k = icocc(kk)
             l = ijbo (j, k)
             if (j == k) then
-              do j1 = 1, nj
-                sum = cocc(ja+j1+loop)
-                do k1 = 1, j1
-                  k2 = ka + k1
-                  l = l + 1
-                  p(l) = p(l) + cocc(k2) * sum
+#ifdef GPU
+              if (mozyme_gpu .and. lgpu .and. (nj >= mozyme_gpu_min_block)) then
+                integer :: nb
+                double precision, allocatable :: xmat(:,:)
+                nb = nj
+                lbase = l
+                allocate(xmat(nb, nb))
+                xmat = 0.0d0
+                if (ngpus > 1 .or. mozyme_force_2gpu) then
+                  call syrk_cublas_2gpu('L','N', nb, 1, 1.0d0, cocc(ja+1+loop:ja+nb+loop), nb, 0.0d0, xmat, nb)
+                else
+                  call syrk_cublas('L','N', nb, 1, 1.0d0, cocc(ja+1+loop:ja+nb+loop), nb, 0.0d0, xmat, nb)
+                end if
+                l = lbase
+                do j1 = 1, nb
+                  do k1 = 1, j1
+                    l = l + 1
+                    p(l) = p(l) + xmat(j1, k1)
+                  end do
                 end do
-              end do
+                deallocate(xmat)
+              else if (mozyme_gpu .and. (nj >= mozyme_gpu_min_block)) then
+                integer :: nb
+                double precision, allocatable :: xmat(:,:)
+                nb = nj
+                lbase = l
+                allocate(xmat(nb, nb))
+                xmat = 0.0d0
+                call dsyrk('L','N', nb, 1, 1.0d0, cocc(ja+1+loop), nb, 0.0d0, xmat, nb)
+                l = lbase
+                do j1 = 1, nb
+                  do k1 = 1, j1
+                    l = l + 1
+                    p(l) = p(l) + xmat(j1, k1)
+                  end do
+                end do
+                deallocate(xmat)
+              else
+#endif
+                do j1 = 1, nj
+                  sum = cocc(ja+j1+loop)
+                  do k1 = 1, j1
+                    k2 = ka + k1
+                    l = l + 1
+                    p(l) = p(l) + cocc(k2) * sum
+                  end do
+                end do
+#ifdef GPU
+              end if
+#endif
             else if (j > k .and. l >= 0) then
-              do j1 = 1, nj
-                sum = cocc(ja+j1+loop)
-                do k1 = 1, iorbs(k)
-                  k2 = ka + k1
-                  l = l + 1
-                  p(l) = p(l) + cocc(k2) * sum
+#ifdef GPU
+              if (mozyme_gpu .and. lgpu .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
+                integer :: nk
+                double precision, allocatable :: xblk(:,:)
+                nk = iorbs(k)
+                allocate(xblk(nj, nk))
+                xblk = 0.0d0
+                if (ngpus > 1 .or. mozyme_force_2gpu) then
+                  call gemm_cublas_2gpu('N','T', nj, nk, 1, 1.0d0, cocc(ja+1+loop:ja+nj+loop), nj, &
+                                        cocc(ka+1:ka+nk), nk, 0.0d0, xblk, nj)
+                else
+                  call gemm_cublas('N','T', nj, nk, 1, 1.0d0, cocc(ja+1+loop:ja+nj+loop), nj, &
+                                   cocc(ka+1:ka+nk), nk, 0.0d0, xblk, nj)
+                end if
+                do j1 = 1, nj
+                  do k1 = 1, nk
+                    l = l + 1
+                    p(l) = p(l) + xblk(j1, k1)
+                  end do
                 end do
-              end do
+                deallocate(xblk)
+              else if (mozyme_gpu .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
+                integer :: nk
+                double precision, allocatable :: xblk(:,:)
+                nk = iorbs(k)
+                allocate(xblk(nj, nk))
+                xblk = 0.0d0
+                call dgemm('N','T', nj, nk, 1, 1.0d0, cocc(ja+1+loop), nj, &
+                           cocc(ka+1), nk, 0.0d0, xblk, nj)
+                do j1 = 1, nj
+                  do k1 = 1, nk
+                    l = l + 1
+                    p(l) = p(l) + xblk(j1, k1)
+                  end do
+                end do
+                deallocate(xblk)
+              else
+#endif
+                do j1 = 1, nj
+                  sum = cocc(ja+j1+loop)
+                  do k1 = 1, iorbs(k)
+                    k2 = ka + k1
+                    l = l + 1
+                    p(l) = p(l) + cocc(k2) * sum
+                  end do
+                end do
+#ifdef GPU
+              end if
+#endif
             end if
             ka = ka + iorbs(k)
           end do

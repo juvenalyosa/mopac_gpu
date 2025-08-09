@@ -17,9 +17,11 @@ module mod_vars_cuda
 
   integer, parameter :: nthreads_gpu = 256, nblocks_gpu = 256
   logical :: lgpu = .false.
+  logical :: mozyme_gpu = .false.
+  logical :: mozyme_force_2gpu = .false.
+  integer :: mozyme_gpu_min_block = 16
   real, parameter :: real_cuda = selected_real_kind(8)
   integer, parameter :: prec = 8
   integer :: ngpus,gpu_id
   logical, parameter :: exe_gpu_kepler = .true.
 end module mod_vars_cuda
-

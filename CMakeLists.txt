@@ -282,6 +282,31 @@ if(GPU)
   target_link_libraries(mopac-core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver)
   # Ensure position independent code for shared targets
   set_target_properties(mopac-core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+  # Optional local GPU verification
+  option(ENABLE_GPU_TESTS "Enable GPU verification tests/targets" OFF)
+  set(GPU_VERIFY_PAIR "" CACHE STRING "Optional GPU pair to use for verification (format: 1,2)")
+  set(GPU_VERIFY_TOL "1e-4" CACHE STRING "Verification tolerance for energy deltas")
+  # Custom target to run verification script locally (not part of ctest by default)
+  add_custom_target(mozyme-gpu-verify
+    COMMAND ${CMAKE_COMMAND} -E env 
+            bash ${CMAKE_SOURCE_DIR}/scripts/test_mozyme_gpu.sh 
+                 $<TARGET_FILE:mopac> 
+                 ${CMAKE_SOURCE_DIR}/tests/mozyme_h2o.mop 
+                 ${GPU_VERIFY_PAIR} ${GPU_VERIFY_TOL}
+    DEPENDS mopac
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running MOZYME GPU verification script"
+  )
+  if(ENABLE_GPU_TESTS)
+    enable_testing()
+    add_test(NAME mozyme_gpu_verify
+      COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/test_mozyme_gpu.sh 
+                      $<TARGET_FILE:mopac> 
+                      ${CMAKE_SOURCE_DIR}/tests/mozyme_h2o.mop 
+                      ${GPU_VERIFY_PAIR} ${GPU_VERIFY_TOL})
+    set_tests_properties(mozyme_gpu_verify PROPERTIES LABELS "gpu")
+  endif()
 endif()
 
 # Add tests

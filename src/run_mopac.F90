@@ -63,7 +63,7 @@
 #endif
 #ifdef GPU
       Use iso_c_binding
-      Use mod_vars_cuda, only: lgpu, ngpus, gpu_id
+      Use mod_vars_cuda, only: lgpu, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu
       Use gpu_info
       Use settingGPUcard
 #endif
@@ -287,15 +287,45 @@
                   & clockRate, major, minor)
         lgpu = .false.
         lgpu_ref = hasGPU
-        if (lgpu_ref) lgpu_ref = (index(keywrd, " NOGPU") == 0)
+        if (lgpu_ref) lgpu_ref = (index(keywrd, ' NOGPU') == 0)
+        ! Parse optional ignore list: MOZYME_GPUIGNORE=a,b,c (1-based)
+        logical :: ignore(6)
+        ignore = .false.
+        i = index(keywrd, ' MOZYME_GPUIGNORE=')
+        if (i /= 0) then
+          character(len=32) :: list
+          integer :: p, q
+          list = ' '
+          p = i + len(' MOZYME_GPUIGNORE=')
+          q = p
+          do while (q <= len_trim(keywrd))
+            if (keywrd(q:q) == ' ') exit
+            q = q + 1
+          end do
+          if (q > p) then
+            list = keywrd(p:q-1)
+            ! Convert separators to spaces for reading
+            do l = 1, len_trim(list)
+              if (list(l:l) == ',' .or. list(l:l) == ':' .or. list(l:l) == ';') list(l:l) = ' '
+            end do
+            read(list,*,err=77) i, j, k, l
+            if (i>0 .and. i<=6) ignore(i) = .true.
+            if (j>0 .and. j<=6) ignore(j) = .true.
+            if (k>0 .and. k<=6) ignore(k) = .true.
+            if (l>0 .and. l<=6) ignore(l) = .true.
+          end if
+        end if
+77      continue
         if (lgpu_ref) then
           lgpu_ref = .false.
-! Counting how many GPUs are suitable to perform the calculations or with compute capability 2 (Fermi or Kepler).
+          ! Count suitable GPUs (compute capability >=2 with FP64), honoring ignore list
           j = 0
           do i = 1, nDevices
-            if (major(i) >= 2  .and. hasDouble(i)) then
-              gpu_ok(i) = .true.
-              j = j + 1
+            if (.not. ignore(i)) then
+              if (major(i) >= 2 .and. hasDouble(i)) then
+                gpu_ok(i) = .true.
+                j = j + 1
+              end if
             end if
           end do
           lgpu_ref = (j >= 1)
@@ -306,10 +336,9 @@
         l = 0; k = 0
         if (lgpu_ref) then
           l = index(keywrd,' SETGPU=')
-          if (l /= 0) then  ! The user has inserted SETGPU keyword to Select one specific GPU
+          if (l /= 0) then  ! The user has inserted SETGPU keyword to select one specific GPU
             gpu_id = nint(reada(keywrd,l))
             if (gpu_id > nDevices .or. gpu_id < 1 .or. (.not. gpu_ok(gpu_id))) then
-              ! the user made a wrong choice !!!
               Write(iw,'(/,5x,a)') ' Problem with the definition of SETGPU keyword ! '
               Write(iw,'(5x,a,/)') ' MOPAC will automatically set a valid GPU card for the calculation '
               l = 0
@@ -322,9 +351,9 @@
               end if
             end if
           end if
-          if (l == 0) then   ! Select GPU automatically
+          if (l == 0) then   ! Select GPU automatically (skip ignored)
             do i = 1, nDevices
-             if (gpu_ok(i)) then
+              if (gpu_ok(i)) then
                 on_off(i) = 'ON '
                 gpu_id = i - 1
                 call setGPU(gpu_id, lstat)
@@ -344,7 +373,21 @@
 !  For small systems, using a GPU takes longer than not using a GPU,
 !  so do not use a GPU for small systems.  The lower limit, 100, is just a guess.
 !
-        lgpu = (lgpu_ref .and. natoms > 100) ! Warning - there are problems with UHF calculations on small systems
+        lgpu = (lgpu_ref .and. natoms > 100) ! Default: avoid GPU for very small systems
+        ! Optional overrides via environment variables (advanced users)
+        call get_environment_variable('MOPAC_NOGPU', line, status=i)
+        if (i == 0) then
+          if (trim(adjustl(line)) /= '') lgpu = .false.
+        end if
+        call get_environment_variable('MOPAC_FORCEGPU', line, status=i)
+        if (i == 0) then
+          if (trim(adjustl(line)) /= '') lgpu = .true.
+        end if
+        ! Optional MOZYME GPU override via environment variable
+        call get_environment_variable('MOZYME_GPU', line, status=i)
+        if (i == 0) then
+          if (trim(adjustl(line)) /= '') mozyme_gpu = .true.
+        end if
 #endif
       end if
       if (numcal == 1+numcal0 .and. natoms == 0) then
@@ -499,6 +542,94 @@
           call l_control("PREC", len_trim("PREC"), -1)
           if (index(keywrd, " LET") == 0) call l_control("LET", len_trim("LET"), 1)
         end if
+        ! Experimental: enable GPU assist in MOZYME when requested
+#ifdef GPU
+        mozyme_gpu = (index(keywrd, ' MOZYME_GPU') /= 0)
+        ! Uppercase a scratch copy for robust parsing
+        character(len=len(keywrd)) :: keyup
+        keyup = keywrd
+        call upcase(keyup, len_trim(keyup))
+        ! MOZYME_2GPU (whitespace agnostic)
+        if (index(keyup, 'MOZYME_2GPU') /= 0) then
+          mozyme_force_2gpu = .true.
+          if (j >= 2) then
+            ngpus = 2
+            lgpu = .true.
+          end if
+        end if
+        ! MOZYME_MINBLK[= ]n (whitespace-agnostic)
+        i = index(keyup, 'MOZYME_MINBLK')
+        if (i /= 0) then
+          integer :: pos
+          pos = index(keyup(i:), '=')
+          if (pos == 0) pos = index(keyup(i:), ' ')
+          if (pos /= 0) then
+            pos = i + pos - 1
+            ! skip any '=' and spaces
+            do while (pos <= len_trim(keyup) .and. (keyup(pos:pos) == '=' .or. keyup(pos:pos) == ' '))
+              pos = pos + 1
+            end do
+            if (pos <= len_trim(keyup)) then
+              read(keyup(pos:),*,err=901) k
+              mozyme_gpu_min_block = max(1, k)
+            end if
+          end if
+        end if
+        ! MOZYME_GPUPAIR[= ]a[,|:|;]b (whitespace-agnostic)
+        i = index(keyup, 'MOZYME_GPUPAIR')
+        if (i /= 0) then
+          integer :: pos, d0, d1
+          character(len=32) :: pair
+          pos = index(keyup(i:), '=')
+          if (pos == 0) pos = index(keyup(i:), ' ')
+          if (pos /= 0) then
+            pos = i + pos - 1
+            do while (pos <= len_trim(keyup) .and. (keyup(pos:pos) == '=' .or. keyup(pos:pos) == ' '))
+              pos = pos + 1
+            end do
+            pair = ' '
+            l = pos
+            do while (l <= len_trim(keyup))
+              if (keyup(l:l) == ' ') exit
+              l = l + 1
+            end do
+            if (l > pos) then
+              pair = keyup(pos:l-1)
+              do k = 1, len_trim(pair)
+                if (pair(k:k) == ',' .or. pair(k:k) == ':' .or. pair(k:k) == ';') pair(k:k) = ' '
+              end do
+              read(pair,*,err=901) d0, d1
+              if (d0 > 0 .and. d1 > 0 .and. d0 /= d1) then
+                if (d0 <= nDevices .and. d1 <= nDevices) then
+                  if (gpu_ok(d0) .and. gpu_ok(d1)) then
+                    call setMGpuPair(d0-1, d1-1)
+                    mozyme_force_2gpu = .true.
+                    ngpus = 2
+                    lgpu = .true.
+                  end if
+                end if
+              end if
+            end if
+          end if
+        end if
+901     continue
+#endif
+        ! Handle MOZYME-specific GPU tuning keywords
+#ifdef GPU
+        ! Force 2-GPU mode for MOZYME density if requested and at least two GPUs are suitable
+        if (index(keywrd, ' MOZYME_2GPU') /= 0) then
+          mozyme_force_2gpu = .true.
+          if (j >= 2) then
+            ngpus = 2
+            lgpu = .true.
+          end if
+        end if
+        ! Tune the minimum block size for MOZYME GPU offloads (rank-1 GEMM/SYRK)
+        i = index(keywrd, ' MOZYME_MINBLK')
+        if (i /= 0) then
+          mozyme_gpu_min_block = max(1, nint(reada(keywrd, i)))
+        end if
+#endif
       end if
       if (index(keywrd, " ADD-H") + index(keywrd, " SITE=") /= 0 ) nelecs = 0
       if (index(keywrd, " ADD-H") /= 0 ) call l_control("NEWPDB", len_trim("NEWPDB"), 1)
