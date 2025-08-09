@@ -42,6 +42,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     integer :: lbase, nb, nk
     double precision, allocatable :: xmat(:,:)
     double precision, allocatable :: xblk(:,:)
+    double precision, allocatable :: avec(:,:), bvec(:,:)
     double precision :: spinfa, sum
     integer, external :: ijbo
     if (first) then
@@ -84,11 +85,14 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
                 lbase = nijbo(j, k)
                 allocate(xmat(nb, nb))
                 xmat = 0.0d0
+                allocate(avec(nb,1))
+                avec(:,1) = cocc(ja+1+loop:ja+nb+loop)
                 if (ngpus > 1 .or. mozyme_force_2gpu) then
-                  call syrk_cublas_2gpu('L','N', nb, 1, 1.0d0, cocc(ja+1+loop:ja+nb+loop), nb, 0.0d0, xmat, nb)
+                  call syrk_cublas_2gpu('L','N', nb, 1, 1.0d0, avec, nb, 0.0d0, xmat, nb)
                 else
-                  call syrk_cublas('L','N', nb, 1, 1.0d0, cocc(ja+1+loop:ja+nb+loop), nb, 0.0d0, xmat, nb)
+                  call syrk_cublas('L','N', nb, 1, 1.0d0, avec, nb, 0.0d0, xmat, nb)
                 end if
+                deallocate(avec)
                 l = lbase
                 do j1 = 1, nb
                   do k1 = 1, j1
@@ -133,13 +137,15 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
                 nk = iorbs(k)
                 allocate(xblk(nj, nk))
                 xblk = 0.0d0
+                allocate(avec(nj,1), bvec(nk,1))
+                avec(:,1) = cocc(ja+1+loop:ja+nj+loop)
+                bvec(:,1) = cocc(ka+1:ka+nk)
                 if (ngpus > 1 .or. mozyme_force_2gpu) then
-                  call gemm_cublas_2gpu('N','T', nj, nk, 1, 1.0d0, cocc(ja+1+loop:ja+nj+loop), nj, &
-                                        cocc(ka+1:ka+nk), nk, 0.0d0, xblk, nj)
+                  call gemm_cublas_2gpu('N','T', nj, nk, 1, 1.0d0, avec, nj, bvec, nk, 0.0d0, xblk, nj)
                 else
-                  call gemm_cublas('N','T', nj, nk, 1, 1.0d0, cocc(ja+1+loop:ja+nj+loop), nj, &
-                                   cocc(ka+1:ka+nk), nk, 0.0d0, xblk, nj)
+                  call gemm_cublas('N','T', nj, nk, 1, 1.0d0, avec, nj, bvec, nk, 0.0d0, xblk, nj)
                 end if
+                deallocate(avec, bvec)
                 do j1 = 1, nj
                   do k1 = 1, nk
                     l = l + 1
@@ -193,11 +199,14 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
                 lbase = l
                 allocate(xmat(nb, nb))
                 xmat = 0.0d0
+                allocate(avec(nb,1))
+                avec(:,1) = cocc(ja+1+loop:ja+nb+loop)
                 if (ngpus > 1 .or. mozyme_force_2gpu) then
-                  call syrk_cublas_2gpu('L','N', nb, 1, 1.0d0, cocc(ja+1+loop:ja+nb+loop), nb, 0.0d0, xmat, nb)
+                  call syrk_cublas_2gpu('L','N', nb, 1, 1.0d0, avec, nb, 0.0d0, xmat, nb)
                 else
-                  call syrk_cublas('L','N', nb, 1, 1.0d0, cocc(ja+1+loop:ja+nb+loop), nb, 0.0d0, xmat, nb)
+                  call syrk_cublas('L','N', nb, 1, 1.0d0, avec, nb, 0.0d0, xmat, nb)
                 end if
+                deallocate(avec)
                 l = lbase
                 do j1 = 1, nb
                   do k1 = 1, j1
@@ -239,13 +248,15 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
                 nk = iorbs(k)
                 allocate(xblk(nj, nk))
                 xblk = 0.0d0
+                allocate(avec(nj,1), bvec(nk,1))
+                avec(:,1) = cocc(ja+1+loop:ja+nj+loop)
+                bvec(:,1) = cocc(ka+1:ka+nk)
                 if (ngpus > 1 .or. mozyme_force_2gpu) then
-                  call gemm_cublas_2gpu('N','T', nj, nk, 1, 1.0d0, cocc(ja+1+loop:ja+nj+loop), nj, &
-                                        cocc(ka+1:ka+nk), nk, 0.0d0, xblk, nj)
+                  call gemm_cublas_2gpu('N','T', nj, nk, 1, 1.0d0, avec, nj, bvec, nk, 0.0d0, xblk, nj)
                 else
-                  call gemm_cublas('N','T', nj, nk, 1, 1.0d0, cocc(ja+1+loop:ja+nj+loop), nj, &
-                                   cocc(ka+1:ka+nk), nk, 0.0d0, xblk, nj)
+                  call gemm_cublas('N','T', nj, nk, 1, 1.0d0, avec, nj, bvec, nk, 0.0d0, xblk, nj)
                 end if
+                deallocate(avec, bvec)
                 do j1 = 1, nj
                   do k1 = 1, nk
                     l = l + 1
