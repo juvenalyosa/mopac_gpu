@@ -151,6 +151,7 @@ contains
     integer(c_int) :: info
     integer :: c0, c1, rate
     real(c_double) :: t_first, t_rest
+    real(c_double) :: flops, gflops_first, gflops_rest
 
     n = dsy_n; lda = n; iters = dsy_iters
     allocate(A(lda,n), W(n))
@@ -188,9 +189,7 @@ contains
     deallocate(A,W)
   end subroutine bench_dsyevd
 
-end program gpu_bench
-
-subroutine parse_args()
+  subroutine parse_args()
   implicit none
   integer :: argc, i, p
   character(len=256) :: arg, val
@@ -219,10 +218,11 @@ subroutine parse_args()
       call parse_ints(val, rot2_n, rot2_iters)
     end if
   end do
-contains
+  contains
   subroutine print_help()
     implicit none
-    write(*,*) 'Usage: mopac-gpu-bench [--gemm=m,n,k,iters] [--syrk=n,k,iters] [--syrk-full] [--dsyevd=n,iters] [--rot1=n,iters] [--rot2=n,iters]'
+    write(*,*) 'Usage: mopac-gpu-bench [--gemm=m,n,k,iters] [--syrk=n,k,iters] [--syrk-full]', &
+               ' [--dsyevd=n,iters] [--rot1=n,iters] [--rot2=n,iters]'
   end subroutine print_help
   subroutine parse_ints(str, a, b, c, d)
     character(len=*), intent(in) :: str
@@ -245,7 +245,9 @@ contains
     end if
 99  continue
   end subroutine parse_ints
-end subroutine parse_args
+  end subroutine parse_args
+
+end program gpu_bench
 
 subroutine bench_rot_single()
   use iso_c_binding
