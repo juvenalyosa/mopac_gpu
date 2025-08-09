@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 HEAT_RE = re.compile(r"FINAL HEAT OF FORMATION\s*=\s*([\-+0-9\.Ee]+)")
+HEAT_AUX_RE = re.compile(r"HEAT_OF_FORMATION:KCAL/MOL=\s*([\-+0-9\.Ee]+)")
 
 def run(cmd, env=None):
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, text=True)
@@ -20,6 +21,25 @@ def parse_heat(output):
                 return float(m.group(1))
             except Exception:
                 pass
+    return None
+
+def parse_heat_from_files(stem):
+    # Try .out, .arc, then .aux in current working directory
+    for ext, regex in ((".out", HEAT_RE), (".arc", HEAT_RE), (".aux", HEAT_AUX_RE)):
+        path = f"{stem}{ext}"
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    m = regex.search(line)
+                    if m:
+                        try:
+                            return float(m.group(1))
+                        except Exception:
+                            pass
+        except Exception:
+            continue
     return None
 
 def main():
@@ -39,13 +59,17 @@ def main():
     # CPU run (disable GPU)
     env_cpu = env_base.copy()
     env_cpu["MOPAC_NOGPU"] = "1"
+    stem = os.path.splitext(os.path.basename(args.input))[0]
+
     rc_cpu, out_cpu = run([args.mopac, args.input], env=env_cpu)
     if rc_cpu != 0:
         print("CPU run failed:\n" + out_cpu)
         return 2
     heat_cpu = parse_heat(out_cpu)
     if heat_cpu is None:
-        print("CPU run: could not parse FINAL HEAT OF FORMATION\n" + out_cpu)
+        heat_cpu = parse_heat_from_files(stem)
+    if heat_cpu is None:
+        print("CPU run: could not parse FINAL HEAT OF FORMATION (stdout/.out/.arc/.aux)\n" + out_cpu)
         return 2
 
     # GPU run (force GPU)
@@ -57,7 +81,9 @@ def main():
         return 2
     heat_gpu = parse_heat(out_gpu)
     if heat_gpu is None:
-        print("GPU run: could not parse FINAL HEAT OF FORMATION\n" + out_gpu)
+        heat_gpu = parse_heat_from_files(stem)
+    if heat_gpu is None:
+        print("GPU run: could not parse FINAL HEAT OF FORMATION (stdout/.out/.arc/.aux)\n" + out_gpu)
         return 2
 
     diff = abs(heat_cpu - heat_gpu)
@@ -83,4 +109,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
