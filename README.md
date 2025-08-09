@@ -225,6 +225,11 @@ One‑shot sweep + plot helper
   - `bash scripts/peptide_sweep_plot.sh -e ./build-gpu/mopac -i examples/peptide_gg.mop -o gg_sweep`
   - 2 GPUs pair 0,1, repeat 3: `bash scripts/peptide_sweep_plot.sh -e ./build-gpu/mopac -i examples/peptide_aaa.mop -o aaa_sweep --2gpu --pair 1,2 --devices 0,1 --repeat 3`
 
+Merge CSVs with labels
+- Combine multiple CSVs into one with a label column for plotting/archival:
+  - `python3 scripts/merge_peptide_csv.py gg_bench.csv aaa_2gpu.csv --labels GlyGly,Ala3 --out combined.csv`
+  - Prepend label as first column: `python3 scripts/merge_peptide_csv.py gg_bench.csv aaa_2gpu.csv --labels GlyGly,Ala3 --prepend --out combined.csv`
+
 ctest integration (optional)
 - Configure with `-DENABLE_GPU_TESTS=ON -DGPU=ON`.
 - List and run tests labeled `gpu`:
