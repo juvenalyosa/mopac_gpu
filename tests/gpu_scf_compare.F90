@@ -65,6 +65,4 @@ program gpu_scf_compare
   print *, 'Fock max abs diff:', d_f
   print *, 'Fock rel diff:', d_f/denom_f
 
-contains
-#endif
 end program gpu_scf_compare
