@@ -44,6 +44,8 @@ if(GPU)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/cublas_interfaces.F90)
 endif()
 
+# Small API control module is added from src/interface/CMakeLists.txt
+
 #-----------------------------------------------
 # Add a list of source files to the target
 foreach(idx IN LISTS main_src_list)

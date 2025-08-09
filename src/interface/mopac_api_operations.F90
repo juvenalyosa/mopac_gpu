@@ -59,10 +59,10 @@ contains
 #ifdef WIN32
 !dec$ attributes dllexport :: mopac_scf
 #endif
+    use mopac_api_flags, only: keep_fock
     type(mopac_system), intent(in) :: system
     type(mopac_state), intent(inout) :: state
     type(mopac_properties), intent(out) :: properties
-    use mopac_api_flags, only: keep_fock
 
     keywrd = " 1SCF PULAY BONDS"
     if (system%natom_move + system%nlattice_move > 0) keywrd = trim(keywrd) // " GRADIENTS"
