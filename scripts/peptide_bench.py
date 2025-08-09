@@ -46,6 +46,43 @@ def rewrite_keywords(line: str, two_gpu: bool, minblk: int|None, pair: str|None)
             key = key + f' MOZYME_GPUPAIR={pair}'
     return key
 
+def build_compute_keywords_from_addh(line: str, geo_dat_out: str) -> str:
+    """Transform an ADD-H/PDBOUT NEWPDB 0SCF line into a compute line using the hydrogenated PDB.
+
+    Ensures: PM7 MOZYME 1SCF ALLBONDS PULAY PDB GEO_DAT="geo_dat_out" NOCOMMENTS
+    Preserves MOZYME if present. Removes ADD-H/NEWPDB/PDBOUT/0SCF.
+    """
+    key = line.strip()
+    lower = key.lower()
+    # Remove flags not needed for compute
+    for tok in ["add-h", "newpdb", "pdbout", "0scf"]:
+        pat = re.compile(rf"\b{tok}\b", re.IGNORECASE)
+        key = pat.sub("", key)
+    # Ensure PM7 present
+    if ' pm7' not in f' {key.lower()}':
+        key = 'PM7 ' + key
+    # Ensure MOZYME present (most peptide runs expect it)
+    if ' mozyme' not in f' {key.lower()}':
+        key = key + ' MOZYME'
+    # Add compute directives
+    if ' 1scf' not in f' {key.lower()}':
+        key = key + ' 1SCF'
+    if ' allbonds' not in f' {key.lower()}':
+        key = key + ' ALLBONDS'
+    if ' pulay' not in f' {key.lower()}':
+        key = key + ' PULAY'
+    if ' pdb ' not in f' {key.lower()}':
+        key = key + ' PDB'
+    # Replace or add GEO_DAT
+    if 'geo_dat=' in key.lower():
+        key = re.sub(r'GEO_DAT\s*=\s*"[^"]*"', f'GEO_DAT="{geo_dat_out}"', key, flags=re.IGNORECASE)
+    else:
+        key = key + f' GEO_DAT="{geo_dat_out}"'
+    # Keep NOCOMMENTS if present or add it to reduce I/O noise
+    if ' nocomments' not in f' {key.lower()}':
+        key = key + ' NOCOMMENTS'
+    return ' '.join(key.split())
+
 def run_mopac(mopac: Path, input_text: str, env: dict, keep_tmp: bool = False, tmp_root: str | None = None, src_dir: Path | None = None) -> tuple[int,str,float,Path,Path]:
     """Run MOPAC in a temporary directory. If keep_tmp is True, the directory is preserved.
 
@@ -199,9 +236,38 @@ def main():
         with csv_path.open('a') as f:
             f.write('mode,minblk,time_s,hof_kcal_mol,devices,pair,streams,input,out_path,tmp_dir\n')
 
+    addh_pipeline = ('add-h' in key_line.lower() and 'pdbout' in key_line.lower())
     for mb in minblks:
-        new_key = rewrite_keywords(key_line, two_gpu, mb, pair)
-        new_text = new_key + '\n' + body
+        # Construct input for this run
+        if addh_pipeline:
+            # Step 1: hydrogenation from source PDB
+            key1 = rewrite_keywords(key_line, two_gpu=False, minblk=None, pair=pair)
+            text1 = key1 + '\n' + body
+            # Run hydrogenation
+            rc1, out_text1, dt1, out_path1, tmp_dir1 = run_mopac(mopac, text1, env, keep_tmp=args.keep_tmp, tmp_root=(args.tmp_root or None), src_dir=inp_path.parent)
+            # The hydrogenated PDB is typically bench.pdb in tmp_dir
+            hydro_pdb = tmp_dir1 / 'bench.pdb'
+            if not hydro_pdb.exists():
+                # Fallback: look for any .pdb created
+                cand = list(tmp_dir1.glob('*.pdb'))
+                if cand:
+                    hydro_pdb = cand[0]
+            # Rename to hydrogenate.pdb for clarity
+            hydro_named = tmp_dir1 / 'hydrogenate.pdb'
+            try:
+                if hydro_pdb.exists():
+                    if hydro_named.exists():
+                        hydro_named.unlink()
+                    shutil.copy2(hydro_pdb, hydro_named)
+            except Exception:
+                pass
+            # Step 2: compute using hydrogenated PDB; inject minblk and 2GPU as requested
+            key2_base = build_compute_keywords_from_addh(key_line, geo_dat_out='hydrogenate.pdb')
+            key2 = rewrite_keywords(key2_base, two_gpu, mb, pair)
+            new_text = key2 + '\n'
+        else:
+            new_key = rewrite_keywords(key_line, two_gpu, mb, pair)
+            new_text = new_key + '\n' + body
         env = os.environ.copy()
         # Force GPU usage
         env['MOPAC_FORCEGPU'] = '1'

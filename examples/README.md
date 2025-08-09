@@ -21,6 +21,10 @@ Small peptide (Gly–Gly) from PDB with hydrogens added
 - Run (1 GPU auto): `./build-gpu/mopac examples/peptide_gg.mop`
 - Run (2 GPUs 0,1): `CUDA_VISIBLE_DEVICES=0,1 ./build-gpu/mopac examples/peptide_gg_2gpu.mop`
 
+Two-step peptide pipeline (generic peptide.pdb)
+- Step 1 (hydrogenate): `./build-gpu/mopac examples/peptide_addh.mop` (writes `bench.pdb`; copy/rename to `hydrogenate.pdb` if needed)
+- Step 2 (compute): `./build-gpu/mopac examples/peptide_run.mop`
+
 Tri‑alanine (Ala–Ala–Ala) from PDB with hydrogens added
 - File: `peptide_aaa.mop` (uses `peptide_aaa.pdb`)
 - Run (1 GPU auto): `./build-gpu/mopac examples/peptide_aaa.mop`

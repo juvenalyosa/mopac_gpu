@@ -1,0 +1,3 @@
+PM7 MOZYME ADD-H PDB PDBOUT NEWPDB 0SCF GEO_DAT="peptide.pdb" NOCOMMENTS
+Hydrogenate peptide and write PDB
+
