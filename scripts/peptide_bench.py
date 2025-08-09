@@ -10,11 +10,19 @@ import time
 from pathlib import Path
 import platform
 
-HEAT_RE = re.compile(r"HEAT\s+OF\s+FORMATION\s*=*\s*([\-+0-9Ee\.]+)")
+HEAT_RE = re.compile(r"HEAT\s+OF\s+FORMATION[^\n]*?([\-+0-9\.EeDd]+)", re.IGNORECASE)
 
 def parse_heat(text: str):
     m = HEAT_RE.search(text)
-    return float(m.group(1)) if m else None
+    if not m:
+        return None
+    val = m.group(1).strip()
+    # Normalize Fortran D exponents to E
+    val = val.replace('D', 'E').replace('d', 'E')
+    try:
+        return float(val)
+    except Exception:
+        return None
 
 def rewrite_keywords(line: str, two_gpu: bool, minblk: int|None, pair: str|None) -> str:
     key = line.strip()
