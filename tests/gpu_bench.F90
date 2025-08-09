@@ -189,47 +189,18 @@ contains
     deallocate(A,W)
   end subroutine bench_dsyevd
 
-  subroutine parse_args()
-  implicit none
-  integer :: argc, i, p
-  character(len=256) :: arg, val
-  argc = command_argument_count()
-  do i = 1, argc
-    call get_command_argument(i, arg)
-    if (index(arg, '--help') == 1) then
-      call print_help()
-      stop
-    else if (index(arg, '--gemm=') == 1) then
-      val = arg(8:)
-      call parse_ints(val, gemm_m, gemm_n, gemm_k, gemm_iters)
-    else if (index(arg, '--syrk=') == 1) then
-      val = arg(8:)
-      call parse_ints(val, syrk_n, syrk_k, syrk_iters)
-    else if (index(arg, '--dsyevd=') == 1) then
-      val = arg(10:)
-      call parse_ints(val, dsy_n, dsy_iters)
-    else if (trim(arg) == '--syrk-full') then
-      syrk_full = .true.
-    else if (index(arg, '--rot1=') == 1) then
-      val = arg(8:)
-      call parse_ints(val, rot1_n, rot1_iters)
-    else if (index(arg, '--rot2=') == 1) then
-      val = arg(8:)
-      call parse_ints(val, rot2_n, rot2_iters)
-    end if
-  end do
-  contains
   subroutine print_help()
     implicit none
     write(*,*) 'Usage: mopac-gpu-bench [--gemm=m,n,k,iters] [--syrk=n,k,iters] [--syrk-full]', &
                ' [--dsyevd=n,iters] [--rot1=n,iters] [--rot2=n,iters]'
   end subroutine print_help
+
   subroutine parse_ints(str, a, b, c, d)
     character(len=*), intent(in) :: str
     integer, intent(inout) :: a
     integer, intent(inout), optional :: b, c, d
     character(len=len(str)) :: s
-    integer :: i1, i2, i3
+    integer :: i1
     s = str
     do i1 = 1, len_trim(s)
       if (s(i1:i1) == ',') s(i1:i1) = ' '
@@ -245,6 +216,124 @@ contains
     end if
 99  continue
   end subroutine parse_ints
+
+  subroutine parse_args()
+    implicit none
+    integer :: argc, i
+    character(len=256) :: arg, val
+    argc = command_argument_count()
+    do i = 1, argc
+      call get_command_argument(i, arg)
+      if (index(arg, '--help') == 1) then
+        call print_help()
+        stop
+      else if (index(arg, '--gemm=') == 1) then
+        val = arg(8:)
+        call parse_ints(val, gemm_m, gemm_n, gemm_k, gemm_iters)
+      else if (index(arg, '--syrk=') == 1) then
+        val = arg(8:)
+        call parse_ints(val, syrk_n, syrk_k, syrk_iters)
+      else if (index(arg, '--dsyevd=') == 1) then
+        val = arg(10:)
+        call parse_ints(val, dsy_n, dsy_iters)
+      else if (trim(arg) == '--syrk-full') then
+        syrk_full = .true.
+      else if (index(arg, '--rot1=') == 1) then
+        val = arg(8:)
+        call parse_ints(val, rot1_n, rot1_iters)
+      else if (index(arg, '--rot2=') == 1) then
+        val = arg(8:)
+        call parse_ints(val, rot2_n, rot2_iters)
+      end if
+    end do
   end subroutine parse_args
+
+  subroutine bench_rot_single()
+    use iso_c_binding
+    implicit none
+    integer :: n, nocc, lumo, iters, i
+    integer :: c0, c1, rate
+    real(c_double), allocatable :: eig(:), vector(:,:), fmo(:), ci0(:), ca0(:)
+    real(c_double) :: t_first, t_rest
+    real(c_double) :: bigeps, tiny
+
+    n = rot1_n
+    nocc = n/2
+    lumo = nocc + 1
+    iters = rot1_iters
+    bigeps = 1.0d-5
+    tiny   = 1.0d-12
+
+    allocate(eig(n), vector(n,n), ci0(n), ca0(n))
+    allocate(fmo(nocc * (n - nocc)))
+    call random_seed()
+    call random_number(eig)
+    call random_number(vector)
+    call random_number(fmo)
+    fmo = 1.0d-3 * fmo
+    ci0 = 0.0d0; ca0 = 0.0d0
+
+    call system_clock(c0, rate)
+    call call_rot_cuda_gpu(fmo, eig, vector, ci0, ca0, nocc, lumo, n, bigeps, tiny)
+    call system_clock(c1)
+    t_first = real(c1-c0,8)/real(rate,8)
+
+    call system_clock(c0, rate)
+    do i = 1, iters
+      call call_rot_cuda_gpu(fmo, eig, vector, ci0, ca0, nocc, lumo, n, bigeps, tiny)
+    end do
+    call system_clock(c1)
+    t_rest = real(c1-c0,8)/real(rate,8)/real(iters,8)
+
+    write(*,'(a,i6,a,i6)') 'ROT single n=', n, ' nocc=', nocc
+    write(*,'(a,f10.6,a)') '  first call: ', t_first, ' s'
+    write(*,'(a,f10.6,a)') '  avg (cached): ', t_rest, ' s'
+
+    deallocate(eig, vector, fmo, ci0, ca0)
+  end subroutine bench_rot_single
+
+  subroutine bench_rot_2gpu()
+    use iso_c_binding
+    implicit none
+    integer :: n, nocc, lumo, iters, i
+    integer :: c0, c1, rate
+    real(c_double), allocatable :: eig(:), vector(:,:), fmo(:), ci0(:), ca0(:)
+    real(c_double) :: t_first, t_rest
+    real(c_double) :: bigeps, tiny
+
+    n = rot2_n
+    nocc = n/2
+    lumo = nocc + 1
+    iters = rot2_iters
+    bigeps = 1.0d-5
+    tiny   = 1.0d-12
+
+    allocate(eig(n), vector(n,n), ci0(n), ca0(n))
+    allocate(fmo(nocc * (n - nocc)))
+    call random_seed()
+    call random_number(eig)
+    call random_number(vector)
+    call random_number(fmo)
+    fmo = 1.0d-3 * fmo
+    ci0 = 0.0d0; ca0 = 0.0d0
+
+    call system_clock(c0, rate)
+    call call_rot_cuda_2gpu_gpu(fmo, eig, vector, ci0, ca0, nocc, lumo, n, bigeps, tiny)
+    call system_clock(c1)
+    t_first = real(c1-c0,8)/real(rate,8)
+
+    call system_clock(c0, rate)
+    do i = 1, iters
+      call call_rot_cuda_2gpu_gpu(fmo, eig, vector, ci0, ca0, nocc, lumo, n, bigeps, tiny)
+    end do
+    call system_clock(c1)
+    t_rest = real(c1-c0,8)/real(rate,8)/real(iters,8)
+
+    write(*,'(a,i6,a,i6)') 'ROT 2-GPU n=', n, ' nocc=', nocc
+    write(*,'(a,f10.6,a)') '  first call: ', t_first, ' s'
+    write(*,'(a,f10.6,a)') '  avg (cached): ', t_rest, ' s'
+
+    deallocate(eig, vector, fmo, ci0, ca0)
+  end subroutine bench_rot_2gpu
 
 end program gpu_bench
