@@ -828,6 +828,9 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
 
 // Provide a single cleanup entry point for Fortran.
 void mopac_cuda_destroy_resources() {
+  static bool already = false;
+  if (already) return;
+  already = true;
   // BLAS handle and streams
   destroy_handle();
   // cuSOLVER handle

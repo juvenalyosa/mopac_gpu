@@ -433,25 +433,8 @@ contains
       end if
     end if
 
-    ! Default behavior: enable GPU if present
-    if (hasGpu) then
-      do j = 1, nDevices
-        if (major(j) >= 2 .and. hasDouble(j)) then
-          gpu_ok(j) = .true.
-        end if
-      end do
-      if (any(gpu_ok)) then
-        lgpu = .true.
-        ngpus = min(2, count(gpu_ok))
-        do j = 1, nDevices
-          if (gpu_ok(j)) then
-            gpu_id = j - 1
-            call setGPU(gpu_id, lstat)
-            exit
-          end if
-        end do
-      end if
-    end if
+    ! Default behavior (API): stay on CPU unless explicitly forced or pre-set by caller
+    ! This keeps API tests deterministic and avoids implicit GPU enablement.
   end subroutine api_setup_gpu
 #endif
 
