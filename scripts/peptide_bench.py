@@ -46,7 +46,7 @@ def rewrite_keywords(line: str, two_gpu: bool, minblk: int|None, pair: str|None)
             key = key + f' MOZYME_GPUPAIR={pair}'
     return key
 
-def run_mopac(mopac: Path, input_text: str, env: dict, keep_tmp: bool = False, tmp_root: str | None = None) -> tuple[int,str,float,Path,Path]:
+def run_mopac(mopac: Path, input_text: str, env: dict, keep_tmp: bool = False, tmp_root: str | None = None, src_dir: Path | None = None) -> tuple[int,str,float,Path,Path]:
     """Run MOPAC in a temporary directory. If keep_tmp is True, the directory is preserved.
 
     Returns: (returncode, output_text, elapsed_time, out_path, tmp_dir)
@@ -56,6 +56,23 @@ def run_mopac(mopac: Path, input_text: str, env: dict, keep_tmp: bool = False, t
         tmp_dir = td
         tmp = tmp_dir / 'bench.mop'
         tmp.write_text(input_text)
+        # Best-effort: copy referenced auxiliary files (e.g., PDB via NEWPDB)
+        try:
+            if src_dir is not None:
+                lines = input_text.splitlines()
+                for ln in lines[1:]:
+                    name = ln.strip()
+                    if not name:
+                        continue
+                    lower = name.lower()
+                    if lower.endswith(('.pdb', '.ent', '.xyz', '.mol', '.new', '.dat', '.arc')):
+                        src_path = (src_dir / name)
+                        if src_path.exists():
+                            dst_path = tmp_dir / Path(name).name
+                            if not dst_path.exists():
+                                shutil.copy2(src_path, dst_path)
+        except Exception:
+            pass
         t0 = time.perf_counter()
         p = subprocess.Popen([str(mopac), str(tmp)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         out, _ = p.communicate()
@@ -73,6 +90,22 @@ def run_mopac(mopac: Path, input_text: str, env: dict, keep_tmp: bool = False, t
             tmp_dir = Path(td)
             tmp = tmp_dir / 'bench.mop'
             tmp.write_text(input_text)
+            try:
+                if src_dir is not None:
+                    lines = input_text.splitlines()
+                    for ln in lines[1:]:
+                        name = ln.strip()
+                        if not name:
+                            continue
+                        lower = name.lower()
+                        if lower.endswith(('.pdb', '.ent', '.xyz', '.mol', '.new', '.dat', '.arc')):
+                            src_path = (src_dir / name)
+                            if src_path.exists():
+                                dst_path = tmp_dir / Path(name).name
+                                if not dst_path.exists():
+                                    shutil.copy2(src_path, dst_path)
+            except Exception:
+                pass
             t0 = time.perf_counter()
             p = subprocess.Popen([str(mopac), str(tmp)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             out, _ = p.communicate()
@@ -181,7 +214,7 @@ def main():
         best_out_path = None
         best_tmp_dir = None
         for _ in range(max(1, args.repeat)):
-            rc, out_text, dt, out_path, tmp_dir = run_mopac(mopac, new_text, env, keep_tmp=args.keep_tmp, tmp_root=(args.tmp_root or None))
+            rc, out_text, dt, out_path, tmp_dir = run_mopac(mopac, new_text, env, keep_tmp=args.keep_tmp, tmp_root=(args.tmp_root or None), src_dir=inp_path.parent)
             hof = parse_heat(out_text)
             if best_dt is None or dt < best_dt:
                 best_dt = dt
