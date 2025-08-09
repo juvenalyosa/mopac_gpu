@@ -7,6 +7,46 @@
 #include <cmath>
 #include <algorithm>
 
+// Simple grow-only device buffer cache helper (C++ only; placed outside C linkage)
+template <typename T>
+struct DevBuf {
+  T* ptr = nullptr;
+  size_t cap = 0; // capacity in bytes
+  void ensure(size_t bytes) {
+    if (bytes <= cap && ptr) return;
+    if (ptr) cudaFree(ptr);
+    ptr = nullptr; cap = 0;
+    if (bytes > 0) {
+      cudaMalloc((void**)&ptr, bytes);
+      cap = bytes;
+    }
+  }
+  void release() {
+    if (ptr) cudaFree(ptr);
+    ptr = nullptr; cap = 0;
+  }
+};
+
+// Simple grow-only pinned host buffer cache
+template <typename T>
+struct HostBuf {
+  T* ptr = nullptr;
+  size_t cap = 0; // capacity in bytes
+  void ensure(size_t bytes) {
+    if (bytes <= cap && ptr) return;
+    if (ptr) cudaFreeHost(ptr);
+    ptr = nullptr; cap = 0;
+    if (bytes > 0) {
+      cudaHostAlloc((void**)&ptr, bytes, cudaHostAllocDefault);
+      cap = bytes;
+    }
+  }
+  void release() {
+    if (ptr) cudaFreeHost(ptr);
+    ptr = nullptr; cap = 0;
+  }
+};
+
 // Default device pair for 2-GPU MOZYME operations
 static int g_pair_dev0 = 0;
 static int g_pair_dev1 = 1;
@@ -79,10 +119,57 @@ void setDevice(int idevice, bool *stat) {
 
 // Global cuBLAS handle
 static cublasHandle_t g_blas = nullptr;
+static cudaStream_t   g_stream = nullptr;     // single-GPU general stream
+static cudaStream_t   g_stream0 = nullptr;    // 2-GPU device0 stream
+static cudaStream_t   g_stream1 = nullptr;    // 2-GPU device1 stream
+static bool           g_streams_enabled = true;
+
+static inline void ensure_pair_streams() {
+  int dev_count = 0;
+  cudaGetDeviceCount(&dev_count);
+  if (dev_count <= 0) return;
+  if (!g_streams_enabled) return;
+  // Device 0 stream
+  if (!g_stream0) {
+    cudaSetDevice(g_pair_dev0);
+    cudaStreamCreate(&g_stream0);
+  }
+  // Device 1 stream
+  if (!g_stream1) {
+    cudaSetDevice(g_pair_dev1);
+    cudaStreamCreate(&g_stream1);
+  }
+}
+
+// Cached buffers for single-GPU BLAS wrappers
+static DevBuf<double> g_gemm_A, g_gemm_B, g_gemm_C;
+static DevBuf<double> g_syrk_A, g_syrk_C;
+static HostBuf<double> h_gemm_A, h_gemm_B, h_gemm_C;
+static HostBuf<double> h_syrk_A, h_syrk_C;
+// 2-GPU caches
+static DevBuf<double> g2_gemm_a0, g2_gemm_b0, g2_gemm_c0;
+static DevBuf<double> g2_gemm_a1, g2_gemm_b1, g2_gemm_c1;
+static DevBuf<double> g2_syrk_v0, g2_syrk_c0;
+static DevBuf<double> g2_syrk_v1, g2_syrk_c1;
+static HostBuf<double> h2_gemm_A, h2_gemm_B, h2_gemm_C;
+static HostBuf<double> h2_syrk_A, h2_syrk_C;
+static HostBuf<double> h2_rot_V;
 
 void create_handle() {
   if (!g_blas) {
     cublasCreate(&g_blas);
+    const char* env = std::getenv("MOPAC_STREAMS");
+    if (env) {
+      if (std::strcmp(env, "off") == 0 || std::strcmp(env, "0") == 0) {
+        g_streams_enabled = false;
+      }
+    }
+    if (g_streams_enabled) {
+      if (!g_stream) {
+        cudaStreamCreate(&g_stream);
+      }
+      cublasSetStream(g_blas, g_stream);
+    }
   }
 }
 
@@ -91,9 +178,17 @@ void destroy_handle() {
     cublasDestroy(g_blas);
     g_blas = nullptr;
   }
+  if (g_stream) {
+    cudaStreamDestroy(g_stream);
+    g_stream = nullptr;
+  }
+  if (g_stream0) { cudaSetDevice(g_pair_dev0); cudaStreamDestroy(g_stream0); g_stream0 = nullptr; }
+  if (g_stream1) { cudaSetDevice(g_pair_dev1); cudaStreamDestroy(g_stream1); g_stream1 = nullptr; }
 }
 
-// Fortran-callable DGEMM via cuBLAS
+// Cleanup function moved to the end of translation unit (after all static declarations)
+
+// Fortran-callable DGEMM via cuBLAS (uses cached device buffers)
 void call_gemm_cublas(char tra, char trb,
                       int m, int n, int k,
                       double alpha,
@@ -108,22 +203,29 @@ void call_gemm_cublas(char tra, char trb,
   size_t bytesA = (size_t)lda * (size_t)k * sizeof(double);
   size_t bytesB = (size_t)ldb * (size_t)n * sizeof(double);
   size_t bytesC = (size_t)ldc * (size_t)n * sizeof(double);
-  double *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
-  cudaMalloc((void**)&d_A, bytesA);
-  cudaMalloc((void**)&d_B, bytesB);
-  cudaMalloc((void**)&d_C, bytesC);
-  cudaMemcpy(d_A, A, bytesA, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_B, B, bytesB, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_C, C, bytesC, cudaMemcpyHostToDevice);
+  g_gemm_A.ensure(bytesA);
+  g_gemm_B.ensure(bytesB);
+  g_gemm_C.ensure(bytesC);
+  double *d_A = g_gemm_A.ptr;
+  double *d_B = g_gemm_B.ptr;
+  double *d_C = g_gemm_C.ptr;
+  h_gemm_A.ensure(bytesA);
+  h_gemm_B.ensure(bytesB);
+  h_gemm_C.ensure(bytesC);
+  std::memcpy(h_gemm_A.ptr, A, bytesA);
+  std::memcpy(h_gemm_B.ptr, B, bytesB);
+  std::memcpy(h_gemm_C.ptr, C, bytesC);
+  cudaMemcpyAsync(d_A, h_gemm_A.ptr, bytesA, cudaMemcpyHostToDevice, g_stream);
+  cudaMemcpyAsync(d_B, h_gemm_B.ptr, bytesB, cudaMemcpyHostToDevice, g_stream);
+  cudaMemcpyAsync(d_C, h_gemm_C.ptr, bytesC, cudaMemcpyHostToDevice, g_stream);
   // Compute C = alpha*op(A)*op(B) + beta*C
   cublasDgemm(g_blas, opA, opB, m, n, k, &alpha, d_A, lda, d_B, ldb, &beta, d_C, ldc);
-  cudaMemcpy(C, d_C, bytesC, cudaMemcpyDeviceToHost);
-  cudaFree(d_A);
-  cudaFree(d_B);
-  cudaFree(d_C);
+  cudaMemcpyAsync(h_gemm_C.ptr, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+  std::memcpy(C, h_gemm_C.ptr, bytesC);
 }
 
-// SYRK via cuBLAS
+// SYRK via cuBLAS (uses cached device buffers)
 void call_syrk_cublas(char uplo, char tra,
                       int n, int k,
                       double alpha,
@@ -135,15 +237,20 @@ void call_syrk_cublas(char uplo, char tra,
   cublasOperation_t opA = (tra == 'T' || tra == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
   size_t bytesA = (size_t)lda * (size_t)((opA==CUBLAS_OP_N)?k:n) * sizeof(double);
   size_t bytesC = (size_t)ldc * (size_t)n * sizeof(double);
-  double *d_A = nullptr, *d_C = nullptr;
-  cudaMalloc((void**)&d_A, bytesA);
-  cudaMalloc((void**)&d_C, bytesC);
-  cudaMemcpy(d_A, A, bytesA, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_C, C, bytesC, cudaMemcpyHostToDevice);
+  g_syrk_A.ensure(bytesA);
+  g_syrk_C.ensure(bytesC);
+  double *d_A = g_syrk_A.ptr;
+  double *d_C = g_syrk_C.ptr;
+  h_syrk_A.ensure(bytesA);
+  h_syrk_C.ensure(bytesC);
+  std::memcpy(h_syrk_A.ptr, A, bytesA);
+  std::memcpy(h_syrk_C.ptr, C, bytesC);
+  cudaMemcpyAsync(d_A, h_syrk_A.ptr, bytesA, cudaMemcpyHostToDevice, g_stream);
+  cudaMemcpyAsync(d_C, h_syrk_C.ptr, bytesC, cudaMemcpyHostToDevice, g_stream);
   cublasDsyrk(g_blas, u, opA, n, k, &alpha, d_A, lda, &beta, d_C, ldc);
-  cudaMemcpy(C, d_C, bytesC, cudaMemcpyDeviceToHost);
-  cudaFree(d_A);
-  cudaFree(d_C);
+  cudaMemcpyAsync(h_syrk_C.ptr, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+  std::memcpy(C, h_syrk_C.ptr, bytesC);
 }
 
 // 2-GPU outer product helpers and wrappers are further below.
@@ -176,36 +283,48 @@ void call_gemm_cublas_2gpu(char tra, char trb,
     call_gemm_cublas(tra, trb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
     return;
   }
+  ensure_pair_streams();
   int n0 = m / 2;
   int n1 = m - n0;
-  // Device allocations and copies as above
+  // Device allocations and copies with caching per device
   double *d_a0=nullptr, *d_b0=nullptr, *d_c0=nullptr;
   double *d_a1=nullptr, *d_b1=nullptr, *d_c1=nullptr;
   // Device 0
   cudaSetDevice(g_pair_dev0);
-  cudaMalloc((void**)&d_a0, sizeof(double) * (size_t)m);
-  cudaMalloc((void**)&d_b0, sizeof(double) * (size_t)n);
-  cudaMalloc((void**)&d_c0, sizeof(double) * (size_t)n0 * (size_t)ldc);
-  cudaMemcpy(d_a0, A, sizeof(double) * (size_t)m, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_b0, B, sizeof(double) * (size_t)n, cudaMemcpyHostToDevice);
+  g2_gemm_a0.ensure(sizeof(double) * (size_t)m);
+  g2_gemm_b0.ensure(sizeof(double) * (size_t)n);
+  g2_gemm_c0.ensure(sizeof(double) * (size_t)n0 * (size_t)ldc);
+  d_a0 = g2_gemm_a0.ptr; d_b0 = g2_gemm_b0.ptr; d_c0 = g2_gemm_c0.ptr;
+  size_t bytesAm = sizeof(double) * (size_t)m;
+  size_t bytesBn = sizeof(double) * (size_t)n;
+  size_t bytesCfull = sizeof(double) * (size_t)ldc * (size_t)n;
+  h2_gemm_A.ensure(bytesAm);
+  h2_gemm_B.ensure(bytesBn);
+  h2_gemm_C.ensure(bytesCfull);
+  std::memcpy(h2_gemm_A.ptr, A, bytesAm);
+  std::memcpy(h2_gemm_B.ptr, B, bytesBn);
+  std::memcpy(h2_gemm_C.ptr, C, bytesCfull);
+  cudaMemcpyAsync(d_a0, h2_gemm_A.ptr, bytesAm, cudaMemcpyHostToDevice, g_stream0);
+  cudaMemcpyAsync(d_b0, h2_gemm_B.ptr, bytesBn, cudaMemcpyHostToDevice, g_stream0);
   for (int col = 0; col < n; ++col) {
     cudaMemcpyAsync(d_c0 + (size_t)col * (size_t)n0,
-                    C + (size_t)col * (size_t)ldc,
+                    h2_gemm_C.ptr + (size_t)col * (size_t)ldc,
                     sizeof(double) * (size_t)n0,
-                    cudaMemcpyHostToDevice);
+                    cudaMemcpyHostToDevice, g_stream0);
   }
   // Device 1
   cudaSetDevice(g_pair_dev1);
-  cudaMalloc((void**)&d_a1, sizeof(double) * (size_t)m);
-  cudaMalloc((void**)&d_b1, sizeof(double) * (size_t)n);
-  cudaMalloc((void**)&d_c1, sizeof(double) * (size_t)n1 * (size_t)ldc);
-  cudaMemcpy(d_a1, A, sizeof(double) * (size_t)m, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_b1, B, sizeof(double) * (size_t)n, cudaMemcpyHostToDevice);
+  g2_gemm_a1.ensure(sizeof(double) * (size_t)m);
+  g2_gemm_b1.ensure(sizeof(double) * (size_t)n);
+  g2_gemm_c1.ensure(sizeof(double) * (size_t)n1 * (size_t)ldc);
+  d_a1 = g2_gemm_a1.ptr; d_b1 = g2_gemm_b1.ptr; d_c1 = g2_gemm_c1.ptr;
+  cudaMemcpyAsync(d_a1, h2_gemm_A.ptr, bytesAm, cudaMemcpyHostToDevice, g_stream1);
+  cudaMemcpyAsync(d_b1, h2_gemm_B.ptr, bytesBn, cudaMemcpyHostToDevice, g_stream1);
   for (int col = 0; col < n; ++col) {
     cudaMemcpyAsync(d_c1 + (size_t)col * (size_t)n1,
-                    C + (size_t)col * (size_t)ldc + (size_t)n0,
+                    h2_gemm_C.ptr + (size_t)col * (size_t)ldc + (size_t)n0,
                     sizeof(double) * (size_t)n1,
-                    cudaMemcpyHostToDevice);
+                    cudaMemcpyHostToDevice, g_stream1);
   }
 
   // Launch kernels
@@ -215,7 +334,7 @@ void call_gemm_cublas_2gpu(char tra, char trb,
     int total = rows * n;
     int block = 256;
     int grid = (total + block - 1) / block;
-    outer_update_rows<<<grid, block>>>(d_c0, rows, n, d_a0, d_b0, alpha, beta, 0);
+    outer_update_rows<<<grid, block, 0, g_stream0>>>(d_c0, rows, n, d_a0, d_b0, alpha, beta, 0);
   }
   cudaSetDevice(g_pair_dev1);
   {
@@ -223,30 +342,30 @@ void call_gemm_cublas_2gpu(char tra, char trb,
     int total = rows * n;
     int block = 256;
     int grid = (total + block - 1) / block;
-    outer_update_rows<<<grid, block>>>(d_c1, rows, n, d_a1, d_b1, alpha, beta, n0);
+    outer_update_rows<<<grid, block, 0, g_stream1>>>(d_c1, rows, n, d_a1, d_b1, alpha, beta, n0);
   }
 
   // Sync and copy back row slices
-  cudaSetDevice(g_pair_dev0); cudaDeviceSynchronize();
+  cudaSetDevice(g_pair_dev0); cudaStreamSynchronize(g_stream0);
   for (int col = 0; col < n; ++col) {
-    cudaMemcpy(C + (size_t)col * (size_t)ldc,
+    cudaMemcpyAsync(h2_gemm_C.ptr + (size_t)col * (size_t)ldc,
                d_c0 + (size_t)col * (size_t)n0,
                sizeof(double) * (size_t)n0,
-               cudaMemcpyDeviceToHost);
+               cudaMemcpyDeviceToHost, g_stream0);
   }
-  cudaSetDevice(g_pair_dev1); cudaDeviceSynchronize();
+  cudaSetDevice(g_pair_dev1); cudaStreamSynchronize(g_stream1);
   for (int col = 0; col < n; ++col) {
-    cudaMemcpy(C + (size_t)col * (size_t)ldc + (size_t)n0,
+    cudaMemcpyAsync(h2_gemm_C.ptr + (size_t)col * (size_t)ldc + (size_t)n0,
                d_c1 + (size_t)col * (size_t)n1,
                sizeof(double) * (size_t)n1,
-               cudaMemcpyDeviceToHost);
+               cudaMemcpyDeviceToHost, g_stream1);
   }
+  cudaSetDevice(g_pair_dev0); cudaStreamSynchronize(g_stream0);
+  cudaSetDevice(g_pair_dev1); cudaStreamSynchronize(g_stream1);
 
-  // Free
-  cudaSetDevice(g_pair_dev0);
-  cudaFree(d_a0); cudaFree(d_b0); cudaFree(d_c0);
-  cudaSetDevice(g_pair_dev1);
-  cudaFree(d_a1); cudaFree(d_b1); cudaFree(d_c1);
+  // No frees here; cached buffers are released at process cleanup
+  // Copy back to user output
+  std::memcpy(C, h2_gemm_C.ptr, bytesCfull);
 }
 
 // 2-GPU outer product for SYRK with k==1, tra=='N': C[nxn] += alpha*v*v^T + beta*C
@@ -263,32 +382,42 @@ void call_syrk_cublas_2gpu(char uplo, char tra,
     call_syrk_cublas(uplo, tra, n, k, alpha, A, lda, beta, C, ldc);
     return;
   }
+  ensure_pair_streams();
   int n0 = n / 2;
   int n1 = n - n0;
-  // Copy full vector v to both devices and split C by rows
+  // Copy full vector v to both devices and split C by rows (cached per device)
   double *d_v0=nullptr, *d_c0=nullptr;
   double *d_v1=nullptr, *d_c1=nullptr;
   // Device 0
   cudaSetDevice(g_pair_dev0);
-  cudaMalloc((void**)&d_v0, sizeof(double) * (size_t)n);
-  cudaMalloc((void**)&d_c0, sizeof(double) * (size_t)n0 * (size_t)ldc);
-  cudaMemcpy(d_v0, A, sizeof(double) * (size_t)n, cudaMemcpyHostToDevice);
+  g2_syrk_v0.ensure(sizeof(double) * (size_t)n);
+  g2_syrk_c0.ensure(sizeof(double) * (size_t)n0 * (size_t)ldc);
+  d_v0 = g2_syrk_v0.ptr; d_c0 = g2_syrk_c0.ptr;
+  bool regA=false, regC=false;
+  size_t bytesAn = sizeof(double) * (size_t)n;
+  size_t bytesCfull = sizeof(double) * (size_t)ldc * (size_t)n;
+  h2_syrk_A.ensure(bytesAn);
+  h2_syrk_C.ensure(bytesCfull);
+  std::memcpy(h2_syrk_A.ptr, A, bytesAn);
+  std::memcpy(h2_syrk_C.ptr, C, bytesCfull);
+  cudaMemcpyAsync(d_v0, h2_syrk_A.ptr, bytesAn, cudaMemcpyHostToDevice, g_stream0);
   for (int col = 0; col < n; ++col) {
     cudaMemcpyAsync(d_c0 + (size_t)col * (size_t)n0,
-                    C + (size_t)col * (size_t)ldc,
+                    h2_syrk_C.ptr + (size_t)col * (size_t)ldc,
                     sizeof(double) * (size_t)n0,
-                    cudaMemcpyHostToDevice);
+                    cudaMemcpyHostToDevice, g_stream0);
   }
   // Device 1
   cudaSetDevice(g_pair_dev1);
-  cudaMalloc((void**)&d_v1, sizeof(double) * (size_t)n);
-  cudaMalloc((void**)&d_c1, sizeof(double) * (size_t)n1 * (size_t)ldc);
-  cudaMemcpy(d_v1, A, sizeof(double) * (size_t)n, cudaMemcpyHostToDevice);
+  g2_syrk_v1.ensure(sizeof(double) * (size_t)n);
+  g2_syrk_c1.ensure(sizeof(double) * (size_t)n1 * (size_t)ldc);
+  d_v1 = g2_syrk_v1.ptr; d_c1 = g2_syrk_c1.ptr;
+  cudaMemcpyAsync(d_v1, h2_syrk_A.ptr, bytesAn, cudaMemcpyHostToDevice, g_stream1);
   for (int col = 0; col < n; ++col) {
     cudaMemcpyAsync(d_c1 + (size_t)col * (size_t)n1,
-                    C + (size_t)col * (size_t)ldc + (size_t)n0,
+                    h2_syrk_C.ptr + (size_t)col * (size_t)ldc + (size_t)n0,
                     sizeof(double) * (size_t)n1,
-                    cudaMemcpyHostToDevice);
+                    cudaMemcpyHostToDevice, g_stream1);
   }
 
   // Launch outer product kernels per device
@@ -298,7 +427,7 @@ void call_syrk_cublas_2gpu(char uplo, char tra,
     int total = rows * n;
     int block = 256;
     int grid = (total + block - 1) / block;
-    outer_update_rows<<<grid, block>>>(d_c0, rows, n, d_v0, d_v0, alpha, beta, 0);
+    outer_update_rows<<<grid, block, 0, g_stream0>>>(d_c0, rows, n, d_v0, d_v0, alpha, beta, 0);
   }
   cudaSetDevice(g_pair_dev1);
   {
@@ -306,63 +435,74 @@ void call_syrk_cublas_2gpu(char uplo, char tra,
     int total = rows * n;
     int block = 256;
     int grid = (total + block - 1) / block;
-    outer_update_rows<<<grid, block>>>(d_c1, rows, n, d_v1, d_v1, alpha, beta, n0);
+    outer_update_rows<<<grid, block, 0, g_stream1>>>(d_c1, rows, n, d_v1, d_v1, alpha, beta, n0);
   }
 
   // Sync and copy back row slices
-  cudaSetDevice(g_pair_dev0); cudaDeviceSynchronize();
+  cudaSetDevice(g_pair_dev0); cudaStreamSynchronize(g_stream0);
   for (int col = 0; col < n; ++col) {
-    cudaMemcpy(C + (size_t)col * (size_t)ldc,
+    cudaMemcpyAsync(h2_syrk_C.ptr + (size_t)col * (size_t)ldc,
                d_c0 + (size_t)col * (size_t)n0,
                sizeof(double) * (size_t)n0,
-               cudaMemcpyDeviceToHost);
+               cudaMemcpyDeviceToHost, g_stream0);
   }
-  cudaSetDevice(g_pair_dev1); cudaDeviceSynchronize();
+  cudaSetDevice(g_pair_dev1); cudaStreamSynchronize(g_stream1);
   for (int col = 0; col < n; ++col) {
-    cudaMemcpy(C + (size_t)col * (size_t)ldc + (size_t)n0,
+    cudaMemcpyAsync(h2_syrk_C.ptr + (size_t)col * (size_t)ldc + (size_t)n0,
                d_c1 + (size_t)col * (size_t)n1,
                sizeof(double) * (size_t)n1,
-               cudaMemcpyDeviceToHost);
+               cudaMemcpyDeviceToHost, g_stream1);
   }
+  cudaSetDevice(g_pair_dev0); cudaStreamSynchronize(g_stream0);
+  cudaSetDevice(g_pair_dev1); cudaStreamSynchronize(g_stream1);
 
-  // Free
-  cudaSetDevice(g_pair_dev0);
-  cudaFree(d_v0); cudaFree(d_c0);
-  cudaSetDevice(g_pair_dev1);
-  cudaFree(d_v1); cudaFree(d_c1);
+  // No frees; cached buffers are released at process cleanup
+  // Copy back to user output
+  std::memcpy(C, h2_syrk_C.ptr, bytesCfull);
 }
 // Symmetric eigensolver (upper triangle) using cuSOLVER Dsyevd; A overwritten with eigenvectors
+// Cached handles and workspaces for Dsyevd
+static cusolverDnHandle_t g_solver = nullptr;
+static DevBuf<double> g_dsyevd_A, g_dsyevd_W, g_dsyevd_work;
+static DevBuf<int>    g_dsyevd_info;
+static int g_dsyevd_lwork_cap = 0; // elements, not bytes
+
 void mopac_cuda_dsyevd(int n, double *A, int lda, double *W, int *info) {
-  cusolverDnHandle_t handle = nullptr;
-  cusolverDnCreate(&handle);
+  if (!g_solver) cusolverDnCreate(&g_solver);
 
-  double *d_A = nullptr;
-  double *d_W = nullptr;
-  int *d_info = nullptr;
+  size_t bytesA = sizeof(double) * (size_t)lda * (size_t)n;
+  size_t bytesW = sizeof(double) * (size_t)n;
+  g_dsyevd_A.ensure(bytesA);
+  g_dsyevd_W.ensure(bytesW);
+  g_dsyevd_info.ensure(sizeof(int));
+  double *d_A = g_dsyevd_A.ptr;
+  double *d_W = g_dsyevd_W.ptr;
+  int *d_info = g_dsyevd_info.ptr;
+
+  static HostBuf<double> h_dsyevd_A, h_dsyevd_W;
+  h_dsyevd_A.ensure(bytesA);
+  h_dsyevd_W.ensure(bytesW);
+  std::memcpy(h_dsyevd_A.ptr, A, bytesA);
+  cudaMemcpyAsync(d_A, h_dsyevd_A.ptr, bytesA, cudaMemcpyHostToDevice, g_stream);
+
   int lwork = 0;
-  cudaMalloc((void **)&d_A, sizeof(double) * lda * n);
-  cudaMalloc((void **)&d_W, sizeof(double) * n);
-  cudaMalloc((void **)&d_info, sizeof(int));
-
-  cudaMemcpy(d_A, A, sizeof(double) * lda * n, cudaMemcpyHostToDevice);
-
-  cusolverDnDsyevd_bufferSize(handle, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
+  cusolverDnSetStream(g_solver, g_stream);
+  cusolverDnDsyevd_bufferSize(g_solver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
                               n, d_A, lda, d_W, &lwork);
-  double *d_work = nullptr;
-  cudaMalloc((void **)&d_work, sizeof(double) * lwork);
+  if (lwork > g_dsyevd_lwork_cap) {
+    g_dsyevd_work.ensure(sizeof(double) * (size_t)lwork);
+    g_dsyevd_lwork_cap = lwork;
+  }
+  double *d_work = g_dsyevd_work.ptr;
 
-  cusolverDnDsyevd(handle, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
+  cusolverDnDsyevd(g_solver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
                    n, d_A, lda, d_W, d_work, lwork, d_info);
-
-  cudaMemcpy(A, d_A, sizeof(double) * lda * n, cudaMemcpyDeviceToHost);
-  cudaMemcpy(W, d_W, sizeof(double) * n, cudaMemcpyDeviceToHost);
-  cudaMemcpy(info, d_info, sizeof(int), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_work);
-  cudaFree(d_A);
-  cudaFree(d_W);
-  cudaFree(d_info);
-  cusolverDnDestroy(handle);
+  cudaMemcpyAsync(h_dsyevd_A.ptr, d_A, bytesA, cudaMemcpyDeviceToHost, g_stream);
+  cudaMemcpyAsync(h_dsyevd_W.ptr, d_W, bytesW, cudaMemcpyDeviceToHost, g_stream);
+  cudaMemcpyAsync(info, d_info, sizeof(int), cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+  std::memcpy(A, h_dsyevd_A.ptr, bytesA);
+  std::memcpy(W, h_dsyevd_W.ptr, bytesW);
 }
 
 // --- MOZYME rotation: GPU-assisted drot over two columns ---
@@ -400,15 +540,24 @@ __global__ void drot_cols_batch_kernel(double *V, int n, int npairs,
   }
 }
 
+// Cached buffers for single-GPU rotation
+static DevBuf<double> g_rot_V;
+static DevBuf<int>    g_rot_i, g_rot_j;
+static DevBuf<double> g_rot_a, g_rot_b;
+
 void call_rot_cuda_gpu(const double *fmo, const double *eig,
                        double *vector, const double *ci0, const double *ca0,
                        int nocc, int lumo, int n,
                        double bigeps, double tiny) {
   (void)ci0; (void)ca0; // unused for now
-  // Allocate and copy eigenvector matrix to device
-  double *d_V = nullptr;
-  cudaMalloc((void**)&d_V, sizeof(double) * (size_t)n * (size_t)n);
-  cudaMemcpy(d_V, vector, sizeof(double) * (size_t)n * (size_t)n, cudaMemcpyHostToDevice);
+  // Allocate and copy eigenvector matrix to device (async, pinned if possible)
+  size_t bytesV = sizeof(double) * (size_t)n * (size_t)n;
+  g_rot_V.ensure(bytesV);
+  double *d_V = g_rot_V.ptr;
+  static HostBuf<double> h_rot_V;
+  h_rot_V.ensure(bytesV);
+  std::memcpy(h_rot_V.ptr, vector, bytesV);
+  cudaMemcpyAsync(d_V, h_rot_V.ptr, bytesV, cudaMemcpyHostToDevice, g_stream);
 
   // Walk pairs sequentially; batch to reduce kernel launches
   const int max_batch = 256;
@@ -416,12 +565,12 @@ void call_rot_cuda_gpu(const double *fmo, const double *eig,
   int   *h_j = (int*)malloc(sizeof(int) * max_batch);
   double *h_a = (double*)malloc(sizeof(double) * max_batch);
   double *h_b = (double*)malloc(sizeof(double) * max_batch);
-  int   *d_i = nullptr, *d_j = nullptr;
-  double *d_a = nullptr, *d_b = nullptr;
-  cudaMalloc((void**)&d_i, sizeof(int) * max_batch);
-  cudaMalloc((void**)&d_j, sizeof(int) * max_batch);
-  cudaMalloc((void**)&d_a, sizeof(double) * max_batch);
-  cudaMalloc((void**)&d_b, sizeof(double) * max_batch);
+  g_rot_i.ensure(sizeof(int) * max_batch);
+  g_rot_j.ensure(sizeof(int) * max_batch);
+  g_rot_a.ensure(sizeof(double) * max_batch);
+  g_rot_b.ensure(sizeof(double) * max_batch);
+  int   *d_i = g_rot_i.ptr, *d_j = g_rot_j.ptr;
+  double *d_a = g_rot_a.ptr, *d_b = g_rot_b.ptr;
 
   int ij = 0;
   for (int i = 0; i < nocc; ++i) {
@@ -443,34 +592,31 @@ void call_rot_cuda_gpu(const double *fmo, const double *eig,
       h_b[batch] = beta;
       batch++;
       if (batch == max_batch) {
-        cudaMemcpy(d_i, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_j, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_a, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b, h_b, sizeof(double) * batch, cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(d_i, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice, g_stream);
+        cudaMemcpyAsync(d_j, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice, g_stream);
+        cudaMemcpyAsync(d_a, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice, g_stream);
+        cudaMemcpyAsync(d_b, h_b, sizeof(double) * batch, cudaMemcpyHostToDevice, g_stream);
         int block = 256;
         int grid = (n + block - 1) / block;
-        drot_cols_batch_kernel<<<grid, block>>>(d_V, n, batch, d_i, d_j, d_a, d_b);
+        drot_cols_batch_kernel<<<grid, block, 0, g_stream>>>(d_V, n, batch, d_i, d_j, d_a, d_b);
         batch = 0;
       }
     }
     if (batch > 0) {
-      cudaMemcpy(d_i, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice);
-      cudaMemcpy(d_j, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice);
-      cudaMemcpy(d_a, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice);
-      cudaMemcpy(d_b, h_b, sizeof(double) * batch, cudaMemcpyHostToDevice);
+      cudaMemcpyAsync(d_i, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice, g_stream);
+      cudaMemcpyAsync(d_j, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice, g_stream);
+      cudaMemcpyAsync(d_a, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice, g_stream);
+      cudaMemcpyAsync(d_b, h_b, sizeof(double) * batch, cudaMemcpyHostToDevice, g_stream);
       int block = 256;
       int grid = (n + block - 1) / block;
-      drot_cols_batch_kernel<<<grid, block>>>(d_V, n, batch, d_i, d_j, d_a, d_b);
+      drot_cols_batch_kernel<<<grid, block, 0, g_stream>>>(d_V, n, batch, d_i, d_j, d_a, d_b);
     }
   }
-  cudaDeviceSynchronize();
+  cudaStreamSynchronize(g_stream);
   // Copy back result
-  cudaMemcpy(vector, d_V, sizeof(double) * (size_t)n * (size_t)n, cudaMemcpyDeviceToHost);
-  cudaFree(d_V);
-  cudaFree(d_i);
-  cudaFree(d_j);
-  cudaFree(d_a);
-  cudaFree(d_b);
+  cudaMemcpyAsync(h_rot_V.ptr, d_V, sizeof(double) * (size_t)n * (size_t)n, cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+  std::memcpy(vector, h_rot_V.ptr, bytesV);
   free(h_i);
   free(h_j);
   free(h_a);
@@ -532,7 +678,7 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
   size_t bytes0 = (size_t)n0 * (size_t)n * sizeof(double);
   size_t bytes1 = (size_t)n1 * (size_t)n * sizeof(double);
 
-  // Allocate device slices
+  // Allocate device slices (cached per device)
   double *d_V0 = nullptr, *d_V1 = nullptr;
   int *d_i0 = nullptr, *d_j0 = nullptr, *d_i1 = nullptr, *d_j1 = nullptr;
   double *d_a0 = nullptr, *d_b0 = nullptr, *d_a1 = nullptr, *d_b1 = nullptr;
@@ -540,30 +686,40 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
   // Use configured device pair
   int dev0 = g_pair_dev0;
   int dev1 = g_pair_dev1;
+  static DevBuf<double> g2_rot_V0, g2_rot_V1;
+  static DevBuf<int>    g2_rot_i0, g2_rot_j0, g2_rot_i1, g2_rot_j1;
+  static DevBuf<double> g2_rot_a0, g2_rot_b0, g2_rot_a1, g2_rot_b1;
+  ensure_pair_streams();
   cudaSetDevice(dev0);
-  cudaMalloc((void**)&d_V0, bytes0);
-  cudaMalloc((void**)&d_i0, sizeof(int) * 256);
-  cudaMalloc((void**)&d_j0, sizeof(int) * 256);
-  cudaMalloc((void**)&d_a0, sizeof(double) * 256);
-  cudaMalloc((void**)&d_b0, sizeof(double) * 256);
+  g2_rot_V0.ensure(bytes0);
+  g2_rot_i0.ensure(sizeof(int) * 256);
+  g2_rot_j0.ensure(sizeof(int) * 256);
+  g2_rot_a0.ensure(sizeof(double) * 256);
+  g2_rot_b0.ensure(sizeof(double) * 256);
+  d_V0 = g2_rot_V0.ptr; d_i0 = g2_rot_i0.ptr; d_j0 = g2_rot_j0.ptr; d_a0 = g2_rot_a0.ptr; d_b0 = g2_rot_b0.ptr;
+  // Pinned staging for full matrix
+  size_t bytesV = sizeof(double) * (size_t)n * (size_t)n;
+  h2_rot_V.ensure(bytesV);
+  std::memcpy(h2_rot_V.ptr, vector, bytesV);
   // Copy top slice rows [0..n0)
   for (int col = 0; col < n; ++col) {
-    const double *col_ptr = vector + (size_t)col * (size_t)n;
+    const double *col_ptr = h2_rot_V.ptr + (size_t)col * (size_t)n;
     cudaMemcpyAsync(d_V0 + (size_t)col * (size_t)n0, col_ptr, sizeof(double) * n0,
                     cudaMemcpyHostToDevice);
   }
 
   cudaSetDevice(dev1);
-  cudaMalloc((void**)&d_V1, bytes1);
-  cudaMalloc((void**)&d_i1, sizeof(int) * 256);
-  cudaMalloc((void**)&d_j1, sizeof(int) * 256);
-  cudaMalloc((void**)&d_a1, sizeof(double) * 256);
-  cudaMalloc((void**)&d_b1, sizeof(double) * 256);
+  g2_rot_V1.ensure(bytes1);
+  g2_rot_i1.ensure(sizeof(int) * 256);
+  g2_rot_j1.ensure(sizeof(int) * 256);
+  g2_rot_a1.ensure(sizeof(double) * 256);
+  g2_rot_b1.ensure(sizeof(double) * 256);
+  d_V1 = g2_rot_V1.ptr; d_i1 = g2_rot_i1.ptr; d_j1 = g2_rot_j1.ptr; d_a1 = g2_rot_a1.ptr; d_b1 = g2_rot_b1.ptr;
   // Copy bottom slice rows [n0..n)
   for (int col = 0; col < n; ++col) {
-    const double *col_ptr = vector + (size_t)col * (size_t)n + (size_t)n0;
+    const double *col_ptr = h2_rot_V.ptr + (size_t)col * (size_t)n + (size_t)n0;
     cudaMemcpyAsync(d_V1 + (size_t)col * (size_t)n1, col_ptr, sizeof(double) * n1,
-                    cudaMemcpyHostToDevice);
+                    cudaMemcpyHostToDevice, g_stream1);
   }
 
   // Host batching buffers
@@ -595,90 +751,106 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
       if (batch == max_batch) {
         // Launch on device dev0
         cudaSetDevice(dev0);
-        cudaMemcpy(d_i0, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_j0, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_a0, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b0, h_b, sizeof(double) * batch, cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(d_i0, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice, g_stream0);
+        cudaMemcpyAsync(d_j0, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice, g_stream0);
+        cudaMemcpyAsync(d_a0, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice, g_stream0);
+        cudaMemcpyAsync(d_b0, h_b, sizeof(double) * batch, cudaMemcpyHostToDevice, g_stream0);
         {
           int block = 256;
           int grid = (n0 + block - 1) / block;
-          drot_cols_batch_kernel_strided<<<grid, block>>>(d_V0, n0, n, batch, d_i0, d_j0, d_a0, d_b0);
+          drot_cols_batch_kernel_strided<<<grid, block, 0, g_stream0>>>(d_V0, n0, n, batch, d_i0, d_j0, d_a0, d_b0);
         }
         // Launch on device dev1
         cudaSetDevice(dev1);
-        cudaMemcpy(d_i1, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_j1, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_a1, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_b1, h_b, sizeof(double) * batch, cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(d_i1, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice, g_stream1);
+        cudaMemcpyAsync(d_j1, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice, g_stream1);
+        cudaMemcpyAsync(d_a1, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice, g_stream1);
+        cudaMemcpyAsync(d_b1, h_b, sizeof(double) * batch, cudaMemcpyHostToDevice, g_stream1);
         {
           int block = 256;
           int grid = (n1 + block - 1) / block;
-          drot_cols_batch_kernel_strided<<<grid, block>>>(d_V1, n1, n, batch, d_i1, d_j1, d_a1, d_b1);
+          drot_cols_batch_kernel_strided<<<grid, block, 0, g_stream1>>>(d_V1, n1, n, batch, d_i1, d_j1, d_a1, d_b1);
         }
         batch = 0;
       }
     }
     if (batch > 0) {
       cudaSetDevice(dev0);
-      cudaMemcpy(d_i0, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice);
-      cudaMemcpy(d_j0, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice);
-      cudaMemcpy(d_a0, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice);
-      cudaMemcpy(d_b0, h_b, sizeof(double) * batch, cudaMemcpyHostToDevice);
+      cudaMemcpyAsync(d_i0, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice, g_stream0);
+      cudaMemcpyAsync(d_j0, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice, g_stream0);
+      cudaMemcpyAsync(d_a0, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice, g_stream0);
+      cudaMemcpyAsync(d_b0, h_b, sizeof(double) * batch, cudaMemcpyHostToDevice, g_stream0);
       {
         int block = 256;
         int grid = (n0 + block - 1) / block;
-        drot_cols_batch_kernel_strided<<<grid, block>>>(d_V0, n0, n, batch, d_i0, d_j0, d_a0, d_b0);
+        drot_cols_batch_kernel_strided<<<grid, block, 0, g_stream0>>>(d_V0, n0, n, batch, d_i0, d_j0, d_a0, d_b0);
       }
       cudaSetDevice(dev1);
-      cudaMemcpy(d_i1, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice);
-      cudaMemcpy(d_j1, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice);
-      cudaMemcpy(d_a1, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice);
-      cudaMemcpy(d_b1, h_b, sizeof(double) * batch, cudaMemcpyHostToDevice);
+      cudaMemcpyAsync(d_i1, h_i, sizeof(int) * batch, cudaMemcpyHostToDevice, g_stream1);
+      cudaMemcpyAsync(d_j1, h_j, sizeof(int) * batch, cudaMemcpyHostToDevice, g_stream1);
+      cudaMemcpyAsync(d_a1, h_a, sizeof(double) * batch, cudaMemcpyHostToDevice, g_stream1);
+      cudaMemcpyAsync(d_b1, h_b, sizeof(double) * batch, cudaMemcpyHostToDevice, g_stream1);
       {
         int block = 256;
         int grid = (n1 + block - 1) / block;
-        drot_cols_batch_kernel_strided<<<grid, block>>>(d_V1, n1, n, batch, d_i1, d_j1, d_a1, d_b1);
+        drot_cols_batch_kernel_strided<<<grid, block, 0, g_stream1>>>(d_V1, n1, n, batch, d_i1, d_j1, d_a1, d_b1);
       }
     }
   }
 
   // Synchronize both devices
-  cudaSetDevice(dev0);
-  cudaDeviceSynchronize();
-  cudaSetDevice(dev1);
-  cudaDeviceSynchronize();
+  cudaSetDevice(dev0); cudaStreamSynchronize(g_stream0);
+  cudaSetDevice(dev1); cudaStreamSynchronize(g_stream1);
 
-  // Copy results back into host matrix
+  // Copy results back into pinned host matrix
   cudaSetDevice(dev0);
   for (int col = 0; col < n; ++col) {
-    double *col_ptr = vector + (size_t)col * (size_t)n;
-    cudaMemcpy(col_ptr, d_V0 + (size_t)col * (size_t)n0, sizeof(double) * n0,
-               cudaMemcpyDeviceToHost);
+    double *col_ptr = h2_rot_V.ptr + (size_t)col * (size_t)n;
+    cudaMemcpyAsync(col_ptr, d_V0 + (size_t)col * (size_t)n0, sizeof(double) * n0,
+               cudaMemcpyDeviceToHost, g_stream0);
   }
   cudaSetDevice(dev1);
   for (int col = 0; col < n; ++col) {
-    double *col_ptr = vector + (size_t)col * (size_t)n + (size_t)n0;
-    cudaMemcpy(col_ptr, d_V1 + (size_t)col * (size_t)n1, sizeof(double) * n1,
-               cudaMemcpyDeviceToHost);
+    double *col_ptr = h2_rot_V.ptr + (size_t)col * (size_t)n + (size_t)n0;
+    cudaMemcpyAsync(col_ptr, d_V1 + (size_t)col * (size_t)n1, sizeof(double) * n1,
+               cudaMemcpyDeviceToHost, g_stream1);
   }
+  cudaSetDevice(dev0); cudaStreamSynchronize(g_stream0);
+  cudaSetDevice(dev1); cudaStreamSynchronize(g_stream1);
+  // Copy back staged matrix to user memory
+  std::memcpy(vector, h2_rot_V.ptr, bytesV);
 
-  // Cleanup
-  cudaSetDevice(0);
-  cudaFree(d_V0);
-  cudaFree(d_i0);
-  cudaFree(d_j0);
-  cudaFree(d_a0);
-  cudaFree(d_b0);
-  cudaSetDevice(1);
-  cudaFree(d_V1);
-  cudaFree(d_i1);
-  cudaFree(d_j1);
-  cudaFree(d_a1);
-  cudaFree(d_b1);
+  // Cleanup host buffers only; device buffers are retained in cache
   free(h_i);
   free(h_j);
   free(h_a);
   free(h_b);
+}
+
+// Provide a single cleanup entry point for Fortran.
+void mopac_cuda_destroy_resources() {
+  // BLAS handle and streams
+  destroy_handle();
+  // cuSOLVER handle
+  if (g_solver) {
+    cusolverDnDestroy(g_solver);
+    g_solver = nullptr;
+  }
+  // Release cached device buffers
+  g_gemm_A.release(); g_gemm_B.release(); g_gemm_C.release();
+  g_syrk_A.release(); g_syrk_C.release();
+  g_dsyevd_A.release(); g_dsyevd_W.release(); g_dsyevd_work.release(); g_dsyevd_info.release();
+  g_rot_V.release(); g_rot_i.release(); g_rot_j.release(); g_rot_a.release(); g_rot_b.release();
+  // Release cached pinned host buffers
+  h_gemm_A.release(); h_gemm_B.release(); h_gemm_C.release();
+  h_syrk_A.release(); h_syrk_C.release();
+  // DSYEVD stages are static locals; nothing to release here on purpose
+  // 2-GPU caches
+  g2_gemm_a0.release(); g2_gemm_b0.release(); g2_gemm_c0.release();
+  g2_gemm_a1.release(); g2_gemm_b1.release(); g2_gemm_c1.release();
+  g2_syrk_v0.release(); g2_syrk_c0.release(); g2_syrk_v1.release(); g2_syrk_c1.release();
+  h2_gemm_A.release(); h2_gemm_B.release(); h2_gemm_C.release();
+  h2_syrk_A.release(); h2_syrk_C.release();
 }
 
 } // extern "C"

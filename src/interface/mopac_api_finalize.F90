@@ -88,6 +88,15 @@ contains
     call setup_mopac_arrays(0,0)
     if (mozyme) call delete_MOZYME_arrays()
 
+    ! Clean up GPU resources (if built with GPU)
+#ifdef GPU
+    interface
+      subroutine mopac_cuda_destroy_resources() bind(C, name='mopac_cuda_destroy_resources')
+      end subroutine mopac_cuda_destroy_resources
+    end interface
+    call mopac_cuda_destroy_resources()
+#endif
+
     ! turn use_disk back on
     use_disk = .true.
 

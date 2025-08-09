@@ -343,6 +343,11 @@ if(TESTS)
     target_link_libraries(mopac-gpu-scf-compare mopac-core)
     add_dependencies(mopac-gpu-scf-compare mopac-core)
 
+    # Simple performance bench for cached GPU wrappers
+    add_executable(mopac-gpu-bench tests/gpu_bench.F90)
+    target_link_libraries(mopac-gpu-bench mopac-core)
+    add_dependencies(mopac-gpu-bench mopac-core)
+
     # Optional: register 2-GPU rotation verification with ctest
     if(ENABLE_GPU_TESTS)
       add_test(NAME gpu_rot_verify

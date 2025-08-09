@@ -15,6 +15,19 @@ Commercial versions of MOPAC are no longer supported, and all MOPAC users are en
 
 MOPAC is actively maintained and curated by the [Molecular Sciences Software Institute (MolSSI)](https://molssi.org).
 
+## Quick Start (GPU)
+
+- Build (GPU):
+  - `cmake -S . -B build-gpu -DGPU=ON -DAUTO_BLAS=ON`
+  - `cmake --build build-gpu -j`
+- Try examples (in `examples/`):
+  - CPU baseline: `./build-gpu/mopac examples/h2o_cpu.mop`
+  - Force GPU: `MOPAC_FORCEGPU=1 ./build-gpu/mopac examples/h2o_gpu_force.mop`
+  - MOZYME on 1 GPU: `./build-gpu/mopac examples/mozyme_1gpu.mop`
+  - MOZYME on 2 GPUs (devices 0,1): `CUDA_VISIBLE_DEVICES=0,1 ./build-gpu/mopac examples/mozyme_2gpu_pair.mop`
+- Optional debug switch: disable streams (serialize copies/compute)
+  - `MOPAC_STREAMS=off ./build-gpu/mopac examples/h2o_gpu_force.mop`
+
 ## Installation
 
 Open-source MOPAC is available through multiple distributon channels, and it can also be compiled from source using CMake.
@@ -130,6 +143,99 @@ GPU verification (CI)
     - GPU pair: e.g., `1,2` (optional; overrides default or env)
     - Energy tolerance: e.g., `1e-4` (optional; default `1e-4`)
     - Choose target branch and click “Run workflow”.
+
+### GPU Usage and Examples
+
+Build-time options
+- `-DGPU=ON`: enables CUDA wrappers and GPU-aware code paths.
+- `-DAUTO_BLAS=ON`: let CMake discover BLAS/LAPACK (recommended). If OFF, set `-DMOPAC_LINK` and `-DMOPAC_LINK_PATH` manually.
+- `-DENABLE_GPU_TESTS=ON`: registers GPU checks with `ctest` (requires `GPU=ON`).
+
+Runtime environment knobs
+- `MOPAC_NOGPU=1`: disable GPU paths entirely.
+- `MOPAC_FORCEGPU=1`: force-enable GPU (bypasses small-system heuristic if any).
+- `MOPAC_STREAMS=off` (or `0`): disable custom CUDA streams (helpful for debugging ordering). Default uses streams for overlap.
+- `CUDA_VISIBLE_DEVICES=...`: standard CUDA device masking (e.g., `0` or `0,1`).
+
+MOZYME-specific GPU keywords (in the MOPAC keyword line)
+- `MOZYME_2GPU`: use two GPUs for MOZYME density rank‑1 updates when available.
+- `MOZYME_MINBLK=INT`: minimum localized block size to offload (default 16).
+- `MOZYME_GPUPAIR=a,b`: explicit 1‑based GPU IDs (e.g., `1,2`).
+
+Notes
+- 1‑GPU SCF and MOZYME paths offload dense BLAS and rotations using cuBLAS/cuSOLVER.
+- 2‑GPU MOZYME density uses a row‑sliced outer‑product implementation; device pair defaults to `0,1` or can be set via `MOZYME_GPUPAIR`.
+- Internally, MOPAC uses grow‑only device and pinned‑host caches to avoid repeated allocations and to overlap copies with compute.
+
+Common build recipes
+- CPU only, auto BLAS:
+  - `cmake -S . -B build-cpu -DAUTO_BLAS=ON`
+  - `cmake --build build-cpu -j`
+- GPU build (CUDA on PATH), auto BLAS:
+  - `cmake -S . -B build-gpu -DGPU=ON -DAUTO_BLAS=ON`
+  - `cmake --build build-gpu -j`
+
+Quick verification executables (when `GPU=ON`)
+- 1‑GPU rotation check: `./build-gpu/mopac-gpu-rot-verify`
+- 2‑GPU rotation check: `CUDA_VISIBLE_DEVICES=0,1 ./build-gpu/mopac-gpu-rot-2gpu-verify`
+- Density check: `./build-gpu/mopac-gpu-density-verify`
+- SCF (density + Fock) compare: `./build-gpu/mopac-gpu-scf-compare`
+
+Benchmark tool (with CLI flags)
+- Build target: `./build-gpu/mopac-gpu-bench`
+- Default run prints first‑call vs cached timings and GFLOP/s for GEMM/SYRK:
+  - `./build-gpu/mopac-gpu-bench`
+- Custom sizes/iterations and options:
+  - `./build-gpu/mopac-gpu-bench --gemm=2048,2048,128,10 --syrk=2048,128,10 --syrk-full --dsyevd=1024,3 --rot1=2048,5 --rot2=4096,5`
+
+End‑to‑end run examples
+- Single‑GPU default (auto device selection):
+  - `./build-gpu/mopac my_system.mop`
+- Force GPU on small system:
+  - `MOPAC_FORCEGPU=1 ./build-gpu/mopac my_small_system.mop`
+- Disable GPU explicitly:
+  - `MOPAC_NOGPU=1 ./build-gpu/mopac my_system.mop`
+- Debug with streams disabled (serialize copies/compute on default stream):
+  - `MOPAC_STREAMS=off ./build-gpu/mopac my_system.mop`
+- Restrict to one device with CUDA:
+  - `CUDA_VISIBLE_DEVICES=1 ./build-gpu/mopac my_system.mop`
+- MOZYME on two specific GPUs with custom threshold:
+  - Put on the first line of the input: `MOZYME MOZYME_2GPU MOZYME_MINBLK=32 MOZYME_GPUPAIR=1,2`
+  - Run: `CUDA_VISIBLE_DEVICES=0,1 ./build-gpu/mopac protein.mop`
+
+Compare CPU vs GPU (quick script)
+- Run the included helper to execute all examples with CPU and with GPU forced, then compare heats of formation:
+  - `python3 scripts/run_examples_compare.py ./build-gpu/mopac`
+  - Or specify files: `python3 scripts/run_examples_compare.py ./build-gpu/mopac examples/h2o_cpu.mop examples/ethanol.mop`
+  - Set a custom workdir: `python3 scripts/run_examples_compare.py ./build-gpu/mopac examples/*.mop --workdir out_compare`
+
+MOZYME peptide benchmark (CSV export)
+- Sweep MOZYME_MINBLK values on a peptide input and export results to CSV for plotting:
+  - `python3 scripts/peptide_bench.py ./build-gpu/mopac examples/peptide_gg.mop --minblk 8,16,24,32,48,64 --csv gg_bench.csv`
+  - Two GPUs (pair 0,1) and average best of 3: `python3 scripts/peptide_bench.py ./build-gpu/mopac examples/peptide_aaa.mop --two-gpu --pair 1,2 --devices 0,1 --repeat 3 --csv aaa_2gpu.csv`
+  - Disable streams for a control run: `--streams off`
+  
+Plotting the benchmark results
+- Use the helper to plot minblk vs time from one or more CSV files (requires matplotlib):
+  - `python3 scripts/plot_peptide_csv.py gg_bench.csv --out gg_bench.png --title "Gly–Gly MOZYME minblk sweep"`
+  - Compare two datasets: `python3 scripts/plot_peptide_csv.py gg_bench.csv aaa_2gpu.csv --labels GlyGly,Ala3 --out compare.png`
+
+One‑shot sweep + plot helper
+- Run a minblk sweep and plot in one go (produces .csv and .png):
+  - `bash scripts/peptide_sweep_plot.sh -e ./build-gpu/mopac -i examples/peptide_gg.mop -o gg_sweep`
+  - 2 GPUs pair 0,1, repeat 3: `bash scripts/peptide_sweep_plot.sh -e ./build-gpu/mopac -i examples/peptide_aaa.mop -o aaa_sweep --2gpu --pair 1,2 --devices 0,1 --repeat 3`
+
+ctest integration (optional)
+- Configure with `-DENABLE_GPU_TESTS=ON -DGPU=ON`.
+- List and run tests labeled `gpu`:
+  - `ctest -N -L gpu`
+  - `ctest -V -L gpu`
+
+Expected correctness
+- The GPU paths are designed to match the CPU numerics to double‑precision round‑off. Typical diffs:
+  - Densities/Fock: 0 or ~1e‑15
+  - Rotations/Eigenvalues: ~1e‑15 to 1e‑14
+  - If diffs exceed ~1e‑12 consistently, please open an issue with input and environment details.
 
 ## Documentation
 

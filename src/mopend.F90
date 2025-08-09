@@ -33,6 +33,14 @@
       call summary(txt, len_trim(txt))
       if (trim(txt) /= "JOB ENDED NORMALLY" ) write(iw,'(/10x,a)')trim(txt)
       call to_screen("To_file:END_OF_JOB"//trim(txt))
+#ifdef GPU
+      ! Best-effort cleanup of GPU resources in any termination path
+      interface
+        subroutine mopac_cuda_destroy_resources() bind(C, name='mopac_cuda_destroy_resources')
+        end subroutine mopac_cuda_destroy_resources
+      end interface
+      call mopac_cuda_destroy_resources()
+#endif
       return
       end subroutine mopend
       subroutine summary(txt, ntxt)
