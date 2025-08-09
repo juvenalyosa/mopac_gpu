@@ -42,7 +42,7 @@ program gpu_scf_compare
 
   ! GPU run (force GPU)
 #ifdef GPU
-  call setenv_and_ignore()
+  lgpu = .true.
 #endif
   call mopac_scf_f(sys, st_gpu, props)
   if (st_gpu%mpack <= 0) then
@@ -66,17 +66,5 @@ program gpu_scf_compare
   print *, 'Fock rel diff:', d_f/denom_f
 
 contains
-#ifdef GPU
-  subroutine setenv_and_ignore()
-    ! Use environment variable to force GPU path during initialize
-    character(len=*), parameter :: name = 'MOPAC_FORCEGPU'
-    character(len=*), parameter :: value = '1'
-    call set_env(name, value)
-  end subroutine setenv_and_ignore
-
-  subroutine set_env(name, value)
-    character(len=*), intent(in) :: name, value
-    call execute_command_line('export '//trim(name)//'='//trim(value))
-  end subroutine set_env
 #endif
 end program gpu_scf_compare

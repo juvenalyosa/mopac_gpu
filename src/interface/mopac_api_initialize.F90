@@ -376,6 +376,28 @@ contains
     hasDouble = .false. ; gpu_ok = .false.
     major = 0 ; minor = 0
     call gpuInfo(hasGpu, hasDouble, nDevices, gpuName, name_size, totalMem, clockRate, major, minor)
+    ! Honor a pre‑set lgpu from the caller (e.g., tests) by short‑circuiting setup
+    if (lgpu) then
+      ngpus = 0
+      do j = 1, nDevices
+        if (major(j) >= 2 .and. hasDouble(j)) then
+          gpu_ok(j) = .true.
+        end if
+      end do
+      if (any(gpu_ok)) then
+        ngpus = min(2, count(gpu_ok))
+        do j = 1, nDevices
+          if (gpu_ok(j)) then
+            gpu_id = j - 1
+            call setGPU(gpu_id, lstat)
+            exit
+          end if
+        end do
+      else
+        lgpu = .false.
+      end if
+      return
+    end if
     ngpus = 0
     lgpu = .false.
 
