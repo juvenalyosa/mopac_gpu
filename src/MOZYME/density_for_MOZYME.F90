@@ -80,8 +80,6 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
 #ifdef GPU
               if (mozyme_gpu .and. lgpu .and. (nj >= mozyme_gpu_min_block)) then
                 ! Use SYRK on GPU to form outer product v*v^T for the diagonal block
-                integer :: nb
-                double precision, allocatable :: xmat(:,:)
                 nb = nj
                 lbase = nijbo(j, k)
                 allocate(xmat(nb, nb))
@@ -100,8 +98,6 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
                 end do
                 deallocate(xmat)
               else if (mozyme_gpu .and. (nj >= mozyme_gpu_min_block)) then
-                integer :: nb
-                double precision, allocatable :: xmat(:,:)
                 nb = nj
                 lbase = nijbo(j, k)
                 allocate(xmat(nb, nb))
@@ -134,8 +130,6 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
 #ifdef GPU
               if (mozyme_gpu .and. lgpu .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
                 ! Off-diagonal block: form outer product a(nj) * b(nk)^T with GEMM (k=1)
-                integer :: nk
-                double precision, allocatable :: xblk(:,:)
                 nk = iorbs(k)
                 allocate(xblk(nj, nk))
                 xblk = 0.0d0
@@ -154,8 +148,6 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
                 end do
                 deallocate(xblk)
               else if (mozyme_gpu .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
-                integer :: nk
-                double precision, allocatable :: xblk(:,:)
                 nk = iorbs(k)
                 allocate(xblk(nj, nk))
                 xblk = 0.0d0
@@ -197,8 +189,6 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
             if (j == k) then
 #ifdef GPU
               if (mozyme_gpu .and. lgpu .and. (nj >= mozyme_gpu_min_block)) then
-                integer :: nb
-                double precision, allocatable :: xmat(:,:)
                 nb = nj
                 lbase = l
                 allocate(xmat(nb, nb))
@@ -217,8 +207,6 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
                 end do
                 deallocate(xmat)
               else if (mozyme_gpu .and. (nj >= mozyme_gpu_min_block)) then
-                integer :: nb
-                double precision, allocatable :: xmat(:,:)
                 nb = nj
                 lbase = l
                 allocate(xmat(nb, nb))
@@ -248,8 +236,6 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
             else if (j > k .and. l >= 0) then
 #ifdef GPU
               if (mozyme_gpu .and. lgpu .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
-                integer :: nk
-                double precision, allocatable :: xblk(:,:)
                 nk = iorbs(k)
                 allocate(xblk(nj, nk))
                 xblk = 0.0d0
@@ -268,8 +254,6 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
                 end do
                 deallocate(xblk)
               else if (mozyme_gpu .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
-                integer :: nk
-                double precision, allocatable :: xblk(:,:)
                 nk = iorbs(k)
                 allocate(xblk(nj, nk))
                 xblk = 0.0d0

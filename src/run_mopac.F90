@@ -73,6 +73,15 @@
       logical :: exists, opend, l_OLDDEN
       double precision, external :: C_triple_bond_C, reada, seconds
       character :: nokey(20)*10
+#ifdef GPU
+      ! Local helpers for GPU keyword parsing
+      logical :: ignore(6)
+      character(len=256) :: list, pair
+      integer :: ii0, jj0, kk0, ll0  ! temps for ignore parsing
+      integer :: d0_pair, d1_pair
+      character(len=2048) :: keyup
+      integer :: pos
+#endif
 #ifdef MKL
       integer :: num_threads
       integer, external :: mkl_get_max_threads
@@ -289,30 +298,27 @@
         lgpu_ref = hasGPU
         if (lgpu_ref) lgpu_ref = (index(keywrd, ' NOGPU') == 0)
         ! Parse optional ignore list: MOZYME_GPUIGNORE=a,b,c (1-based)
-        logical :: ignore(6)
         ignore = .false.
         i = index(keywrd, ' MOZYME_GPUIGNORE=')
         if (i /= 0) then
-          character(len=32) :: list
-          integer :: p, q
           list = ' '
-          p = i + len(' MOZYME_GPUIGNORE=')
-          q = p
-          do while (q <= len_trim(keywrd))
-            if (keywrd(q:q) == ' ') exit
-            q = q + 1
+          ii0 = i + len(' MOZYME_GPUIGNORE=')
+          jj0 = ii0
+          do while (jj0 <= len_trim(keywrd))
+            if (keywrd(jj0:jj0) == ' ') exit
+            jj0 = jj0 + 1
           end do
-          if (q > p) then
-            list = keywrd(p:q-1)
+          if (jj0 > ii0) then
+            list = keywrd(ii0:jj0-1)
             ! Convert separators to spaces for reading
-            do l = 1, len_trim(list)
-              if (list(l:l) == ',' .or. list(l:l) == ':' .or. list(l:l) == ';') list(l:l) = ' '
+            do ll0 = 1, len_trim(list)
+              if (list(ll0:ll0) == ',' .or. list(ll0:ll0) == ':' .or. list(ll0:ll0) == ';') list(ll0:ll0) = ' '
             end do
-            read(list,*,err=77) i, j, k, l
-            if (i>0 .and. i<=6) ignore(i) = .true.
-            if (j>0 .and. j<=6) ignore(j) = .true.
-            if (k>0 .and. k<=6) ignore(k) = .true.
-            if (l>0 .and. l<=6) ignore(l) = .true.
+            read(list,*,err=77) ii0, jj0, kk0, ll0
+            if (ii0>0 .and. ii0<=6) ignore(ii0) = .true.
+            if (jj0>0 .and. jj0<=6) ignore(jj0) = .true.
+            if (kk0>0 .and. kk0<=6) ignore(kk0) = .true.
+            if (ll0>0 .and. ll0<=6) ignore(ll0) = .true.
           end if
         end if
 77      continue
@@ -546,7 +552,6 @@
 #ifdef GPU
         mozyme_gpu = (index(keywrd, ' MOZYME_GPU') /= 0)
         ! Uppercase a scratch copy for robust parsing
-        character(len=len(keywrd)) :: keyup
         keyup = keywrd
         call upcase(keyup, len_trim(keyup))
         ! MOZYME_2GPU (whitespace agnostic)
@@ -560,7 +565,6 @@
         ! MOZYME_MINBLK[= ]n (whitespace-agnostic)
         i = index(keyup, 'MOZYME_MINBLK')
         if (i /= 0) then
-          integer :: pos
           pos = index(keyup(i:), '=')
           if (pos == 0) pos = index(keyup(i:), ' ')
           if (pos /= 0) then
@@ -570,16 +574,14 @@
               pos = pos + 1
             end do
             if (pos <= len_trim(keyup)) then
-              read(keyup(pos:),*,err=901) k
-              mozyme_gpu_min_block = max(1, k)
+              read(keyup(pos:),*,err=901) kk0
+              mozyme_gpu_min_block = max(1, kk0)
             end if
           end if
         end if
         ! MOZYME_GPUPAIR[= ]a[,|:|;]b (whitespace-agnostic)
         i = index(keyup, 'MOZYME_GPUPAIR')
         if (i /= 0) then
-          integer :: pos, d0, d1
-          character(len=32) :: pair
           pos = index(keyup(i:), '=')
           if (pos == 0) pos = index(keyup(i:), ' ')
           if (pos /= 0) then
@@ -588,21 +590,21 @@
               pos = pos + 1
             end do
             pair = ' '
-            l = pos
-            do while (l <= len_trim(keyup))
-              if (keyup(l:l) == ' ') exit
-              l = l + 1
+            ll0 = pos
+            do while (ll0 <= len_trim(keyup))
+              if (keyup(ll0:ll0) == ' ') exit
+              ll0 = ll0 + 1
             end do
-            if (l > pos) then
-              pair = keyup(pos:l-1)
-              do k = 1, len_trim(pair)
-                if (pair(k:k) == ',' .or. pair(k:k) == ':' .or. pair(k:k) == ';') pair(k:k) = ' '
+            if (ll0 > pos) then
+              pair = keyup(pos:ll0-1)
+              do kk0 = 1, len_trim(pair)
+                if (pair(kk0:kk0) == ',' .or. pair(kk0:kk0) == ':' .or. pair(kk0:kk0) == ';') pair(kk0:kk0) = ' '
               end do
-              read(pair,*,err=901) d0, d1
-              if (d0 > 0 .and. d1 > 0 .and. d0 /= d1) then
-                if (d0 <= nDevices .and. d1 <= nDevices) then
-                  if (gpu_ok(d0) .and. gpu_ok(d1)) then
-                    call setMGpuPair(d0-1, d1-1)
+              read(pair,*,err=901) d0_pair, d1_pair
+              if (d0_pair > 0 .and. d1_pair > 0 .and. d0_pair /= d1_pair) then
+                if (d0_pair <= nDevices .and. d1_pair <= nDevices) then
+                  if (gpu_ok(d0_pair) .and. gpu_ok(d1_pair)) then
+                    call setMGpuPair(d0_pair-1, d1_pair-1)
                     mozyme_force_2gpu = .true.
                     ngpus = 2
                     lgpu = .true.
