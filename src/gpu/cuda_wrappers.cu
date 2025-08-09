@@ -393,7 +393,6 @@ void call_syrk_cublas_2gpu(char uplo, char tra,
   g2_syrk_v0.ensure(sizeof(double) * (size_t)n);
   g2_syrk_c0.ensure(sizeof(double) * (size_t)n0 * (size_t)ldc);
   d_v0 = g2_syrk_v0.ptr; d_c0 = g2_syrk_c0.ptr;
-  bool regA=false, regC=false;
   size_t bytesAn = sizeof(double) * (size_t)n;
   size_t bytesCfull = sizeof(double) * (size_t)ldc * (size_t)n;
   h2_syrk_A.ensure(bytesAn);

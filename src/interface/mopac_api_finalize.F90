@@ -48,6 +48,12 @@ contains
     type(mopac_properties), intent(out) :: properties
     integer :: status, i, j, size
     type(c_ptr), allocatable :: pptr(:)
+#ifdef GPU
+    interface
+      subroutine mopac_cuda_destroy_resources() bind(C, name='mopac_cuda_destroy_resources')
+      end subroutine mopac_cuda_destroy_resources
+    end interface
+#endif
 
     ! record properties
     if (.not. moperr) call mopac_record(properties)
@@ -90,10 +96,6 @@ contains
 
     ! Clean up GPU resources (if built with GPU)
 #ifdef GPU
-    interface
-      subroutine mopac_cuda_destroy_resources() bind(C, name='mopac_cuda_destroy_resources')
-      end subroutine mopac_cuda_destroy_resources
-    end interface
     call mopac_cuda_destroy_resources()
 #endif
 

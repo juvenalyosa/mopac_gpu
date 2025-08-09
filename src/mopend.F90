@@ -24,6 +24,15 @@
 !   D u m m y   A r g u m e n t s
 !-----------------------------------------------
       character , intent(in) :: txt*(*)
+#ifdef GPU
+!-----------------------------------------------
+!   E x t e r n a l   I n t e r f a c e s
+!-----------------------------------------------
+      interface
+        subroutine mopac_cuda_destroy_resources() bind(C, name='mopac_cuda_destroy_resources')
+        end subroutine mopac_cuda_destroy_resources
+      end interface
+#endif
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
 !-----------------------------------------------
@@ -35,10 +44,6 @@
       call to_screen("To_file:END_OF_JOB"//trim(txt))
 #ifdef GPU
       ! Best-effort cleanup of GPU resources in any termination path
-      interface
-        subroutine mopac_cuda_destroy_resources() bind(C, name='mopac_cuda_destroy_resources')
-        end subroutine mopac_cuda_destroy_resources
-      end interface
       call mopac_cuda_destroy_resources()
 #endif
       return
