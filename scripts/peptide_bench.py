@@ -238,13 +238,19 @@ def main():
 
     addh_pipeline = ('add-h' in key_line.lower() and 'pdbout' in key_line.lower())
     for mb in minblks:
+        # Base environment for this run
+        env_base = os.environ.copy()
         # Construct input for this run
         if addh_pipeline:
             # Step 1: hydrogenation from source PDB
             key1 = rewrite_keywords(key_line, two_gpu=False, minblk=None, pair=pair)
             text1 = key1 + '\n' + body
-            # Run hydrogenation
-            rc1, out_text1, dt1, out_path1, tmp_dir1 = run_mopac(mopac, text1, env, keep_tmp=args.keep_tmp, tmp_root=(args.tmp_root or None), src_dir=inp_path.parent)
+            # Run hydrogenation (CPU base env)
+            env1 = env_base.copy()
+            # Prefer deterministic CPU for hydrogenation
+            env1.pop('MOPAC_FORCEGPU', None)
+            env1['MOPAC_NOGPU'] = '1'
+            rc1, out_text1, dt1, out_path1, tmp_dir1 = run_mopac(mopac, text1, env1, keep_tmp=args.keep_tmp, tmp_root=(args.tmp_root or None), src_dir=inp_path.parent)
             # The hydrogenated PDB is typically bench.pdb in tmp_dir
             hydro_pdb = tmp_dir1 / 'bench.pdb'
             if not hydro_pdb.exists():
@@ -268,7 +274,7 @@ def main():
         else:
             new_key = rewrite_keywords(key_line, two_gpu, mb, pair)
             new_text = new_key + '\n' + body
-        env = os.environ.copy()
+        env = env_base.copy()
         # Force GPU usage
         env['MOPAC_FORCEGPU'] = '1'
         if args.devices:
