@@ -62,6 +62,7 @@ contains
     type(mopac_system), intent(in) :: system
     type(mopac_state), intent(inout) :: state
     type(mopac_properties), intent(out) :: properties
+    use mopac_api_flags, only: keep_fock
 
     keywrd = " 1SCF PULAY BONDS"
     if (system%natom_move + system%nlattice_move > 0) keywrd = trim(keywrd) // " GRADIENTS"
@@ -70,7 +71,9 @@ contains
     ! call computational routine for SCF calculations
     if (.not. moperr) call compfg (xparam, .true., escf, .true., grad, .true.)
     if (.not. moperr) call mopac_save(state)
+    keep_fock = .true.
     call mopac_finalize(properties)
+    keep_fock = .false.
   end subroutine mopac_scf
 
   ! MOPAC geometry relaxation

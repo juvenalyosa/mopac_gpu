@@ -28,6 +28,7 @@
      & wk, errfn, aicorr, nbonds, ibonds, na_store, q, nw, lopt, &
      & hesinv, gnext1, gmin1, ifact, i1fact, ptot2, geoa, l_atom, coorda, &
        txtatm1
+  use mopac_api_flags, only: keep_fock
 !
   USE maps_C, only : react
 !
@@ -242,7 +243,9 @@
     if (allocated(expn))       deallocate(expn, stat = i)
     if (allocated(exs))        deallocate(exs, stat = i)
     if (allocated(exsr))       deallocate(exsr, stat = i)
-    if (allocated(f))          deallocate (f, stat = i)
+    if (allocated(f)) then
+      if (.not. keep_fock) deallocate (f, stat = i)
+    end if
     if (allocated(f0))         deallocate(f0, stat = i)
     if (allocated(f1))         deallocate(f1, stat = i)
     if (allocated(fb))         deallocate (fb, stat = i)
