@@ -15,18 +15,47 @@ Commercial versions of MOPAC are no longer supported, and all MOPAC users are en
 
 MOPAC is actively maintained and curated by the [Molecular Sciences Software Institute (MolSSI)](https://molssi.org).
 
-## Quick Start (GPU)
+## Quick Start (Ubuntu + GPU)
 
-- Build (GPU):
-  - `cmake -S . -B build-gpu -DGPU=ON -DAUTO_BLAS=ON`
-  - `cmake --build build-gpu -j`
-- Try examples (in `examples/`):
-  - CPU baseline: `./build-gpu/mopac examples/h2o_cpu.mop`
-  - Force GPU: `MOPAC_FORCEGPU=1 ./build-gpu/mopac examples/h2o_gpu_force.mop`
-  - MOZYME on 1 GPU: `./build-gpu/mopac examples/mozyme_1gpu.mop`
-  - MOZYME on 2 GPUs (devices 0,1): `CUDA_VISIBLE_DEVICES=0,1 ./build-gpu/mopac examples/mozyme_2gpu_pair.mop`
-- Optional debug switch: disable streams (serialize copies/compute)
-  - `MOPAC_STREAMS=off ./build-gpu/mopac examples/h2o_gpu_force.mop`
+1) Install prerequisites
+- NVIDIA driver + CUDA Toolkit 11.2+ (verify `nvidia-smi` and `nvcc --version`)
+- Build tools and BLAS/LAPACK:
+  - `sudo apt-get install -y build-essential cmake gfortran ninja-build libopenblas-dev liblapack-dev`
+
+2) Configure and build (one build for everything)
+- `export CUDAToolkit_ROOT=/usr/local/cuda`   # adjust if needed
+- `cmake -S . -B build -G Ninja -DGPU=ON -DCMAKE_BUILD_TYPE=Release \\
+         -DCMAKE_CUDA_ARCHITECTURES=70;80;86`  # match your GPU(s)
+- `cmake --build build --parallel`
+
+3) Run a calculation (manual, no scripts)
+- CPU run (explicitly disable GPU):
+  - Add `NOGPU` to the first keyword line of your `.mop` input
+  - Run: `./build/mopac path/to/your_input.mop`
+- GPU run (recommended for larger systems):
+  - Keep your input unchanged (no `NOGPU`)
+  - Export: `export MOPAC_FORCEGPU=1`  # enable GPU if available
+  - Optional: `export MOPAC_FASTGPU=1` # faster SCF by keeping data on GPU
+  - Run: `./build/mopac path/to/your_input.mop`
+
+Examples
+- Minimal water input (PM7): `examples/water_pm7_gpu.mop`
+  - Prints eigenvectors (includes `EIGS VECTORS`).
+  - GPU (recommended on larger systems):
+    - `export MOPAC_FORCEGPU=1`
+    - `./build/mopac examples/water_pm7_gpu.mop`
+  - CPU only:
+    - Edit the first line to prepend the keyword `NOGPU`, e.g., `NOGPU PM7 1SCF EIGS VECTORS`
+    - `./build/mopac examples/water_pm7_gpu.mop`
+
+Useful runtime toggles (set only if needed)
+- `MOPAC_GPU_EIGEN_MIN=400`   # GPU eigensolve cutoff in AOs (default 400)
+- `MOPAC_EIG2HOST=1`          # copy eigenvectors back to host immediately
+- `MOPAC_PIN_USER=1`          # pin user arrays to reduce extra host memcpy
+- `MOPAC_STREAMS=off`         # disable CUDA streams (debugging)
+
+Printing eigenvectors
+- Add `EIGS VECTORS` to the keyword line; if eigenvectors were kept on the GPU, MOPAC fetches them automatically before printing.
 
 ## Installation
 
@@ -81,24 +110,12 @@ maintained by [MolSSI Container Hub](https://molssi.github.io/molssi-hub/index.h
 
 ### CMake
 
-MOPAC is now built using a CMake 3.x build system with tests orchestrated using CTest.
-The minimum required CMake version is presently 3.14.
-
-CMake performs out-of-source builds, with the canonical sequence of commands:
+MOPAC uses a CMake build system. For a single, unified build (CPU+GPU when available), follow the Quick Start above. If you need CPU‑only:
 
 ```
-mkdir build
-cd build
-cmake ..
-make
+cmake -S . -B build-cpu -G Ninja -DGPU=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build build-cpu --parallel
 ```
-
-starting from the root directory of the MOPAC repository. MOPAC should build without any additional options
-if CMake successfully detects a Fortran compiler and BLAS/LAPACK libraries. Otherwise, the `cmake ..` command
-may require additional command-line options to specify a Fortran compiler (`-DCMAKE_Fortran_COMPILER=...`)
-or the path (`-DMOPAC_LINK_PATH=...`) and linker options (`-DMOPAC_LINK=...`) to link BLAS and LAPACK libraries to the MOPAC executable.
-
-The CTest-based testing requires an installation of Python 3.x and Numpy that can be detected by CMake.
 
 ### GPU Support (CUDA)
 
@@ -127,22 +144,7 @@ Examples
 - Force two GPUs with explicit pair: `MOZYME MOZYME_GPU MOZYME_2GPU MOZYME_GPUPAIR=1,2`
 - Increase offload threshold: `MOZYME MOZYME_GPU MOZYME_MINBLK=32`
 
-GPU verification (local)
-- With GPU=ON, a local target runs a quick MOZYME energy check across CPU, 1-GPU, and 2-GPU and enforces a tolerance:
-  - Configure: `cmake -S . -B build-gpu -DGPU=ON -DGPU_VERIFY_PAIR=1,2 -DGPU_VERIFY_TOL=1e-4`
-  - Build: `cmake --build build-gpu -j`
-  - Verify: `cmake --build build-gpu --target mozyme-gpu-verify`
-  - Optional CTest: configure with `-DENABLE_GPU_TESTS=ON` then `ctest -V -L gpu`
-
-GPU verification (CI)
-- A GitHub Actions job `gpu-verify` is included for self-hosted GPU runners. It triggers only when:
-  - Manually dispatched (workflow_dispatch), or
-  - Pushed to a designated branch (see CI.yaml for the current condition), on a runner labeled `self-hosted` and `gpu`.
-  - Customize device pair/tolerance via repository variables `GPU_VERIFY_PAIR`, `GPU_VERIFY_TOL` or edit the workflow env.
-  - From the Actions UI: select the “CI” workflow → “Run workflow”, then set inputs:
-    - GPU pair: e.g., `1,2` (optional; overrides default or env)
-    - Energy tolerance: e.g., `1e-4` (optional; default `1e-4`)
-    - Choose target branch and click “Run workflow”.
+Note: Optional verification helpers and CI recipes have been removed from this quick path to keep usage simple. See scripts/ and .github/ for advanced options.
 
 ### GPU Usage and Examples
 
@@ -188,53 +190,7 @@ Benchmark tool (with CLI flags)
 - Custom sizes/iterations and options:
   - `./build-gpu/mopac-gpu-bench --gemm=2048,2048,128,10 --syrk=2048,128,10 --syrk-full --dsyevd=1024,3 --rot1=2048,5 --rot2=4096,5`
 
-End‑to‑end run examples
-- Single‑GPU default (auto device selection):
-  - `./build-gpu/mopac my_system.mop`
-- Force GPU on small system:
-  - `MOPAC_FORCEGPU=1 ./build-gpu/mopac my_small_system.mop`
-- Disable GPU explicitly:
-  - `MOPAC_NOGPU=1 ./build-gpu/mopac my_system.mop`
-- Debug with streams disabled (serialize copies/compute on default stream):
-  - `MOPAC_STREAMS=off ./build-gpu/mopac my_system.mop`
-- Restrict to one device with CUDA:
-  - `CUDA_VISIBLE_DEVICES=1 ./build-gpu/mopac my_system.mop`
-- MOZYME on two specific GPUs with custom threshold:
-  - Put on the first line of the input: `MOZYME MOZYME_2GPU MOZYME_MINBLK=32 MOZYME_GPUPAIR=1,2`
-  - Run: `CUDA_VISIBLE_DEVICES=0,1 ./build-gpu/mopac protein.mop`
-
-Compare CPU vs GPU (quick script)
-- Run the included helper to execute all examples with CPU and with GPU forced, then compare heats of formation:
-  - `python3 scripts/run_examples_compare.py ./build-gpu/mopac`
-  - Or specify files: `python3 scripts/run_examples_compare.py ./build-gpu/mopac examples/h2o_cpu.mop examples/ethanol.mop`
-  - Set a custom workdir: `python3 scripts/run_examples_compare.py ./build-gpu/mopac examples/*.mop --workdir out_compare`
-
-MOZYME peptide benchmark (CSV export)
-- Sweep MOZYME_MINBLK values on a peptide input and export results to CSV for plotting:
-  - `python3 scripts/peptide_bench.py ./build-gpu/mopac examples/peptide_gg.mop --minblk 8,16,24,32,48,64 --csv gg_bench.csv`
-  - Two GPUs (pair 0,1) and average best of 3: `python3 scripts/peptide_bench.py ./build-gpu/mopac examples/peptide_aaa.mop --two-gpu --pair 1,2 --devices 0,1 --repeat 3 --csv aaa_2gpu.csv`
-  - Disable streams for a control run: `--streams off`
-  
-Plotting the benchmark results
-- Use the helper to plot minblk vs time from one or more CSV files (requires matplotlib):
-  - `python3 scripts/plot_peptide_csv.py gg_bench.csv --out gg_bench.png --title "Gly–Gly MOZYME minblk sweep"`
-  - Compare two datasets: `python3 scripts/plot_peptide_csv.py gg_bench.csv aaa_2gpu.csv --labels GlyGly,Ala3 --out compare.png`
-
-One‑shot sweep + plot helper
-- Run a minblk sweep and plot in one go (produces .csv and .png):
-  - `bash scripts/peptide_sweep_plot.sh -e ./build-gpu/mopac -i examples/peptide_gg.mop -o gg_sweep`
-  - 2 GPUs pair 0,1, repeat 3: `bash scripts/peptide_sweep_plot.sh -e ./build-gpu/mopac -i examples/peptide_aaa.mop -o aaa_sweep --2gpu --pair 1,2 --devices 0,1 --repeat 3`
-
-Merge CSVs with labels
-- Combine multiple CSVs into one with a label column for plotting/archival:
-  - `python3 scripts/merge_peptide_csv.py gg_bench.csv aaa_2gpu.csv --labels GlyGly,Ala3 --out combined.csv`
-  - Prepend label as first column: `python3 scripts/merge_peptide_csv.py gg_bench.csv aaa_2gpu.csv --labels GlyGly,Ala3 --prepend --out combined.csv`
-
-ctest integration (optional)
-- Configure with `-DENABLE_GPU_TESTS=ON -DGPU=ON`.
-- List and run tests labeled `gpu`:
-  - `ctest -N -L gpu`
-  - `ctest -V -L gpu`
+End‑to‑end examples and benchmarking tools are available in `scripts/` and `tests/`, but are intentionally omitted here to keep usage simple. Refer to those directories if you need automated comparisons or performance studies.
 
 Expected correctness
 - The GPU paths are designed to match the CPU numerics to double‑precision round‑off. Typical diffs:
