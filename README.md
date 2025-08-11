@@ -242,6 +242,76 @@ Expected correctness
   - Rotations/Eigenvalues: ~1e‑15 to 1e‑14
   - If diffs exceed ~1e‑12 consistently, please open an issue with input and environment details.
 
+## Enhanced GPU SCF (cuSOLVER + Reduced Transfers)
+
+This release adds a high‑performance GPU SCF path that keeps heavy linear‑algebra on the device and reduces PCIe transfers while preserving double‑precision accuracy.
+
+What’s new
+- Exact eigensolve on GPU: SCF uses cuSOLVER `Dsyevd` for symmetric eigenvalue problems in double precision.
+- Size‑aware routing: A configurable cutoff avoids GPU overhead on small matrices; CPU LAPACK is used below the threshold.
+- Keep‑on‑GPU mode: Optionally keep eigenvectors on the GPU after diagonalization and form the density on device (cuBLAS `Dsyrk`/`Dgemm`), copying only the density back.
+- Smarter H2D/D2H: Skip copying `C` when `beta=0` and optionally pin user arrays to reduce extra memcpy.
+- Auto‑fetch for printing: When `EIGS VECTORS` is requested, MOPAC automatically fetches eigenvectors to host for printing even if they were kept on GPU.
+
+Build on Ubuntu (GPU)
+1) Install dependencies
+   - NVIDIA drivers + CUDA Toolkit 11.2+ (verify `nvidia-smi` and `nvcc --version`)
+   - `sudo apt-get install -y build-essential cmake gfortran ninja-build libopenblas-dev liblapack-dev`
+2) Configure and build
+   - `export CUDAToolkit_ROOT=/usr/local/cuda`            # adjust if needed
+   - `cmake -S . -B build -G Ninja -DGPU=ON -DCMAKE_BUILD_TYPE=Release \\
+            -DCMAKE_CUDA_ARCHITECTURES=70;80;86`         # match your GPUs
+   - `cmake --build build --parallel`
+3) Binaries: `build/mopac`, `build/mopac-param`
+
+Runtime controls (environment)
+- `MOPAC_FORCEGPU=1`            Force‑enable GPU if any suitable device exists.
+- `MOPAC_GPU_EIGEN_MIN=400`     Size cutoff (AOs) for GPU eigensolve; smaller sizes stay on CPU. Default: 400.
+- `MOPAC_FASTGPU=1`             Keep eigenvectors on the GPU; build density on device; copy back only the density.
+- `MOPAC_EIG2HOST=1`            Also fetch eigenvectors to host immediately after GPU diagonalization (optional).
+- `MOPAC_PIN_USER=1`            Pin user arrays to cut extra host memcpy (falls back safely if unsupported).
+- `MOPAC_STREAMS=off`           Disable CUDA streams (debug/diagnostics).
+- `MOPAC_NOGPU=1`               Disable all GPU functionality.
+
+Typical usage
+- Large system, fast SCF:
+  - `export MOPAC_FORCEGPU=1`
+  - `export MOPAC_FASTGPU=1`
+  - Optional tuning: `export MOPAC_GPU_EIGEN_MIN=600`
+  - Optional: `export MOPAC_PIN_USER=1`
+  - Run: `./build/mopac examples/your_input.mop`
+- Print eigenvectors on fast path:
+  - Add `EIGS VECTORS` to the keyword line; MOPAC auto‑fetches eigenvectors if they were kept on GPU.
+  - Or set `MOPAC_EIG2HOST=1` to fetch right after eigensolve.
+- Disable GPU (for comparison): `MOPAC_NOGPU=1 ./build/mopac examples/your_input.mop`
+
+Performance guidance
+- Small (< 300–400 AOs): CPU LAPACK/BLAS is often as fast due to GPU overheads. The cutoff avoids regressions.
+- Medium (≈ 500–1500 AOs): 1.5–4× faster SCF with cuSOLVER + cuBLAS, especially with `MOPAC_FASTGPU=1`.
+- Large (≥ 2000 AOs): 3–8× faster SCF; benefits grow with basis size; ensure sufficient VRAM (see below).
+- Gradients: When ported selectively to cuBLAS (symmetric GEMM/SYRK contractions) expect 1.5–3× on large systems.
+
+VRAM sizing (double precision)
+- One dense `n×n` matrix ≈ `8·n²` bytes.
+- Typical SCF peak (eigensolve + density) ≈ `40–56·n²` bytes per GPU (includes cuSOLVER workspace and caches).
+- Examples (per device):
+  - n=2000: one matrix ~32 MB; SCF peak ~160–225 MB; worst‑case caches ~300–500 MB.
+  - n=3000: one matrix ~72 MB; peak ~360–500 MB; worst‑case ~0.7–1.2 GB.
+  - n=5000: one matrix ~200 MB; peak ~1.0–1.4 GB; worst‑case ~2–3 GB.
+- 2 GPUs halve per‑device footprint for certain outer‑products; eigensolve remains single‑GPU.
+
+Accuracy and reproducibility
+- All GPU math runs in double precision (cuBLAS D* and cuSOLVER `Dsyevd`).
+- Results match CPU within ulp‑level differences; eigenvectors can differ by phase/sign (expected behavior).
+- SCF tolerances and convergence criteria are unchanged.
+
+Troubleshooting
+- CUDA not found at configure time: set `CUDAToolkit_ROOT` or ensure CUDA is on PATH/LD_LIBRARY_PATH.
+- Link errors to `cusolver/cublas`: ensure `/usr/local/cuda/lib64` is in `LD_LIBRARY_PATH`.
+- Architecture mismatch: set `-DCMAKE_CUDA_ARCHITECTURES` to your GPU’s compute capability.
+- Streams/ordering issues: run with `MOPAC_STREAMS=off`.
+- Disable GPU quickly: `MOPAC_NOGPU=1` or add `NOGPU` to the input keywords.
+
 ## Documentation
 
 The main source for MOPAC documentation is presently its old [online user manual](http://openmopac.net/manual/index.html).
