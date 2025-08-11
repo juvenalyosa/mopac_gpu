@@ -17,7 +17,7 @@
       USE chanel_C, only : iw
 #ifdef GPU
       Use mod_vars_cuda, only: lgpu, ngpus, prec
-      use eigenvectors_cuda_mod, only: eigenvectors_CUDA, eigenvectors_CUDA_keep
+      use eigenvectors_cuda_mod, only: eigenvectors_CUDA, eigenvectors_CUDA_keep, eigenvectors_CUDA_fetch
 #endif
 #if (MAGMA)
       Use magma
@@ -34,6 +34,12 @@
       Integer, dimension(1:10) :: iwork_tmp
       double precision, allocatable :: work(:)
       Integer, allocatable :: iwork(:)
+#ifdef GPU
+      ! Local controls for GPU diag selection
+      integer :: thr_min, stat_env
+      character(len=32) :: env, fast, fetch
+      logical :: fastgpu, fetch_eigs
+#endif
 !==============================================================================
 ! Code to find all eigenvectors and all eigenvalues for a symmetric General matrix
 ! using LAPACK and MAGMA
@@ -68,9 +74,6 @@ end if
       ! Use GPU eigensolver only when problem size is large enough.
       ! Threshold can be overridden via environment variable MOPAC_GPU_EIGEN_MIN.
       if (lgpu) then
-        integer :: thr_min, stat_env
-        character(len=32) :: env, fast, fetch
-        logical :: fastgpu, fetch_eigs
         thr_min = 400
         env = '' ; fast = '' ; fetch = ''
         fastgpu = .false. ; fetch_eigs = .false.
