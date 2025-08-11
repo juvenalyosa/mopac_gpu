@@ -67,12 +67,16 @@ echo "Running 2-GPU (MOZYME_2GPU)…"
 # Try to find energies in .out or logs
 extract_energy() {
   local tag="$1"
-  local out_file
+  local out_file line
   out_file=$(ls -1 ${tag%.*}*.out 2>/dev/null | head -n1 || true)
   if [[ -n "$out_file" ]]; then
-    grep -m1 -E "FINAL HEAT OF FORMATION" "$out_file" | awk '{print $(NF-1)}' || true
+    # Prefer the FINAL line, otherwise fall back to last HEAT OF FORMATION line
+    line=$(grep -E "FINAL HEAT OF FORMATION|HEAT OF FORMATION" "$out_file" | tail -n1 || true)
   else
-    grep -m1 -E "FINAL HEAT OF FORMATION" "$tag".log | awk '{print $(NF-1)}' || true
+    line=$(grep -E "FINAL HEAT OF FORMATION|HEAT OF FORMATION" "$tag".log | tail -n1 || true)
+  fi
+  if [[ -n "$line" ]]; then
+    echo "$line" | awk '{print $(NF-1)}'
   fi
 }
 

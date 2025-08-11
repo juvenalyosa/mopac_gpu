@@ -312,6 +312,32 @@ Troubleshooting
 - Streams/ordering issues: run with `MOPAC_STREAMS=off`.
 - Disable GPU quickly: `MOPAC_NOGPU=1` or add `NOGPU` to the input keywords.
 
+### Local GPU Verification Helper (MOZYME)
+
+To quickly compare CPU vs 1‑GPU vs 2‑GPU energies on a small MOZYME case:
+
+- Build the helper target (from your build dir):
+  - `cmake --build build --target mozyme-gpu-verify`
+
+- Or run the script manually for more control:
+  - `bash scripts/test_mozyme_gpu.sh ./build/mopac tests/mozyme_h2o.mop [pair] [tol]`
+  - Examples:
+    - Default devices, default tolerance (`1e-4`):
+      - `bash scripts/test_mozyme_gpu.sh ./build/mopac tests/mozyme_h2o.mop`
+    - Force device pair `1,2` (1‑based) for the 2‑GPU check and set tolerance to `5e-4`:
+      - `bash scripts/test_mozyme_gpu.sh ./build/mopac tests/mozyme_h2o.mop 1,2 5e-4`
+
+What it does
+- Makes three copies of the input and prepends the appropriate keywords: `NOGPU`, `MOZYME_GPU`, and `MOZYME_2GPU` (and `MOZYME_GPUPAIR=…` if you passed a pair).
+- Runs each, then extracts the (final) heat of formation from either the `.out` file or the `.log` if no `.out` was produced.
+- Prints CPU/1‑GPU/2‑GPU energies and their absolute differences against the CPU value.
+
+Troubleshooting the helper
+- If energies are blank, the script prints the temp folder name (e.g., `mozyme_h2o_testgpu.XXXXXX`). Inspect `cpu.log`, `gpu1.log`, `gpu2.log` and any `.out` files in that directory.
+- The script matches either `FINAL HEAT OF FORMATION` or `HEAT OF FORMATION` and takes the last occurrence.
+- “bash: …/libtinfo.so.6: no version information available”: typically harmless (conda/bash libtinfo mismatch). You can invoke the system shell explicitly: `/bin/bash scripts/test_mozyme_gpu.sh …`.
+- If you use a nested build directory, pass the correct path to `mopac` (e.g., `./build/mopac`).
+
 ## Documentation
 
 The main source for MOPAC documentation is presently its old [online user manual](http://openmopac.net/manual/index.html).
