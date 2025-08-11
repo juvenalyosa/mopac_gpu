@@ -394,6 +394,23 @@
         if (i == 0) then
           if (trim(adjustl(line)) /= '') mozyme_gpu = .true.
         end if
+        ! If MOZYME is active and GPU is enabled, default to MOZYME GPU unless explicitly disabled
+        if (mozyme .and. lgpu) then
+          if (.not. mozyme_gpu) mozyme_gpu = .true.
+        end if
+        ! Optional debug summary
+        call get_environment_variable('MOPAC_GPU_DEBUG', line, status=i)
+        if (i == 0) then
+          if (trim(adjustl(line)) /= '') then
+            write(iw,'(//,1x,a)') 'GPU DEBUG SUMMARY:'
+            write(iw,'(3x,a,1x,l1,3x,a,1x,i0,3x,a,1x,l1)') 'hasGPU=', hasGPU, 'nDevices=', nDevices, 'lgpu=', lgpu
+            write(iw,'(3x,a,1x,i0)') 'ngpus=', ngpus
+            do j = 1, nDevices
+              write(iw,'(3x,a,i0,a,1x,a,1x,a,i0,a,i0)') 'dev[',j,']', trim(gpuName(j)(:name_size(j))), 'CC', major(j), '.', minor(j)
+            end do
+            write(iw,'(3x,a,1x,l1,3x,a,1x,i0,3x,a,1x,l1)') 'mozyme_gpu=', mozyme_gpu, 'mozyme_minblk=', mozyme_gpu_min_block, 'mozyme_2gpu=', mozyme_force_2gpu
+          end if
+        end if
 #endif
       end if
       if (numcal == 1+numcal0 .and. natoms == 0) then
