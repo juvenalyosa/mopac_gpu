@@ -19,6 +19,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       Use iso_c_binding
       Use density_cuda_i
       Use mopac_cublas_interfaces
+      use gpu_density_interfaces
       use gpu_diag_state, only: have_device_eigvecs, device_eigvecs_n, gpu_diag_clear
 #endif
       implicit none
@@ -57,15 +58,6 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
         case(2)   ! Option to use dgemm from CUBLAS
 #ifdef GPU
           if (have_device_eigvecs .and. device_eigvecs_n == norbs) then
-            interface
-              subroutine mopac_cuda_density_from_dev_gemm(n, nl2, nu2, nl1, nu1, sign, frac, xmat, ldx) bind(C,name='mopac_cuda_density_from_dev_gemm')
-                use iso_c_binding
-                implicit none
-                integer(c_int), value :: n, nl2, nu2, nl1, nu1, ldx
-                real(c_double), value :: sign, frac
-                real(c_double) :: xmat(ldx, n)
-              end subroutine mopac_cuda_density_from_dev_gemm
-            end interface
             allocate(xmat(norbs,norbs),stat = i)
             call mopac_cuda_density_from_dev_gemm(norbs, nl2, nu2, nl1, nu1, sign, frac, xmat, norbs)
             forall (i=1:norbs)
@@ -112,15 +104,6 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
         case(4)   ! Option to use dsyrk from CUBLAS
 #ifdef GPU
           if (have_device_eigvecs .and. device_eigvecs_n == norbs .and. fract < 1.d-2) then
-            interface
-              subroutine mopac_cuda_density_from_dev_syrk(n, ndubl, alpha, c_full, ldc) bind(C,name='mopac_cuda_density_from_dev_syrk')
-                use iso_c_binding
-                implicit none
-                integer(c_int), value :: n, ndubl, ldc
-                real(c_double), value :: alpha
-                real(c_double) :: c_full(ldc, n)
-              end subroutine mopac_cuda_density_from_dev_syrk
-            end interface
             allocate(xmat(norbs,norbs),stat = i)
             call mopac_cuda_density_from_dev_syrk(norbs, ndubl, occ, xmat, norbs)
             call dtrttp('u', norbs, xmat, norbs, pp, i )

@@ -42,6 +42,8 @@ if(GPU)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/cuda_wrappers.cu)
     # Minimal Fortran interfaces for cuBLAS wrappers
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/cublas_interfaces.F90)
+    # Fortran interfaces for density-from-device helpers
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_density_interfaces.F90)
 endif()
 
 # Small API control module is added from src/interface/CMakeLists.txt
