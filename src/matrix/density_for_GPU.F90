@@ -19,6 +19,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       Use iso_c_binding
       Use density_cuda_i
       Use mopac_cublas_interfaces
+      use gpu_diag_state, only: have_device_eigvecs, device_eigvecs_n, gpu_diag_clear
 #endif
       implicit none
       Integer :: ndubl, nsingl, mode, mpack, norbs, nl1, nl2, nu1, nu2, i, j, l, &
@@ -55,19 +56,38 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       Select case (iopc)
         case(2)   ! Option to use dgemm from CUBLAS
 #ifdef GPU
-
-          nl21 = Min (norbs, nl2)
-          nl11 = Min (norbs, nl1)
-          allocate(xmat(norbs,norbs),stat = i)
-          call gemm_cublas ('N', 'T', norbs, norbs, nu2-nl2+1, 2.0_prec*sign, c(1:norbs,nl21:norbs),&
-                        &   norbs, c(1:norbs,nl21:norbs), norbs, 0.0_prec, xmat, norbs)
-          call gemm_cublas ('N', 'T', norbs, norbs, nu1-nl1+1, frac*sign, c(1:norbs,nl11:norbs), &
-                        &   norbs, c(1:norbs,nl11:norbs), norbs, 1.0_prec, xmat, norbs)
-          forall (i=1:norbs)
-             xmat(i,i) = xmat(i,i) + cst
-          endforall
-          call dtrttp('u', norbs, xmat, norbs, pp, i )
-          deallocate (xmat,stat=i)
+          if (have_device_eigvecs .and. device_eigvecs_n == norbs) then
+            interface
+              subroutine mopac_cuda_density_from_dev_gemm(n, nl2, nu2, nl1, nu1, sign, frac, xmat, ldx) bind(C,name='mopac_cuda_density_from_dev_gemm')
+                use iso_c_binding
+                implicit none
+                integer(c_int), value :: n, nl2, nu2, nl1, nu1, ldx
+                real(c_double), value :: sign, frac
+                real(c_double) :: xmat(ldx, n)
+              end subroutine mopac_cuda_density_from_dev_gemm
+            end interface
+            allocate(xmat(norbs,norbs),stat = i)
+            call mopac_cuda_density_from_dev_gemm(norbs, nl2, nu2, nl1, nu1, sign, frac, xmat, norbs)
+            forall (i=1:norbs)
+               xmat(i,i) = xmat(i,i) + cst
+            endforall
+            call dtrttp('u', norbs, xmat, norbs, pp, i )
+            deallocate (xmat,stat=i)
+            call gpu_diag_clear()
+          else
+            nl21 = Min (norbs, nl2)
+            nl11 = Min (norbs, nl1)
+            allocate(xmat(norbs,norbs),stat = i)
+            call gemm_cublas ('N', 'T', norbs, norbs, nu2-nl2+1, 2.0_prec*sign, c(1:norbs,nl21:norbs),&
+                          &   norbs, c(1:norbs,nl21:norbs), norbs, 0.0_prec, xmat, norbs)
+            call gemm_cublas ('N', 'T', norbs, norbs, nu1-nl1+1, frac*sign, c(1:norbs,nl11:norbs), &
+                          &   norbs, c(1:norbs,nl11:norbs), norbs, 1.0_prec, xmat, norbs)
+            forall (i=1:norbs)
+               xmat(i,i) = xmat(i,i) + cst
+            endforall
+            call dtrttp('u', norbs, xmat, norbs, pp, i )
+            deallocate (xmat,stat=i)
+          end if
 #endif
         case(3)   ! Option to use dgemm from BLAS
 
@@ -91,13 +111,30 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
           deallocate (xmat,stat=i)
         case(4)   ! Option to use dsyrk from CUBLAS
 #ifdef GPU
-          allocate(xmat(norbs,norbs),stat = i)
-          forall (j = 1:norbs, i=1:norbs) xmat(i, j) = 0.d0
-          call syrk_cublas ('U','N',norbs,ndubl, &
-                 & occ,c(1:norbs,1:ndubl),norbs, &
-                 & 0.d0,xmat,norbs)
-          call dtrttp('u', norbs, xmat, norbs, pp, i )
-          deallocate(xmat,stat=i)
+          if (have_device_eigvecs .and. device_eigvecs_n == norbs .and. fract < 1.d-2) then
+            interface
+              subroutine mopac_cuda_density_from_dev_syrk(n, ndubl, alpha, c_full, ldc) bind(C,name='mopac_cuda_density_from_dev_syrk')
+                use iso_c_binding
+                implicit none
+                integer(c_int), value :: n, ndubl, ldc
+                real(c_double), value :: alpha
+                real(c_double) :: c_full(ldc, n)
+              end subroutine mopac_cuda_density_from_dev_syrk
+            end interface
+            allocate(xmat(norbs,norbs),stat = i)
+            call mopac_cuda_density_from_dev_syrk(norbs, ndubl, occ, xmat, norbs)
+            call dtrttp('u', norbs, xmat, norbs, pp, i )
+            deallocate(xmat,stat=i)
+            call gpu_diag_clear()
+          else
+            allocate(xmat(norbs,norbs),stat = i)
+            forall (j = 1:norbs, i=1:norbs) xmat(i, j) = 0.d0
+            call syrk_cublas ('U','N',norbs,ndubl, &
+                   & occ,c(1:norbs,1:ndubl),norbs, &
+                   & 0.d0,xmat,norbs)
+            call dtrttp('u', norbs, xmat, norbs, pp, i )
+            deallocate(xmat,stat=i)
+          end if
 #endif
         case(5)   ! Option to use dsyrk from BLAS
           if (fract < 1.d-2) then

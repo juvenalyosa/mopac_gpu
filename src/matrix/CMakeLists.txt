@@ -20,7 +20,7 @@ set(src_list
     mxmt mat33 interp mxv diag_for_GPU
     eigenvectors_LAPACK mult_symm_AB mtxm supdot
     molval schmit mxm diag rsp mult dot minv
-    mamult esp_utilities osinv ddiag
+    mamult esp_utilities osinv ddiag gpu_diag_state
     )
 #-----------------------------------------------
 # Add a list of source files to the target

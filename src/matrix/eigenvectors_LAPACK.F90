@@ -17,7 +17,7 @@
       USE chanel_C, only : iw
 #ifdef GPU
       Use mod_vars_cuda, only: lgpu, ngpus, prec
-      use eigenvectors_cuda_mod, only: eigenvectors_CUDA
+      use eigenvectors_cuda_mod, only: eigenvectors_CUDA, eigenvectors_CUDA_keep
 #endif
 #if (MAGMA)
       Use magma
@@ -65,9 +65,38 @@ end if
       if (i /= 0) stop 'error in dtpttr'
 
 #ifdef GPU
+      ! Use GPU eigensolver only when problem size is large enough.
+      ! Threshold can be overridden via environment variable MOPAC_GPU_EIGEN_MIN.
       if (lgpu) then
-        call eigenvectors_CUDA(eigenvecs, xmat, eigvals, ndim)
-        return
+        integer :: thr_min, stat_env
+        character(len=32) :: env, fast, fetch
+        logical :: fastgpu, fetch_eigs
+        thr_min = 400
+        env = '' ; fast = '' ; fetch = ''
+        fastgpu = .false. ; fetch_eigs = .false.
+        stat_env = 1
+        call get_environment_variable('MOPAC_GPU_EIGEN_MIN', env, status=stat_env)
+        if (stat_env == 0) then
+          ! Ignore parse errors silently; keep default if read fails
+          read(env, *, end=10, err=10) thr_min
+        end if
+10      continue
+        call get_environment_variable('MOPAC_FASTGPU', fast, status=stat_env)
+        if (stat_env == 0) fastgpu = (trim(adjustl(fast)) /= '')
+        call get_environment_variable('MOPAC_EIG2HOST', fetch, status=stat_env)
+        if (stat_env == 0) fetch_eigs = (trim(adjustl(fetch)) /= '')
+        if (ndim >= thr_min) then
+          if (fastgpu) then
+            ! Keep eigenvectors on device; optionally fetch to host
+            call eigenvectors_CUDA_keep(eigenvecs, eigvals, ndim)
+            if (fetch_eigs) then
+              call eigenvectors_CUDA_fetch(eigenvecs, ndim)
+            end if
+          else
+            call eigenvectors_CUDA(eigenvecs, xmat, eigvals, ndim)
+          end if
+          return
+        end if
       end if
 #endif
 

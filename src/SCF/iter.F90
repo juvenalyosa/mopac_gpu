@@ -33,6 +33,8 @@
 #ifdef GPU
       Use mod_vars_cuda, only: lgpu, real_cuda, prec
       use density_cuda_i
+      use gpu_diag_state, only: have_device_eigvecs
+      use eigenvectors_cuda_mod, only: eigenvectors_CUDA_fetch
 #endif
       implicit none
       double precision , intent(out) :: ee
@@ -870,6 +872,9 @@
             if (uhf) j = 2
             write (iw, &
          & '(2/10X,A,'' EIGENVECTORS AND EIGENVALUES ON ITERATION'',I3)') abprt(j), niter
+#ifdef GPU
+            if (have_device_eigvecs) call eigenvectors_CUDA_fetch(c, norbs)
+#endif
             call matout (c, eigs, norbs, norbs, norbs)
         else
           if (prteig) write (iw, 550) abprt(j), niter, (eigs(i),i=1,norbs)
@@ -990,6 +995,9 @@
             write (iw, &
       '(2/10X,A,'' EIGENVECTORS AND EIGENVALUES ON '',   ''ITERATION'',I3)') &
             &  abprt(3), niter
+#ifdef GPU
+            if (have_device_eigvecs) call eigenvectors_CUDA_fetch(cb, norbs)
+#endif
             call matout (cb, eigb, norbs, norbs, norbs)
           else
             if (prteig) write (iw, 550) abprt(3), niter, (eigb(i),i=1,norbs)

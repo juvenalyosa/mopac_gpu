@@ -123,6 +123,7 @@ static cudaStream_t   g_stream = nullptr;     // single-GPU general stream
 static cudaStream_t   g_stream0 = nullptr;    // 2-GPU device0 stream
 static cudaStream_t   g_stream1 = nullptr;    // 2-GPU device1 stream
 static bool           g_streams_enabled = true;
+static bool           g_pin_user = false;     // Pin user memory for direct H2D/D2H if requested
 
 static inline void ensure_pair_streams() {
   int dev_count = 0;
@@ -162,6 +163,12 @@ void create_handle() {
     if (env) {
       if (std::strcmp(env, "off") == 0 || std::strcmp(env, "0") == 0) {
         g_streams_enabled = false;
+      }
+    }
+    const char* env_pin = std::getenv("MOPAC_PIN_USER");
+    if (env_pin) {
+      if (std::strcmp(env_pin, "on") == 0 || std::strcmp(env_pin, "1") == 0 || std::strcmp(env_pin, "true") == 0) {
+        g_pin_user = true;
       }
     }
     if (g_streams_enabled) {
@@ -209,20 +216,54 @@ void call_gemm_cublas(char tra, char trb,
   double *d_A = g_gemm_A.ptr;
   double *d_B = g_gemm_B.ptr;
   double *d_C = g_gemm_C.ptr;
-  h_gemm_A.ensure(bytesA);
-  h_gemm_B.ensure(bytesB);
-  h_gemm_C.ensure(bytesC);
-  std::memcpy(h_gemm_A.ptr, A, bytesA);
-  std::memcpy(h_gemm_B.ptr, B, bytesB);
-  std::memcpy(h_gemm_C.ptr, C, bytesC);
-  cudaMemcpyAsync(d_A, h_gemm_A.ptr, bytesA, cudaMemcpyHostToDevice, g_stream);
-  cudaMemcpyAsync(d_B, h_gemm_B.ptr, bytesB, cudaMemcpyHostToDevice, g_stream);
-  cudaMemcpyAsync(d_C, h_gemm_C.ptr, bytesC, cudaMemcpyHostToDevice, g_stream);
+  bool pinned = false;
+  if (g_pin_user) {
+    if (cudaHostRegister((void*)A, bytesA, cudaHostRegisterDefault) == cudaSuccess &&
+        cudaHostRegister((void*)B, bytesB, cudaHostRegisterDefault) == cudaSuccess) {
+      if (beta != 0.0) {
+        if (cudaHostRegister((void*)C, bytesC, cudaHostRegisterDefault) == cudaSuccess) {
+          pinned = true;
+        } else {
+          cudaHostUnregister((void*)A);
+          cudaHostUnregister((void*)B);
+        }
+      } else {
+        pinned = true;
+      }
+    }
+  }
+  if (pinned) {
+    cudaMemcpyAsync(d_A, A, bytesA, cudaMemcpyHostToDevice, g_stream);
+    cudaMemcpyAsync(d_B, B, bytesB, cudaMemcpyHostToDevice, g_stream);
+    if (beta != 0.0) cudaMemcpyAsync(d_C, C, bytesC, cudaMemcpyHostToDevice, g_stream);
+  } else {
+    h_gemm_A.ensure(bytesA);
+    h_gemm_B.ensure(bytesB);
+    h_gemm_C.ensure(bytesC);
+    std::memcpy(h_gemm_A.ptr, A, bytesA);
+    std::memcpy(h_gemm_B.ptr, B, bytesB);
+    cudaMemcpyAsync(d_A, h_gemm_A.ptr, bytesA, cudaMemcpyHostToDevice, g_stream);
+    cudaMemcpyAsync(d_B, h_gemm_B.ptr, bytesB, cudaMemcpyHostToDevice, g_stream);
+    if (beta != 0.0) {
+      // Only need initial C when beta != 0
+      std::memcpy(h_gemm_C.ptr, C, bytesC);
+      cudaMemcpyAsync(d_C, h_gemm_C.ptr, bytesC, cudaMemcpyHostToDevice, g_stream);
+    }
+  }
   // Compute C = alpha*op(A)*op(B) + beta*C
   cublasDgemm(g_blas, opA, opB, m, n, k, &alpha, d_A, lda, d_B, ldb, &beta, d_C, ldc);
-  cudaMemcpyAsync(h_gemm_C.ptr, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
-  cudaStreamSynchronize(g_stream);
-  std::memcpy(C, h_gemm_C.ptr, bytesC);
+  if (pinned) {
+    cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
+    cudaStreamSynchronize(g_stream);
+    // Unregister
+    cudaHostUnregister((void*)A);
+    cudaHostUnregister((void*)B);
+    if (beta != 0.0) cudaHostUnregister((void*)C);
+  } else {
+    cudaMemcpyAsync(h_gemm_C.ptr, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
+    cudaStreamSynchronize(g_stream);
+    std::memcpy(C, h_gemm_C.ptr, bytesC);
+  }
 }
 
 // SYRK via cuBLAS (uses cached device buffers)
@@ -241,16 +282,45 @@ void call_syrk_cublas(char uplo, char tra,
   g_syrk_C.ensure(bytesC);
   double *d_A = g_syrk_A.ptr;
   double *d_C = g_syrk_C.ptr;
-  h_syrk_A.ensure(bytesA);
-  h_syrk_C.ensure(bytesC);
-  std::memcpy(h_syrk_A.ptr, A, bytesA);
-  std::memcpy(h_syrk_C.ptr, C, bytesC);
-  cudaMemcpyAsync(d_A, h_syrk_A.ptr, bytesA, cudaMemcpyHostToDevice, g_stream);
-  cudaMemcpyAsync(d_C, h_syrk_C.ptr, bytesC, cudaMemcpyHostToDevice, g_stream);
+  bool pinnedS = false;
+  if (g_pin_user) {
+    if (cudaHostRegister((void*)A, bytesA, cudaHostRegisterDefault) == cudaSuccess) {
+      if (beta != 0.0) {
+        if (cudaHostRegister((void*)C, bytesC, cudaHostRegisterDefault) == cudaSuccess) {
+          pinnedS = true;
+        } else {
+          cudaHostUnregister((void*)A);
+        }
+      } else {
+        pinnedS = true;
+      }
+    }
+  }
+  if (pinnedS) {
+    cudaMemcpyAsync(d_A, A, bytesA, cudaMemcpyHostToDevice, g_stream);
+    if (beta != 0.0) cudaMemcpyAsync(d_C, C, bytesC, cudaMemcpyHostToDevice, g_stream);
+  } else {
+    h_syrk_A.ensure(bytesA);
+    h_syrk_C.ensure(bytesC);
+    std::memcpy(h_syrk_A.ptr, A, bytesA);
+    cudaMemcpyAsync(d_A, h_syrk_A.ptr, bytesA, cudaMemcpyHostToDevice, g_stream);
+    if (beta != 0.0) {
+      // Only need initial C when beta != 0
+      std::memcpy(h_syrk_C.ptr, C, bytesC);
+      cudaMemcpyAsync(d_C, h_syrk_C.ptr, bytesC, cudaMemcpyHostToDevice, g_stream);
+    }
+  }
   cublasDsyrk(g_blas, u, opA, n, k, &alpha, d_A, lda, &beta, d_C, ldc);
-  cudaMemcpyAsync(h_syrk_C.ptr, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
-  cudaStreamSynchronize(g_stream);
-  std::memcpy(C, h_syrk_C.ptr, bytesC);
+  if (pinnedS) {
+    cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
+    cudaStreamSynchronize(g_stream);
+    cudaHostUnregister((void*)A);
+    if (beta != 0.0) cudaHostUnregister((void*)C);
+  } else {
+    cudaMemcpyAsync(h_syrk_C.ptr, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
+    cudaStreamSynchronize(g_stream);
+    std::memcpy(C, h_syrk_C.ptr, bytesC);
+  }
 }
 
 // 2-GPU outer product helpers and wrappers are further below.
@@ -465,6 +535,8 @@ static cusolverDnHandle_t g_solver = nullptr;
 static DevBuf<double> g_dsyevd_A, g_dsyevd_W, g_dsyevd_work;
 static DevBuf<int>    g_dsyevd_info;
 static int g_dsyevd_lwork_cap = 0; // elements, not bytes
+static bool g_have_device_eigvecs = false;
+static int  g_device_eigvecs_n = 0;
 
 void mopac_cuda_dsyevd(int n, double *A, int lda, double *W, int *info) {
   if (!g_solver) cusolverDnCreate(&g_solver);
@@ -502,6 +574,122 @@ void mopac_cuda_dsyevd(int n, double *A, int lda, double *W, int *info) {
   cudaStreamSynchronize(g_stream);
   std::memcpy(A, h_dsyevd_A.ptr, bytesA);
   std::memcpy(W, h_dsyevd_W.ptr, bytesW);
+}
+
+// Variant: keep eigenvectors on device, return eigenvalues only
+void mopac_cuda_dsyevd_keep(int n, double *A, int lda, double *W, int *info) {
+  if (!g_solver) cusolverDnCreate(&g_solver);
+
+  size_t bytesA = sizeof(double) * (size_t)lda * (size_t)n;
+  size_t bytesW = sizeof(double) * (size_t)n;
+  g_dsyevd_A.ensure(bytesA);
+  g_dsyevd_W.ensure(bytesW);
+  g_dsyevd_info.ensure(sizeof(int));
+  double *d_A = g_dsyevd_A.ptr;
+  double *d_W = g_dsyevd_W.ptr;
+  int *d_info = g_dsyevd_info.ptr;
+
+  static HostBuf<double> h_dsyevd_A, h_dsyevd_W;
+  h_dsyevd_A.ensure(bytesA);
+  h_dsyevd_W.ensure(bytesW);
+  // Copy host-packed upper triangle (in A) that was unpacked by caller into full matrix; here A is ignored.
+  // Caller should have already unpacked; we accept A as a full matrix buffer for simplicity.
+  std::memcpy(h_dsyevd_A.ptr, A, bytesA);
+  cudaMemcpyAsync(d_A, h_dsyevd_A.ptr, bytesA, cudaMemcpyHostToDevice, g_stream);
+
+  int lwork = 0;
+  cusolverDnSetStream(g_solver, g_stream);
+  cusolverDnDsyevd_bufferSize(g_solver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
+                              n, d_A, lda, d_W, &lwork);
+  if (lwork > g_dsyevd_lwork_cap) {
+    g_dsyevd_work.ensure(sizeof(double) * (size_t)lwork);
+    g_dsyevd_lwork_cap = lwork;
+  }
+  double *d_work = g_dsyevd_work.ptr;
+
+  cusolverDnDsyevd(g_solver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
+                   n, d_A, lda, d_W, d_work, lwork, d_info);
+  cudaMemcpyAsync(h_dsyevd_W.ptr, d_W, bytesW, cudaMemcpyDeviceToHost, g_stream);
+  cudaMemcpyAsync(info, d_info, sizeof(int), cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+  std::memcpy(W, h_dsyevd_W.ptr, bytesW);
+  // Mark device eigenvectors available
+  g_have_device_eigvecs = true;
+  g_device_eigvecs_n = n;
+}
+
+// Build density C = alpha * V(:,1:ndubl) * V(:,1:ndubl)^T on device from last eigenvectors
+void mopac_cuda_density_from_dev_syrk(int n, int ndubl, double alpha, double *C, int ldc) {
+  if (!g_blas) create_handle();
+  if (!g_have_device_eigvecs || n != g_device_eigvecs_n) {
+    // Fallback: just zero C
+    size_t bytesC = (size_t)ldc * (size_t)n * sizeof(double);
+    std::memset(C, 0, bytesC);
+    return;
+  }
+  size_t bytesC = (size_t)ldc * (size_t)n * sizeof(double);
+  DevBuf<double> dC;
+  dC.ensure(bytesC);
+  double *d_A = g_dsyevd_A.ptr; // eigenvectors on device
+  double *d_C = dC.ptr;
+  double beta = 0.0;
+  cublasDsyrk(g_blas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, n, ndubl, &alpha, d_A, n, &beta, d_C, ldc);
+  cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+}
+
+// Build full X = 2*sign*V(:,nl2:nu2)V(:,nl2:nu2)^T + frac*sign*V(:,nl1:nu1)V(:,nl1:nu1)^T
+// Caller adds cst to the diagonal on host.
+void mopac_cuda_density_from_dev_gemm(int n,
+                                      int nl2, int nu2,
+                                      int nl1, int nu1,
+                                      double sign,
+                                      double frac,
+                                      double *C, int ldc) {
+  if (!g_blas) create_handle();
+  if (!g_have_device_eigvecs || n != g_device_eigvecs_n) {
+    size_t bytesC = (size_t)ldc * (size_t)n * sizeof(double);
+    std::memset(C, 0, bytesC);
+    return;
+  }
+  size_t bytesC = (size_t)ldc * (size_t)n * sizeof(double);
+  DevBuf<double> dC;
+  dC.ensure(bytesC);
+  double *d_A = g_dsyevd_A.ptr; // eigenvectors on device
+  double *d_C = dC.ptr;
+  // Zero C (beta=0 in first SYRK covers it)
+  // First block: columns [nl2..nu2]
+  int k1 = (nu2 >= nl2) ? (nu2 - nl2 + 1) : 0;
+  if (k1 > 0) {
+    double alpha1 = 2.0 * sign;
+    double beta = 0.0;
+    const double *d_block1 = d_A + (size_t)(nl2 - 1) * (size_t)n;
+    cublasDsyrk(g_blas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, n, k1, &alpha1, d_block1, n, &beta, d_C, ldc);
+  } else {
+    // Initialize d_C to zero if first block absent
+    cudaMemsetAsync(d_C, 0, bytesC, g_stream);
+  }
+  // Second block: columns [nl1..nu1]
+  int k2 = (nu1 >= nl1) ? (nu1 - nl1 + 1) : 0;
+  if (k2 > 0) {
+    double alpha2 = frac * sign;
+    double beta = 1.0;
+    const double *d_block2 = d_A + (size_t)(nl1 - 1) * (size_t)n;
+    cublasDsyrk(g_blas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, n, k2, &alpha2, d_block2, n, &beta, d_C, ldc);
+  }
+  cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+}
+
+// Fetch device-resident eigenvectors into host buffer A (ld=lda)
+void mopac_cuda_fetch_eigenvectors(int n, double *A, int lda) {
+  if (!g_have_device_eigvecs || n != g_device_eigvecs_n) {
+    // Nothing to fetch; leave A unchanged
+    return;
+  }
+  size_t bytesA = (size_t)lda * (size_t)n * sizeof(double);
+  cudaMemcpyAsync(A, g_dsyevd_A.ptr, bytesA, cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
 }
 
 // --- MOZYME rotation: GPU-assisted drot over two columns ---
