@@ -24,7 +24,11 @@
 !#endif
       Use mod_vars_cuda, only: lgpu 
       use overlap_build,   only: build_overlap_packed
+#ifdef GPU
       use gpu_diis_interfaces
+      use gpu_bmat_interfaces
+      use gpu_small_solve_interfaces
+#endif
       implicit none
       integer  :: n,iopc 
       integer , intent(inout) :: lfock 
