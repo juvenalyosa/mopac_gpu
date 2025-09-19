@@ -1247,7 +1247,6 @@ void mopac_cuda_diis_init(int linear, int maxfock) {
   size_t bytes = (size_t)linear * (size_t)maxfock * sizeof(double);
   g_diis_R.ensure(bytes);
   g_diis_linear_cap = linear;
-  g_diis_maxfock_cap = maxfock;
 }
 
 void mopac_cuda_diis_store(int linear, int col, const double *r_host) {
