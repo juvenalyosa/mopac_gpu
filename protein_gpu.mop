@@ -1,0 +1,3 @@
+PM7 GEO_DAT=modeljuv.B99990166_withH_rep0_step5000.pdb MOZYME MOZYME_GPU EIGS VECTORS
+Protein GPU run (MOZYME + SCF)
+
