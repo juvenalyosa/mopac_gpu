@@ -16,12 +16,12 @@ contains
     double precision, intent(out) :: pp((n*(n+1))/2)
     double precision, allocatable :: Sfull(:,:), Ffull(:,:), U(:,:), Uinv(:,:), Fp(:,:), X(:,:), X2(:,:), T(:,:), Pao(:,:)
     double precision, allocatable :: Spack(:)
-    integer :: i, info, k, stat_env
+    integer :: i, j, info, k, stat_env
     double precision :: trX, target, delta, sigma, err, lam_min, lam_max, mu, beta
     double precision :: one, zero
     character(len=32) :: env
     logical :: use_gpu
-    double precision :: tol_l
+    double precision :: tol_l, s, diff
     integer :: maxit_l
     one = 1.d0; zero = 0.d0
 
