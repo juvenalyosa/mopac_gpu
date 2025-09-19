@@ -15,7 +15,7 @@ Commercial versions of MOPAC are no longer supported, and all MOPAC users are en
 
 MOPAC is actively maintained and curated by the [Molecular Sciences Software Institute (MolSSI)](https://molssi.org).
 
-## Recommended: Protein GPU Quickstart (No Env Vars)
+## Recommended: Protein GPU Quickstart
 
 For protein and protein–ligand jobs, the GPU path is used automatically on large systems — no environment variables required.
 
