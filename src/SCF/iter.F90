@@ -31,6 +31,9 @@
       USE reimers_C, only: dd, ff, tot, cc0, aa, dtmp, nb2
       use cosmo_C, only : useps
 #ifdef GPU
+      use eig_call_context, only: current_spin
+#endif
+#ifdef GPU
       use purify_gpu
 #endif
 #ifdef GPU
@@ -866,7 +869,13 @@
 !           accelerated using a QR diagonalization analog at some point ...
 !          if (halfe .or. camkin) then
             if (timitr) call timer ('BEFORE FULL DIAG')
+#ifdef GPU
+            current_spin = 1
+#endif
             call eigenvectors_LAPACK(c, f, eigs, norbs)
+#ifdef GPU
+            current_spin = 0
+#endif
             if (timitr) call timer ('AFTER  FULL DIAG')
 !          else
 !            if (lgpu) then
@@ -990,7 +999,13 @@
 !           accelerated using a QR diagonalization analog at some point ...
 !            if (halfe .or. camkin) then
               if (timitr) call timer ('BEFORE FULL DIAG')
+#ifdef GPU
+              current_spin = 2
+#endif
               call eigenvectors_LAPACK(cb, fb, eigb, norbs)
+#ifdef GPU
+              current_spin = 0
+#endif
               if (timitr) call timer ('AFTER  FULL DIAG')
 !            else
 !              if (lgpu) then

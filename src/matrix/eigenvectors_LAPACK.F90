@@ -21,7 +21,8 @@
       use gpu_ortho_interfaces
       use overlap_build, only: build_overlap_packed, unpack_upper_to_full
       use partial_eig_gpu
-      use molkst_C, only: uhf, nclose
+      use molkst_C, only: uhf, nclose, nalpha, nbeta
+      use eig_call_context, only: current_spin
 #endif
 #if (MAGMA)
       Use magma
@@ -114,10 +115,20 @@ end if
         ! Optional: experimental partial eigensolve for RHF (smallest nclose eigenpairs)
         env = ''
         call get_environment_variable('MOPAC_PARTIAL_EIG', env, status=stat_env)
-        if (stat_env == 0 .and. trim(adjustl(env)) /= '' .and. .not. uhf) then
+        if (stat_env == 0 .and. trim(adjustl(env)) /= '') then
           integer :: nocc, itmax
           double precision :: etol
-          nocc = max(1, min(nclose, ndim))
+          if (uhf) then
+            if (current_spin == 1) then
+              nocc = max(1, min(nclose + nalpha, ndim))
+            else if (current_spin == 2) then
+              nocc = max(1, min(nclose + nbeta, ndim))
+            else
+              nocc = max(1, min(nclose, ndim))
+            end if
+          else
+            nocc = max(1, min(nclose, ndim))
+          end if
           etol = 1.d-8
           itmax = 50
           call get_environment_variable('MOPAC_PARTIAL_TOL', env, status=stat_env)

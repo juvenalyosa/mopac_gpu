@@ -52,6 +52,10 @@ if(GPU)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_bmat_interfaces.F90)
     # Fortran interfaces for persistent DIIS residual buffer
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_diis_interfaces.F90)
+    # Fortran interfaces for GPU Fock build
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_fock_interfaces.F90)
+    # CUDA Fock kernels (scaffold)
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/fock_kernels.cu)
 endif()
 
 # Small API control module is added from src/interface/CMakeLists.txt
@@ -68,6 +72,7 @@ if(GPU)
     # and compile the CUDA .cu wrapper via CUDA language
     set_source_files_properties(
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/cuda_wrappers.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/gpu/fock_kernels.cu
         PROPERTIES LANGUAGE CUDA
     )
 endif()

@@ -18,6 +18,10 @@
 !   M o d u l e s
 !-----------------------------------------------
       use molkst_C, only : numcal, norbs, mpack, n2elec, id, numat_ref => numat
+#ifdef GPU
+      use mod_vars_cuda, only: lgpu
+      use gpu_fock_interfaces
+#endif
       use cosmo_C, only : useps
 
 !***********************************************************************
@@ -71,6 +75,25 @@
       data icalcn/ 0/
       deriv = (numat < 0)
       numat = abs(numat)
+! Optional experimental GPU Fock build (scaffold)
+#ifdef GPU
+      if (.not. deriv) then
+        integer :: envs
+        character(len=8) :: line8
+        logical :: want_gpu
+        want_gpu = .false.
+        envs = 1 ; line8 = ''
+        call get_environment_variable('MOPAC_FOCK_GPU', line8, status=envs)
+        if (envs == 0) want_gpu = (trim(adjustl(line8)) /= '')
+        if (want_gpu .and. lgpu) then
+          logical(c_bool) :: ok
+          ok = mopac_cuda_fock2(norbs, mpack, numat, nfirst, nlast, ptot, p, f)
+          if (ok) then
+            return
+          end if
+        end if
+      end if
+#endif
       if (numat == 0) then
         if (allocated(ptot2))  deallocate(ptot2)
         if (allocated(ifact))  deallocate(ifact)

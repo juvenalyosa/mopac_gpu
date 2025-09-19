@@ -169,7 +169,8 @@ Notes
 - 1‑GPU SCF and MOZYME paths offload dense BLAS and rotations using cuBLAS/cuSOLVER.
 - 2‑GPU MOZYME density uses a row‑sliced outer‑product implementation; device pair defaults to `0,1` or can be set via `MOZYME_GPUPAIR`.
 - Internally, MOPAC uses grow‑only device and pinned‑host caches to avoid repeated allocations and to overlap copies with compute.
- - Experimental (phase 2): GPU orthogonalization helpers (Cholesky + TRSM) are available via new interfaces for future fully GPU‑resident SCF wiring.
+- Experimental (phase 2): GPU orthogonalization helpers (Cholesky + TRSM) are available via new interfaces for future fully GPU‑resident SCF wiring.
+- Experimental (phase 3): GPU Fock build scaffold (MOPAC_FOCK_GPU=1) is wired; current implementation falls back to CPU until kernels are enabled.
 
 Common build recipes
 - CPU only, auto BLAS:
@@ -243,6 +244,7 @@ Runtime controls (environment)
 - `MOPAC_PURIFY_GPU=1`          Experimental: accelerate purification with GPU (GEMM/TRSM helpers).
 - `MOPAC_PURIFY_TOL=1e-8`       Purification tolerance on ||X - X^2||_F and trace targeting.
 - `MOPAC_PURIFY_MAXIT=100`      Max purification iterations.
+- `MOPAC_FOCK_GPU=1`            Experimental: enable GPU Fock build path (currently a scaffold; falls back to CPU if not available).
 
 Typical usage
 - Large system, fast SCF:
