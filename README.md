@@ -15,6 +15,38 @@ Commercial versions of MOPAC are no longer supported, and all MOPAC users are en
 
 MOPAC is actively maintained and curated by the [Molecular Sciences Software Institute (MolSSI)](https://molssi.org).
 
+## Recommended: Protein GPU Quickstart (No Env Vars)
+
+For protein and protein–ligand jobs, the GPU path is used automatically on large systems — no environment variables required.
+
+1) Build the GPU binary (set your GPU architecture)
+- Tesla P4 → 61, V100 → 70, A100 → 80, RTX 30xx → 86
+```
+cmake -S . -B build-gpu -G Ninja -DGPU=ON -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CUDA_ARCHITECTURES=61
+cmake --build build-gpu -j
+```
+
+2) Prepare a minimal protein input (PM7 + GEO_DAT)
+Create `protein_gpu.mop` next to your PDB:
+```
+PM7 GEO_DAT=modeljuv.B99990166_withH_rep0_step5000.pdb MOZYME 1SCF EIGS VECTORS
+Protein quick GPU test
+
+```
+
+3) Run (GPU is auto‑enabled for large systems)
+```
+./build-gpu/mopac protein_gpu.mop
+```
+
+Notes
+- MOZYME is recommended for large biomolecules; the MOZYME GPU path is used automatically when a GPU is available.
+- Add `NOGPU` to the keyword line only if you want to force CPU.
+- VRAM rule of thumb (double precision): one dense `n×n` uses `8·n²` bytes; SCF peak ≈ `40–56·n²` bytes/GPU.
+
+If you need CPU vs GPU details, advanced GPU features, or troubleshooting, see the sections further below.
+
 ## Quick Start (Ubuntu + GPU)
 
 1) Install prerequisites
@@ -436,6 +468,8 @@ Use the helper script:
 - Arch mismatch: set `-DCMAKE_CUDA_ARCHITECTURES` (e.g., 61 for P4).
 - Streams/ordering: `MOPAC_STREAMS=off`.
 - Determinism: `MOPAC_DETERMINISTIC=1`.
+
+<!-- Protein GPU Quickstart duplicated above for prominence; advanced details follow. -->
 
 ## Interfaces
 
