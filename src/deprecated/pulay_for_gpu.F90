@@ -44,6 +44,11 @@
       logical :: debug  
       character(len=8) :: env
       logical :: gen_resid
+      ! GPU DIIS workspace (moved here for F90 compliance)
+      double precision, allocatable :: spack(:), tmp1(:), tmp2(:)
+      double precision, allocatable :: bfull(:,:), bcol(:)
+      double precision, allocatable :: amat(:,:), rhs(:)
+      integer :: info_s
 #ifdef GPU
       integer :: igrid, iblock
 #endif        
@@ -125,7 +130,6 @@
 
       if (gen_resid) then
         ! Generalized Pulay residual: R = F P S - S P F (packed storage)
-        double precision, allocatable :: spack(:), tmp1(:), tmp2(:)
         allocate(spack(linear), tmp1(linear), tmp2(linear), stat=i)
         if (i /= 0) then
           call memory_error('Pulay GPU generalized residual alloc')
@@ -161,7 +165,6 @@
       call get_environment_variable('MOPAC_DIIS_GPU_BFULL', env, status=i)
       if (lgpu .and. i == 0 .and. trim(adjustl(env)) /= '') then
         ! Build full B = R^T R on GPU
-        double precision, allocatable :: bfull(:,:)
         allocate(bfull(nfock, nfock), stat=i)
         if (i /= 0) then
           call memory_error('Pulay GPU Bfull alloc')
@@ -185,7 +188,6 @@
         env = ''
         call get_environment_variable('MOPAC_DIIS_GPU_BMAT', env, status=i)
         if (i == 0 .and. trim(adjustl(env)) /= '') then
-          double precision, allocatable :: bcol(:)
           allocate(bcol(nfock), stat=i)
           if (i /= 0) then
             call memory_error('Pulay GPU Bcol alloc')
@@ -257,8 +259,6 @@
       call get_environment_variable('MOPAC_DIIS_GPU', env, status=i)
       if (i == 0 .and. trim(adjustl(env)) /= '') then
         ! Solve [B  -1; -1^T 0] y = e_last using cuSOLVER; weights = -y(1:nfock)
-        double precision, allocatable :: amat(:,:), rhs(:)
-        integer :: info_s
         allocate(amat(nfock1,nfock1), rhs(nfock1), stat=i)
         if (i /= 0) then
           call memory_error('Pulay GPU DIIS solve alloc')

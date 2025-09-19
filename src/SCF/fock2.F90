@@ -21,6 +21,7 @@
 #ifdef GPU
       use mod_vars_cuda, only: lgpu
       use gpu_fock_interfaces
+      use iso_c_binding, only: c_bool
 #endif
       use cosmo_C, only : useps
 
@@ -59,6 +60,13 @@
       double precision, dimension(16) :: pja, pjb
       double precision :: sumdia, sumoff, sum, aa, bb, aj, ak, a
       logical :: lid, deriv
+#ifdef GPU
+      ! GPU Fock path controls
+      integer :: envs
+      character(len=8) :: line8
+      logical :: want_gpu
+      logical(c_bool) :: ok
+#endif
 
       save ifact, i1fact, ione, lid, icalcn, jindex, ptot2
 !-----------------------------------------------
@@ -78,15 +86,11 @@
 ! Optional experimental GPU Fock build (scaffold)
 #ifdef GPU
       if (.not. deriv) then
-        integer :: envs
-        character(len=8) :: line8
-        logical :: want_gpu
         want_gpu = .false.
         envs = 1 ; line8 = ''
         call get_environment_variable('MOPAC_FOCK_GPU', line8, status=envs)
         if (envs == 0) want_gpu = (trim(adjustl(line8)) /= '')
         if (want_gpu .and. lgpu) then
-          logical(c_bool) :: ok
           ok = mopac_cuda_fock2(norbs, mpack, numat, nfirst, nlast, ptot, p, f)
           if (ok) then
             return

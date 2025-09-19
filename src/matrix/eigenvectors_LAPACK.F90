@@ -45,6 +45,9 @@
       character(len=32) :: env, fast, fetch, ortho
       logical :: fastgpu, fetch_eigs, ortho_gpu
       double precision, allocatable :: Sfull(:,:), Spack(:)
+      ! Partial eigensolve controls
+      integer :: nocc, itmax
+      double precision :: etol
 #endif
 !==============================================================================
 ! Code to find all eigenvectors and all eigenvalues for a symmetric General matrix
@@ -116,8 +119,6 @@ end if
         env = ''
         call get_environment_variable('MOPAC_PARTIAL_EIG', env, status=stat_env)
         if (stat_env == 0 .and. trim(adjustl(env)) /= '') then
-          integer :: nocc, itmax
-          double precision :: etol
           if (uhf) then
             if (current_spin == 1) then
               nocc = max(1, min(nclose + nalpha, ndim))
