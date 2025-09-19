@@ -159,6 +159,17 @@ static HostBuf<double> h2_rot_V;
 void create_handle() {
   if (!g_blas) {
     cublasCreate(&g_blas);
+    // Enforce deterministic behavior if requested
+    const char* det = std::getenv("MOPAC_DETERMINISTIC");
+    if (det && (std::strcmp(det, "1") == 0 || std::strcmp(det, "on") == 0 || std::strcmp(det, "true") == 0)) {
+#if defined(CUBLAS_VERSION) && (CUBLAS_VERSION >= 11000)
+      cublasSetAtomicsMode(g_blas, CUBLAS_ATOMICS_NOT_ALLOWED);
+#endif
+      cublasSetPointerMode(g_blas, CUBLAS_POINTER_MODE_HOST);
+#if defined(CUBLAS_VERSION)
+      cublasSetMathMode(g_blas, CUBLAS_DEFAULT_MATH);
+#endif
+    }
     const char* env = std::getenv("MOPAC_STREAMS");
     if (env) {
       if (std::strcmp(env, "off") == 0 || std::strcmp(env, "0") == 0) {
@@ -888,11 +899,11 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
   size_t bytesV = sizeof(double) * (size_t)n * (size_t)n;
   h2_rot_V.ensure(bytesV);
   std::memcpy(h2_rot_V.ptr, vector, bytesV);
-  // Copy top slice rows [0..n0)
+  // Copy top slice rows [0..n0) on device 0 using its stream
   for (int col = 0; col < n; ++col) {
     const double *col_ptr = h2_rot_V.ptr + (size_t)col * (size_t)n;
     cudaMemcpyAsync(d_V0 + (size_t)col * (size_t)n0, col_ptr, sizeof(double) * n0,
-                    cudaMemcpyHostToDevice);
+                    cudaMemcpyHostToDevice, g_stream0);
   }
 
   cudaSetDevice(dev1);
@@ -1041,6 +1052,160 @@ void mopac_cuda_destroy_resources() {
   g2_syrk_v0.release(); g2_syrk_c0.release(); g2_syrk_v1.release(); g2_syrk_c1.release();
   h2_gemm_A.release(); h2_gemm_B.release(); h2_gemm_C.release();
   h2_syrk_A.release(); h2_syrk_C.release();
+}
+
+} // extern "C"
+
+// =============== Additional GPU Orthogonalization Helpers (Phase 2) ===============
+// These helpers provide Cholesky + triangular-solve based orthogonalization primitives
+// for future integration of fully GPU-resident SCF orthonormalization paths.
+
+extern "C" {
+
+// Perform Cholesky factorization of symmetric positive definite matrix S (upper)
+// On return, S contains U (upper) such that S = U^T U (host memory)
+void mopac_cuda_potrf_upper(int n, double *S, int ld, int *info) {
+  if (!g_blas) create_handle();
+  static cusolverDnHandle_t solver = nullptr;
+  if (!solver) cusolverDnCreate(&solver);
+
+  size_t bytes = (size_t)ld * (size_t)n * sizeof(double);
+  DevBuf<double> dS;
+  dS.ensure(bytes);
+  double *d_S = dS.ptr;
+  cudaMemcpyAsync(d_S, S, bytes, cudaMemcpyHostToDevice, g_stream);
+  cusolverDnSetStream(solver, g_stream);
+  int lwork = 0;
+  cusolverDnDpotrf_bufferSize(solver, CUBLAS_FILL_MODE_UPPER, n, d_S, ld, &lwork);
+  DevBuf<double> dW; dW.ensure(sizeof(double) * (size_t)lwork);
+  DevBuf<int> dI; dI.ensure(sizeof(int));
+  cusolverDnDpotrf(solver, CUBLAS_FILL_MODE_UPPER, n, d_S, ld, dW.ptr, lwork, dI.ptr);
+  cudaMemcpyAsync(S, d_S, bytes, cudaMemcpyDeviceToHost, g_stream);
+  cudaMemcpyAsync(info, dI.ptr, sizeof(int), cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+}
+
+// F' = X^T F X where X = U^{-1} and S = U^T U (upper). S is overwritten with U (upper).
+// All matrices provided in column-major host memory.
+void mopac_cuda_transform_fock_with_s(int n,
+                                      double *S, int lds,
+                                      double *F, int ldf,
+                                      int *info) {
+  if (!g_blas) create_handle();
+  // 1) Cholesky on S -> S := U (upper)
+  mopac_cuda_potrf_upper(n, S, lds, info);
+  if (info && *info != 0) return;
+  // 2) Copy S and F to device
+  size_t bytesS = (size_t)lds * (size_t)n * sizeof(double);
+  size_t bytesF = (size_t)ldf * (size_t)n * sizeof(double);
+  DevBuf<double> dS, dF;
+  dS.ensure(bytesS); dF.ensure(bytesF);
+  cudaMemcpyAsync(dS.ptr, S, bytesS, cudaMemcpyHostToDevice, g_stream);
+  cudaMemcpyAsync(dF.ptr, F, bytesF, cudaMemcpyHostToDevice, g_stream);
+  cudaStreamSynchronize(g_stream);
+  // 3) Y = U^{-T} F  -> solve (U^T) Y = F  => left TRSM with trans=Trans
+  const double one = 1.0;
+  cublasDtrsm(g_blas,
+              CUBLAS_SIDE_LEFT,
+              CUBLAS_FILL_MODE_UPPER,
+              CUBLAS_OP_T,
+              CUBLAS_DIAG_NON_UNIT,
+              n, n,
+              &one,
+              dS.ptr, lds,
+              dF.ptr, ldf);
+  // 4) F' = Y U^{-1} -> solve Z = Y * U^{-1} => right TRSM with trans=NoTrans
+  cublasDtrsm(g_blas,
+              CUBLAS_SIDE_RIGHT,
+              CUBLAS_FILL_MODE_UPPER,
+              CUBLAS_OP_N,
+              CUBLAS_DIAG_NON_UNIT,
+              n, n,
+              &one,
+              dS.ptr, lds,
+              dF.ptr, ldf);
+  // 5) Copy back F' to host
+  cudaMemcpyAsync(F, dF.ptr, bytesF, cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+}
+
+// Solve for Cocc in AO: U * Cocc = Uocc  (U upper from Cholesky of S)
+void mopac_cuda_build_c_from_u(int n, int nocc,
+                               const double *U, int ldu,
+                               const double *Uocc, int lduocc,
+                               double *Cocc, int ldc) {
+  if (!g_blas) create_handle();
+  size_t bytesU = (size_t)ldu * (size_t)n * sizeof(double);
+  size_t bytesUocc = (size_t)lduocc * (size_t)nocc * sizeof(double);
+  size_t bytesC = (size_t)ldc * (size_t)nocc * sizeof(double);
+  DevBuf<double> dU, dUocc, dC;
+  dU.ensure(bytesU); dUocc.ensure(bytesUocc); dC.ensure(bytesC);
+  cudaMemcpyAsync(dU.ptr, U, bytesU, cudaMemcpyHostToDevice, g_stream);
+  cudaMemcpyAsync(dUocc.ptr, Uocc, bytesUocc, cudaMemcpyHostToDevice, g_stream);
+  cudaMemcpyAsync(dC.ptr, dUocc.ptr, bytesUocc, cudaMemcpyDeviceToDevice, g_stream);
+  const double one = 1.0;
+  // Solve U * C = Uocc  -> Left TRSM with trans=NoTrans
+  cublasDtrsm(g_blas,
+              CUBLAS_SIDE_LEFT,
+              CUBLAS_FILL_MODE_UPPER,
+              CUBLAS_OP_N,
+              CUBLAS_DIAG_NON_UNIT,
+              n, nocc,
+              &one,
+              dU.ptr, ldu,
+              dC.ptr, ldc);
+  cudaMemcpyAsync(Cocc, dC.ptr, bytesC, cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+}
+
+// P = 2 * Cocc * Cocc^T (upper sym)
+void mopac_cuda_density_from_c(int n, int nocc, const double *Cocc, int ldc,
+                               double *P, int ldp, double scale) {
+  if (!g_blas) create_handle();
+  size_t bytesC = (size_t)ldc * (size_t)nocc * sizeof(double);
+  size_t bytesP = (size_t)ldp * (size_t)n * sizeof(double);
+  DevBuf<double> dC, dP;
+  dC.ensure(bytesC); dP.ensure(bytesP);
+  cudaMemcpyAsync(dC.ptr, Cocc, bytesC, cudaMemcpyHostToDevice, g_stream);
+  cudaMemsetAsync(dP.ptr, 0, bytesP, g_stream);
+  double alpha = scale;
+  double beta  = 0.0;
+  cublasDsyrk(g_blas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, n, nocc,
+              &alpha, dC.ptr, ldc, &beta, dP.ptr, ldp);
+  cudaMemcpyAsync(P, dP.ptr, bytesP, cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+}
+
+} // extern "C"
+
+// =============== Small dense linear solve for DIIS (GPU) ===============
+extern "C" {
+
+// Solve A x = b in-place on b using LU (getrf/getrs); A overwritten
+void mopac_cuda_solve_linear(int n, double *A, int lda, double *b, int *info) {
+  if (!g_blas) create_handle();
+  cusolverDnHandle_t solver = nullptr;
+  cusolverDnCreate(&solver);
+  cusolverDnSetStream(solver, g_stream);
+  size_t bytesA = (size_t)lda * (size_t)n * sizeof(double);
+  size_t bytesB = sizeof(double) * (size_t)n;
+  DevBuf<double> dA, dB;
+  dA.ensure(bytesA); dB.ensure(bytesB);
+  cudaMemcpyAsync(dA.ptr, A, bytesA, cudaMemcpyHostToDevice, g_stream);
+  cudaMemcpyAsync(dB.ptr, b, bytesB, cudaMemcpyHostToDevice, g_stream);
+  int lwork = 0;
+  DevBuf<int> dIpiv, dInfo;
+  dIpiv.ensure(sizeof(int) * (size_t)n);
+  dInfo.ensure(sizeof(int));
+  cusolverDnDgetrf_bufferSize(solver, n, n, (double*)dA.ptr, lda, &lwork);
+  DevBuf<double> dWork; dWork.ensure(sizeof(double) * (size_t)lwork);
+  cusolverDnDgetrf(solver, n, n, (double*)dA.ptr, lda, dWork.ptr, dIpiv.ptr, dInfo.ptr);
+  // NRHS = 1
+  cusolverDnDgetrs(solver, CUBLAS_OP_N, n, 1, (double*)dA.ptr, lda, dIpiv.ptr, dB.ptr, n, dInfo.ptr);
+  cudaMemcpyAsync(b, dB.ptr, bytesB, cudaMemcpyDeviceToHost, g_stream);
+  cudaMemcpyAsync(info, dInfo.ptr, sizeof(int), cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+  cusolverDnDestroy(solver);
 }
 
 } // extern "C"

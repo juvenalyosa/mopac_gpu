@@ -23,6 +23,7 @@
 !      Use mod_vars_cuda, only: real_cuda, prec, ngpus
 !#endif
       Use mod_vars_cuda, only: lgpu 
+      use overlap_build,   only: build_overlap_packed
       implicit none
       integer  :: n,iopc 
       integer , intent(inout) :: lfock 
@@ -40,6 +41,8 @@
       double precision, dimension(20) :: coeffs 
       double precision :: const, d, sum 
       logical :: debug  
+      character(len=8) :: env
+      logical :: gen_resid
 #ifdef GPU
       integer :: igrid, iblock
 #endif        
@@ -109,8 +112,36 @@
         iopc = 3
       end if
 
-      call mult_symm_AB(p, f, 1.d0, n, linear, fppf(lbase+1:idim), 0.d0, iopc)
-      call mult_symm_AB(f, p, 1.d0, n, linear, fppf(lbase+1:idim), -1.d0, iopc)
+      env = ''
+      gen_resid = .false.
+      call get_environment_variable('MOPAC_DIIS_GEN', env, status=i)
+      if (i == 0) gen_resid = (trim(adjustl(env)) /= '')
+
+      if (gen_resid) then
+        ! Generalized Pulay residual: R = F P S - S P F (packed storage)
+        double precision, allocatable :: spack(:), tmp1(:), tmp2(:)
+        allocate(spack(linear), tmp1(linear), tmp2(linear), stat=i)
+        if (i /= 0) then
+          call memory_error('Pulay GPU generalized residual alloc')
+          return
+        end if
+        call build_overlap_packed(spack)
+        ! tmp1 = P*S
+        call mult_symm_AB(p, spack, 1.d0, n, linear, tmp1, 0.d0, iopc)
+        ! fppf = F*(P*S)
+        call mult_symm_AB(f, tmp1, 1.d0, n, linear, fppf(lbase+1:idim), 0.d0, iopc)
+        ! tmp2 = P*F
+        call mult_symm_AB(p, f, 1.d0, n, linear, tmp2, 0.d0, iopc)
+        ! tmp1 = S*(P*F)
+        call mult_symm_AB(spack, tmp2, 1.d0, n, linear, tmp1, 0.d0, iopc)
+        ! fppf = fppf - tmp1
+        fppf(lbase+1:idim) = fppf(lbase+1:idim) - tmp1
+        deallocate(spack, tmp1, tmp2, stat=i)
+      else
+        ! Default commutator residual: R = F P - P F
+        call mult_symm_AB(p, f, 1.d0, n, linear, fppf(lbase+1:idim), 0.d0, iopc)
+        call mult_symm_AB(f, p, 1.d0, n, linear, fppf(lbase+1:idim), -1.d0, iopc)
+      end if
       
 !      call mamult (p, f, fppf(lbase+1), n, 0.D0) 
 !      call mamult (f, p, fppf(lbase+1), n, -1.D0) 
@@ -164,14 +195,58 @@
 !   TIMES [F*P] FOR ITERATION J.
 !
 !********************************************************************
-      call osinv (evec, nfock1, d) 
-      if (abs(d) < 1.D-6) then 
-        start = .TRUE. 
-        return  
-      end if 
-      if (nfock < 2) return  
-      il = nfock*nfock1 
-      coeffs(:nfock) = -evec(1+il:nfock+il) 
+      env = ''
+      call get_environment_variable('MOPAC_DIIS_GPU', env, status=i)
+      if (i == 0 .and. trim(adjustl(env)) /= '') then
+        ! Solve [B  -1; -1^T 0] y = e_last using cuSOLVER; weights = -y(1:nfock)
+        double precision, allocatable :: amat(:,:), rhs(:)
+        integer :: info_s
+        allocate(amat(nfock1,nfock1), rhs(nfock1), stat=i)
+        if (i /= 0) then
+          call memory_error('Pulay GPU DIIS solve alloc')
+          return
+        end if
+        amat(:,:) = 0.d0
+        ! Copy emat into amat and apply same scaling as for inversion path
+        amat(:nfock,:nfock) = emat(:nfock,:nfock)
+        amat(:nfock,nfock1) = emat(:nfock,nfock1)
+        amat(nfock1,:nfock) = emat(nfock1,:nfock)
+        amat(nfock1,nfock1) = emat(nfock1,nfock1)
+        const = 1.D0/emat(lfock,lfock)
+        amat(:nfock,:nfock) = amat(:nfock,:nfock) * const
+        rhs(:) = 0.d0
+        rhs(nfock1) = 1.d0
+        call mopac_cuda_solve_linear(nfock1, amat, nfock1, rhs, info_s)
+        if (info_s /= 0) then
+          deallocate(amat, rhs, stat=i)
+          ! Fallback to inverse path on failure
+          call osinv (evec, nfock1, d)
+          if (abs(d) < 1.D-6) then
+            start = .TRUE.
+            return
+          end if
+          if (nfock < 2) return
+          il = nfock*nfock1
+          coeffs(:nfock) = -evec(1+il:nfock+il)
+        else
+          if (nfock < 2) then
+            deallocate(amat, rhs, stat=i)
+            return
+          end if
+          coeffs(:nfock) = -rhs(:nfock)
+          deallocate(amat, rhs, stat=i)
+          goto 777
+        end if
+      else
+        call osinv (evec, nfock1, d)
+        if (abs(d) < 1.D-6) then
+          start = .TRUE.
+          return
+        end if
+        if (nfock < 2) return
+        il = nfock*nfock1
+        coeffs(:nfock) = -evec(1+il:nfock+il)
+      end if
       if (debug) then 
         write (iw, '('' EVEC'')') 
         write (iw, '(6F12.6)') (coeffs(i),i=1,nfock) 
@@ -179,7 +254,7 @@
       end if 
      
      ! TODO: make it parallel
-      do i = 1, linear 
+777   do i = 1, linear 
         sum = 0.D0 
         l = 0 
         ii = (i - 1)*mfock 

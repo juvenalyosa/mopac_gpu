@@ -5,12 +5,14 @@ module gpu_info
                 subroutine gpuInfo(hasGpu, hasDouble, nDevices, name,name_size, totalMem, clockRate, major, minor) &
                 bind(c, name="getGPUInfo")
                   import :: c_bool, c_int, c_char, c_size_t
-                  logical(c_bool)                :: hasGpu
-                  integer(c_int)                 :: nDevices
-                  logical(c_bool),dimension(6)   :: hasDouble
-                  integer(c_int),dimension(6)    :: clockRate, major, minor, name_size
-                  character(kind=c_char),dimension(6) :: name
-                  integer(c_size_t),dimension(6) :: totalMem
+                  ! C signature: void getGPUInfo(bool*, bool hasDouble[6], int*, char name[6][256], ...)
+                  ! Fortran side uses CHARACTER*256 :: gpuName(6); map as name(256,6) with C char kind
+                  logical(c_bool)                  :: hasGpu
+                  integer(c_int)                   :: nDevices
+                  logical(c_bool), dimension(6)    :: hasDouble
+                  integer(c_int),  dimension(6)    :: clockRate, major, minor, name_size
+                  character(kind=c_char), dimension(256,6) :: name
+                  integer(c_size_t), dimension(6)  :: totalMem
                 end subroutine
             end interface
         end module

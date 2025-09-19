@@ -18,6 +18,8 @@
 #ifdef GPU
       Use mod_vars_cuda, only: lgpu, ngpus, prec
       use eigenvectors_cuda_mod, only: eigenvectors_CUDA, eigenvectors_CUDA_keep, eigenvectors_CUDA_fetch
+      use gpu_ortho_interfaces
+      use overlap_build, only: build_overlap_packed, unpack_upper_to_full
 #endif
 #if (MAGMA)
       Use magma
@@ -37,8 +39,9 @@
 #ifdef GPU
       ! Local controls for GPU diag selection
       integer :: thr_min, stat_env
-      character(len=32) :: env, fast, fetch
-      logical :: fastgpu, fetch_eigs
+      character(len=32) :: env, fast, fetch, ortho
+      logical :: fastgpu, fetch_eigs, ortho_gpu
+      double precision, allocatable :: Sfull(:,:), Spack(:)
 #endif
 !==============================================================================
 ! Code to find all eigenvectors and all eigenvalues for a symmetric General matrix
@@ -60,7 +63,7 @@
           xmat((i*(i + 1))/2) = xmat((i*(i + 1))/2) + i*1.d-10   ! Do NOT go much higher than 1.d-10, otherwise the geometry
       endforall                                              ! optimization might go into an endless loop.
       call dtpttr( 'u', ndim, xmat, eigenvecs, ndim, i )
-
+      
 #ifdef MKL
 #ifdef GPU
 if (lgpu .and. (ngpus > 1 .and. ndim > 100)) then
@@ -75,8 +78,8 @@ end if
       ! Threshold can be overridden via environment variable MOPAC_GPU_EIGEN_MIN.
       if (lgpu) then
         thr_min = 400
-        env = '' ; fast = '' ; fetch = ''
-        fastgpu = .false. ; fetch_eigs = .false.
+        env = '' ; fast = '' ; fetch = '' ; ortho = ''
+        fastgpu = .false. ; fetch_eigs = .false. ; ortho_gpu = .false.
         stat_env = 1
         call get_environment_variable('MOPAC_GPU_EIGEN_MIN', env, status=stat_env)
         if (stat_env == 0) then
@@ -88,6 +91,24 @@ end if
         if (stat_env == 0) fastgpu = (trim(adjustl(fast)) /= '')
         call get_environment_variable('MOPAC_EIG2HOST', fetch, status=stat_env)
         if (stat_env == 0) fetch_eigs = (trim(adjustl(fetch)) /= '')
+        call get_environment_variable('MOPAC_ORTHO_GPU', ortho, status=stat_env)
+        if (stat_env == 0) ortho_gpu = (trim(adjustl(ortho)) /= '')
+
+        ! Optional: apply GPU orthogonalization transform F' = X^T F X using overlap S
+        if (ortho_gpu) then
+          allocate(Spack((ndim*(ndim+1))/2), Sfull(ndim,ndim), stat=i)
+          if (i == 0) then
+            call build_overlap_packed(Spack)
+            call unpack_upper_to_full(ndim, Spack, Sfull)
+            i = 0
+            call mopac_cuda_transform_fock_with_s(ndim, Sfull, ndim, eigenvecs, ndim, i)
+            ! eigenvecs now contains transformed F' on host
+          end if
+          if (allocated(Sfull)) deallocate(Sfull)
+          if (allocated(Spack)) deallocate(Spack)
+          ! Force keep-on-GPU path since we now supply full F' in eigenvecs
+          fastgpu = .true.
+        end if
         if (ndim >= thr_min) then
           if (fastgpu) then
             ! Keep eigenvectors on device; optionally fetch to host

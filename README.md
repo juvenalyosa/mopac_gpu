@@ -53,6 +53,7 @@ Useful runtime toggles (set only if needed)
 - `MOPAC_EIG2HOST=1`          # copy eigenvectors back to host immediately
 - `MOPAC_PIN_USER=1`          # pin user arrays to reduce extra host memcpy
 - `MOPAC_STREAMS=off`         # disable CUDA streams (debugging)
+- `MOPAC_DETERMINISTIC=1`     # enforce deterministic cuBLAS settings (no atomics, host pointer mode)
 
 Printing eigenvectors
 - Add `EIGS VECTORS` to the keyword line; if eigenvectors were kept on the GPU, MOPAC fetches them automatically before printing.
@@ -168,6 +169,7 @@ Notes
 - 1‑GPU SCF and MOZYME paths offload dense BLAS and rotations using cuBLAS/cuSOLVER.
 - 2‑GPU MOZYME density uses a row‑sliced outer‑product implementation; device pair defaults to `0,1` or can be set via `MOZYME_GPUPAIR`.
 - Internally, MOPAC uses grow‑only device and pinned‑host caches to avoid repeated allocations and to overlap copies with compute.
+ - Experimental (phase 2): GPU orthogonalization helpers (Cholesky + TRSM) are available via new interfaces for future fully GPU‑resident SCF wiring.
 
 Common build recipes
 - CPU only, auto BLAS:
@@ -228,6 +230,9 @@ Runtime controls (environment)
 - `MOPAC_PIN_USER=1`            Pin user arrays to cut extra host memcpy (falls back safely if unsupported).
 - `MOPAC_STREAMS=off`           Disable CUDA streams (debug/diagnostics).
 - `MOPAC_NOGPU=1`               Disable all GPU functionality.
+- `MOPAC_ORTHO_GPU=1`           Experimental: orthogonalize F with S on GPU (Cholesky + TRSM) before eigensolve.
+- `MOPAC_DIIS_GEN=1`            Experimental: use generalized Pulay residual R = F P S − S P F (GPU-assisted).
+- `MOPAC_DIIS_GPU=1`            Experimental: solve DIIS linear system on GPU (cuSOLVER small dense solve).
 
 Typical usage
 - Large system, fast SCF:

@@ -21,6 +21,7 @@ set(src_list
     eigenvectors_LAPACK mult_symm_AB mtxm supdot
     molval schmit mxm diag rsp mult dot minv
     mamult esp_utilities osinv ddiag gpu_diag_state
+    overlap_build
     )
 #-----------------------------------------------
 # Add a list of source files to the target
