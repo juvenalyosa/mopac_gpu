@@ -98,7 +98,8 @@ Multi-GPU BLAS (cuBLASXt)
 
 Multi-GPU Eigensolver roadmap
 - Current: DSYEVD uses single-GPU cuSOLVER with optional keep-on-device mode.
-- Planned: explore cuSOLVERMg for multi-GPU symmetric eigensolve and/or block-cyclic CPU/GPU hybrids for very large problems. This requires API and data layout changes and will be staged separately.
+- Optional (experimental): set `MOPAC_EIG_MG=1` to attempt a multi-GPU eigensolver path.
+  - Present implementation is a placeholder that safely falls back to single-GPU; a full cuSOLVERMg integration requires distributed data and will be staged separately.
 
 Printing eigenvectors
 - Add `EIGS VECTORS` to the keyword line; if eigenvectors were kept on the GPU, MOPAC fetches them automatically before printing.
@@ -198,6 +199,7 @@ Build-time options
 - `-DGPU=ON`: enables CUDA wrappers and GPU-aware code paths.
 - `-DAUTO_BLAS=ON`: let CMake discover BLAS/LAPACK (recommended). If OFF, set `-DMOPAC_LINK` and `-DMOPAC_LINK_PATH` manually.
 - `-DENABLE_GPU_TESTS=ON`: registers GPU checks with `ctest` (requires `GPU=ON`).
+- `-DENABLE_CUSOLVER_MG=ON`: attempt to detect and link cuSOLVERMg; current code uses a safe stub until a full MG implementation lands.
 
 Runtime environment knobs
 - `MOPAC_NOGPU=1`: disable GPU paths entirely.

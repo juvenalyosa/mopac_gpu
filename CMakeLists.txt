@@ -280,6 +280,18 @@ if(GPU)
   find_package(CUDAToolkit REQUIRED)
   # Link CUDA runtime and math libraries needed by wrappers
   target_link_libraries(mopac-core PUBLIC CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
+  # Optional: cuSOLVERMg detection for experimental multi-GPU eigensolver stub
+  option(ENABLE_CUSOLVER_MG "Enable cuSOLVERMg detection and stubs" OFF)
+  if(ENABLE_CUSOLVER_MG)
+    find_library(CUSOLVERMG_LIBRARY NAMES cusolverMg PATHS $ENV{CUDA_HOME}/lib64 $ENV{CUDA_HOME}/lib $ENV{CUDAToolkit_ROOT}/lib64)
+    if(CUSOLVERMG_LIBRARY)
+      message(STATUS "Found cuSOLVERMg: ${CUSOLVERMG_LIBRARY}")
+      target_link_libraries(mopac-core PUBLIC ${CUSOLVERMG_LIBRARY})
+      target_compile_definitions(mopac-core PRIVATE HAVE_CUSOLVER_MG=1)
+    else()
+      message(STATUS "cuSOLVERMg not found; multi-GPU eigensolver remains a placeholder")
+    endif()
+  endif()
   # Ensure position independent code for shared targets
   set_target_properties(mopac-core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -309,6 +321,12 @@ if(GPU)
                       ${CMAKE_SOURCE_DIR}/tests/mozyme_h2o.mop 
                       ${GPU_VERIFY_PAIR} ${GPU_VERIFY_TOL})
     set_tests_properties(mozyme_gpu_verify PROPERTIES LABELS "gpu")
+    # cuBLASXt smoke test (runs regardless of ngpus; selects multi-GPU if available)
+    add_executable(mopac-gpu-xt-smoke tests/gpu_xt_smoke.F90)
+    target_link_libraries(mopac-gpu-xt-smoke mopac-core)
+    add_dependencies(mopac-gpu-xt-smoke mopac-core)
+    add_test(NAME gpu_xt_smoke COMMAND $<TARGET_FILE:mopac-gpu-xt-smoke>)
+    set_tests_properties(gpu_xt_smoke PROPERTIES LABELS "gpu")
   endif()
 endif()
 

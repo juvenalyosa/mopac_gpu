@@ -1891,6 +1891,10 @@ end subroutine overlp
 subroutine prjfc (f, xparam, nvar, cof, p, atmass, x, rm, dx, coord)
     use molkst_C, only: numat
     use chanel_C, only: iw
+#ifdef GPU
+    use mod_vars_cuda, only: lgpu, ngpus
+    use mopac_cublas_interfaces
+#endif
     implicit none
     integer, intent (in) :: nvar
     double precision, dimension (nvar), intent (in) :: xparam
@@ -2111,13 +2115,35 @@ subroutine prjfc (f, xparam, nvar, cof, p, atmass, x, rm, dx, coord)
 ! For GPU MOPAC
 ! GBR_new_addition
    !     USE COF FOR SCRATCH.
-    call dgemm ("N", "N", nc1, nc1, nc1, 1.0d0, f, nvar, p, nvar, &
-         & 0.0d0, cof, nvar)
+#ifdef GPU
+    if (lgpu) then
+      if (ngpus > 1) then
+        call gemm_cublas_multi('N','N', nc1, nc1, nc1, 1.0d0, f, nvar, p, nvar, 0.0d0, cof, nvar)
+      else
+        call gemm_cublas('N','N', nc1, nc1, nc1, 1.0d0, f, nvar, p, nvar, 0.0d0, cof, nvar)
+      end if
+    else
+      call dgemm ("N", "N", nc1, nc1, nc1, 1.0d0, f, nvar, p, nvar, 0.0d0, cof, nvar)
+    end if
+#else
+    call dgemm ("N", "N", nc1, nc1, nc1, 1.0d0, f, nvar, p, nvar, 0.0d0, cof, nvar)
+#endif
    !
    ! 11. COMPUTE P*F*P.
    !
-    call dgemm ("N", "N", nc1, nc1, nc1, 1.0d0, p, nvar, cof, nvar, &
-         & 0.0d0, f, nvar)
+#ifdef GPU
+    if (lgpu) then
+      if (ngpus > 1) then
+        call gemm_cublas_multi('N','N', nc1, nc1, nc1, 1.0d0, p, nvar, cof, nvar, 0.0d0, f, nvar)
+      else
+        call gemm_cublas('N','N', nc1, nc1, nc1, 1.0d0, p, nvar, cof, nvar, 0.0d0, f, nvar)
+      end if
+    else
+      call dgemm ("N", "N", nc1, nc1, nc1, 1.0d0, p, nvar, cof, nvar, 0.0d0, f, nvar)
+    end if
+#else
+    call dgemm ("N", "N", nc1, nc1, nc1, 1.0d0, p, nvar, cof, nvar, 0.0d0, f, nvar)
+#endif
     continue
     return
 !

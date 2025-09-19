@@ -119,15 +119,21 @@ subroutine diag_for_GPU (fao, vector, nocc, eig, norbs, mpack)
       F_full(1:n,1:n) => fmo
       Fmo_nv(1:nvirt,1:nocc) => fmo
       if (nocc < nvirt) then
-        call gemm_cublas('N', 'N', n, nocc, n, 1.0d0, F_full, n, vector , mdim, 0.0d0, fck, &
-        & norbs)
-        call gemm_cublas('T', 'N', nvirt, nocc, n, 1.0d0, vector(1:n, lumo:n), mdim, fck, &
-        & norbs, 0.0d0, Fmo_nv, nvirt)
+        if (ngpus > 1) then
+          call gemm_cublas_multi('N', 'N', n, nocc, n, 1.0d0, F_full, n, vector , mdim, 0.0d0, fck, norbs)
+          call gemm_cublas_multi('T', 'N', nvirt, nocc, n, 1.0d0, vector(1:n, lumo:n), mdim, fck, norbs, 0.0d0, Fmo_nv, nvirt)
+        else
+          call gemm_cublas('N', 'N', n, nocc, n, 1.0d0, F_full, n, vector , mdim, 0.0d0, fck, norbs)
+          call gemm_cublas('T', 'N', nvirt, nocc, n, 1.0d0, vector(1:n, lumo:n), mdim, fck, norbs, 0.0d0, Fmo_nv, nvirt)
+        end if
       else
-        call gemm_cublas ('N', 'N', n, nvirt, n, 1.0d0, F_full, n, vector(1:n, lumo:n), mdim, &
-        & 0.0d0, fck, norbs)
-        call gemm_cublas ('T', 'N', nvirt, nocc, n, 1.0d0, fck, norbs, vector, mdim, &
-        & 0.0d0, Fmo_nv, nvirt)
+        if (ngpus > 1) then
+          call gemm_cublas_multi('N', 'N', n, nvirt, n, 1.0d0, F_full, n, vector(1:n, lumo:n), mdim, 0.0d0, fck, norbs)
+          call gemm_cublas_multi('T', 'N', nvirt, nocc, n, 1.0d0, fck, norbs, vector, mdim, 0.0d0, Fmo_nv, nvirt)
+        else
+          call gemm_cublas('N', 'N', n, nvirt, n, 1.0d0, F_full, n, vector(1:n, lumo:n), mdim, 0.0d0, fck, norbs)
+          call gemm_cublas('T', 'N', nvirt, nocc, n, 1.0d0, fck, norbs, vector, mdim, 0.0d0, Fmo_nv, nvirt)
+        end if
       end if
     else
 #endif

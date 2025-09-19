@@ -3,6 +3,9 @@
 #include <cublas_v2.h>
 #include <cublasXt.h>
 #include <cusolverDn.h>
+#if defined(HAVE_CUSOLVER_MG)
+#include <cusolverMg.h>
+#endif
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
@@ -1437,3 +1440,14 @@ void mopac_cuda_fmulC(int n, const double *F_packed, const double *C, int ldc, d
 }
 
 } // extern "C"
+// Placeholder: multi-GPU eigensolver via cuSOLVERMg (not implemented yet)
+// Returns a negative info to signal fallback to single-GPU path.
+void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
+  (void)n; (void)A; (void)lda; (void)W;
+#if defined(HAVE_CUSOLVER_MG)
+  // TODO: implement distributed data setup and call cusolverMg
+  if (info) *info = -2; // compiled with MG, but not wired
+#else
+  if (info) *info = -1; // MG not available; force fallback
+#endif
+}

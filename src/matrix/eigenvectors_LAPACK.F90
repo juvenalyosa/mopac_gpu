@@ -23,6 +23,7 @@
       use partial_eig_gpu
       use molkst_C, only: uhf, nclose, nalpha, nbeta
       use eig_call_context, only: current_spin
+      use gpu_eig_mg_interfaces
 #endif
 #if (MAGMA)
       Use magma
@@ -155,6 +156,25 @@ end if
         end if
 
         if (ndim >= thr_min) then
+          ! Optional: attempt multi-GPU eigensolver (cuSOLVERMg placeholder)
+          env = ''
+          call get_environment_variable('MOPAC_EIG_MG', env, status=stat_env)
+          if (ngpus > 1 .and. stat_env == 0 .and. trim(adjustl(env)) /= '') then
+            ! Provide a full matrix to the MG wrapper; on success, return.
+            ! The placeholder returns info<0 to trigger fallback paths.
+            allocate(Sfull(ndim,ndim), stat=i)
+            if (i == 0) then
+              Sfull = eigenvecs
+              i = 0
+              call mopac_cusolvermg_dsyevd(ndim, Sfull, ndim, eigvals, i)
+              if (i == 0) then
+                eigenvecs = Sfull
+                deallocate(Sfull)
+                return
+              end if
+              deallocate(Sfull)
+            end if
+          end if
           if (fastgpu) then
             ! Keep eigenvectors on device; optionally fetch to host
             call eigenvectors_CUDA_keep(eigenvecs, eigvals, ndim)
