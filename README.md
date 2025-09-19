@@ -317,6 +317,126 @@ The main source for MOPAC documentation is presently its old [online user manual
 
 There is a [new documentation website](https://openmopac.github.io) under development, but it is not yet ready for general use.
 
+## CPU vs GPU: Step‑by‑Step Instructions
+
+This section provides detailed, step‑by‑step instructions to build and run MOPAC in CPU‑only mode and in GPU‑accelerated mode, including recommended runtime flags and a worked example using `GEO_DAT=`.
+
+### A. Prerequisites
+
+- CPU‑only
+  - GFortran 9+ (or another Fortran compiler)
+  - CMake 3.14+
+  - Ninja or Make (Ninja recommended)
+  - BLAS/LAPACK (OpenBLAS or MKL)
+
+- GPU (NVIDIA)
+  - NVIDIA GPU + recent driver
+  - CUDA Toolkit 11.2+ (verify `nvidia-smi` and `nvcc --version`)
+  - CMake 3.18+ (for CUDA language)
+
+Ubuntu packages (example):
+
+```
+sudo apt-get update
+sudo apt-get install -y build-essential cmake ninja-build gfortran libopenblas-dev liblapack-dev
+```
+
+### B. Building MOPAC
+
+1) CPU‑only
+
+```
+cmake -S . -B build-cpu -G Ninja -DGPU=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build build-cpu -j
+```
+
+2) GPU (Tesla P4 example, compute capability 6.1)
+
+```
+export CUDAToolkit_ROOT=/usr/local/cuda   # if needed
+cmake -S . -B build-gpu -G Ninja -DGPU=ON -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CUDA_ARCHITECTURES=61
+cmake --build build-gpu -j
+```
+
+Portable multi‑arch build (optional): `-DCMAKE_CUDA_ARCHITECTURES=61;70;75;80;86`.
+
+### C. Running: CPU vs GPU
+
+- CPU run (use CPU build, or disable GPU):
+  - `./build-cpu/mopac input.mop`
+  - Or: `MOPAC_NOGPU=1 ./build-gpu/mopac input.mop`
+
+- GPU run (recommended for medium/large systems):
+  - `export MOPAC_FORCEGPU=1`
+  - `./build-gpu/mopac input.mop`
+
+Recommended GPU flags:
+- Determinism: `export MOPAC_DETERMINISTIC=1`
+- Fast path (keep on device): `export MOPAC_FASTGPU=1`
+- Optional orthogonalization: `export MOPAC_ORTHO_GPU=1`
+- Streams off (debug): `export MOPAC_STREAMS=off`
+
+Advanced (optional):
+- Partial eig (RHF): `MOPAC_PARTIAL_EIG=1` (`MOPAC_PARTIAL_TOL=1e-8`, `MOPAC_PARTIAL_MAXIT=50`)
+- Purification (RHF): `MOPAC_PURIFY=1` and `MOPAC_PURIFY_GPU=1` (`MOPAC_PURIFY_TOL`, `MOPAC_PURIFY_MAXIT`)
+- DIIS on GPU: `MOPAC_DIIS_GEN=1`, `MOPAC_DIIS_GPU_BUF=1`, `MOPAC_DIIS_GPU_BFULL=1`, `MOPAC_DIIS_GPU=1`
+- Experimental Fock GPU: `MOPAC_FOCK_GPU=1` (falls back to CPU until kernels are enabled)
+
+### D. Worked Example (PDB via GEO_DAT)
+
+Create `protein_pm7_gpu.mop`:
+
+```
+PM7 GEO_DAT=modeljuv.B99990166_withH_rep0_step5000.pdb 1SCF EIGS VECTORS
+Protein quick GPU test
+
+```
+
+Run on GPU (Tesla P4):
+
+```
+export MOPAC_FORCEGPU=1
+export MOPAC_DETERMINISTIC=1
+export MOPAC_ORTHO_GPU=1
+export MOPAC_FASTGPU=1
+./build-gpu/mopac protein_pm7_gpu.mop
+```
+
+Run on CPU (baseline):
+
+```
+unset MOPAC_FORCEGPU; export MOPAC_NOGPU=1
+./build-cpu/mopac protein_pm7_gpu.mop
+```
+
+### E. One‑Command Build & Test
+
+Use the helper script:
+
+```
+# GPU build for P4 (sm_61) and quick run with PDB
+./scripts/build_and_test.sh --gpu on --arch 61 \
+  --pdb modeljuv.B99990166_withH_rep0_step5000.pdb
+
+# CPU‑only
+./scripts/build_and_test.sh --gpu off --pdb modeljuv.B99990166_withH_rep0_step5000.pdb
+```
+
+### F. Choosing CPU vs GPU
+
+- < 300–400 AOs: often CPU is as fast; consider CPU or raise `MOPAC_GPU_EIGEN_MIN`.
+- 500–1500 AOs: GPU typically 1.5–4× faster (especially with `MOPAC_FASTGPU=1`).
+- ≥ 2000 AOs: GPU often 3–8× faster; ensure enough VRAM.
+
+### G. Troubleshooting
+
+- CUDA not found: set `CUDAToolkit_ROOT` or ensure `nvcc` is on PATH.
+- Link errors: ensure `/usr/local/cuda/lib64` in `LD_LIBRARY_PATH`.
+- Arch mismatch: set `-DCMAKE_CUDA_ARCHITECTURES` (e.g., 61 for P4).
+- Streams/ordering: `MOPAC_STREAMS=off`.
+- Determinism: `MOPAC_DETERMINISTIC=1`.
+
 ## Interfaces
 
 While MOPAC is primarily a self-contained command-line program whose behavior is specified by an input file, it also has other modes of
