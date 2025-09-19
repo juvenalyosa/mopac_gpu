@@ -1209,3 +1209,132 @@ void mopac_cuda_solve_linear(int n, double *A, int lda, double *b, int *info) {
 }
 
 } // extern "C"
+
+// =============== Build DIIS B-column on GPU (R^T r_lfock) ===============
+extern "C" {
+
+void mopac_cuda_bcol_from_residuals(int linear, int nfock,
+                                    const double *fppf, int lfock,
+                                    double *out) {
+  if (!g_blas) create_handle();
+  size_t bytesR = (size_t)linear * (size_t)nfock * sizeof(double);
+  DevBuf<double> dR, dY;
+  dR.ensure(bytesR);
+  dY.ensure(sizeof(double) * (size_t)nfock);
+  for (int col = 0; col < nfock; ++col) {
+    const double *src = fppf + (size_t)col * (size_t)linear;
+    double *dst = dR.ptr + (size_t)col * (size_t)linear;
+    cudaMemcpyAsync(dst, src, sizeof(double) * (size_t)linear, cudaMemcpyHostToDevice, g_stream);
+  }
+  const double *dr = dR.ptr + (size_t)(lfock - 1) * (size_t)linear;
+  const double alpha = 1.0;
+  const double beta  = 0.0;
+  cublasDgemv(g_blas, CUBLAS_OP_T, linear, nfock, &alpha, dR.ptr, linear, dr, 1, &beta, dY.ptr, 1);
+  cudaMemcpyAsync(out, dY.ptr, sizeof(double) * (size_t)nfock, cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+}
+
+} // extern "C"
+
+// =============== Persistent DIIS residual buffer on GPU ===============
+extern "C" {
+
+static DevBuf<double> g_diis_R;
+static int g_diis_linear_cap = 0;
+static int g_diis_maxfock_cap = 0;
+
+void mopac_cuda_diis_init(int linear, int maxfock) {
+  if (!g_blas) create_handle();
+  size_t bytes = (size_t)linear * (size_t)maxfock * sizeof(double);
+  g_diis_R.ensure(bytes);
+  g_diis_linear_cap = linear;
+  g_diis_maxfock_cap = maxfock;
+}
+
+void mopac_cuda_diis_store(int linear, int col, const double *r_host) {
+  if (g_diis_linear_cap < linear || !g_diis_R.ptr) {
+    // Not initialized or too small; ignore store safely
+    return;
+  }
+  size_t offset = (size_t)(col - 1) * (size_t)g_diis_linear_cap;
+  double *dst = g_diis_R.ptr + offset;
+  cudaMemcpyAsync(dst, r_host, sizeof(double) * (size_t)linear, cudaMemcpyHostToDevice, g_stream);
+  cudaStreamSynchronize(g_stream);
+}
+
+void mopac_cuda_diis_bcol(int linear, int nfock, int lfock, double *out_host) {
+  if (!g_blas) create_handle();
+  if (!g_diis_R.ptr || g_diis_linear_cap < linear) {
+    // Not initialized; zero output
+    for (int i = 0; i < nfock; ++i) out_host[i] = 0.0;
+    return;
+  }
+  DevBuf<double> dY;
+  dY.ensure(sizeof(double) * (size_t)nfock);
+  const double alpha = 1.0;
+  const double beta  = 0.0;
+  const double *dr = g_diis_R.ptr + (size_t)(lfock - 1) * (size_t)g_diis_linear_cap;
+  cublasDgemv(g_blas, CUBLAS_OP_T, linear, nfock, &alpha, g_diis_R.ptr, g_diis_linear_cap, dr, 1, &beta, dY.ptr, 1);
+  cudaMemcpyAsync(out_host, dY.ptr, sizeof(double) * (size_t)nfock, cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+}
+
+void mopac_cuda_diis_release() {
+  g_diis_R.release();
+  g_diis_linear_cap = 0;
+  g_diis_maxfock_cap = 0;
+}
+
+} // extern "C"
+
+// =============== Full B = R^T R assembly on GPU ===============
+extern "C" {
+
+void mopac_cuda_bfull_from_host(int linear, int nfock,
+                                const double *fppf,
+                                double *b_out) {
+  if (!g_blas) create_handle();
+  size_t bytesR = (size_t)linear * (size_t)nfock * sizeof(double);
+  DevBuf<double> dR, dB;
+  dR.ensure(bytesR);
+  dB.ensure(sizeof(double) * (size_t)nfock * (size_t)nfock);
+  for (int col = 0; col < nfock; ++col) {
+    const double *src = fppf + (size_t)col * (size_t)linear;
+    double *dst = dR.ptr + (size_t)col * (size_t)linear;
+    cudaMemcpyAsync(dst, src, sizeof(double) * (size_t)linear, cudaMemcpyHostToDevice, g_stream);
+  }
+  const double alpha = 1.0;
+  const double beta  = 0.0;
+  cublasDgemm(g_blas, CUBLAS_OP_T, CUBLAS_OP_N,
+              nfock, nfock, linear,
+              &alpha,
+              dR.ptr, linear,
+              dR.ptr, linear,
+              &beta,
+              dB.ptr, nfock);
+  cudaMemcpyAsync(b_out, dB.ptr, sizeof(double) * (size_t)nfock * (size_t)nfock, cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+}
+
+void mopac_cuda_bfull_from_device(int linear, int nfock, double *b_out) {
+  if (!g_blas) create_handle();
+  if (!g_diis_R.ptr || g_diis_linear_cap < linear) {
+    for (int i = 0; i < nfock*nfock; ++i) b_out[i] = 0.0;
+    return;
+  }
+  DevBuf<double> dB;
+  dB.ensure(sizeof(double) * (size_t)nfock * (size_t)nfock);
+  const double alpha = 1.0;
+  const double beta  = 0.0;
+  cublasDgemm(g_blas, CUBLAS_OP_T, CUBLAS_OP_N,
+              nfock, nfock, linear,
+              &alpha,
+              g_diis_R.ptr, g_diis_linear_cap,
+              g_diis_R.ptr, g_diis_linear_cap,
+              &beta,
+              dB.ptr, nfock);
+  cudaMemcpyAsync(b_out, dB.ptr, sizeof(double) * (size_t)nfock * (size_t)nfock, cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+}
+
+} // extern "C"

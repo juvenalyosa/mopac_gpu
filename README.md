@@ -233,6 +233,16 @@ Runtime controls (environment)
 - `MOPAC_ORTHO_GPU=1`           Experimental: orthogonalize F with S on GPU (Cholesky + TRSM) before eigensolve.
 - `MOPAC_DIIS_GEN=1`            Experimental: use generalized Pulay residual R = F P S − S P F (GPU-assisted).
 - `MOPAC_DIIS_GPU=1`            Experimental: solve DIIS linear system on GPU (cuSOLVER small dense solve).
+- `MOPAC_DIIS_GPU_BMAT=1`       Experimental: assemble DIIS B‑matrix column on GPU (BLAS‑3, R^T r).
+- `MOPAC_DIIS_GPU_BUF=1`        Experimental: keep DIIS residuals in a persistent GPU buffer (fewer host copies).
+- `MOPAC_DIIS_GPU_BFULL=1`      Experimental: build full DIIS B = R^T R on GPU each iteration.
+- `MOPAC_PARTIAL_EIG=1`         Experimental: partial eigensolve (RHF): compute only the lowest nclose eigenpairs with a block subspace method.
+- `MOPAC_PARTIAL_TOL=1e-8`      Tolerance for partial eigensolve residuals.
+- `MOPAC_PARTIAL_MAXIT=50`      Max iterations for partial eigensolve.
+- `MOPAC_PURIFY=1`              Experimental: diagonalization-free purification (RHF). Builds density via TC2 in orthonormal basis.
+- `MOPAC_PURIFY_GPU=1`          Experimental: accelerate purification with GPU (GEMM/TRSM helpers).
+- `MOPAC_PURIFY_TOL=1e-8`       Purification tolerance on ||X - X^2||_F and trace targeting.
+- `MOPAC_PURIFY_MAXIT=100`      Max purification iterations.
 
 Typical usage
 - Large system, fast SCF:

@@ -24,6 +24,7 @@
 !#endif
       Use mod_vars_cuda, only: lgpu 
       use overlap_build,   only: build_overlap_packed
+      use gpu_diis_interfaces
       implicit none
       integer  :: n,iopc 
       integer , intent(inout) :: lfock 
@@ -87,6 +88,11 @@
         nfock = 1 
         lfock = 1 
         start = .FALSE. 
+        env = ''
+        call get_environment_variable('MOPAC_DIIS_GPU_BUF', env, status=i)
+        if (lgpu .and. i == 0) then
+          if (trim(adjustl(env)) /= '') call mopac_cuda_diis_init(linear, mfock)
+        end if
       else 
         if (nfock < mfock) nfock = nfock + 1 
         if (lfock /= mfock) then 
@@ -139,8 +145,8 @@
         deallocate(spack, tmp1, tmp2, stat=i)
       else
         ! Default commutator residual: R = F P - P F
-        call mult_symm_AB(p, f, 1.d0, n, linear, fppf(lbase+1:idim), 0.d0, iopc)
-        call mult_symm_AB(f, p, 1.d0, n, linear, fppf(lbase+1:idim), -1.d0, iopc)
+      call mult_symm_AB(p, f, 1.d0, n, linear, fppf(lbase+1:idim), 0.d0, iopc)
+      call mult_symm_AB(f, p, 1.d0, n, linear, fppf(lbase+1:idim), -1.d0, iopc)
       end if
       
 !      call mamult (p, f, fppf(lbase+1), n, 0.D0) 
@@ -150,14 +156,66 @@
 !   FPPF NOW CONTAINS THE RESULT OF FP - PF.
 !
       nfock1 = nfock + 1 
-      do i = 1, nfock
-        kdim = i*linear        
-        emat(nfock1,i) = -1.D0 
-        emat(i,nfock1) = -1.D0  
-        emat(lfock,i) = ddot(linear,fppf((i-1)*linear+1:kdim),1,fppf(lbase+1:idim),1)
-        
-        emat(i,lfock) = emat(lfock,i) 
-      end do 
+      ! Assemble DIIS B-matrix entries for the current column/row
+      env = ''
+      call get_environment_variable('MOPAC_DIIS_GPU_BFULL', env, status=i)
+      if (lgpu .and. i == 0 .and. trim(adjustl(env)) /= '') then
+        ! Build full B = R^T R on GPU
+        double precision, allocatable :: bfull(:,:)
+        allocate(bfull(nfock, nfock), stat=i)
+        if (i /= 0) then
+          call memory_error('Pulay GPU Bfull alloc')
+          return
+        end if
+        env = ''
+        call get_environment_variable('MOPAC_DIIS_GPU_BUF', env, status=i)
+        if (i == 0 .and. trim(adjustl(env)) /= '') then
+          call mopac_cuda_diis_store(linear, lfock, fppf(lbase+1:idim))
+          call mopac_cuda_bfull_from_device(linear, nfock, bfull)
+        else
+          call mopac_cuda_bfull_from_host(linear, nfock, fppf, bfull)
+        end if
+        emat(1:nfock,1:nfock) = bfull(1:nfock,1:nfock)
+        do i = 1, nfock
+          emat(nfock1,i) = -1.D0
+          emat(i,nfock1) = -1.D0
+        end do
+        deallocate(bfull, stat=i)
+      else if (lgpu) then
+        env = ''
+        call get_environment_variable('MOPAC_DIIS_GPU_BMAT', env, status=i)
+        if (i == 0 .and. trim(adjustl(env)) /= '') then
+          double precision, allocatable :: bcol(:)
+          allocate(bcol(nfock), stat=i)
+          if (i /= 0) then
+            call memory_error('Pulay GPU Bcol alloc')
+            return
+          end if
+          env = ''
+          call get_environment_variable('MOPAC_DIIS_GPU_BUF', env, status=i)
+          if (i == 0 .and. trim(adjustl(env)) /= '') then
+            call mopac_cuda_diis_store(linear, lfock, fppf(lbase+1:idim))
+            call mopac_cuda_diis_bcol(linear, nfock, lfock, bcol)
+          else
+            call mopac_cuda_bcol_from_residuals(linear, nfock, fppf, lfock, bcol)
+          end if
+          do i = 1, nfock
+            emat(nfock1,i) = -1.D0
+            emat(i,nfock1) = -1.D0
+            emat(lfock,i)  = bcol(i)
+            emat(i,lfock)  = emat(lfock,i)
+          end do
+          deallocate(bcol, stat=i)
+        else
+        do i = 1, nfock
+          kdim = i*linear
+          emat(nfock1,i) = -1.D0
+          emat(i,nfock1) = -1.D0
+          emat(lfock,i) = ddot(linear,fppf((i-1)*linear+1:kdim),1,fppf(lbase+1:idim),1)
+          emat(i,lfock) = emat(lfock,i)
+        end do
+        end if
+      end if
       pl = emat(lfock,lfock)/linear 
       emat(nfock1,nfock1) = 0.D0 
       if (emat(lfock, lfock) < 1.d-20) return

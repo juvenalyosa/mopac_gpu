@@ -24,12 +24,15 @@
       USE maps_C, ONLY: latom
       USE chanel_C, only : iw, ifiles_1
       USE molkst_C, ONLY: numat, norbs, nalpha, nbeta, uhf, &
-    &    nclose, nopen, fract, numcal, mpack, iflepo, iscf, &
-    &    enuclr, keywrd, gnorm, moperr, last, nscf, emin, &
+        &    nclose, nopen, fract, numcal, mpack, iflepo, iscf, &
+    &    enuclr, keywrd, gnorm, moperr, last, nscf, emin, nelecs, &
          limscf, atheat, is_PARAM, id, line, lxfac, nalpha_open, &
          nbeta_open, npulay, method_indo, use_disk
       USE reimers_C, only: dd, ff, tot, cc0, aa, dtmp, nb2
       use cosmo_C, only : useps
+#ifdef GPU
+      use purify_gpu
+#endif
 #ifdef GPU
       Use mod_vars_cuda, only: lgpu, real_cuda, prec
       use density_cuda_i
@@ -824,10 +827,10 @@
               end if
             end if
 #ifdef GPU
-              if (lgpu) then
-                 call pulay_for_gpu (f, pa, norbs, pold, pold2, pold3, &
-                 & jalp, ialp, npulay*mpack, frst, pl)
-              else
+      if (lgpu) then
+         call pulay_for_gpu (f, pa, norbs, pold, pold2, pold3, &
+         & jalp, ialp, npulay*mpack, frst, pl)
+      else
 #endif
                  call pulay (f, pa, norbs, pold, pold2, pold3, &
                  & jalp, ialp, npulay*mpack, frst, pl)
@@ -836,6 +839,21 @@
 #endif
           end if
 
+! Optional diagonalization-free purification (RHF only)
+#ifdef GPU
+      call get_environment_variable('MOPAC_PURIFY', line, status=i)
+      if (i == 0) then
+        if (trim(adjustl(line)) /= '' .and. .not. uhf) then
+          use purify_gpu
+          if (timitr) call timer('BEFORE DENSIT')
+          call purify_density_from_fock(f, norbs, nelecs, p, 1.d-8, 100)
+          if (modea/=3 .and. .not.(newdg .and. okpuly)) then
+            call cnvg (p, pold, pold2,  niter, pl)
+          end if
+          goto 9050
+        end if
+      end if
+#endif
 !***********************************************************************
 !                                                                      *
 !           DIAGONALIZE THE ALPHA OR RHF SECULAR DETERMINANT           *
@@ -905,7 +923,7 @@
             call cnvg (p, pold, pold2,  niter, pl)
         end if
       end if
-      if (timitr) call timer ('AFTER  DENSIT')
+9050  if (timitr) call timer ('AFTER  DENSIT')
 !***********************************************************************
 !                                                                      *
 !                       UHF-SPECIFIC CODE                              *

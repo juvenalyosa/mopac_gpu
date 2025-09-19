@@ -22,6 +22,8 @@ set(src_list
     molval schmit mxm diag rsp mult dot minv
     mamult esp_utilities osinv ddiag gpu_diag_state
     overlap_build
+    purify_gpu
+    partial_eig_gpu
     )
 #-----------------------------------------------
 # Add a list of source files to the target

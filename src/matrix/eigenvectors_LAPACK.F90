@@ -20,6 +20,8 @@
       use eigenvectors_cuda_mod, only: eigenvectors_CUDA, eigenvectors_CUDA_keep, eigenvectors_CUDA_fetch
       use gpu_ortho_interfaces
       use overlap_build, only: build_overlap_packed, unpack_upper_to_full
+      use partial_eig_gpu
+      use molkst_C, only: uhf, nclose
 #endif
 #if (MAGMA)
       Use magma
@@ -109,6 +111,37 @@ end if
           ! Force keep-on-GPU path since we now supply full F' in eigenvecs
           fastgpu = .true.
         end if
+        ! Optional: experimental partial eigensolve for RHF (smallest nclose eigenpairs)
+        env = ''
+        call get_environment_variable('MOPAC_PARTIAL_EIG', env, status=stat_env)
+        if (stat_env == 0 .and. trim(adjustl(env)) /= '' .and. .not. uhf) then
+          integer :: nocc, itmax
+          double precision :: etol
+          nocc = max(1, min(nclose, ndim))
+          etol = 1.d-8
+          itmax = 50
+          call get_environment_variable('MOPAC_PARTIAL_TOL', env, status=stat_env)
+          if (stat_env == 0) then
+            read(env, *, end=20, err=20) etol
+          end if
+20        continue
+          call get_environment_variable('MOPAC_PARTIAL_MAXIT', env, status=stat_env)
+          if (stat_env == 0) then
+            read(env, *, end=30, err=30) itmax
+          end if
+30        continue
+          ! Ensure we are in orthonormal basis when possible
+          if (ortho_gpu) then
+            ! eigenvecs currently holds transformed F'
+            call block_subspace_smallest(eigenvecs, ndim, nocc, eigvals, eigenvecs, itmax, etol)
+            return
+          else
+            ! Fall back to CPU GEMM path using current full matrix unpacked earlier
+            call block_subspace_smallest(eigenvecs, ndim, nocc, eigvals, eigenvecs, itmax, etol)
+            return
+          end if
+        end if
+
         if (ndim >= thr_min) then
           if (fastgpu) then
             ! Keep eigenvectors on device; optionally fetch to host
