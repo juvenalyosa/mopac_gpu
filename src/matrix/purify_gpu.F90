@@ -21,6 +21,8 @@ contains
     double precision :: one, zero
     character(len=32) :: env
     logical :: use_gpu
+    double precision :: tol_l
+    integer :: maxit_l
     one = 1.d0; zero = 0.d0
 
     allocate(Sfull(n,n), Ffull(n,n), U(n,n), Uinv(n,n), Fp(n,n), X(n,n), X2(n,n), T(n,n), Pao(n,n))
@@ -83,21 +85,11 @@ contains
     do i=1,n
       X(i,i) = 0.5d0 - (Fp(i,i) - mu)/beta
     end do
-    ! Allow env overrides for tol/maxit
-    stat_env = 1 ; env = ''
-    call get_environment_variable('MOPAC_PURIFY_TOL', env, status=stat_env)
-    if (stat_env == 0) then
-      read(env, *, end=5, err=5) tol
-    end if
-5   continue
-    stat_env = 1 ; env = ''
-    call get_environment_variable('MOPAC_PURIFY_MAXIT', env, status=stat_env)
-    if (stat_env == 0) then
-      read(env, *, end=6, err=6) maxit
-    end if
-6   continue
+    ! Use tolerances passed by caller
+    tol_l = tol
+    maxit_l = maxit
 
-    do k=1,maxit
+    do k=1,maxit_l
       ! X2 = X*X
 #ifdef GPU
       if (use_gpu) then
@@ -135,8 +127,16 @@ contains
 #else
       call dgemm('N','N', n, n, n, one, X, n, X, n, zero, X2, n)
 #endif
-      err = fro_norm_diff(X, X2, n)
-      if (abs(delta) < max(1.d0, target)*tol .and. err < tol) exit
+      ! err = ||X - X^2||_F
+      s = 0.d0
+      do j=1,n
+        do i=1,n
+          diff = X(i,j) - X2(i,j)
+          s = s + diff*diff
+        end do
+      end do
+      err = dsqrt(s)
+      if (abs(delta) < max(1.d0, target)*tol_l .and. err < tol_l) exit
     end do
 
     ! Transform back to AO: Pao = 2 * Uinv^T * X * Uinv
@@ -158,17 +158,6 @@ contains
     deallocate(Sfull, Ffull, U, Uinv, Fp, X, X2, T, Pao, Spack)
   end subroutine purify_density_from_fock
 
-  double precision function fro_norm_diff(A, B, n)
-    implicit none
-    integer, intent(in) :: n
-    double precision, intent(in) :: A(n,n), B(n,n)
-    integer :: i
-    double precision :: s
-    s = 0.d0
-    do i=1,n*n
-      s = s + (A(i) - B(i))*(A(i) - B(i))
-    end do
-    fro_norm_diff = dsqrt(s)
-  end function fro_norm_diff
+  ! No separate norm function; computed inline above for simplicity/compliance
 
 end module purify_gpu
