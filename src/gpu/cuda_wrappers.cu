@@ -1241,7 +1241,6 @@ extern "C" {
 
 static DevBuf<double> g_diis_R;
 static int g_diis_linear_cap = 0;
-static int g_diis_maxfock_cap = 0;
 
 void mopac_cuda_diis_init(int linear, int maxfock) {
   if (!g_blas) create_handle();
@@ -1282,7 +1281,6 @@ void mopac_cuda_diis_bcol(int linear, int nfock, int lfock, double *out_host) {
 void mopac_cuda_diis_release() {
   g_diis_R.release();
   g_diis_linear_cap = 0;
-  g_diis_maxfock_cap = 0;
 }
 
 } // extern "C"

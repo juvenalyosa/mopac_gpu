@@ -17,6 +17,7 @@ contains
     double precision, allocatable :: X(:,:), AX(:,:), M(:,:), work(:), R(:,:)
     double precision :: nrm, nrm_max
     integer :: i, it, info
+    double precision, external :: ddot, dnrm2
 
     allocate(X(n,k), AX(n,k), M(k,k), R(n,k))
     ! Initialize X as first k columns of identity
@@ -73,6 +74,7 @@ contains
     double precision, intent(inout) :: Q(n,k)
     integer :: i,j
     double precision :: r
+    double precision, external :: ddot, dnrm2
     do i = 1, k
       do j = 1, i-1
         r = ddot(n, Q(1,j), 1, Q(1,i), 1)
@@ -84,4 +86,3 @@ contains
   end subroutine mgs_orthonormalize
 
 end module partial_eig_gpu
-
