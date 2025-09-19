@@ -332,4 +332,6 @@ align with the most common observed uses of MOPAC. Future expansion of this func
 
 ## Citation
 
-To cite the use of open-source MOPAC in scientific publications, see the `CITATION.cff` file in this repository.
+We are validating the implementation, so please proceed with caution, and if this repository need to be cited, feel free to get the citation from github repository.
+
+Powered by Juvenal Yosa PhD. y.r.juvenal@umcg juvenal.yosa@unisimon.edu.co
