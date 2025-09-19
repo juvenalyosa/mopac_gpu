@@ -1335,3 +1335,48 @@ void mopac_cuda_bfull_from_device(int linear, int nfock, double *b_out) {
 }
 
 } // extern "C"
+
+// =============== F*C MO transform helper ===============
+extern "C" {
+
+// Compute W = F * C, where F is given in packed lower-triangular form (size n(n+1)/2)
+// and C, W are n x n (column-major). Uses cuBLAS GEMM on an unpacked full symmetric F.
+void mopac_cuda_fmulC(int n, const double *F_packed, const double *C, int ldc, double *W, int ldw) {
+  if (!g_blas) create_handle();
+  // Unpack F on pinned host into full n x n symmetric matrix (lower to both triangles)
+  size_t bytesN = (size_t)n * (size_t)n * sizeof(double);
+  static HostBuf<double> hF;
+  hF.ensure(bytesN);
+  // Fill zeros
+  for (int j = 0; j < n*n; ++j) hF.ptr[j] = 0.0;
+  // Unpack lower triangle
+  size_t idx = 0;
+  for (int col = 0; col < n; ++col) {
+    for (int row = col; row < n; ++row) {
+      double v = F_packed[idx++];
+      hF.ptr[row + (size_t)col * (size_t)n] = v; // lower
+      hF.ptr[col + (size_t)row * (size_t)n] = v; // mirror to upper
+    }
+  }
+  // Device buffers
+  DevBuf<double> dF, dC, dW;
+  dF.ensure(bytesN);
+  dC.ensure(bytesN);
+  dW.ensure(bytesN);
+  // Copy F and C to device
+  cudaMemcpyAsync(dF.ptr, hF.ptr, bytesN, cudaMemcpyHostToDevice, g_stream);
+  cudaMemcpyAsync(dC.ptr, C, bytesN, cudaMemcpyHostToDevice, g_stream);
+  // GEMM: W = F * C
+  double alpha = 1.0, beta = 0.0;
+  cublasDgemm(g_blas, CUBLAS_OP_N, CUBLAS_OP_N,
+              n, n, n, &alpha,
+              dF.ptr, n,
+              dC.ptr, ldc,
+              &beta,
+              dW.ptr, ldw);
+  // Copy back
+  cudaMemcpyAsync(W, dW.ptr, bytesN, cudaMemcpyDeviceToHost, g_stream);
+  cudaStreamSynchronize(g_stream);
+}
+
+} // extern "C"

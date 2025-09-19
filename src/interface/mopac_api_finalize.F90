@@ -52,6 +52,8 @@ contains
     interface
       subroutine mopac_cuda_destroy_resources() bind(C, name='mopac_cuda_destroy_resources')
       end subroutine mopac_cuda_destroy_resources
+      subroutine mopac_cuda_grad_buffers_release() bind(C, name='mopac_cuda_grad_buffers_release')
+      end subroutine mopac_cuda_grad_buffers_release
     end interface
 #endif
 
@@ -97,6 +99,7 @@ contains
     ! Clean up GPU resources (if built with GPU)
 #ifdef GPU
     call mopac_cuda_destroy_resources()
+    call mopac_cuda_grad_buffers_release()
 #endif
 
     ! turn use_disk back on

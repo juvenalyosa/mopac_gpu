@@ -23,6 +23,12 @@
       use common_arrays_C, only : nfirst, nlast, eigb, p, pa, c, coord
       USE funcon_C, only : fpc_9
       use derivs_C, only : wmat, hmat, fmat
+#ifdef GPU
+      use mod_vars_cuda, only : lgpu
+      use gpu_fock_interfaces
+      use iso_c_binding, only : c_bool
+      use gpu_transform_interfaces
+#endif
       use meci_C, only : nelec, nmos, lab, nbo, nstate, maxci, xy, vectci
       implicit none
       integer , intent(in) :: number
@@ -104,7 +110,43 @@
 !     STORED IN FMAT, DIVIDED BY STEP.
 !
       call dcopy (mpack, hmat, 1, fmat, 1)
+#ifdef GPU
+      if (lgpu) then
+        ! Respect CI mode: force GPU-only gradient if MOPAC_FORCE_GPU_GRAD is set
+        call get_environment_variable('MOPAC_FORCE_GPU_GRAD', line, status=i)
+        ! Also allow a keyword: GPU-GRAD-ONLY or FORCEGPU-GRAD
+        if (i /= 0) then
+          if (index(keywrd,' GPU-GRAD-ONLY') /= 0 .or. index(keywrd,' FORCEGPU-GRAD') /= 0) then
+            i = 0
+            line = '1'
+          end if
+        end if
+        if (i == 0) then
+          if (index(adjustl(line),'0')==0 .and. index(adjustl(line),'off')==0 .and. len_trim(line)>0) then
+            if (.not. mopac_cuda_fock2_keep(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati)) then
+              call mopend('GPU gradient path failed under MOPAC_FORCE_GPU_GRAD')
+              return
+            end if
+          else
+            if (.not. mopac_cuda_fock2_keep(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati)) then
+              if (.not. mopac_cuda_fock2(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati, fmat)) then
+                call dfock2 (fmat, p, pa, wmat, numat, nfirst, nlast, nati)
+              end if
+            end if
+          end if
+        else
+          if (.not. mopac_cuda_fock2_keep(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati)) then
+            if (.not. mopac_cuda_fock2(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati, fmat)) then
+              call dfock2 (fmat, p, pa, wmat, numat, nfirst, nlast, nati)
+            end if
+          end if
+        end if
+      else
+        call dfock2 (fmat, p, pa, wmat, numat, nfirst, nlast, nati)
+      end if
+#else
       call dfock2 (fmat, p, pa, wmat, numat, nfirst, nlast, nati)
+#endif
 !
 !  FMAT HOLDS THE ONE PLUS TWO - ELECTRON DERIVATIVES OF ATOM NATI FOR
 !       DIRECTION NATX W.R.T. ALL OTHER ATOMS
@@ -134,9 +176,19 @@
 !             3) VIRTUAL-VIRTUAL SAME RULE OF ORDERING.
 !
 !     PART 1 : WORK(N,N) = FMAT(N,N) * C(N,N)
+#ifdef GPU
+      if (lgpu) then
+        call mopac_cuda_fmulC_from_dev(norbs, c, norbs, work, norbs)
+      else
+        do i = 1, norbs
+          call supdot (work(1,i), fmat, c(1,i), norbs)
+        end do
+      end if
+#else
       do i = 1, norbs
         call supdot (work(1,i), fmat, c(1,i), norbs)
       end do
+#endif
 !
 !     PART 2 : F(IJ) =  (C' * WORK)(I,J) ... OFF-DIAGONAL BLOCKS.
       l = 1

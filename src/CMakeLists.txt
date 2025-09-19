@@ -46,6 +46,8 @@ if(GPU)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_density_interfaces.F90)
     # Fortran interfaces for orthogonalization helpers (phase 2)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_ortho_interfaces.F90)
+    # Fortran interfaces for GPU MO transform helpers
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_transform_interfaces.F90)
     # Fortran interfaces for small dense solves used in DIIS
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_small_solve_interfaces.F90)
     # Fortran interfaces for GPU B-matrix column builder

@@ -90,8 +90,8 @@
         envs = 1 ; line8 = ''
         call get_environment_variable('MOPAC_FOCK_GPU', line8, status=envs)
         if (envs == 0) want_gpu = (trim(adjustl(line8)) /= '')
-        if (want_gpu .and. lgpu) then
-          ok = mopac_cuda_fock2(norbs, mpack, numat, nfirst, nlast, ptot, p, f)
+        if (want_gpu .and. lgpu .and. id == 0) then
+          ok = mopac_cuda_fock2_scf(norbs, mpack, numat, nfirst, nlast, ptot, p, w, f)
           if (ok) then
             return
           end if

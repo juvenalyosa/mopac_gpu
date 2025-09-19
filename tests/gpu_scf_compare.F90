@@ -64,5 +64,29 @@ program gpu_scf_compare
   denom_f = max(1.0d0, maxval(abs(f_cpu(:n))))
   print *, 'Fock max abs diff:', d_f
   print *, 'Fock rel diff:', d_f/denom_f
+  call scf_assert('H2O_SCF', d_f, denom_f)
+
+contains
+  subroutine scf_assert(label, diff_abs, denom)
+    character(*), intent(in) :: label
+    double precision, intent(in) :: diff_abs, denom
+    character(len=64) :: env
+    integer :: ist
+    double precision :: tol_rel, tol_abs
+    tol_rel = -1.d0; tol_abs = -1.d0
+    call get_environment_variable('MOPAC_SCF_REL_TOL', env, status=ist)
+    if (ist == 0) read(env,*,err=10,end=10) tol_rel
+10  continue
+    call get_environment_variable('MOPAC_SCF_ABS_TOL', env, status=ist)
+    if (ist == 0) read(env,*,err=20,end=20) tol_abs
+20  continue
+    if ((tol_rel > 0.d0 .and. diff_abs/max(1.d0,denom) > tol_rel) .or. &
+        (tol_abs > 0.d0 .and. diff_abs > tol_abs)) then
+      print *, trim(label)//' SCF check FAIL'
+      stop 1
+    else
+      print *, trim(label)//' SCF check PASS'
+    end if
+  end subroutine scf_assert
 
 end program gpu_scf_compare

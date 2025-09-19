@@ -30,6 +30,7 @@
          nbeta_open, npulay, method_indo, use_disk
       USE reimers_C, only: dd, ff, tot, cc0, aa, dtmp, nb2
       use cosmo_C, only : useps
+      use ga_harness
 #ifdef GPU
       use eig_call_context, only: current_spin
 #endif
@@ -198,6 +199,9 @@
               end do
             end if
           end if
+          ! Optionally refine initial guess via a small GA harness
+          call maybe_ga_refine_initial_guess(pa, pb, p, w, h, f, fb, norbs, mpack, numat, nfirst, nlast, &
+                                             uhf, na1el, nb1el, nclose, fract, id)
           pold(1:mpack) = pa(1:mpack)
           if (uhf) then
             pbold(1:mpack) = pb(1:mpack)
