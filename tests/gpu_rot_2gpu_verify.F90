@@ -15,7 +15,7 @@ program gpu_rot_2gpu_verify
   logical(c_bool) :: hasGpu
   integer(c_int)  :: nDevices
   logical(c_bool) :: hasDouble(6)
-  character(kind=c_char) :: name(6)
+  character(kind=c_char) :: name(256,6)
   integer(c_int)  :: name_size(6), clockRate(6), major(6), minor(6)
   integer(c_size_t) :: totalMem(6)
 
@@ -65,4 +65,3 @@ program gpu_rot_2gpu_verify
 
   deallocate(V_gpu, V_cpu, eig, fmo)
 end program gpu_rot_2gpu_verify
-
