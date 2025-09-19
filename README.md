@@ -87,6 +87,19 @@ Useful runtime toggles (set only if needed)
 - `MOPAC_STREAMS=off`         # disable CUDA streams (debugging)
 - `MOPAC_DETERMINISTIC=1`     # enforce deterministic cuBLAS settings (no atomics, host pointer mode)
 
+Fock build on GPU (default when GPU is enabled)
+- By default, the two-center Fock build runs on the GPU when available.
+- Opt-out: set `MOPAC_NOFOCKGPU=1` to force CPU Fock build.
+- Legacy opt-in: `MOPAC_FOCK_GPU=1` is still honored if you need explicit control.
+
+Multi-GPU BLAS (cuBLASXt)
+- For dense BLAS-3 (GEMM/SYRK) in density builds, MOPAC uses cuBLASXt across multiple GPUs when `ngpus > 1`.
+- Device selection: set `MOPAC_CUBLASXT_DEVICES="0,1"` to specify the GPU list; otherwise all detected GPUs are used.
+
+Multi-GPU Eigensolver roadmap
+- Current: DSYEVD uses single-GPU cuSOLVER with optional keep-on-device mode.
+- Planned: explore cuSOLVERMg for multi-GPU symmetric eigensolve and/or block-cyclic CPU/GPU hybrids for very large problems. This requires API and data layout changes and will be staged separately.
+
 Printing eigenvectors
 - Add `EIGS VECTORS` to the keyword line; if eigenvectors were kept on the GPU, MOPAC fetches them automatically before printing.
 

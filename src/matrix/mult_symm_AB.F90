@@ -22,6 +22,7 @@
         Use mopac_cublas_interfaces
         Use mamult_cuda_i
         use common_arrays_C, only : ifact
+        Use mod_vars_cuda, only: ngpus
 #endif
         implicit none
         Integer :: iopc,ndim,mdim
@@ -138,10 +139,19 @@
             same_ab = c_associated(pa, pb)
 
             if (same_ab) then
-               call syrk_cublas('U', 'N', ndim, ndim, alpha, xa, ndim, beta, xc, ndim)
+               if (ngpus > 1) then
+                 call syrk_cublas_multi('U', 'N', ndim, ndim, alpha, xa, ndim, beta, xc, ndim)
+               else
+                 call syrk_cublas('U', 'N', ndim, ndim, alpha, xa, ndim, beta, xc, ndim)
+               end if
             else
-               call gemm_cublas ("N", "N", ndim, ndim, ndim, alpha, xa, ndim, xb, ndim, beta, xc, &
+               if (ngpus > 1) then
+                 call gemm_cublas_multi ("N", "N", ndim, ndim, ndim, alpha, xa, ndim, xb, ndim, beta, xc, &
                            & ndim)
+               else
+                 call gemm_cublas ("N", "N", ndim, ndim, ndim, alpha, xa, ndim, xb, ndim, beta, xc, &
+                           & ndim)
+               end if
             end if
 
             call dtrttp('u', ndim, xc, ndim, c, i )

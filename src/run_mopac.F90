@@ -66,6 +66,7 @@
       Use mod_vars_cuda, only: lgpu, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu
       Use gpu_info
       Use settingGPUcard
+      use gpu_runtime_interfaces
 #endif
       implicit none
       integer ::  i, j, k, l
@@ -1197,6 +1198,10 @@
         read(ilog,'(a)', iostat=i)line
         if (i == -1) close(ilog, status = 'delete', iostat=i)
       end if
+      ! Ensure GPU resources are released (if GPU build)
+#ifdef GPU
+      call mopac_cuda_destroy_resources()
+#endif
       return
 end subroutine run_mopac
 subroutine special

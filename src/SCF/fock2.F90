@@ -85,12 +85,22 @@
       numat = abs(numat)
 ! Optional experimental GPU Fock build (scaffold)
 #ifdef GPU
+      ! Default to GPU Fock build when GPU is enabled and this is not a derivative build.
+      ! Allow users to opt-out via MOPAC_NOFOCKGPU (any non-empty value disables),
+      ! or explicitly opt-in via legacy MOPAC_FOCK_GPU (kept for backward compatibility).
       if (.not. deriv) then
-        want_gpu = .false.
+        want_gpu = lgpu .and. id == 0
+        envs = 1 ; line8 = ''
+        call get_environment_variable('MOPAC_NOFOCKGPU', line8, status=envs)
+        if (envs == 0) then
+          if (trim(adjustl(line8)) /= '') want_gpu = .false.
+        end if
         envs = 1 ; line8 = ''
         call get_environment_variable('MOPAC_FOCK_GPU', line8, status=envs)
-        if (envs == 0) want_gpu = (trim(adjustl(line8)) /= '')
-        if (want_gpu .and. lgpu .and. id == 0) then
+        if (envs == 0) then
+          if (trim(adjustl(line8)) /= '') want_gpu = .true.
+        end if
+        if (want_gpu) then
           ok = mopac_cuda_fock2_scf(norbs, mpack, numat, nfirst, nlast, ptot, p, w, f)
           if (ok) then
             return

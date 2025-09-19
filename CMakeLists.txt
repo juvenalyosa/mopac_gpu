@@ -271,7 +271,7 @@ if(ENABLE_COVERAGE)
   configure_file("cmake/CTestCustom.cmake" "${CMAKE_BINARY_DIR}/CTestCustom.cmake")
 endif()
 
-# GPU functionality (not functional at the moment)
+# GPU functionality (cuBLAS/cuSOLVER-based offloads: eigensolver, density, MOZYME, Fock)
 option(GPU "GPU build flag" OFF)
 if(GPU)
   add_definitions(-DGPU)
@@ -279,7 +279,7 @@ if(GPU)
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
   # Link CUDA runtime and math libraries needed by wrappers
-  target_link_libraries(mopac-core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver)
+  target_link_libraries(mopac-core PUBLIC CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
   # Ensure position independent code for shared targets
   set_target_properties(mopac-core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 

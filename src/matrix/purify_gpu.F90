@@ -4,6 +4,7 @@ module purify_gpu
 #ifdef GPU
   use mopac_cublas_interfaces
   use gpu_ortho_interfaces
+  use mod_vars_cuda, only: ngpus
 #endif
   implicit none
 contains
@@ -93,7 +94,11 @@ contains
       ! X2 = X*X
 #ifdef GPU
       if (use_gpu) then
-        call gemm_cublas('N','N', n, n, n, 1.d0, X, n, X, n, 0.d0, X2, n)
+        if (ngpus > 1) then
+          call gemm_cublas_multi('N','N', n, n, n, 1.d0, X, n, X, n, 0.d0, X2, n)
+        else
+          call gemm_cublas('N','N', n, n, n, 1.d0, X, n, X, n, 0.d0, X2, n)
+        end if
       else
         call dgemm('N','N', n, n, n, one, X, n, X, n, zero, X2, n)
       end if
@@ -120,7 +125,11 @@ contains
       ! Recompute X2 = X*X for error check
 #ifdef GPU
       if (use_gpu) then
-        call gemm_cublas('N','N', n, n, n, 1.d0, X, n, X, n, 0.d0, X2, n)
+        if (ngpus > 1) then
+          call gemm_cublas_multi('N','N', n, n, n, 1.d0, X, n, X, n, 0.d0, X2, n)
+        else
+          call gemm_cublas('N','N', n, n, n, 1.d0, X, n, X, n, 0.d0, X2, n)
+        end if
       else
         call dgemm('N','N', n, n, n, one, X, n, X, n, zero, X2, n)
       end if
@@ -142,8 +151,13 @@ contains
     ! Transform back to AO: Pao = 2 * Uinv^T * X * Uinv
 #ifdef GPU
     if (use_gpu) then
-      call gemm_cublas('N','N', n, n, n, 1.d0, X, n, Uinv, n, 0.d0, T, n)
-      call gemm_cublas('T','N', n, n, n, 2.d0, Uinv, n, T, n, 0.d0, Pao, n)
+      if (ngpus > 1) then
+        call gemm_cublas_multi('N','N', n, n, n, 1.d0, X, n, Uinv, n, 0.d0, T, n)
+        call gemm_cublas_multi('T','N', n, n, n, 2.d0, Uinv, n, T, n, 0.d0, Pao, n)
+      else
+        call gemm_cublas('N','N', n, n, n, 1.d0, X, n, Uinv, n, 0.d0, T, n)
+        call gemm_cublas('T','N', n, n, n, 2.d0, Uinv, n, T, n, 0.d0, Pao, n)
+      end if
     else
       call dgemm('N','N', n, n, n, one, X, n, Uinv, n, zero, T, n)
       call dgemm('T','N', n, n, n, 2.d0, Uinv, n, T, n, zero, Pao, n)

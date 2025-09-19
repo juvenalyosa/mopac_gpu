@@ -70,10 +70,17 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             nl21 = Min (norbs, nl2)
             nl11 = Min (norbs, nl1)
             allocate(xmat(norbs,norbs),stat = i)
-            call gemm_cublas ('N', 'T', norbs, norbs, nu2-nl2+1, 2.0_prec*sign, c(1:norbs,nl21:norbs),&
+            if (ngpus > 1) then
+              call gemm_cublas_multi ('N', 'T', norbs, norbs, nu2-nl2+1, 2.0_prec*sign, c(1:norbs,nl21:norbs),&
                           &   norbs, c(1:norbs,nl21:norbs), norbs, 0.0_prec, xmat, norbs)
-            call gemm_cublas ('N', 'T', norbs, norbs, nu1-nl1+1, frac*sign, c(1:norbs,nl11:norbs), &
+              call gemm_cublas_multi ('N', 'T', norbs, norbs, nu1-nl1+1, frac*sign, c(1:norbs,nl11:norbs), &
                           &   norbs, c(1:norbs,nl11:norbs), norbs, 1.0_prec, xmat, norbs)
+            else
+              call gemm_cublas ('N', 'T', norbs, norbs, nu2-nl2+1, 2.0_prec*sign, c(1:norbs,nl21:norbs),&
+                          &   norbs, c(1:norbs,nl21:norbs), norbs, 0.0_prec, xmat, norbs)
+              call gemm_cublas ('N', 'T', norbs, norbs, nu1-nl1+1, frac*sign, c(1:norbs,nl11:norbs), &
+                          &   norbs, c(1:norbs,nl11:norbs), norbs, 1.0_prec, xmat, norbs)
+            end if
             forall (i=1:norbs)
                xmat(i,i) = xmat(i,i) + cst
             endforall
@@ -112,9 +119,15 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
           else
             allocate(xmat(norbs,norbs),stat = i)
             forall (j = 1:norbs, i=1:norbs) xmat(i, j) = 0.d0
-            call syrk_cublas ('U','N',norbs,ndubl, &
+            if (ngpus > 1) then
+              call syrk_cublas_multi ('U','N',norbs,ndubl, &
                    & occ,c(1:norbs,1:ndubl),norbs, &
                    & 0.d0,xmat,norbs)
+            else
+              call syrk_cublas ('U','N',norbs,ndubl, &
+                   & occ,c(1:norbs,1:ndubl),norbs, &
+                   & 0.d0,xmat,norbs)
+            end if
             call dtrttp('u', norbs, xmat, norbs, pp, i )
             deallocate(xmat,stat=i)
           end if

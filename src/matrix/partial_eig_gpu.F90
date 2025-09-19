@@ -2,6 +2,7 @@ module partial_eig_gpu
   use iso_c_binding
 #ifdef GPU
   use mopac_cublas_interfaces
+  use mod_vars_cuda, only: ngpus
 #endif
   implicit none
 contains
@@ -28,7 +29,11 @@ contains
 
     do it = 1, maxit
 #ifdef GPU
-      call gemm_cublas('N','N', n, k, n, 1.d0, F, n, X, n, 0.d0, AX, n)
+      if (ngpus > 1) then
+        call gemm_cublas_multi('N','N', n, k, n, 1.d0, F, n, X, n, 0.d0, AX, n)
+      else
+        call gemm_cublas('N','N', n, k, n, 1.d0, F, n, X, n, 0.d0, AX, n)
+      end if
 #else
       call dgemm('N','N', n, k, n, 1.d0, F, n, X, n, 0.d0, AX, n)
 #endif
@@ -44,7 +49,11 @@ contains
       deallocate(work)
       ! Update X := X * Y (overwrite X)
 #ifdef GPU
-      call gemm_cublas('N','N', n, k, k, 1.d0, X, n, M, k, 0.d0, evecs, n)
+      if (ngpus > 1) then
+        call gemm_cublas_multi('N','N', n, k, k, 1.d0, X, n, M, k, 0.d0, evecs, n)
+      else
+        call gemm_cublas('N','N', n, k, k, 1.d0, X, n, M, k, 0.d0, evecs, n)
+      end if
 #else
       call dgemm('N','N', n, k, k, 1.d0, X, n, M, k, 0.d0, evecs, n)
 #endif

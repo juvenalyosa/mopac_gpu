@@ -1,6 +1,7 @@
 // Portable CUDA interop for MOPAC: cuBLAS GEMM, cuSOLVER SYEVD, and basic GPU info
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include <cublasXt.h>
 #include <cusolverDn.h>
 #include <cstring>
 #include <cstdlib>
@@ -118,7 +119,8 @@ void setDevice(int idevice, bool *stat) {
 }
 
 // Global cuBLAS handle
-static cublasHandle_t g_blas = nullptr;
+static cublasHandle_t  g_blas = nullptr;
+static cublasXtHandle_t g_blasXt = nullptr;
 static cudaStream_t   g_stream = nullptr;     // single-GPU general stream
 static cudaStream_t   g_stream0 = nullptr;    // 2-GPU device0 stream
 static cudaStream_t   g_stream1 = nullptr;    // 2-GPU device1 stream
@@ -191,10 +193,38 @@ void create_handle() {
   }
 }
 
+static inline void create_handle_xt() {
+  if (!g_blasXt) {
+    cublasXtCreate(&g_blasXt);
+    int devCount = 0; cudaGetDeviceCount(&devCount);
+    int devList[8]; int nDevs = 0;
+    const char* list = std::getenv("MOPAC_CUBLASXT_DEVICES");
+    if (list && devCount > 0) {
+      char buf[256]; std::strncpy(buf, list, sizeof(buf)-1); buf[sizeof(buf)-1] = '\0';
+      char* tok = std::strtok(buf, ",; :");
+      while (tok && nDevs < 8) {
+        int d = std::atoi(tok);
+        if (d >= 0 && d < devCount) { devList[nDevs++] = d; }
+        tok = std::strtok(nullptr, ",; :");
+      }
+    }
+    if (nDevs == 0) {
+      for (int d = 0; d < std::min(devCount, 8); ++d) devList[nDevs++] = d;
+    }
+    if (nDevs > 0) {
+      cublasXtDeviceSelect(g_blasXt, nDevs, devList);
+    }
+  }
+}
+
 void destroy_handle() {
   if (g_blas) {
     cublasDestroy(g_blas);
     g_blas = nullptr;
+  }
+  if (g_blasXt) {
+    cublasXtDestroy(g_blasXt);
+    g_blasXt = nullptr;
   }
   if (g_stream) {
     cudaStreamDestroy(g_stream);
@@ -538,7 +568,34 @@ void call_syrk_cublas_2gpu(char uplo, char tra,
 
   // No frees; cached buffers are released at process cleanup
   // Copy back to user output
-  std::memcpy(C, h2_syrk_C.ptr, bytesCfull);
+std::memcpy(C, h2_syrk_C.ptr, bytesCfull);
+}
+
+// Multi-GPU GEMM via cuBLASXt (host pointers)
+extern "C" void call_gemm_cublas_multi(char tra, char trb,
+                           int m, int n, int k,
+                           double alpha,
+                           const double *A, int lda,
+                           const double *B, int ldb,
+                           double beta,
+                           double *C, int ldc) {
+  create_handle_xt();
+  cublasOperation_t opA = (tra == 'T' || tra == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
+  cublasOperation_t opB = (trb == 'T' || trb == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
+  cublasXtDgemm(g_blasXt, opA, opB, m, n, k, &alpha, A, lda, B, ldb, &beta, C, ldc);
+}
+
+// Multi-GPU SYRK via cuBLASXt (host pointers)
+extern "C" void call_syrk_cublas_multi(char uplo, char tra,
+                           int n, int k,
+                           double alpha,
+                           const double *A, int lda,
+                           double beta,
+                           double *C, int ldc) {
+  create_handle_xt();
+  cublasFillMode_t U = (uplo == 'U' || uplo == 'u') ? CUBLAS_FILL_MODE_UPPER : CUBLAS_FILL_MODE_LOWER;
+  cublasOperation_t opA = (tra == 'T' || tra == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
+  cublasXtDsyrk(g_blasXt, U, opA, n, k, &alpha, A, lda, &beta, C, ldc);
 }
 // Symmetric eigensolver (upper triangle) using cuSOLVER Dsyevd; A overwritten with eigenvectors
 // Cached handles and workspaces for Dsyevd

@@ -5,6 +5,7 @@ module mopac_cublas_interfaces
   private
   public :: gemm_cublas, syrk_cublas
   public :: gemm_cublas_2gpu, syrk_cublas_2gpu
+  public :: gemm_cublas_multi, syrk_cublas_multi
 
   interface gemm_cublas
     subroutine gemm_cublas(tra, trb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc) &
@@ -59,6 +60,34 @@ module mopac_cublas_interfaces
       real(c_double)           :: c(ldc,*)
       real(c_double), value    :: alpha, beta
     end subroutine syrk_cublas_2gpu
+  end interface
+
+  ! Multi-GPU (cuBLASXt) interfaces operating on host pointers
+  interface gemm_cublas_multi
+    subroutine gemm_cublas_multi(tra, trb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc) &
+      bind(C, name='call_gemm_cublas_multi')
+      use iso_c_binding
+      implicit none
+      character(c_char), value :: tra, trb
+      integer(c_int), value    :: m, n, k, lda, ldb, ldc
+      real(c_double)           :: a(lda,*)
+      real(c_double)           :: b(ldb,*)
+      real(c_double)           :: c(ldc,*)
+      real(c_double), value    :: alpha, beta
+    end subroutine gemm_cublas_multi
+  end interface
+
+  interface syrk_cublas_multi
+    subroutine syrk_cublas_multi(uplo, tra, n, k, alpha, a, lda, beta, c, ldc) &
+      bind(C, name='call_syrk_cublas_multi')
+      use iso_c_binding
+      implicit none
+      character(c_char), value :: uplo, tra
+      integer(c_int), value    :: n, k, lda, ldc
+      real(c_double)           :: a(lda,*)
+      real(c_double)           :: c(ldc,*)
+      real(c_double), value    :: alpha, beta
+    end subroutine syrk_cublas_multi
   end interface
 
 end module mopac_cublas_interfaces
