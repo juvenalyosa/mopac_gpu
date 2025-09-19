@@ -847,7 +847,6 @@
       call get_environment_variable('MOPAC_PURIFY', line, status=i)
       if (i == 0) then
         if (trim(adjustl(line)) /= '' .and. .not. uhf) then
-          use purify_gpu
           if (timitr) call timer('BEFORE DENSIT')
           call purify_density_from_fock(f, norbs, nelecs, p, 1.d-8, 100)
           if (modea/=3 .and. .not.(newdg .and. okpuly)) then
