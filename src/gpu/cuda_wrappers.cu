@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <cmath>
 #include <algorithm>
+#include <cstdio>
+#include <chrono>
 
 // Simple grow-only device buffer cache helper (C++ only; placed outside C linkage)
 template <typename T>
@@ -199,6 +201,19 @@ void create_handle() {
 static inline void create_handle_xt() {
   if (!g_blasXt) {
     cublasXtCreate(&g_blasXt);
+    // Optional block size tuning for cuBLASXt (default picked by library)
+    const char* blk = std::getenv("MOPAC_CUBLASXT_BLOCK");
+    if (blk) {
+      int b = std::max(64, std::atoi(blk));
+      cublasXtSetBlockDim(g_blasXt, b);
+    }
+    // Optional CPU ratio (0.0 .. 1.0), 0 means pure GPU
+    const char* ratio = std::getenv("MOPAC_CUBLASXT_CPU_RATIO");
+    if (ratio) {
+      double r = std::atof(ratio);
+      if (r < 0.0) r = 0.0; if (r > 1.0) r = 1.0;
+      cublasXtSetCpuRatio(g_blasXt, r);
+    }
     int devCount = 0; cudaGetDeviceCount(&devCount);
     int devList[8]; int nDevs = 0;
     const char* list = std::getenv("MOPAC_CUBLASXT_DEVICES");
@@ -247,6 +262,7 @@ void call_gemm_cublas(char tra, char trb,
                       const double *B, int ldb,
                       double beta,
                       double *C, int ldc) {
+  ensure_w_verbose();
   if (!g_blas) create_handle();
   cublasOperation_t opA = (tra == 'T' || tra == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
   cublasOperation_t opB = (trb == 'T' || trb == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -295,7 +311,17 @@ void call_gemm_cublas(char tra, char trb,
     }
   }
   // Compute C = alpha*op(A)*op(B) + beta*C
+  float ms = 0.0f; cudaEvent_t ev0, ev1; if (w_verbose) { cudaEventCreate(&ev0); cudaEventCreate(&ev1); cudaEventRecord(ev0, g_stream?g_stream:0); }
   cublasDgemm(g_blas, opA, opB, m, n, k, &alpha, d_A, lda, d_B, ldb, &beta, d_C, ldc);
+  if (w_verbose) {
+    cudaEventRecord(ev1, g_stream?g_stream:0);
+    cudaEventSynchronize(ev1);
+    cudaEventElapsedTime(&ms, ev0, ev1);
+    cudaEventDestroy(ev0); cudaEventDestroy(ev1);
+    double flops = 2.0 * (double)m * (double)n * (double)k;
+    double gflops = flops / 1.0e9 / (ms/1000.0);
+    std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: %.3f ms, %.1f GF/s\n", m,n,k, ms, gflops);
+  }
   if (pinned) {
     cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
     cudaStreamSynchronize(g_stream);
@@ -317,6 +343,7 @@ void call_syrk_cublas(char uplo, char tra,
                       const double *A, int lda,
                       double beta,
                       double *C, int ldc) {
+  ensure_w_verbose();
   if (!g_blas) create_handle();
   cublasFillMode_t u = (uplo == 'U' || uplo == 'u') ? CUBLAS_FILL_MODE_UPPER : CUBLAS_FILL_MODE_LOWER;
   cublasOperation_t opA = (tra == 'T' || tra == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -354,7 +381,17 @@ void call_syrk_cublas(char uplo, char tra,
       cudaMemcpyAsync(d_C, h_syrk_C.ptr, bytesC, cudaMemcpyHostToDevice, g_stream);
     }
   }
+  float ms = 0.0f; cudaEvent_t ev0, ev1; if (w_verbose) { cudaEventCreate(&ev0); cudaEventCreate(&ev1); cudaEventRecord(ev0, g_stream?g_stream:0); }
   cublasDsyrk(g_blas, u, opA, n, k, &alpha, d_A, lda, &beta, d_C, ldc);
+  if (w_verbose) {
+    cudaEventRecord(ev1, g_stream?g_stream:0);
+    cudaEventSynchronize(ev1);
+    cudaEventElapsedTime(&ms, ev0, ev1);
+    cudaEventDestroy(ev0); cudaEventDestroy(ev1);
+    double flops = 2.0 * (double)n * (double)n * (double)k; // rough upper-bound
+    double gflops = flops / 1.0e9 / (ms/1000.0);
+    std::fprintf(stderr, "[GPU] DSYRK n=%d k=%d: %.3f ms, %.1f GF/s\n", n,k, ms, gflops);
+  }
   if (pinnedS) {
     cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
     cudaStreamSynchronize(g_stream);
@@ -582,10 +619,19 @@ extern "C" void call_gemm_cublas_multi(char tra, char trb,
                            const double *B, int ldb,
                            double beta,
                            double *C, int ldc) {
+  ensure_w_verbose();
   create_handle_xt();
   cublasOperation_t opA = (tra == 'T' || tra == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
   cublasOperation_t opB = (trb == 'T' || trb == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
+  auto t0 = std::chrono::high_resolution_clock::now();
   cublasXtDgemm(g_blasXt, opA, opB, m, n, k, &alpha, A, lda, B, ldb, &beta, C, ldc);
+  if (w_verbose) {
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    double flops = 2.0 * (double)m * (double)n * (double)k;
+    double gflops = flops / 1.0e9 / (ms/1000.0);
+    std::fprintf(stderr, "[MGPU] DGEMM %dx%dx%d: %.3f ms, %.1f GF/s\n", m,n,k, ms, gflops);
+  }
 }
 
 // Multi-GPU SYRK via cuBLASXt (host pointers)
@@ -595,10 +641,19 @@ extern "C" void call_syrk_cublas_multi(char uplo, char tra,
                            const double *A, int lda,
                            double beta,
                            double *C, int ldc) {
+  ensure_w_verbose();
   create_handle_xt();
   cublasFillMode_t U = (uplo == 'U' || uplo == 'u') ? CUBLAS_FILL_MODE_UPPER : CUBLAS_FILL_MODE_LOWER;
   cublasOperation_t opA = (tra == 'T' || tra == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
+  auto t0 = std::chrono::high_resolution_clock::now();
   cublasXtDsyrk(g_blasXt, U, opA, n, k, &alpha, A, lda, &beta, C, ldc);
+  if (w_verbose) {
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    double flops = 2.0 * (double)n * (double)n * (double)k; // rough
+    double gflops = flops / 1.0e9 / (ms/1000.0);
+    std::fprintf(stderr, "[MGPU] DSYRK n=%d k=%d: %.3f ms, %.1f GF/s\n", n,k, ms, gflops);
+  }
 }
 // Symmetric eigensolver (upper triangle) using cuSOLVER Dsyevd; A overwritten with eigenvectors
 // Cached handles and workspaces for Dsyevd
@@ -1411,6 +1466,15 @@ void mopac_cuda_fmulC(int n, const double *F_packed, const double *C, int ldc, d
   for (int j = 0; j < n*n; ++j) hF.ptr[j] = 0.0;
   // Unpack lower triangle
   size_t idx = 0;
+// Lightweight verbose/timing control for BLAS wrappers
+static int w_verbose = 0; static int w_inited = 0;
+static inline void ensure_w_verbose() {
+  if (!w_inited) {
+    const char* v = std::getenv("MOPAC_GPU_VERBOSE");
+    if (v && (std::strcmp(v, "1")==0 || std::strcmp(v, "on")==0 || std::strcmp(v, "true")==0)) w_verbose = 1;
+    w_inited = 1;
+  }
+}
   for (int col = 0; col < n; ++col) {
     for (int row = col; row < n; ++row) {
       double v = F_packed[idx++];
@@ -1446,6 +1510,14 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
   (void)n; (void)A; (void)lda; (void)W;
 #if defined(HAVE_CUSOLVER_MG)
   // TODO: implement distributed data setup and call cusolverMg
+  // Parse optional env hints (unused for now)
+  const char* v = std::getenv("MOPAC_EIG_MG_VERBOSE");
+  int verbose = 0; if (v && (std::strcmp(v,"1")==0 || std::strcmp(v,"on")==0 || std::strcmp(v,"true")==0)) verbose = 1;
+  const char* blks = std::getenv("MOPAC_EIG_MG_BLKSIZE");
+  const char* grid = std::getenv("MOPAC_EIG_MG_GRID");
+  if (verbose) {
+    std::fprintf(stderr, "[MG] cuSOLVERMg stub: BLKSIZE=%s GRID=%s\n", blks?blks:"(default)", grid?grid:"(auto)");
+  }
   if (info) *info = -2; // compiled with MG, but not wired
 #else
   if (info) *info = -1; // MG not available; force fallback

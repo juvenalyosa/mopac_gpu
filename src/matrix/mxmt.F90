@@ -14,6 +14,10 @@
 ! limitations under the License.
 
       subroutine mxmt(a, nar, b, nbr, c, ncc)
+#ifdef GPU
+      use mod_vars_cuda, only: lgpu, ngpus
+      use mopac_cublas_interfaces
+#endif
       implicit none
       integer  :: nar
       integer  :: nbr
@@ -25,6 +29,18 @@
 !     MATRIX PRODUCT C(NAR,NCC) = A(NAR,NBR) * (B(NCC,NBR))'
 !     ALL MATRICES RECTANGULAR , PACKED.
 !
+#ifdef GPU
+      if (lgpu) then
+        if (ngpus > 1) then
+          call gemm_cublas_multi('N','T', nar, ncc, nbr, 1.0d0, a, nar, b, ncc, 0.0d0, c, nar)
+        else
+          call gemm_cublas('N','T', nar, ncc, nbr, 1.0d0, a, nar, b, ncc, 0.0d0, c, nar)
+        end if
+      else
+        call dgemm ('N', 'T', nar, ncc, nbr, 1.0D0, a, nar, b, ncc, 0.0D0, c, nar)
+      end if
+#else
       call dgemm ('N', 'T', nar, ncc, nbr, 1.0D0, a, nar, b, ncc, 0.0D0, c, nar)
+#endif
       return
       end subroutine mxmt
