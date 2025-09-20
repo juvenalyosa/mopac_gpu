@@ -98,6 +98,10 @@
       logical            :: gpu_ok(6)
       character*3        :: on_off(6)
       integer(c_int), dimension(6)	 :: clockRate, major, minor, name_size
+      ! Env parsing helpers for GPU selection
+      integer :: stat_env
+      character(len=64) :: env
+      double precision :: min_cc
 #endif
 #ifdef BUILD_MDI
       if (close_mdi) goto 100
