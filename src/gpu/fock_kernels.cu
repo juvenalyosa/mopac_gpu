@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cstdio>
+#include <cstring>
 
 extern "C" {
 
@@ -825,6 +826,12 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
   if (w_len == 0) return true; // nothing to do
 
   // Stage inputs to persistent device buffers
+  // Predeclare timing and host list buffers before any goto to satisfy nvcc
+  cudaEvent_t t_all_start = nullptr, t_all_stop = nullptr; float ms_all = 0.f;
+  int *h_ll_j = nullptr, *h_ll_off = nullptr;
+  int *h_lh_j = nullptr, *h_lh_off = nullptr;
+  int *h_hh_j = nullptr, *h_hh_off = nullptr;
+  int ll_count = 0, lh_count = 0, hh_count = 0;
   size_t atoms_e = (size_t)numat;
   size_t mpack_e = (size_t)mpack;
   size_t w_e = w_len;
@@ -844,12 +851,9 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
   e = cudaMemcpy(s_d_f, f, sizeof(double)*mpack_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
   e = cudaMemcpy(s_d_w, w, sizeof(double)*w_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
   // Total timing start
-  cudaEvent_t t_all_start, t_all_stop; float ms_all = 0.f;
   if (verbose) { cudaEventCreate(&t_all_start); cudaEventCreate(&t_all_stop); cudaEventRecord(t_all_start); }
 
   // Build compact pair lists with w offsets
-  int *h_ll_j = nullptr, *h_ll_off = nullptr, *h_lh_j = nullptr, *h_lh_off = nullptr, *h_hh_j = nullptr, *h_hh_off = nullptr;
-  int ll_count = 0, lh_count = 0, hh_count = 0;
   if (!all_ll) {
     // We still may have a mix of LL and LH without HH
   }

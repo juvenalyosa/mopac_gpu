@@ -13,6 +13,16 @@
 #include <cstdio>
 #include <chrono>
 
+// Lightweight verbose/timing control for BLAS wrappers
+static int w_verbose = 0; static int w_inited = 0;
+static inline void ensure_w_verbose() {
+  if (!w_inited) {
+    const char* v = std::getenv("MOPAC_GPU_VERBOSE");
+    if (v && (std::strcmp(v, "1")==0 || std::strcmp(v, "on")==0 || std::strcmp(v, "true")==0)) w_verbose = 1;
+    w_inited = 1;
+  }
+}
+
 // Simple grow-only device buffer cache helper (C++ only; placed outside C linkage)
 template <typename T>
 struct DevBuf {
@@ -208,12 +218,7 @@ static inline void create_handle_xt() {
       cublasXtSetBlockDim(g_blasXt, b);
     }
     // Optional CPU ratio (0.0 .. 1.0), 0 means pure GPU
-    const char* ratio = std::getenv("MOPAC_CUBLASXT_CPU_RATIO");
-    if (ratio) {
-      double r = std::atof(ratio);
-      if (r < 0.0) r = 0.0; if (r > 1.0) r = 1.0;
-      cublasXtSetCpuRatio(g_blasXt, r);
-    }
+    // NOTE: cublasXtSetCpuRatio signature varies across versions; skip configuring it for portability.
     int devCount = 0; cudaGetDeviceCount(&devCount);
     int devList[8]; int nDevs = 0;
     const char* list = std::getenv("MOPAC_CUBLASXT_DEVICES");
@@ -1483,15 +1488,6 @@ void mopac_cuda_fmulC(int n, const double *F_packed, const double *C, int ldc, d
   for (int j = 0; j < n*n; ++j) hF.ptr[j] = 0.0;
   // Unpack lower triangle
   size_t idx = 0;
-// Lightweight verbose/timing control for BLAS wrappers
-static int w_verbose = 0; static int w_inited = 0;
-static inline void ensure_w_verbose() {
-  if (!w_inited) {
-    const char* v = std::getenv("MOPAC_GPU_VERBOSE");
-    if (v && (std::strcmp(v, "1")==0 || std::strcmp(v, "on")==0 || std::strcmp(v, "true")==0)) w_verbose = 1;
-    w_inited = 1;
-  }
-}
   for (int col = 0; col < n; ++col) {
     for (int row = col; row < n; ++row) {
       double v = F_packed[idx++];
