@@ -49,6 +49,8 @@
       ! Partial eigensolve controls
       integer :: nocc, itmax
       double precision :: etol
+      ! Multi-GPU eigensolver threshold
+      integer :: thr_mg
 #endif
 !==============================================================================
 ! Code to find all eigenvectors and all eigenvalues for a symmetric General matrix
@@ -87,7 +89,6 @@ end if
       if (lgpu) then
         thr_min = 400
         ! Multi-GPU eigensolver threshold (defaults high to avoid overheads on small sizes)
-        integer :: thr_mg
         thr_mg = 3000
         env = '' ; fast = '' ; fetch = '' ; ortho = ''
         fastgpu = .false. ; fetch_eigs = .false. ; ortho_gpu = .false.
