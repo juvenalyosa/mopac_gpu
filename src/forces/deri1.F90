@@ -43,6 +43,7 @@
         , n2, lcut, k, ll, ncol
       double precision :: const, step, enucl2, gse, sum
       logical :: debug
+      character(len=32) :: line
       double precision, external :: ddot, helect
       save debug, icalcn, const
 !-----------------------------------------------

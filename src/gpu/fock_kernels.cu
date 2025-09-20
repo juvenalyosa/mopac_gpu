@@ -4,7 +4,9 @@
 #include <cstdio>
 #include <cstring>
 
-// Forward declarations for dfock2 kernels used before their definitions
+extern "C" {
+
+// Forward declarations for dfock2 kernels used before their definitions (C linkage)
 __global__ void dfock2_ll_lh_kernel(int norbs, int mpack, int numat,
                                     const int* nfirst, const int* nlast,
                                     const double* ptot, const double* p, const double* w,
@@ -21,8 +23,6 @@ __global__ void dfock2_hh_parallel_kernel(int norbs, int mpack, int numat,
                                           const int* nfirst, const int* nlast,
                                           const double* ptot, const double* p, const double* w,
                                           int ii, const int* jlist, const int* offlist, int count, double* f);
-
-extern "C" {
 
 __device__ __host__ inline int ifact_idx(int i) { return (i * (i - 1)) / 2; }
 
