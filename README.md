@@ -103,6 +103,7 @@ Multi-GPU Eigensolver roadmap
 - Optional (experimental): set `MOPAC_EIG_MG=1` to attempt a multi-GPU eigensolver path.
   - Present implementation is a placeholder that safely falls back to single-GPU; a full cuSOLVERMg integration requires distributed data and will be staged separately.
   - Env hints reserved for future MG: `MOPAC_EIG_MG_BLKSIZE=256`, `MOPAC_EIG_MG_GRID=2x2`, `MOPAC_EIG_MG_VERBOSE=1`.
+  - Threshold to enable MG attempt: `MOPAC_EIG_MG_MIN=3000` (AOs).
 
 Printing eigenvectors
 - Add `EIGS VECTORS` to the keyword line; if eigenvectors were kept on the GPU, MOPAC fetches them automatically before printing.

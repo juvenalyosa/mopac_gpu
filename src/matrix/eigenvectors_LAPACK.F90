@@ -83,8 +83,12 @@ end if
 #ifdef GPU
       ! Use GPU eigensolver only when problem size is large enough.
       ! Threshold can be overridden via environment variable MOPAC_GPU_EIGEN_MIN.
+      ! Multi-GPU eigensolver (MG) has its own size threshold MOPAC_EIG_MG_MIN.
       if (lgpu) then
         thr_min = 400
+        ! Multi-GPU eigensolver threshold (defaults high to avoid overheads on small sizes)
+        integer :: thr_mg
+        thr_mg = 3000
         env = '' ; fast = '' ; fetch = '' ; ortho = ''
         fastgpu = .false. ; fetch_eigs = .false. ; ortho_gpu = .false.
         stat_env = 1
@@ -100,6 +104,12 @@ end if
         if (stat_env == 0) fetch_eigs = (trim(adjustl(fetch)) /= '')
         call get_environment_variable('MOPAC_ORTHO_GPU', ortho, status=stat_env)
         if (stat_env == 0) ortho_gpu = (trim(adjustl(ortho)) /= '')
+        env = '' ; stat_env = 1
+        call get_environment_variable('MOPAC_EIG_MG_MIN', env, status=stat_env)
+        if (stat_env == 0) then
+          read(env,*,end=11,err=11) thr_mg
+        end if
+11      continue
 
         ! Optional: apply GPU orthogonalization transform F' = X^T F X using overlap S
         if (ortho_gpu) then
@@ -159,7 +169,7 @@ end if
           ! Optional: attempt multi-GPU eigensolver (cuSOLVERMg placeholder)
           env = ''
           call get_environment_variable('MOPAC_EIG_MG', env, status=stat_env)
-          if (ngpus > 1 .and. stat_env == 0 .and. trim(adjustl(env)) /= '') then
+          if (ngpus > 1 .and. ndim >= thr_mg .and. stat_env == 0 .and. trim(adjustl(env)) /= '') then
             ! Provide a full matrix to the MG wrapper; on success, return.
             ! The placeholder returns info<0 to trigger fallback paths.
             allocate(Sfull(ndim,ndim), stat=i)
