@@ -382,12 +382,7 @@ if(TESTS)
       target_link_libraries(mopac-gpu-rot-2gpu-verify mopac-core)
       add_dependencies(mopac-gpu-rot-2gpu-verify mopac-core)
     endif()
-    if(NOT TARGET mopac-gpu-scf-compare)
-      add_executable(mopac-gpu-scf-compare tests/gpu_scf_compare.F90)
-      set_target_properties(mopac-gpu-scf-compare PROPERTIES Fortran_MODULE_DIRECTORY "${CMAKE_BINARY_DIR}/mod/gpu-scf-compare")
-      target_link_libraries(mopac-gpu-scf-compare mopac-core)
-      add_dependencies(mopac-gpu-scf-compare mopac-core)
-    endif()
+    # scf-compare targets are defined in tests/CMakeLists.txt; avoid duplicates here
 
     # Simple performance bench for cached GPU wrappers
     if(NOT TARGET mopac-gpu-bench)
