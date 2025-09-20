@@ -8,7 +8,6 @@ contains
   subroutine ga_initial_guess(pa, pb, p, w, h, f, fb, &
                               norbs, mpack, numat, nfirst, nlast, &
                               uhf, na1el, nb1el, nclose, fract, id, best_e)
-    use molkst_C, only : uhf => uhf
     use chanel_C, only : iw
     implicit none
     integer, intent(in) :: norbs, mpack, numat, id
