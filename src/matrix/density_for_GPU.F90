@@ -15,7 +15,7 @@
 
 subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp, iopc)
 #ifdef GPU
-      Use mod_vars_cuda, only: real_cuda, prec, nthreads_gpu, nblocks_gpu
+      Use mod_vars_cuda, only: real_cuda, prec, nthreads_gpu, nblocks_gpu, ngpus
       Use iso_c_binding
       Use density_cuda_i
       Use mopac_cublas_interfaces

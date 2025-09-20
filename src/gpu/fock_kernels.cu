@@ -4,6 +4,24 @@
 #include <cstdio>
 #include <cstring>
 
+// Forward declarations for dfock2 kernels used before their definitions
+__global__ void dfock2_ll_lh_kernel(int norbs, int mpack, int numat,
+                                    const int* nfirst, const int* nlast,
+                                    const double* ptot, const double* p, const double* w,
+                                    int nati, double* f);
+__global__ void dfock2_ll_parallel_kernel(int norbs, int mpack, int numat,
+                                          const int* nfirst, const int* nlast,
+                                          const double* ptot, const double* p, const double* w,
+                                          int ii, const int* jlist, const int* offlist, int count, double* f);
+__global__ void dfock2_lh_parallel_kernel(int norbs, int mpack, int numat,
+                                          const int* nfirst, const int* nlast,
+                                          const double* ptot, const double* p, const double* w,
+                                          int ii, const int* jlist, const int* offlist, int count, double* f);
+__global__ void dfock2_hh_parallel_kernel(int norbs, int mpack, int numat,
+                                          const int* nfirst, const int* nlast,
+                                          const double* ptot, const double* p, const double* w,
+                                          int ii, const int* jlist, const int* offlist, int count, double* f);
+
 extern "C" {
 
 __device__ __host__ inline int ifact_idx(int i) { return (i * (i - 1)) / 2; }
@@ -986,8 +1004,3 @@ FAIL:
 }
 
 }
-// Stub kernels to satisfy optional code paths; real implementations can replace these
-__global__ void dfock2_ll_lh_kernel(int /*norbs*/, int /*mpack*/, int /*numat*/, const int* /*nfirst*/, const int* /*nlast*/, const double* /*ptot*/, const double* /*p*/, const double* /*w*/, int /*nati*/, double* /*f*/) {}
-__global__ void dfock2_ll_parallel_kernel(int /*norbs*/, int /*mpack*/, int /*numat*/, const int* /*nfirst*/, const int* /*nlast*/, const double* /*ptot*/, const double* /*p*/, const double* /*w*/, int /*ii*/, const int* /*jlist*/, const int* /*offlist*/, int /*count*/, double* /*f*/) {}
-__global__ void dfock2_lh_parallel_kernel(int /*norbs*/, int /*mpack*/, int /*numat*/, const int* /*nfirst*/, const int* /*nlast*/, const double* /*ptot*/, const double* /*p*/, const double* /*w*/, int /*ii*/, const int* /*jlist*/, const int* /*offlist*/, int /*count*/, double* /*f*/) {}
-__global__ void dfock2_hh_parallel_kernel(int /*norbs*/, int /*mpack*/, int /*numat*/, const int* /*nfirst*/, const int* /*nlast*/, const double* /*ptot*/, const double* /*p*/, const double* /*w*/, int /*ii*/, const int* /*jlist*/, const int* /*offlist*/, int /*count*/, double* /*f*/) {}
