@@ -331,7 +331,6 @@
           ! Optional: minimum compute capability (e.g., 7.0 for Volta+) via env MOPAC_MIN_CC
           env = '' ; stat_env = 1
           call get_environment_variable('MOPAC_MIN_CC', env, status=stat_env)
-          double precision :: min_cc
           min_cc = 2.0d0
           if (stat_env == 0) then
             read(env,*,err=76,end=76) min_cc
