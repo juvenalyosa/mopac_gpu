@@ -15,6 +15,9 @@
 
 # Using Cmake version 3.14 for NumPy support
 cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
+if(POLICY CMP0104)
+  cmake_policy(SET CMP0104 NEW)
+endif()
 
 # Ensure we are building out-of-source so that the tests work (issue 120)
 get_filename_component(srcdir "${CMAKE_SOURCE_DIR}" REALPATH)
@@ -275,8 +278,6 @@ endif()
 option(GPU "GPU build flag" OFF)
 if(GPU)
   add_definitions(-DGPU)
-  # Enable CUDA language support
-  enable_language(CUDA)
   # Allow users to control CUDA architectures flexibly across different GPUs
   # Options:
   #  -DCUDA_ARCHS=native     (use local GPU at build time)
@@ -290,6 +291,12 @@ if(GPU)
     set(CMAKE_CUDA_ARCHITECTURES ${CUDA_ARCHS})
   endif()
   message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+  # Ensure targets pick up architectures even if created before enabling CUDA
+  if(CMAKE_CUDA_ARCHITECTURES)
+    set_property(TARGET mopac-core PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+  endif()
+  # Enable CUDA language support after architectures are set
+  enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
   # Link CUDA runtime and math libraries needed by wrappers
   target_link_libraries(mopac-core PUBLIC CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
