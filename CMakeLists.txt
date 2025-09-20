@@ -277,6 +277,19 @@ if(GPU)
   add_definitions(-DGPU)
   # Enable CUDA language support
   enable_language(CUDA)
+  # Allow users to control CUDA architectures flexibly across different GPUs
+  # Options:
+  #  -DCUDA_ARCHS=native     (use local GPU at build time)
+  #  -DCUDA_ARCHS=all        (fatbin for common SMs)
+  #  -DCUDA_ARCHS=61;70;75;80;86;89;90 (explicit list)
+  # Default to a broad fatbin so binaries run from RTX 4060 (SM 89) up to current datacenter parts
+  set(CUDA_ARCHS "all" CACHE STRING "Semicolon-separated CUDA SM list (e.g. 61;70;75;80;86;89;90), or 'native'/'all'")
+  if(CUDA_ARCHS STREQUAL "all")
+    set(CMAKE_CUDA_ARCHITECTURES 61;70;75;80;86;89;90)
+  elseif(CUDA_ARCHS)
+    set(CMAKE_CUDA_ARCHITECTURES ${CUDA_ARCHS})
+  endif()
+  message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
   find_package(CUDAToolkit REQUIRED)
   # Link CUDA runtime and math libraries needed by wrappers
   target_link_libraries(mopac-core PUBLIC CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)

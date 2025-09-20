@@ -226,8 +226,25 @@ static inline void create_handle_xt() {
         tok = std::strtok(nullptr, ",; :");
       }
     }
-    if (nDevs == 0) {
-      for (int d = 0; d < std::min(devCount, 8); ++d) devList[nDevs++] = d;
+    if (nDevs == 0 && devCount > 0) {
+      // Auto-select up to 8 devices, ordered by capability and size
+      int cand = std::min(devCount, 8);
+      int order[8];
+      for (int i = 0; i < cand; ++i) order[i] = i;
+      // Simple selection sort by (major, multiprocessors, totalGlobalMem)
+      for (int i = 0; i < cand; ++i) {
+        int best = i;
+        cudaDeviceProp propBest{}; cudaGetDeviceProperties(&propBest, order[best]);
+        for (int j = i+1; j < cand; ++j) {
+          cudaDeviceProp prop{}; cudaGetDeviceProperties(&prop, order[j]);
+          bool better = (prop.major > propBest.major) ||
+                        (prop.major == propBest.major && prop.multiProcessorCount > propBest.multiProcessorCount) ||
+                        (prop.major == propBest.major && prop.multiProcessorCount == propBest.multiProcessorCount && prop.totalGlobalMem > propBest.totalGlobalMem);
+          if (better) { best = j; propBest = prop; }
+        }
+        int tmp = order[i]; order[i] = order[best]; order[best] = tmp;
+      }
+      for (int i = 0; i < cand; ++i) devList[nDevs++] = order[i];
     }
     if (nDevs > 0) {
       cublasXtDeviceSelect(g_blasXt, nDevs, devList);

@@ -57,7 +57,7 @@ If you need CPU vs GPU details, advanced GPU features, or troubleshooting, see t
 2) Configure and build (one build for everything)
 - `export CUDAToolkit_ROOT=/usr/local/cuda`   # adjust if needed
 - `cmake -S . -B build -G Ninja -DGPU=ON -DCMAKE_BUILD_TYPE=Release \\
-         -DCMAKE_CUDA_ARCHITECTURES=70;80;86`  # match your GPU(s)
+         -DCUDA_ARCHS=native`  # or a fatbin: -DCUDA_ARCHS=61;70;75;80;86;89;90
 - `cmake --build build --parallel`
 
 3) Run a calculation (manual, no scripts)
@@ -87,6 +87,7 @@ Useful runtime toggles (set only if needed)
 - `MOPAC_STREAMS=off`         # disable CUDA streams (debugging)
 - `MOPAC_DETERMINISTIC=1`     # enforce deterministic cuBLAS settings (no atomics, host pointer mode)
 - `MOPAC_GPU_VERBOSE=1`       # print timing/GF/s for GEMM/SYRK (single/multi-GPU)
+ - `MOPAC_MIN_CC=7.0`         # require GPU CC >= 7.0 (filters out older devices)
 
 Fock build on GPU (default when GPU is enabled)
 - By default, the two-center Fock build runs on the GPU when available.

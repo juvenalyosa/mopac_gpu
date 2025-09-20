@@ -324,12 +324,23 @@
         end if
 77      continue
         if (lgpu_ref) then
+          ! Optional: minimum compute capability (e.g., 7.0 for Volta+) via env MOPAC_MIN_CC
+          env = '' ; stat_env = 1
+          call get_environment_variable('MOPAC_MIN_CC', env, status=stat_env)
+          double precision :: min_cc
+          min_cc = 2.0d0
+          if (stat_env == 0) then
+            read(env,*,err=76,end=76) min_cc
+          end if
+76        continue
           lgpu_ref = .false.
           ! Count suitable GPUs (compute capability >=2 with FP64), honoring ignore list
           j = 0
           do i = 1, nDevices
             if (.not. ignore(i)) then
+              ! Compute capability in floating form (e.g., 8.9 for Ada)
               if (major(i) >= 2 .and. hasDouble(i)) then
+                if (dble(major(i)) + dble(minor(i))/10.d0 < min_cc) cycle
                 gpu_ok(i) = .true.
                 j = j + 1
               end if
