@@ -1150,6 +1150,9 @@ void mopac_cuda_destroy_resources() {
   if (skip && *skip) return;
   if (already) return;
   already = true;
+  // Try to quiesce all pending GPU work before releasing resources
+  // This helps avoid tearing down streams/handles while async copies are in-flight.
+  cudaDeviceSynchronize();
   // BLAS handle and streams
   destroy_handle();
   // cuSOLVER handle
@@ -1165,6 +1168,7 @@ void mopac_cuda_destroy_resources() {
   // Release cached pinned host buffers
   h_gemm_A.release(); h_gemm_B.release(); h_gemm_C.release();
   h_syrk_A.release(); h_syrk_C.release();
+  // 2-GPU caches
   // DSYEVD stages are static locals; nothing to release here on purpose
   // 2-GPU caches
   g2_gemm_a0.release(); g2_gemm_b0.release(); g2_gemm_c0.release();
@@ -1172,6 +1176,7 @@ void mopac_cuda_destroy_resources() {
   g2_syrk_v0.release(); g2_syrk_c0.release(); g2_syrk_v1.release(); g2_syrk_c1.release();
   h2_gemm_A.release(); h2_gemm_B.release(); h2_gemm_C.release();
   h2_syrk_A.release(); h2_syrk_C.release();
+  h2_rot_V.release();
 }
 
 } // extern "C"
