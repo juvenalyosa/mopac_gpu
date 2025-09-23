@@ -129,6 +129,22 @@ static inline void ensure_local_handles() {
   }
 }
 
+// Unpack packed lower-triangular matrix (length n*(n+1)/2) to full n x n (column-major)
+__global__ void unpack_lower_to_full_kernel(const double *packed, double *full, int n) {
+  int tid = blockDim.x * blockIdx.x + threadIdx.x;
+  int total = n * n;
+  if (tid >= total) return;
+  int r = tid % n;     // row index [0..n-1]
+  int c = tid / n;     // col index [0..n-1]
+  size_t idx;
+  if (r >= c) {
+    idx = (size_t)c + ((size_t)r * ((size_t)r + 1)) / 2;
+  } else {
+    idx = (size_t)r + ((size_t)c * ((size_t)c + 1)) / 2;
+  }
+  full[(size_t)r + (size_t)c * (size_t)n] = packed[idx];
+}
+
 bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
                            const int *nfirst, const int *nlast,
                            const double *ptot, const double *p,
@@ -182,16 +198,25 @@ void mopac_cuda_fmulC_from_dev(int n, const double *C, int ldc, double *W, int l
   if (cudaMalloc((void**)&dC, bytesN) != cudaSuccess) return;
   if (cudaMalloc((void**)&dW, bytesN) != cudaSuccess) { cudaFree(dC); return; }
   cudaMemcpyAsync(dC, C, bytesN, cudaMemcpyHostToDevice, g_stream_local);
+  // Unpack device-resident packed-lower F to full matrix before GEMM
+  double *dFfull = nullptr;
+  if (cudaMalloc((void**)&dFfull, bytesN) != cudaSuccess) { cudaFree(dC); cudaFree(dW); return; }
+  {
+    int total = n * n;
+    int block = 256;
+    int grid = (total + block - 1) / block;
+    unpack_lower_to_full_kernel<<<grid, block, 0, g_stream_local>>>(g_lastF_dev, dFfull, n);
+  }
   double alpha=1.0, beta=0.0;
   cublasDgemm(g_blas_local, CUBLAS_OP_N, CUBLAS_OP_N,
               n, n, n, &alpha,
-              g_lastF_dev, n,
+              dFfull, n,
               dC, ldc,
               &beta,
               dW, ldw);
   cudaMemcpyAsync(W, dW, bytesN, cudaMemcpyDeviceToHost, g_stream_local);
   cudaStreamSynchronize(g_stream_local);
-  cudaFree(dC); cudaFree(dW);
+  cudaFree(dC); cudaFree(dW); cudaFree(dFfull);
 }
 
 void mopac_cuda_grad_buffers_release() {
