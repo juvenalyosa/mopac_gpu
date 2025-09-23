@@ -50,10 +50,18 @@
       logical :: graph, graph_formatted, namo_ok
 ! GBR_new_addition
       integer :: nlower
+      ! optional runtime guard to skip mulliken analysis if it misbehaves
+      integer :: istat_env
+      character(len=16) :: env_nomull
 !
       save :: graph, graph_formatted, icalcn, mo_l, mo_u
 !
-
+      ! Early exit if MOPAC_NOMULLIK is set (skip Mulliken analysis)
+      env_nomull = '' ; istat_env = 1
+      call get_environment_variable('MOPAC_NOMULLIK', env_nomull, status=istat_env)
+      if (istat_env == 0) then
+        if (trim(adjustl(env_nomull)) /= '') return
+      end if
 !-----------------------------------------------
 !*********************************************************************
 !
