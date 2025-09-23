@@ -344,16 +344,25 @@ void call_gemm_cublas(char tra, char trb,
     }
   }
   // Compute C = alpha*op(A)*op(B) + beta*C
-  float ms = 0.0f; cudaEvent_t ev0, ev1; if (w_verbose) { cudaEventCreate(&ev0); cudaEventCreate(&ev1); cudaEventRecord(ev0, g_stream?g_stream:0); }
-  cublasDgemm(g_blas, opA, opB, m, n, k, &alpha, d_A, lda, d_B, ldb, &beta, d_C, ldc);
+  float ms = 0.0f; cudaEvent_t ev0 = nullptr, ev1 = nullptr;
+  cudaStream_t s = g_stream ? g_stream : 0;
   if (w_verbose) {
-    cudaEventRecord(ev1, g_stream?g_stream:0);
+    if (cudaEventCreate(&ev0) != cudaSuccess) { ev0 = nullptr; }
+    if (cudaEventCreate(&ev1) != cudaSuccess) { if (ev0) cudaEventDestroy(ev0); ev0 = nullptr; ev1 = nullptr; }
+    if (ev0) cudaEventRecord(ev0, s);
+  }
+  cublasStatus_t st = cublasDgemm(g_blas, opA, opB, m, n, k, &alpha, d_A, lda, d_B, ldb, &beta, d_C, ldc);
+  if (w_verbose && ev0 && ev1 && st == CUBLAS_STATUS_SUCCESS) {
+    cudaEventRecord(ev1, s);
     cudaEventSynchronize(ev1);
     cudaEventElapsedTime(&ms, ev0, ev1);
     cudaEventDestroy(ev0); cudaEventDestroy(ev1);
     double flops = 2.0 * (double)m * (double)n * (double)k;
     double gflops = flops / 1.0e9 / (ms/1000.0);
     std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: %.3f ms, %.1f GF/s\n", m,n,k, ms, gflops);
+  } else if (w_verbose) {
+    if (ev0) cudaEventDestroy(ev0);
+    if (ev1) cudaEventDestroy(ev1);
   }
   if (pinned) {
     cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
@@ -391,16 +400,25 @@ void call_syrk_cublas(char uplo, char tra,
   if (beta != 0.0) {
     cudaMemcpyAsync(d_C, C, bytesC, cudaMemcpyHostToDevice, g_stream ? g_stream : 0);
   }
-  float ms = 0.0f; cudaEvent_t ev0, ev1; if (w_verbose) { cudaEventCreate(&ev0); cudaEventCreate(&ev1); cudaEventRecord(ev0, g_stream?g_stream:0); }
-  cublasDsyrk(g_blas, u, opA, n, k, &alpha, d_A, lda, &beta, d_C, ldc);
+  float ms = 0.0f; cudaEvent_t ev0 = nullptr, ev1 = nullptr;
+  cudaStream_t s2 = g_stream ? g_stream : 0;
   if (w_verbose) {
-    cudaEventRecord(ev1, g_stream?g_stream:0);
+    if (cudaEventCreate(&ev0) != cudaSuccess) { ev0 = nullptr; }
+    if (cudaEventCreate(&ev1) != cudaSuccess) { if (ev0) cudaEventDestroy(ev0); ev0 = nullptr; ev1 = nullptr; }
+    if (ev0) cudaEventRecord(ev0, s2);
+  }
+  cublasStatus_t st2 = cublasDsyrk(g_blas, u, opA, n, k, &alpha, d_A, lda, &beta, d_C, ldc);
+  if (w_verbose && ev0 && ev1 && st2 == CUBLAS_STATUS_SUCCESS) {
+    cudaEventRecord(ev1, s2);
     cudaEventSynchronize(ev1);
     cudaEventElapsedTime(&ms, ev0, ev1);
     cudaEventDestroy(ev0); cudaEventDestroy(ev1);
     double flops = 2.0 * (double)n * (double)n * (double)k; // rough upper-bound
     double gflops = flops / 1.0e9 / (ms/1000.0);
     std::fprintf(stderr, "[GPU] DSYRK n=%d k=%d: %.3f ms, %.1f GF/s\n", n,k, ms, gflops);
+  } else if (w_verbose) {
+    if (ev0) cudaEventDestroy(ev0);
+    if (ev1) cudaEventDestroy(ev1);
   }
   cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream ? g_stream : 0);
   cudaStreamSynchronize(g_stream ? g_stream : 0);
