@@ -30,6 +30,8 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       double precision :: cst, sign, fract, frac, occ, sum1, sum2
 #ifdef GPU
       double precision, allocatable :: pdens(:)
+      integer :: iopc_eff, istat_env
+      character(len=32) :: env_cpu
 #endif
       if (ndubl /= 0 .and. nsingl > (norbs/2) .and. mode /= 2) then
         !
@@ -56,8 +58,6 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       end if
       ! Allow runtime override to force CPU density even when lgpu is true
 #ifdef GPU
-      integer :: iopc_eff, istat_env
-      character(len=32) :: env_cpu
       iopc_eff = iopc
       env_cpu = '' ; istat_env = 1
       call get_environment_variable('MOPAC_CPU_DENSITY', env_cpu, status=istat_env)
@@ -67,11 +67,10 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
           if (iopc == 2) iopc_eff = 3   ! GPU DGEMM -> CPU DGEMM
         end if
       end if
-#else
-      integer, parameter :: iopc_eff = iopc
-#endif
-
       Select case (iopc_eff)
+#else
+      Select case (iopc)
+#endif
         case(2)   ! Option to use dgemm from CUBLAS
 #ifdef GPU
           if (have_device_eigvecs .and. device_eigvecs_n == norbs) then
