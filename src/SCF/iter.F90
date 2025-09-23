@@ -933,7 +933,18 @@
 !***********************************************************************
         if (timitr) call timer ('BEFORE DENSIT')
         if (uhf) then
-          call density_for_GPU (c, fract, nalpha, nalpha_open, 1.d0, mpack,norbs, 1, pa, iopc_calcp)
+          ! Optional hard override to use CPU density even if lgpu is true
+          i = 1 ; line = ''
+          call get_environment_variable('MOPAC_CPU_DENSITY', line, status=i)
+          if (i == 0) then
+            if (trim(adjustl(line)) /= '') then
+              call densit (c, norbs, norbs, nalpha, 1.d0, na1el, fract, pa, 1)
+            else
+              call density_for_GPU (c, fract, nalpha, nalpha_open, 1.d0, mpack,norbs, 1, pa, iopc_calcp)
+            end if
+          else
+            call density_for_GPU (c, fract, nalpha, nalpha_open, 1.d0, mpack,norbs, 1, pa, iopc_calcp)
+          end if
           if (modea /= 3 .and. .not. (newdg .and. okpuly)) then
             i = niter
             if (camkin) i = 7
@@ -943,7 +954,18 @@
           if (halfe) then
             call densit (c, norbs, norbs, na2el, 2.d0, na1el, fract, p, 1)
           else
-            call density_for_GPU (c, fract, na2el, na1el, 2.d0, mpack, norbs, 1, p, iopc_calcp)
+            ! Optional hard override to use CPU density
+            i = 1 ; line = ''
+            call get_environment_variable('MOPAC_CPU_DENSITY', line, status=i)
+            if (i == 0) then
+              if (trim(adjustl(line)) /= '') then
+                call densit (c, norbs, norbs, na2el, 2.d0, na1el, fract, p, 1)
+              else
+                call density_for_GPU (c, fract, na2el, na1el, 2.d0, mpack, norbs, 1, p, iopc_calcp)
+              end if
+            else
+              call density_for_GPU (c, fract, na2el, na1el, 2.d0, mpack, norbs, 1, p, iopc_calcp)
+            end if
           end if
           if (modea/=3 .and. .not.(newdg .and. okpuly)) then
             call cnvg (p, pold, pold2,  niter, pl)
