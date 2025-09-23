@@ -1558,22 +1558,3 @@ void mopac_cuda_fmulC(int n, const double *F_packed, const double *C, int ldc, d
 }
 
 } // extern "C"
-// Placeholder: multi-GPU eigensolver via cuSOLVERMg (not implemented yet)
-// Returns a negative info to signal fallback to single-GPU path.
-extern "C" void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
-  (void)n; (void)A; (void)lda; (void)W;
-#if defined(HAVE_CUSOLVER_MG)
-  // TODO: implement distributed data setup and call cusolverMg
-  // Parse optional env hints (unused for now)
-  const char* v = std::getenv("MOPAC_EIG_MG_VERBOSE");
-  int verbose = 0; if (v && (std::strcmp(v,"1")==0 || std::strcmp(v,"on")==0 || std::strcmp(v,"true")==0)) verbose = 1;
-  const char* blks = std::getenv("MOPAC_EIG_MG_BLKSIZE");
-  const char* grid = std::getenv("MOPAC_EIG_MG_GRID");
-  if (verbose) {
-    std::fprintf(stderr, "[MG] cuSOLVERMg stub: BLKSIZE=%s GRID=%s\n", blks?blks:"(default)", grid?grid:"(auto)");
-  }
-  if (info) *info = -2; // compiled with MG, but not wired
-#else
-  if (info) *info = -1; // MG not available; force fallback
-#endif
-}
