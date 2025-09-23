@@ -43,6 +43,7 @@
         , n2, lcut, k, ll, ncol
       double precision :: const, step, enucl2, gse, sum
       logical :: debug
+      logical :: use_gpu_grad
       character(len=32) :: line
       double precision, external :: ddot, helect
       save debug, icalcn, const
@@ -115,7 +116,6 @@
       if (lgpu) then
         ! Determine whether to use GPU gradient pieces in this routine
         ! Default: enabled when lgpu, unless explicitly disabled via env
-        logical :: use_gpu_grad
         use_gpu_grad = .true.
         call get_environment_variable('MOPAC_NO_GPU_GRAD', line, status=i)
         if (i == 0) then
