@@ -222,6 +222,20 @@
           if (lgpu) iopc_calcp = 4  ! DSYRK on GPU
 #endif
         end if
+        ! Allow explicit override via environment variables
+#ifdef GPU
+        i = 1 ; line = ''
+        call get_environment_variable('MOPAC_CPU_DENSITY', line, status=i)
+        if (i == 0) then
+          if (trim(adjustl(line)) /= '') then
+            if (halfe) then
+              iopc_calcp = 3
+            else
+              iopc_calcp = 5
+            end if
+          end if
+        end if
+#endif
 !
         if (gs) gs = .not. halfe .and. .not.ci
 !

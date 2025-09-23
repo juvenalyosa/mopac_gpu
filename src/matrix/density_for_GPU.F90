@@ -54,7 +54,24 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
         nl1 = ndubl + 1
         nu1 = nsingl
       end if
-      Select case (iopc)
+      ! Allow runtime override to force CPU density even when lgpu is true
+#ifdef GPU
+      integer :: iopc_eff, istat_env
+      character(len=32) :: env_cpu
+      iopc_eff = iopc
+      env_cpu = '' ; istat_env = 1
+      call get_environment_variable('MOPAC_CPU_DENSITY', env_cpu, status=istat_env)
+      if (istat_env == 0) then
+        if (trim(adjustl(env_cpu)) /= '') then
+          if (iopc == 4) iopc_eff = 5   ! GPU DSYRK -> CPU DSYRK
+          if (iopc == 2) iopc_eff = 3   ! GPU DGEMM -> CPU DGEMM
+        end if
+      end if
+#else
+      integer, parameter :: iopc_eff = iopc
+#endif
+
+      Select case (iopc_eff)
         case(2)   ! Option to use dgemm from CUBLAS
 #ifdef GPU
           if (have_device_eigvecs .and. device_eigvecs_n == norbs) then
