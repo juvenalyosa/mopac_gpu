@@ -113,13 +113,13 @@
       call dcopy (mpack, hmat, 1, fmat, 1)
 #ifdef GPU
       if (lgpu) then
-        ! Optional hard-disable of GPU gradient path for stability on small systems
+        ! Determine whether to use GPU gradient pieces in this routine
+        ! Default: enabled when lgpu, unless explicitly disabled via env
+        logical :: use_gpu_grad
+        use_gpu_grad = .true.
         call get_environment_variable('MOPAC_NO_GPU_GRAD', line, status=i)
         if (i == 0) then
-          if (trim(adjustl(line)) /= '') then
-            call dfock2 (fmat, p, pa, wmat, numat, nfirst, nlast, nati)
-            goto 9001
-          end if
+          if (trim(adjustl(line)) /= '') use_gpu_grad = .false.
         end if
         ! Respect CI mode: force GPU-only gradient if MOPAC_FORCE_GPU_GRAD is set
         call get_environment_variable('MOPAC_FORCE_GPU_GRAD', line, status=i)
@@ -132,19 +132,19 @@
         end if
         if (i == 0) then
           if (index(adjustl(line),'0')==0 .and. index(adjustl(line),'off')==0 .and. len_trim(line)>0) then
-            if (.not. mopac_cuda_fock2_keep(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati)) then
+            if (use_gpu_grad .and. .not. mopac_cuda_fock2_keep(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati)) then
               call mopend('GPU gradient path failed under MOPAC_FORCE_GPU_GRAD')
               return
             end if
           else
-            if (.not. mopac_cuda_fock2_keep(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati)) then
+            if (use_gpu_grad .and. .not. mopac_cuda_fock2_keep(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati)) then
               if (.not. mopac_cuda_fock2(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati, fmat)) then
                 call dfock2 (fmat, p, pa, wmat, numat, nfirst, nlast, nati)
               end if
             end if
           end if
         else
-          if (.not. mopac_cuda_fock2_keep(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati)) then
+          if (use_gpu_grad .and. .not. mopac_cuda_fock2_keep(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati)) then
             if (.not. mopac_cuda_fock2(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati, fmat)) then
               call dfock2 (fmat, p, pa, wmat, numat, nfirst, nlast, nati)
             end if
@@ -187,7 +187,7 @@
 !
 !     PART 1 : WORK(N,N) = FMAT(N,N) * C(N,N)
 #ifdef GPU
-      if (lgpu) then
+      if (lgpu .and. use_gpu_grad) then
         call mopac_cuda_fmulC_from_dev(norbs, c, norbs, work, norbs)
       else
         do i = 1, norbs
