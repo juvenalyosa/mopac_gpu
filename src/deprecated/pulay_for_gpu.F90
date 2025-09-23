@@ -97,10 +97,8 @@
         nfock = 1 
         lfock = 1 
         start = .FALSE. 
-        env = ''
-        call get_environment_variable('MOPAC_DIIS_GPU_BUF', env, status=i)
-        if (lgpu .and. i == 0) then
-          if (trim(adjustl(env)) /= '') call mopac_cuda_diis_init(linear, mfock)
+        if (lgpu) then
+          call mopac_cuda_diis_init(linear, mfock)
         end if
       else 
         if (nfock < mfock) nfock = nfock + 1 

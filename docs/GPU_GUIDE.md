@@ -66,3 +66,21 @@ Multi‑GPU Eigensolver (Roadmap)
 Cleanup and Safety
 - GPU resources are released automatically at end of run. You can skip teardown via `MOPAC_SKIP_GPU_DESTROY=1` for debugging on fragile drivers.
 
+Large Biomolecules (Proteins/DNA/RNA)
+- Keywords: Prefer `MOZYME 1SCF EIGS VECTORS` for very large systems. Add `PULAY`, `DAMP`, and `SHIFT=-50` if SCF is tough.
+- Multi‑GPU BLAS: If multiple GPUs are available, set `MOPAC_CUBLASXT_DEVICES="0,1"` (or leave unset to auto‑select). cuBLASXt accelerates density GEMM/SYRK across devices.
+- Keep data on GPU: `MOPAC_FASTGPU=1` keeps eigenvectors/device data to reduce PCIe traffic. Use `MOPAC_EIG2HOST=1` only when you need vectors printed.
+- Memory sizing: Peak VRAM (double) is roughly `40–56·n²` bytes during SCF for dense paths; with MOZYME, scaling is closer to linear in atoms. Use tiling or reduce `THREADS` for constrained VRAM.
+- Determinism: `MOPAC_DETERMINISTIC=1` enforces cuBLAS settings to avoid atomics for reproducibility.
+- Troubleshooting: Enable `MOPAC_GPU_VERBOSE=1` to see per‑call timings. If timing causes issues on old drivers, unset `MOPAC_STREAMS` (use default stream) and re‑run.
+
+Multi‑GPU Eigensolver (cuSOLVERMg)
+- Enable attempt with `MOPAC_EIG_MG=1` and set a size threshold via `MOPAC_EIG_MG_MIN` (e.g., `3000`). Requires multiple GPUs (`ngpus>1`).
+- Current status: a safe stub is wired; if MG cannot be used, the code falls back to single‑GPU/cuSOLVER or CPU. A full cusolverMg implementation with 2D distribution is planned.
+- Future tuning (reserved): `MOPAC_EIG_MG_GRID` (e.g., `2x2`), `MOPAC_EIG_MG_BLKSIZE`, `MOPAC_EIG_MG_VERBOSE`.
+
+Best‑Practice Recipe
+- Export: `MOPAC_FORCEGPU=1 MOPAC_FASTGPU=1 MOPAC_DETERMINISTIC=1`
+- Optionally: `MOPAC_CUBLASXT_DEVICES="0,1"` on multi‑GPU nodes; set `CUDA_VISIBLE_DEVICES` accordingly.
+- For big matrices: set `MOPAC_EIG_MG=1` and `MOPAC_EIG_MG_MIN=4000` once cuSOLVERMg is enabled in your build.
+- Use example inputs in `examples/` (e.g., `peptide_gg.mop`, `mozyme_1gpu.mop`, `peptide_gg_2gpu.mop`).

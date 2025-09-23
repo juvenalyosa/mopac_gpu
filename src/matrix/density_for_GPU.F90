@@ -81,7 +81,12 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             endforall
             call dtrttp('u', norbs, xmat, norbs, pp, i )
             deallocate (xmat,stat=i)
-            call gpu_diag_clear()
+            ! Keep device eigenvectors available for subsequent steps when FASTGPU is enabled
+            env_cpu = '' ; istat_env = 1
+            call get_environment_variable('MOPAC_FASTGPU', env_cpu, status=istat_env)
+            if (istat_env /= 0 .or. trim(adjustl(env_cpu)) == '') then
+              call gpu_diag_clear()
+            end if
           else
             nl21 = Min (norbs, nl2)
             nl11 = Min (norbs, nl1)
@@ -131,7 +136,11 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             call mopac_cuda_density_from_dev_syrk(norbs, ndubl, occ, xmat, norbs)
             call dtrttp('u', norbs, xmat, norbs, pp, i )
             deallocate(xmat,stat=i)
-            call gpu_diag_clear()
+            env_cpu = '' ; istat_env = 1
+            call get_environment_variable('MOPAC_FASTGPU', env_cpu, status=istat_env)
+            if (istat_env /= 0 .or. trim(adjustl(env_cpu)) == '') then
+              call gpu_diag_clear()
+            end if
           else
             allocate(xmat(norbs,norbs),stat = i)
             forall (j = 1:norbs, i=1:norbs) xmat(i, j) = 0.d0

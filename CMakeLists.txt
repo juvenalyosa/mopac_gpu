@@ -254,6 +254,12 @@ endif()
 # Add list of source files from src directory
 add_subdirectory(src)
 
+# Optional cuSOLVERMg (multi-GPU eigensolver) support flag
+option(USE_CUSOLVER_MG "Enable cuSOLVERMg-based multi-GPU eigensolver (experimental)" OFF)
+if (USE_CUSOLVER_MG AND GPU)
+  target_compile_definitions(mopac-core PRIVATE HAVE_CUSOLVER_MG)
+endif()
+
 # Set up code coverage
 set(GCOV_PROGRAM_NAME gcov CACHE STRING "Name of GNU code coverage analysis tool.")
 set(LCOV_PROGRAM_NAME lcov CACHE STRING "Name of GNU code coverage visualization tool.")

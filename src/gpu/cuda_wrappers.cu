@@ -1205,6 +1205,41 @@ void mopac_cuda_destroy_resources() {
 
 extern "C" {
 
+// =================== cuSOLVERMg multi-GPU symmetric eigensolver (stub) ===================
+// Fortran calls mopac_cusolvermg_dsyevd when ngpus>1, n>=threshold, and env enables MG.
+// If cuSOLVERMg headers/support are not available, return a nonzero info to trigger fallback.
+void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
+#if !defined(HAVE_CUSOLVER_MG)
+  if (info) *info = -777; // clearly non-zero to trigger safe fallback
+  (void)n; (void)A; (void)lda; (void)W;
+  return;
+#else
+  // Parse environment for grid and block size
+  int gx = 2, gy = 2, blksz = 256;
+  {
+    const char* g = std::getenv("MOPAC_EIG_MG_GRID");
+    if (g && *g) {
+      int a=0,b=0;
+      if (std::sscanf(g, "%dx%d", &a, &b) == 2 && a>0 && b>0) { gx = a; gy = b; }
+    }
+    const char* bs = std::getenv("MOPAC_EIG_MG_BLKSIZE");
+    if (bs && *bs) { int tmp = std::atoi(bs); if (tmp > 0) blksz = tmp; }
+  }
+  int devCount = 0; cudaGetDeviceCount(&devCount);
+  int need = gx * gy;
+  if (devCount < need) {
+    if (info) *info = -2; // insufficient GPUs
+    if (w_verbose) std::fprintf(stderr, "[MGPU] DSYEVD requested but only %d GPU(s) available; need %d (%dx%d)\n", devCount, need, gx, gy);
+    return;
+  }
+  // For now, report unimplemented but with validated grid; future steps will create the MG handle and descriptors.
+  if (w_verbose) std::fprintf(stderr, "[MGPU] DSYEVD n=%d grid=%dx%d blksz=%d: implementation pending; falling back.\n", n, gx, gy, blksz);
+  if (info) *info = -1;
+  (void)A; (void)lda; (void)W;
+  return;
+#endif
+}
+
 // Perform Cholesky factorization of symmetric positive definite matrix S (upper)
 // On return, S contains U (upper) such that S = U^T U (host memory)
 void mopac_cuda_potrf_upper(int n, double *S, int ld, int *info) {

@@ -44,6 +44,11 @@
       call to_screen("To_file:END_OF_JOB"//trim(txt))
 #ifdef GPU
       ! Best-effort cleanup of GPU resources in any termination path
+      interface
+        subroutine mopac_cuda_diis_release() bind(C, name='mopac_cuda_diis_release')
+        end subroutine mopac_cuda_diis_release
+      end interface
+      call mopac_cuda_diis_release()
       call mopac_cuda_destroy_resources()
 #endif
       return
