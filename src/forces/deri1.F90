@@ -113,6 +113,14 @@
       call dcopy (mpack, hmat, 1, fmat, 1)
 #ifdef GPU
       if (lgpu) then
+        ! Optional hard-disable of GPU gradient path for stability on small systems
+        call get_environment_variable('MOPAC_NO_GPU_GRAD', line, status=i)
+        if (i == 0) then
+          if (trim(adjustl(line)) /= '') then
+            call dfock2 (fmat, p, pa, wmat, numat, nfirst, nlast, nati)
+            goto 9001
+          end if
+        end if
         ! Respect CI mode: force GPU-only gradient if MOPAC_FORCE_GPU_GRAD is set
         call get_environment_variable('MOPAC_FORCE_GPU_GRAD', line, status=i)
         ! Also allow a keyword: GPU-GRAD-ONLY or FORCEGPU-GRAD
@@ -148,6 +156,7 @@
 #else
       call dfock2 (fmat, p, pa, wmat, numat, nfirst, nlast, nati)
 #endif
+9001  continue
 !
 !  FMAT HOLDS THE ONE PLUS TWO - ELECTRON DERIVATIVES OF ATOM NATI FOR
 !       DIRECTION NATX W.R.T. ALL OTHER ATOMS
