@@ -4,6 +4,15 @@
 #include <cstdio>
 #include <cstring>
 
+// Silence intentional placeholders to avoid noisy nvcc warnings
+#if !defined(MOPAC_UNUSED)
+#  if defined(__GNUC__) || defined(__clang__)
+#    define MOPAC_UNUSED __attribute__((unused))
+#  else
+#    define MOPAC_UNUSED
+#  endif
+#endif
+
 extern "C" {
 
 // Forward declarations for dfock2 kernels used before their definitions (C linkage)
@@ -48,7 +57,10 @@ static double *s_d_ptot = nullptr, *s_d_p = nullptr, *s_d_w = nullptr, *s_d_f = 
 static size_t cap_atoms = 0, cap_mpack = 0, cap_w = 0;
 static int verbose = 0; static int verbose_inited = 0;
 static int csv_enabled = 0; static int csv_inited = 0;
-static int th_ll = 64, th_lh = 32, th_hh = 16; static int th_inited = 0;
+static int th_ll MOPAC_UNUSED = 64;
+static int th_lh MOPAC_UNUSED = 32;
+static int th_hh MOPAC_UNUSED = 16;
+static int th_inited MOPAC_UNUSED = 0;
 // Profiling accumulators
 static long long prof_atoms = 0;
 static long long prof_ll_pairs = 0, prof_lh_pairs = 0, prof_hh_pairs = 0;
@@ -104,7 +116,7 @@ static inline bool ensure_buf_double(double **ptr, size_t *cap_elems, size_t nee
 extern "C" {
 
 static double *g_lastF_dev = nullptr;
-static size_t g_lastF_bytes = 0;
+static size_t g_lastF_bytes MOPAC_UNUSED = 0;
 static int g_lastF_n = 0;
 static cublasHandle_t g_blas_local = nullptr;
 static cudaStream_t g_stream_local = nullptr;
