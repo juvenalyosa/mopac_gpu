@@ -386,33 +386,10 @@ void call_syrk_cublas(char uplo, char tra,
   g_syrk_C.ensure(bytesC);
   double *d_A = g_syrk_A.ptr;
   double *d_C = g_syrk_C.ptr;
-  bool pinnedS = false;
-  if (g_pin_user) {
-    if (cudaHostRegister((void*)A, bytesA, cudaHostRegisterDefault) == cudaSuccess) {
-      if (beta != 0.0) {
-        if (cudaHostRegister((void*)C, bytesC, cudaHostRegisterDefault) == cudaSuccess) {
-          pinnedS = true;
-        } else {
-          cudaHostUnregister((void*)A);
-        }
-      } else {
-        pinnedS = true;
-      }
-    }
-  }
-  if (pinnedS) {
-    cudaMemcpyAsync(d_A, A, bytesA, cudaMemcpyHostToDevice, g_stream);
-    if (beta != 0.0) cudaMemcpyAsync(d_C, C, bytesC, cudaMemcpyHostToDevice, g_stream);
-  } else {
-    h_syrk_A.ensure(bytesA);
-    h_syrk_C.ensure(bytesC);
-    std::memcpy(h_syrk_A.ptr, A, bytesA);
-    cudaMemcpyAsync(d_A, h_syrk_A.ptr, bytesA, cudaMemcpyHostToDevice, g_stream);
-    if (beta != 0.0) {
-      // Only need initial C when beta != 0
-      std::memcpy(h_syrk_C.ptr, C, bytesC);
-      cudaMemcpyAsync(d_C, h_syrk_C.ptr, bytesC, cudaMemcpyHostToDevice, g_stream);
-    }
+  // Simpler and safer: copy directly from user pointers (unpinned OK)
+  cudaMemcpyAsync(d_A, A, bytesA, cudaMemcpyHostToDevice, g_stream ? g_stream : 0);
+  if (beta != 0.0) {
+    cudaMemcpyAsync(d_C, C, bytesC, cudaMemcpyHostToDevice, g_stream ? g_stream : 0);
   }
   float ms = 0.0f; cudaEvent_t ev0, ev1; if (w_verbose) { cudaEventCreate(&ev0); cudaEventCreate(&ev1); cudaEventRecord(ev0, g_stream?g_stream:0); }
   cublasDsyrk(g_blas, u, opA, n, k, &alpha, d_A, lda, &beta, d_C, ldc);
@@ -425,16 +402,8 @@ void call_syrk_cublas(char uplo, char tra,
     double gflops = flops / 1.0e9 / (ms/1000.0);
     std::fprintf(stderr, "[GPU] DSYRK n=%d k=%d: %.3f ms, %.1f GF/s\n", n,k, ms, gflops);
   }
-  if (pinnedS) {
-    cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
-    cudaStreamSynchronize(g_stream);
-    cudaHostUnregister((void*)A);
-    if (beta != 0.0) cudaHostUnregister((void*)C);
-  } else {
-    cudaMemcpyAsync(h_syrk_C.ptr, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
-    cudaStreamSynchronize(g_stream);
-    std::memcpy(C, h_syrk_C.ptr, bytesC);
-  }
+  cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream ? g_stream : 0);
+  cudaStreamSynchronize(g_stream ? g_stream : 0);
 }
 
 // 2-GPU outer product helpers and wrappers are further below.
