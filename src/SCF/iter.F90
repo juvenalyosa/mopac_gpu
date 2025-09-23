@@ -1082,7 +1082,18 @@
 !                                                                      *
 !***********************************************************************
         if (timitr) call timer ('BEFORE B-DENS')
-        call density_for_GPU (cb, fract, nbeta, nbeta_open, 1.d0, mpack, norbs, 1, pb, iopc_calcp)
+        ! Optional hard override to use CPU density for beta as well
+        i = 1 ; line = ''
+        call get_environment_variable('MOPAC_CPU_DENSITY', line, status=i)
+        if (i == 0) then
+          if (trim(adjustl(line)) /= '') then
+            call densit (cb, norbs, norbs, nbeta, 1.d0, nb1el, fract, pb, 1)
+          else
+            call density_for_GPU (cb, fract, nbeta, nbeta_open, 1.d0, mpack, norbs, 1, pb, iopc_calcp)
+          end if
+        else
+          call density_for_GPU (cb, fract, nbeta, nbeta_open, 1.d0, mpack, norbs, 1, pb, iopc_calcp)
+        end if
         if (.not.(newdg .and. okpuly)) then
           i = niter
           if (camkin) i = 7
