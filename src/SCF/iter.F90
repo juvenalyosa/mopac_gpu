@@ -917,7 +917,14 @@
             write (iw, &
          & '(2/10X,A,'' EIGENVECTORS AND EIGENVALUES ON ITERATION'',I3)') abprt(j), niter
 #ifdef GPU
-            if (have_device_eigvecs) call eigenvectors_CUDA_fetch(c, norbs)
+            ! Avoid fetching device-resident eigenvectors unless explicitly requested.
+            ! Host fetch is only needed for printing or CPU-only density paths.
+            if (have_device_eigvecs) then
+              call get_environment_variable('MOPAC_EIG2HOST', line, status=i)
+              if (i == 0 .and. trim(adjustl(line)) /= '') then
+                call eigenvectors_CUDA_fetch(c, norbs)
+              end if
+            end if
 #endif
             call matout (c, eigs, norbs, norbs, norbs)
         else
@@ -1068,7 +1075,12 @@
       '(2/10X,A,'' EIGENVECTORS AND EIGENVALUES ON '',   ''ITERATION'',I3)') &
             &  abprt(3), niter
 #ifdef GPU
-            if (have_device_eigvecs) call eigenvectors_CUDA_fetch(cb, norbs)
+            if (have_device_eigvecs) then
+              call get_environment_variable('MOPAC_EIG2HOST', line, status=i)
+              if (i == 0 .and. trim(adjustl(line)) /= '') then
+                call eigenvectors_CUDA_fetch(cb, norbs)
+              end if
+            end if
 #endif
             call matout (cb, eigb, norbs, norbs, norbs)
           else

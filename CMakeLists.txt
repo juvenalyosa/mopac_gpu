@@ -54,6 +54,18 @@ message(STATUS "Build type is ${CMAKE_BUILD_TYPE}")
 # Specify project name & programming languages
 project(openmopac VERSION ${CMAKE_MATCH_1} LANGUAGES Fortran C)
 
+# Default CUDA architectures (fat binary) for broad GPU support
+# Covers Kepler (35) through Ada/Hopper (89/90). Users can override by setting
+# CMAKE_CUDA_ARCHITECTURES explicitly, or pass -DCMAKE_CUDA_ARCHITECTURES=native.
+if(GPU)
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
+    set(CMAKE_CUDA_ARCHITECTURES
+        35;50;52;60;61;70;75;80;86;89;90
+        CACHE STRING "CUDA SM architectures to compile" FORCE)
+    message(STATUS "Defaulting CMAKE_CUDA_ARCHITECTURES to ${CMAKE_CUDA_ARCHITECTURES}")
+  endif()
+endif()
+
 # Enable C language support for MKL?  (C is only needed for auto-detection of MKL by find_package)
 option(ENABLE_MKL "Turn on C language support for MKL" ON)
 option(USE_C_MALLOC "Turn on C malloc/free for API memory management" OFF)
