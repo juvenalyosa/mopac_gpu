@@ -48,18 +48,29 @@ template <typename T>
 struct HostBuf {
   T* ptr = nullptr;
   size_t cap = 0; // capacity in bytes
+  bool pinned = false;
   void ensure(size_t bytes) {
     if (bytes <= cap && ptr) return;
-    if (ptr) cudaFreeHost(ptr);
-    ptr = nullptr; cap = 0;
+    if (ptr) {
+      if (pinned) cudaFreeHost(ptr); else std::free(ptr);
+    }
+    ptr = nullptr; cap = 0; pinned = false;
     if (bytes > 0) {
-      cudaHostAlloc((void**)&ptr, bytes, cudaHostAllocDefault);
-      cap = bytes;
+      cudaError_t e = cudaHostAlloc((void**)&ptr, bytes, cudaHostAllocDefault);
+      if (e == cudaSuccess && ptr) {
+        cap = bytes; pinned = true;
+      } else {
+        ptr = (T*)std::malloc(bytes);
+        cap = ptr ? bytes : 0;
+        pinned = false;
+      }
     }
   }
   void release() {
-    if (ptr) cudaFreeHost(ptr);
-    ptr = nullptr; cap = 0;
+    if (ptr) {
+      if (pinned) cudaFreeHost(ptr); else std::free(ptr);
+    }
+    ptr = nullptr; cap = 0; pinned = false;
   }
 };
 
