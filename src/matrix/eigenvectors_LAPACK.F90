@@ -24,6 +24,7 @@
       use molkst_C, only: uhf, nclose, nalpha, nbeta
       use eig_call_context, only: current_spin
       use gpu_eig_mg_interfaces
+      use iso_c_binding, only: c_int
 #endif
 #if (MAGMA)
       Use magma
@@ -51,6 +52,14 @@
       double precision :: etol
       ! Multi-GPU eigensolver threshold
       integer :: thr_mg
+      ! Current device CC for auto policy
+      integer(c_int) :: ccmaj, ccmin
+      interface
+        subroutine mopac_cuda_get_cc(maj, min) bind(C, name='get_current_device_cc')
+          import :: c_int
+          integer(c_int) :: maj, min
+        end subroutine mopac_cuda_get_cc
+      end interface
 #endif
 !==============================================================================
 ! Code to find all eigenvectors and all eigenvalues for a symmetric General matrix
@@ -109,13 +118,6 @@ end if
           ortho_gpu = (trim(adjustl(ortho)) /= '')
         else
           if (lgpu) then
-            interface
-              subroutine mopac_cuda_get_cc(maj, min) bind(C, name='get_current_device_cc')
-                use iso_c_binding
-                integer(c_int) :: maj, min
-              end subroutine mopac_cuda_get_cc
-            end interface
-            integer(c_int) :: ccmaj, ccmin
             ccmaj = 0 ; ccmin = 0
             call mopac_cuda_get_cc(ccmaj, ccmin)
             ortho_gpu = (ccmaj >= 7)
