@@ -63,6 +63,32 @@ run_case() {
   if grep -q "JOB ENDED NORMALLY" "$log"; then status="OK"; fi
   if grep -Eq "\[GPU\] (DGEMM|DSYRK|MGPU)" "$log"; then gpu_hits="yes"; fi
   echo "Result: $status (${elapsed}s), GPU logs: $gpu_hits"
+  if [[ "$status" != "OK" ]]; then
+    echo "--- Failure details ($name) ---"
+    if grep -q "UNRECOGNIZED KEY-WORDS" "$log"; then
+      echo "Reason: Unrecognized keyword(s)"
+      grep -m1 -n "UNRECOGNIZED KEY-WORDS" "$log" || true
+    elif grep -q "ERROR DETECTED IN SUBROUTINE CHECK" "$log"; then
+      echo "Reason: MOZYME CHECK failure (LMO/connectivity)"
+      grep -m1 -n "ERROR DETECTED IN SUBROUTINE CHECK" "$log" || true
+      echo "Hint: simplify keywords (no ALLBONDS/BONDS), set CHARGE, let NEWPDB build bonds."
+    elif grep -q "Segmentation fault" "$log"; then
+      echo "Reason: Segmentation fault"
+      grep -m1 -n "Segmentation fault" "$log" || true
+    elif grep -q "mopac_cuda" "$log"; then
+      echo "Reason: CUDA runtime/interop error"
+      grep -n "mopac_cuda" "$log" | head -n 3 || true
+    else
+      echo "Reason: unknown; last 20 lines:"
+      tail -n 20 "$log" || true
+    fi
+    if grep -q "GPU DEBUG SUMMARY:" "$log"; then
+      echo "GPU Debug Summary:"
+      awk '/GPU DEBUG SUMMARY:/{p=1;print;next} /^$/{if(p){exit}} p && NR<999{print}' "$log" | sed -n '1,12p' || true
+    fi
+    echo "(See full log: $log)"
+    echo "------------------------------"
+  fi
   summary+=("$name;$status;$elapsed;$gpu_hits")
 }
 
