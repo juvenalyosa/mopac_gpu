@@ -81,11 +81,17 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             endforall
             call dtrttp('u', norbs, xmat, norbs, pp, i )
             deallocate (xmat,stat=i)
-            ! Keep device eigenvectors available for subsequent steps when FASTGPU is enabled
+            ! Default: keep device eigvecs to reduce transfers; clear only when explicitly requested
             env_cpu = '' ; istat_env = 1
-            call get_environment_variable('MOPAC_FASTGPU', env_cpu, status=istat_env)
-            if (istat_env /= 0 .or. trim(adjustl(env_cpu)) == '') then
+            call get_environment_variable('MOPAC_EIG2HOST', env_cpu, status=istat_env)
+            if (istat_env == 0 .and. trim(adjustl(env_cpu)) /= '') then
               call gpu_diag_clear()
+            else
+              env_cpu = '' ; istat_env = 1
+              call get_environment_variable('MOPAC_CLEAR_DEVICE', env_cpu, status=istat_env)
+              if (istat_env == 0 .and. trim(adjustl(env_cpu)) /= '') then
+                call gpu_diag_clear()
+              end if
             end if
           else
             nl21 = Min (norbs, nl2)
@@ -137,9 +143,15 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             call dtrttp('u', norbs, xmat, norbs, pp, i )
             deallocate(xmat,stat=i)
             env_cpu = '' ; istat_env = 1
-            call get_environment_variable('MOPAC_FASTGPU', env_cpu, status=istat_env)
-            if (istat_env /= 0 .or. trim(adjustl(env_cpu)) == '') then
+            call get_environment_variable('MOPAC_EIG2HOST', env_cpu, status=istat_env)
+            if (istat_env == 0 .and. trim(adjustl(env_cpu)) /= '') then
               call gpu_diag_clear()
+            else
+              env_cpu = '' ; istat_env = 1
+              call get_environment_variable('MOPAC_CLEAR_DEVICE', env_cpu, status=istat_env)
+              if (istat_env == 0 .and. trim(adjustl(env_cpu)) /= '') then
+                call gpu_diag_clear()
+              end if
             end if
           else
             allocate(xmat(norbs,norbs),stat = i)

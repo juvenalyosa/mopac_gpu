@@ -138,6 +138,18 @@ void getGPUInfo(bool *hasGpu,
   }
 }
 
+// Query compute capability of current CUDA device (simple helper for policy decisions)
+void get_current_device_cc(int *major, int *minor) {
+  int dev = -1;
+  if (major) *major = 0;
+  if (minor) *minor = 0;
+  if (cudaGetDevice(&dev) != cudaSuccess || dev < 0) return;
+  cudaDeviceProp prop{};
+  if (cudaGetDeviceProperties(&prop, dev) != cudaSuccess) return;
+  if (major) *major = prop.major;
+  if (minor) *minor = prop.minor;
+}
+
 // Select device by index
 void setDevice(int idevice, bool *stat) {
   cudaError_t cerr = cudaSetDevice(idevice);

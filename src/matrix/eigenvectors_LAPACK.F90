@@ -103,8 +103,26 @@ end if
         if (stat_env == 0) fastgpu = (trim(adjustl(fast)) /= '')
         call get_environment_variable('MOPAC_EIG2HOST', fetch, status=stat_env)
         if (stat_env == 0) fetch_eigs = (trim(adjustl(fetch)) /= '')
+        ! ORTHO on GPU: if env set, honor it; otherwise enable only on newer GPUs (CC >= 7.0)
         call get_environment_variable('MOPAC_ORTHO_GPU', ortho, status=stat_env)
-        if (stat_env == 0) ortho_gpu = (trim(adjustl(ortho)) /= '')
+        if (stat_env == 0) then
+          ortho_gpu = (trim(adjustl(ortho)) /= '')
+        else
+          if (lgpu) then
+            interface
+              subroutine mopac_cuda_get_cc(maj, min) bind(C, name='get_current_device_cc')
+                use iso_c_binding
+                integer(c_int) :: maj, min
+              end subroutine mopac_cuda_get_cc
+            end interface
+            integer(c_int) :: ccmaj, ccmin
+            ccmaj = 0 ; ccmin = 0
+            call mopac_cuda_get_cc(ccmaj, ccmin)
+            ortho_gpu = (ccmaj >= 7)
+          else
+            ortho_gpu = .false.
+          end if
+        end if
         env = '' ; stat_env = 1
         call get_environment_variable('MOPAC_EIG_MG_MIN', env, status=stat_env)
         if (stat_env == 0) then
