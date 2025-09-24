@@ -42,13 +42,18 @@ if have_cmd nvidia-smi; then
 fi
 
 summary=()
+fail_count=0
+
+LAST_STATUS=""
+LAST_REASON=""
+LAST_LOG=""
 
 run_case() {
   local name="$1"; shift
   local infile="$1"; shift
   local extra_env="$*"
   local log="$OUT_DIR/${name// /_}.out"
-  local start_ts end_ts elapsed status="FAIL" gpu_hits="no"
+  local start_ts end_ts elapsed status="FAIL" gpu_hits="no" reason=""
   echo "==> Running $name"
   if [[ ! -f "$infile" ]]; then
     echo "SKIP: missing input $infile" | tee "$log"
@@ -66,20 +71,29 @@ run_case() {
   if [[ "$status" != "OK" ]]; then
     echo "--- Failure details ($name) ---"
     if grep -q "UNRECOGNIZED KEY-WORDS" "$log"; then
-      echo "Reason: Unrecognized keyword(s)"
+      reason="Unrecognized keyword(s)"
+      echo "Reason: $reason"
       grep -m1 -n "UNRECOGNIZED KEY-WORDS" "$log" || true
     elif grep -q "ERROR DETECTED IN SUBROUTINE CHECK" "$log"; then
-      echo "Reason: MOZYME CHECK failure (LMO/connectivity)"
+      reason="MOZYME CHECK failure (LMO/connectivity)"
+      echo "Reason: $reason"
       grep -m1 -n "ERROR DETECTED IN SUBROUTINE CHECK" "$log" || true
+      echo "Context (15 lines before):"
+      awk '/ERROR DETECTED IN SUBROUTINE CHECK/{print NR-0}' "$log" | head -n1 | {
+        read n; if [[ -n "$n" ]]; then start=$((n-15)); if ((start<1)); then start=1; fi; sed -n "${start},${n}p" "$log"; fi
+      }
       echo "Hint: simplify keywords (no ALLBONDS/BONDS), set CHARGE, let NEWPDB build bonds."
     elif grep -q "Segmentation fault" "$log"; then
-      echo "Reason: Segmentation fault"
+      reason="Segmentation fault"
+      echo "Reason: $reason"
       grep -m1 -n "Segmentation fault" "$log" || true
-    elif grep -q "mopac_cuda" "$log"; then
-      echo "Reason: CUDA runtime/interop error"
-      grep -n "mopac_cuda" "$log" | head -n 3 || true
+    elif grep -Eiq "(cuda|cusolver|cublas|CUBLAS_STATUS|CUDA error)" "$log"; then
+      reason="CUDA runtime/interop error"
+      echo "Reason: $reason"
+      grep -niE "(cuda|cusolver|cublas|CUBLAS_STATUS|CUDA error)" "$log" | head -n 5 || true
     else
-      echo "Reason: unknown; last 20 lines:"
+      reason="Unknown"
+      echo "Reason: $reason; last 20 lines:"
       tail -n 20 "$log" || true
     fi
     if grep -q "GPU DEBUG SUMMARY:" "$log"; then
@@ -88,8 +102,12 @@ run_case() {
     fi
     echo "(See full log: $log)"
     echo "------------------------------"
+    fail_count=$((fail_count+1))
   fi
-  summary+=("$name;$status;$elapsed;$gpu_hits")
+  summary+=("$name;$status;$elapsed;$gpu_hits;$reason")
+  LAST_STATUS="$status"
+  LAST_REASON="$reason"
+  LAST_LOG="$log"
 }
 
 # 1) Dense sanity
@@ -114,6 +132,12 @@ Test MOZYME GPU auto-policy run (CHARGE=-9)
 
 EOF
   run_case "mozyme_protein_auto" "$PROT_MOP" "export CUDA_VISIBLE_DEVICES=0;"
+  # If MOZYME CHECK failed, retry with MOZYME GPU disabled (CPU MOZYME) as an automatic fallback
+  if [[ "$LAST_STATUS" != "OK" ]] && grep -q "ERROR DETECTED IN SUBROUTINE CHECK" "$LAST_LOG"; then
+    echo "Retrying MOZYME protein with MOZYME_GPU_OFF=1 (CPU MOZYME fallback)"
+    run_case "mozyme_protein_cpu_fallback" "$PROT_MOP" \
+      "export CUDA_VISIBLE_DEVICES=0; export MOZYME_GPU_OFF=1;"
+  fi
 else
   echo "NOTE: $PROT_PDB not found; skipping protein MOZYME test"
 fi
@@ -131,10 +155,15 @@ run_case "mg_eigs_attempt" "examples/water_pm7_gpu.mop" \
   "export CUDA_VISIBLE_DEVICES=0; export MOPAC_EIG_MG=1; export MOPAC_EIG_MG_MIN=1;"
 
 echo ""
-echo "GPU Test Summary (name;status;seconds;gpu_logs)"
+echo "GPU Test Summary (name;status;seconds;gpu_logs;reason)"
 for line in "${summary[@]}"; do echo "$line"; done | tee "$OUT_DIR/summary.csv"
 
 # Restore original verbose setting if it was empty
 if [[ -z "$GPU_VERBOSE_DEFAULT" ]]; then unset MOPAC_GPU_VERBOSE; fi
 
-echo "Logs in: $OUT_DIR"; exit 0
+echo "Logs in: $OUT_DIR"
+if [[ "$fail_count" -gt 0 ]]; then
+  echo "Failures: $fail_count" 1>&2
+  exit 1
+fi
+exit 0
