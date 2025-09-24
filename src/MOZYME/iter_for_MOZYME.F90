@@ -27,6 +27,9 @@ subroutine iter_for_MOZYME (ee)
          ws, p1, p2, p3, partf, partp, idiag, mode
 !
     use funcon_C, only: fpc_9
+#ifdef GPU
+    use mod_vars_cuda, only: lgpu, mozyme_gpu
+#endif
     use common_arrays_C, only : f, p
     use iter_C, only : pold
     use cosmo_C, only: useps, lpka, solv_energy
@@ -480,8 +483,29 @@ subroutine iter_for_MOZYME (ee)
 !  Correct any small errors in normalization
 !
       call check (nocc1, nncf, ncf, icocc, icocc_dim, iorbs, ncocc, cocc, cocc_dim)
+#ifdef GPU
+      if (moperr) then
+        ! If MOZYME GPU was enabled and a CHECK error occurred, disable MOZYME GPU and restart once.
+        if (lgpu .and. mozyme_gpu) then
+          write (iw, '(//,1x,a)') 'MOZYME GPU: CHECK failure detected; disabling MOZYME GPU and retrying.'
+          moperr = .false.
+          mozyme_gpu = .false.
+          goto 80
+        end if
+      end if
+#endif
       if (moperr) return
       call check (nvir1, nnce, nce, icvir, icvir_dim, iorbs, ncvir, cvir, cvir_dim)
+#ifdef GPU
+      if (moperr) then
+        if (lgpu .and. mozyme_gpu) then
+          write (iw, '(//,1x,a)') 'MOZYME GPU: CHECK failure (virtual) detected; disabling MOZYME GPU and retrying.'
+          moperr = .false.
+          mozyme_gpu = .false.
+          goto 80
+        end if
+      end if
+#endif
       if (moperr) return
       if (Mod(niter+1, idnout) == 0 .and. use_disk) then
         write (iw, "(A)") " .den FILE TO BE WRITTEN OUT"

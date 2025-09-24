@@ -1240,14 +1240,26 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
   int devCount = 0; cudaGetDeviceCount(&devCount);
   int need = gx * gy;
   if (devCount < need) {
-    if (info) *info = -2; // insufficient GPUs
     if (w_verbose) std::fprintf(stderr, "[MGPU] DSYEVD requested but only %d GPU(s) available; need %d (%dx%d)\n", devCount, need, gx, gy);
+    // Fallback: use single-GPU eigensolver on current/best device
+    mopac_cuda_dsyevd(n, A, lda, W, info);
     return;
   }
-  // For now, report unimplemented but with validated grid; future steps will create the MG handle and descriptors.
-  if (w_verbose) std::fprintf(stderr, "[MGPU] DSYEVD n=%d grid=%dx%d blksz=%d: implementation pending; falling back.\n", n, gx, gy, blksz);
-  if (info) *info = -1;
-  (void)A; (void)lda; (void)W;
+  // TODO: Implement cusolverMg 2D block-cyclic distribution and solve.
+  // For now, select a best device by CC and memory and run single-GPU as a safe fallback.
+  int best = 0; int best_cc = -1; size_t best_mem = 0;
+  for (int d = 0; d < devCount; ++d) {
+    cudaDeviceProp prop{}; cudaGetDeviceProperties(&prop, d);
+    int cc = prop.major * 10 + prop.minor;
+    size_t mem = prop.totalGlobalMem;
+    if (cc > best_cc || (cc == best_cc && mem > best_mem)) { best = d; best_cc = cc; best_mem = mem; }
+  }
+  int cur = -1; cudaGetDevice(&cur);
+  if (cur != best) cudaSetDevice(best);
+  if (w_verbose) std::fprintf(stderr, "[MGPU] DSYEVD n=%d grid=%dx%d blksz=%d: using single-GPU fallback on device %d (CC %d.%d)\n",
+                               n, gx, gy, blksz, best, best_cc/10, best_cc%10);
+  mopac_cuda_dsyevd(n, A, lda, W, info);
+  if (cur >= 0 && cur != best) cudaSetDevice(cur);
   return;
 #endif
 }
