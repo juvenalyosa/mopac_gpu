@@ -1243,24 +1243,31 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
 // Perform Cholesky factorization of symmetric positive definite matrix S (upper)
 // On return, S contains U (upper) such that S = U^T U (host memory)
 void mopac_cuda_potrf_upper(int n, double *S, int ld, int *info) {
+  if (info) *info = 0;
   if (!g_blas) create_handle();
   static cusolverDnHandle_t solver = nullptr;
-  if (!solver) cusolverDnCreate(&solver);
+  if (!solver) {
+    cusolverStatus_t st = cusolverDnCreate(&solver);
+    if (st != CUSOLVER_STATUS_SUCCESS) { if (info) *info = -101; return; }
+  }
 
   size_t bytes = (size_t)ld * (size_t)n * sizeof(double);
   DevBuf<double> dS;
   dS.ensure(bytes);
   double *d_S = dS.ptr;
-  cudaMemcpyAsync(d_S, S, bytes, cudaMemcpyHostToDevice, g_stream);
-  cusolverDnSetStream(solver, g_stream);
+  cudaStream_t s = g_stream ? g_stream : 0;
+  cudaMemcpyAsync(d_S, S, bytes, cudaMemcpyHostToDevice, s);
+  cusolverDnSetStream(solver, s);
   int lwork = 0;
-  cusolverDnDpotrf_bufferSize(solver, CUBLAS_FILL_MODE_UPPER, n, d_S, ld, &lwork);
+  cusolverStatus_t st_b = cusolverDnDpotrf_bufferSize(solver, CUBLAS_FILL_MODE_UPPER, n, d_S, ld, &lwork);
+  if (st_b != CUSOLVER_STATUS_SUCCESS || lwork <= 0) { if (info) *info = -102; return; }
   DevBuf<double> dW; dW.ensure(sizeof(double) * (size_t)lwork);
   DevBuf<int> dI; dI.ensure(sizeof(int));
-  cusolverDnDpotrf(solver, CUBLAS_FILL_MODE_UPPER, n, d_S, ld, dW.ptr, lwork, dI.ptr);
-  cudaMemcpyAsync(S, d_S, bytes, cudaMemcpyDeviceToHost, g_stream);
-  cudaMemcpyAsync(info, dI.ptr, sizeof(int), cudaMemcpyDeviceToHost, g_stream);
-  cudaStreamSynchronize(g_stream);
+  cusolverStatus_t st = cusolverDnDpotrf(solver, CUBLAS_FILL_MODE_UPPER, n, d_S, ld, dW.ptr, lwork, dI.ptr);
+  if (st != CUSOLVER_STATUS_SUCCESS) { if (info) *info = -103; return; }
+  cudaMemcpyAsync(S, d_S, bytes, cudaMemcpyDeviceToHost, s);
+  cudaMemcpyAsync(info, dI.ptr, sizeof(int), cudaMemcpyDeviceToHost, s);
+  cudaStreamSynchronize(s);
 }
 
 // F' = X^T F X where X = U^{-1} and S = U^T U (upper). S is overwritten with U (upper).
@@ -1269,6 +1276,7 @@ void mopac_cuda_transform_fock_with_s(int n,
                                       double *S, int lds,
                                       double *F, int ldf,
                                       int *info) {
+  if (info) *info = 0;
   if (!g_blas) create_handle();
   // 1) Cholesky on S -> S := U (upper)
   mopac_cuda_potrf_upper(n, S, lds, info);
@@ -1278,12 +1286,13 @@ void mopac_cuda_transform_fock_with_s(int n,
   size_t bytesF = (size_t)ldf * (size_t)n * sizeof(double);
   DevBuf<double> dS, dF;
   dS.ensure(bytesS); dF.ensure(bytesF);
-  cudaMemcpyAsync(dS.ptr, S, bytesS, cudaMemcpyHostToDevice, g_stream);
-  cudaMemcpyAsync(dF.ptr, F, bytesF, cudaMemcpyHostToDevice, g_stream);
-  cudaStreamSynchronize(g_stream);
+  cudaStream_t s = g_stream ? g_stream : 0;
+  cudaMemcpyAsync(dS.ptr, S, bytesS, cudaMemcpyHostToDevice, s);
+  cudaMemcpyAsync(dF.ptr, F, bytesF, cudaMemcpyHostToDevice, s);
+  cudaStreamSynchronize(s);
   // 3) Y = U^{-T} F  -> solve (U^T) Y = F  => left TRSM with trans=Trans
   const double one = 1.0;
-  cublasDtrsm(g_blas,
+  cublasStatus_t bst1 = cublasDtrsm(g_blas,
               CUBLAS_SIDE_LEFT,
               CUBLAS_FILL_MODE_UPPER,
               CUBLAS_OP_T,
@@ -1292,8 +1301,9 @@ void mopac_cuda_transform_fock_with_s(int n,
               &one,
               dS.ptr, lds,
               dF.ptr, ldf);
+  if (bst1 != CUBLAS_STATUS_SUCCESS) { if (info) *info = -104; return; }
   // 4) F' = Y U^{-1} -> solve Z = Y * U^{-1} => right TRSM with trans=NoTrans
-  cublasDtrsm(g_blas,
+  cublasStatus_t bst2 = cublasDtrsm(g_blas,
               CUBLAS_SIDE_RIGHT,
               CUBLAS_FILL_MODE_UPPER,
               CUBLAS_OP_N,
@@ -1302,9 +1312,10 @@ void mopac_cuda_transform_fock_with_s(int n,
               &one,
               dS.ptr, lds,
               dF.ptr, ldf);
+  if (bst2 != CUBLAS_STATUS_SUCCESS) { if (info) *info = -105; return; }
   // 5) Copy back F' to host
-  cudaMemcpyAsync(F, dF.ptr, bytesF, cudaMemcpyDeviceToHost, g_stream);
-  cudaStreamSynchronize(g_stream);
+  cudaMemcpyAsync(F, dF.ptr, bytesF, cudaMemcpyDeviceToHost, s);
+  cudaStreamSynchronize(s);
 }
 
 // Solve for Cocc in AO: U * Cocc = Uocc  (U upper from Cholesky of S)
