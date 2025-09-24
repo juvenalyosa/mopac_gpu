@@ -69,6 +69,19 @@ run_case() {
   if grep -qiE "(JOB ENDED NORMALLY|ended normally on)" "$log"; then status="OK"; fi
   # Mark as GPU activity if BLAS logs appear, or if MGPU fallback/solve note appears
   if grep -Eq "(\[GPU\] (DGEMM|DSYRK)|\[MGPU\])" "$log"; then gpu_hits="yes"; fi
+  # Enforce expected GPU logs for certain tests
+  case "$name" in
+    dense_sanity_single_gpu|gradient_device_reuse|diis_gpu_bfull|mg_eigs_attempt|mg_large_dense_*)
+      if [[ "$gpu_hits" != "yes" ]]; then
+        status="FAIL"; reason="Expected GPU logs but none detected";
+      fi
+      ;;
+    multigpu_blas_cublasxt)
+      if [[ "$gpu_count" -ge 2 && "$gpu_hits" != "yes" ]]; then
+        status="FAIL"; reason="Expected multi-GPU BLAS logs but none detected";
+      fi
+      ;;
+  esac
   echo "Result: $status (${elapsed}s), GPU logs: $gpu_hits"
   if [[ "$status" != "OK" ]]; then
     echo "--- Failure details ($name) ---"
@@ -144,12 +157,15 @@ else
   echo "NOTE: $PROT_PDB not found; skipping protein MOZYME test"
 fi
 
-# 5) Multi-GPU BLAS (cuBLASXt) if >=2 GPUs
+# 5) Multi-GPU BLAS (cuBLASXt) if >=2 GPUs; otherwise mark as SKIP in summary
 if [[ "$gpu_count" -ge 2 ]]; then
   run_case "multigpu_blas_cublasxt" "examples/peptide_gg_2gpu.mop" \
     "export CUDA_VISIBLE_DEVICES=0,1; export MOPAC_CUBLASXT_DEVICES=0,1;"
 else
-  echo "NOTE: <2 GPUs detected; skipping multi-GPU BLAS test"
+  name="multigpu_blas_cublasxt"; status="SKIP"; elapsed=0; gpu_hits="no"; reason="<2 GPUs"
+  echo "==> Running $name"
+  echo "Result: $status (${elapsed}s), GPU logs: $gpu_hits"
+  summary+=("$name;$status;$elapsed;$gpu_hits;$reason")
 fi
 
 # 6) MG eigensolver attempt (safe fallback)
@@ -157,12 +173,14 @@ run_case "mg_eigs_attempt" "examples/water_pm7_gpu.mop" \
   "export CUDA_VISIBLE_DEVICES=0; export MOPAC_EIG_MG=1; export MOPAC_EIG_MG_MIN=1;"
 
 # 7) MG eigensolver on larger dense input (if provided)
-# Prefer explicit path via MOPAC_MG_LARGE_INPUT. Otherwise, use examples/large_dense.mop if it exists,
-# or autogenerate a dense input from examples/test_dense_big.pdb (if present),
-# otherwise from examples/test_dense.pdb, using recommended dense keywords (no MOZYME).
+# Prefer explicit path via MOPAC_MG_LARGE_INPUT. Otherwise, try examples/dense_test.mop (preferred),
+# then examples/large_dense.mop; if neither exists, autogenerate from examples/test_dense_big.pdb
+# (or test_dense.pdb) using recommended dense keywords (no MOZYME).
 MG_DENSE_IN="${MOPAC_MG_LARGE_INPUT:-}"
 if [[ -z "$MG_DENSE_IN" ]]; then
-  if [[ -f examples/large_dense.mop ]]; then
+  if [[ -f examples/dense_test.mop ]]; then
+    MG_DENSE_IN=examples/dense_test.mop
+  elif [[ -f examples/large_dense.mop ]]; then
     MG_DENSE_IN=examples/large_dense.mop
   elif [[ -f examples/test_dense_big.pdb || -f examples/test_dense.pdb ]]; then
     MG_DENSE_IN="$OUT_DIR/large_dense_autogen.mop"
