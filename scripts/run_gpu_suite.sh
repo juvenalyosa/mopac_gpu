@@ -155,6 +155,36 @@ fi
 run_case "mg_eigs_attempt" "examples/water_pm7_gpu.mop" \
   "export CUDA_VISIBLE_DEVICES=0; export MOPAC_EIG_MG=1; export MOPAC_EIG_MG_MIN=1;"
 
+# 7) MG eigensolver on larger dense input (if provided)
+# Prefer explicit path via MOPAC_MG_LARGE_INPUT. Otherwise, use examples/large_dense.mop if it exists,
+# or autogenerate a dense input from examples/test_dense.pdb using recommended keywords.
+MG_DENSE_IN="${MOPAC_MG_LARGE_INPUT:-}"
+if [[ -z "$MG_DENSE_IN" ]]; then
+  if [[ -f examples/large_dense.mop ]]; then
+    MG_DENSE_IN=examples/large_dense.mop
+  elif [[ -f examples/test_dense.pdb ]]; then
+    MG_DENSE_IN="$OUT_DIR/large_dense_autogen.mop"
+    cat > "$MG_DENSE_IN" <<EOF
+GEO_DAT="examples/test_dense.pdb" M6-D3H4X  1SCF  XYZ  GEO-OK  CHARGE=+1  SINGLET  SCFCRT=1.D-10  MAXIT=999  SHIFT=50  THREADS=8  COSMO  EPS=78.4
+Large dense SP — PM6-D3H4X + COSMO(H2O); tight SCF, big MAXIT, diagonalization (no MOZYME)
+
+EOF
+  fi
+fi
+
+if [[ -n "$MG_DENSE_IN" && -f "$MG_DENSE_IN" ]]; then
+  # Prefer testing across 2 GPUs if available
+  if [[ "$gpu_count" -ge 2 ]]; then
+    run_case "mg_large_dense_multigpu" "$MG_DENSE_IN" \
+      "export CUDA_VISIBLE_DEVICES=0,1; export MOPAC_EIG_MG=1; export MOPAC_EIG_MG_MIN=2000; export MOPAC_EIG_MG_GRID=2x1;"
+  else
+    run_case "mg_large_dense_singlegpu" "$MG_DENSE_IN" \
+      "export CUDA_VISIBLE_DEVICES=0; export MOPAC_EIG_MG=1; export MOPAC_EIG_MG_MIN=2000;"
+  fi
+else
+  echo "NOTE: No larger dense input provided (set MOPAC_MG_LARGE_INPUT or add examples/large_dense.mop); skipping MG large test"
+fi
+
 echo ""
 echo "GPU Test Summary (name;status;seconds;gpu_logs;reason)"
 for line in "${summary[@]}"; do echo "$line"; done | tee "$OUT_DIR/summary.csv"
