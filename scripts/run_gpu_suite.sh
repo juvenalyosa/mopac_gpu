@@ -25,6 +25,9 @@ detect_mopac() {
 detect_mopac
 
 ROOT_DIR=$(pwd)
+# Resolve repository root relative to this script to find examples reliably
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUT_DIR="gpu_test_logs"
 mkdir -p "$OUT_DIR"
 
@@ -159,8 +162,22 @@ fi
 
 # 5) Multi-GPU BLAS (cuBLASXt) if >=2 GPUs; otherwise mark as SKIP in summary
 if [[ "$gpu_count" -ge 2 ]]; then
-  run_case "multigpu_blas_cublasxt" "examples/peptide_gg_2gpu.mop" \
-    "export CUDA_VISIBLE_DEVICES=0,1; export MOPAC_CUBLASXT_DEVICES=0,1;"
+  # Prefer dense input to exercise BLAS-3 across GPUs
+  DENSE_FOR_MG_BLAS=""
+  if [[ -n "${MOPAC_MG_LARGE_INPUT:-}" && -f "${MOPAC_MG_LARGE_INPUT}" ]]; then
+    DENSE_FOR_MG_BLAS="${MOPAC_MG_LARGE_INPUT}"
+  elif [[ -f "$REPO_ROOT/examples/dense_test.mop" ]]; then
+    DENSE_FOR_MG_BLAS="$REPO_ROOT/examples/dense_test.mop"
+  elif [[ -f "$REPO_ROOT/examples/large_dense.mop" ]]; then
+    DENSE_FOR_MG_BLAS="$REPO_ROOT/examples/large_dense.mop"
+  fi
+  if [[ -n "$DENSE_FOR_MG_BLAS" ]]; then
+    run_case "multigpu_blas_cublasxt" "$DENSE_FOR_MG_BLAS" \
+      "export CUDA_VISIBLE_DEVICES=0,1; export MOPAC_CUBLASXT_DEVICES=0,1;"
+  else
+    run_case "multigpu_blas_cublasxt" "$REPO_ROOT/examples/peptide_gg_2gpu.mop" \
+      "export CUDA_VISIBLE_DEVICES=0,1; export MOPAC_CUBLASXT_DEVICES=0,1;"
+  fi
 else
   name="multigpu_blas_cublasxt"; status="SKIP"; elapsed=0; gpu_hits="no"; reason="<2 GPUs"
   echo "==> Running $name"
@@ -178,14 +195,14 @@ run_case "mg_eigs_attempt" "examples/water_pm7_gpu.mop" \
 # (or test_dense.pdb) using recommended dense keywords (no MOZYME).
 MG_DENSE_IN="${MOPAC_MG_LARGE_INPUT:-}"
 if [[ -z "$MG_DENSE_IN" ]]; then
-  if [[ -f examples/dense_test.mop ]]; then
-    MG_DENSE_IN=examples/dense_test.mop
-  elif [[ -f examples/large_dense.mop ]]; then
-    MG_DENSE_IN=examples/large_dense.mop
-  elif [[ -f examples/test_dense_big.pdb || -f examples/test_dense.pdb ]]; then
+  if [[ -f "$REPO_ROOT/examples/dense_test.mop" ]]; then
+    MG_DENSE_IN="$REPO_ROOT/examples/dense_test.mop"
+  elif [[ -f "$REPO_ROOT/examples/large_dense.mop" ]]; then
+    MG_DENSE_IN="$REPO_ROOT/examples/large_dense.mop"
+  elif [[ -f "$REPO_ROOT/examples/test_dense_big.pdb" || -f "$REPO_ROOT/examples/test_dense.pdb" ]]; then
     MG_DENSE_IN="$OUT_DIR/large_dense_autogen.mop"
-    PDB_SRC="examples/test_dense.pdb"
-    if [[ -f examples/test_dense_big.pdb ]]; then PDB_SRC="examples/test_dense_big.pdb"; fi
+    PDB_SRC="$REPO_ROOT/examples/test_dense.pdb"
+    if [[ -f "$REPO_ROOT/examples/test_dense_big.pdb" ]]; then PDB_SRC="$REPO_ROOT/examples/test_dense_big.pdb"; fi
     CHG="${MOPAC_MG_LARGE_CHARGE:-+1}"
     cat > "$MG_DENSE_IN" <<EOF
 GEO_DAT="$PDB_SRC" M6-D3H4X  1SCF  XYZ  GEO-OK  CHARGE=$CHG  SINGLET  SCFCRT=1.D-10  MAXIT=999  SHIFT=50  THREADS=8  COSMO  EPS=78.4
