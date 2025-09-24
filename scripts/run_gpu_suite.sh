@@ -65,7 +65,8 @@ run_case() {
   bash -c "$extra_env \"$MOPAC_BIN\" \"$infile\"" >"$log" 2>&1 || true
   end_ts=$(date +%s)
   elapsed=$(( end_ts - start_ts ))
-  if grep -q "JOB ENDED NORMALLY" "$log"; then status="OK"; fi
+  # Consider both the banner and the single-line footer (case-insensitive)
+  if grep -qiE "(JOB ENDED NORMALLY|ended normally on)" "$log"; then status="OK"; fi
   if grep -Eq "\[GPU\] (DGEMM|DSYRK|MGPU)" "$log"; then gpu_hits="yes"; fi
   echo "Result: $status (${elapsed}s), GPU logs: $gpu_hits"
   if [[ "$status" != "OK" ]]; then
