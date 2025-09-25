@@ -26,7 +26,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
    !***********************************************************************
     use molkst_C, only: numat, mpack, keywrd
     use MOZYME_C, only : lijbo, nijbo, ncf, ncocc, &
-      nncf, iorbs, cocc, icocc
+      nncf, iorbs, cocc, icocc, gpu_occ_enabled, gpu_virt_enabled, at_res, nnce, nce, ncvir, cvir, icvir
     use chanel_C, only: iw
 #ifdef GPU
     use mod_vars_cuda, only: lgpu, mozyme_gpu, mozyme_gpu_min_block, ngpus, mozyme_force_2gpu
@@ -38,6 +38,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     double precision, dimension (mpack), intent (inout) :: p
     logical :: first = .true.
     logical, save :: prnt
+    logical :: active_occ, active_virt
     integer :: i, j, j1, ja, jj, k, k1, k2, ka, kk, l, loop, nj
     integer :: lbase, nb, nk
     double precision, allocatable :: xmat(:,:)
@@ -68,6 +69,16 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
     end if
 
     do i = 1, nclose_loc
+#ifdef GPU
+      active_occ = mozyme_gpu .and. lgpu
+      if (active_occ) then
+        if (i < 1 .or. i > size(gpu_occ_enabled)) then
+          active_occ = .false.
+        else if (.not. gpu_occ_enabled(i)) then
+          active_occ = .false.
+        end if
+      end if
+#endif
       loop = ncocc(i)
       ja = 0
       if (lijbo) then
@@ -79,7 +90,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
             k = icocc(kk)
             if (j == k) then
 #ifdef GPU
-              if (mozyme_gpu .and. lgpu .and. (nj >= mozyme_gpu_min_block)) then
+              if (active_occ .and. (nj >= mozyme_gpu_min_block)) then
                 ! Use SYRK on GPU to form outer product v*v^T for the diagonal block
                 nb = nj
                 lbase = nijbo(j, k)
@@ -101,7 +112,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
                   end do
                 end do
                 deallocate(xmat)
-              else if (mozyme_gpu .and. (nj >= mozyme_gpu_min_block)) then
+              else if (active_occ .and. (nj >= mozyme_gpu_min_block)) then
                 nb = nj
                 lbase = nijbo(j, k)
                 allocate(xmat(nb, nb))
@@ -132,7 +143,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
             else if (j > k .and. nijbo (j, k) >= 0) then
               l = nijbo (j, k)
 #ifdef GPU
-              if (mozyme_gpu .and. lgpu .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
+              if (active_occ .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
                 ! Off-diagonal block: form outer product a(nj) * b(nk)^T with GEMM (k=1)
                 nk = iorbs(k)
                 allocate(xblk(nj, nk))
@@ -153,7 +164,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
                   end do
                 end do
                 deallocate(xblk)
-              else if (mozyme_gpu .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
+              else if (active_occ .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
                 nk = iorbs(k)
                 allocate(xblk(nj, nk))
                 xblk = 0.0d0
@@ -194,7 +205,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
             l = ijbo (j, k)
             if (j == k) then
 #ifdef GPU
-              if (mozyme_gpu .and. lgpu .and. (nj >= mozyme_gpu_min_block)) then
+              if (active_occ .and. (nj >= mozyme_gpu_min_block)) then
                 nb = nj
                 lbase = l
                 allocate(xmat(nb, nb))
@@ -215,7 +226,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
                   end do
                 end do
                 deallocate(xmat)
-              else if (mozyme_gpu .and. (nj >= mozyme_gpu_min_block)) then
+              else if (active_occ .and. (nj >= mozyme_gpu_min_block)) then
                 nb = nj
                 lbase = l
                 allocate(xmat(nb, nb))
@@ -244,7 +255,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
 #endif
             else if (j > k .and. l >= 0) then
 #ifdef GPU
-              if (mozyme_gpu .and. lgpu .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
+              if (active_occ .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
                 nk = iorbs(k)
                 allocate(xblk(nj, nk))
                 xblk = 0.0d0
@@ -264,7 +275,7 @@ subroutine density_for_MOZYME (p, mode, nclose_loc, partp)
                   end do
                 end do
                 deallocate(xblk)
-              else if (mozyme_gpu .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
+              else if (active_occ .and. (nj >= mozyme_gpu_min_block) .and. (iorbs(k) >= mozyme_gpu_min_block)) then
                 nk = iorbs(k)
                 allocate(xblk(nj, nk))
                 xblk = 0.0d0

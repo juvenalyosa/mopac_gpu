@@ -80,6 +80,10 @@
                & kopt(numat), ncf(noccupied + 1), nce(nvirtual + 1), p(mpack), &
                f(mpack), q(numat), stat = i)
   j = j + i
+  allocate (gpu_occ_enabled(noccupied), stat = i)
+  j = j + i
+  allocate (gpu_virt_enabled(nvirtual), stat = i)
+  j = j + i
   allocate(ifact(norbs), stat = i)
   j = j + i
   allocate(cocc(cocc_dim), cvir(cvir_dim), stat = i)
@@ -123,6 +127,8 @@
   nnce = 0
   ncocc = 0
   ncvir = 0
+  gpu_occ_enabled = .true.
+  gpu_virt_enabled = .true.
 !
 !   Create the ijbo array, if it exists?
 !
@@ -169,12 +175,14 @@
     if (allocated(pold3))      deallocate(pold3)
     if (allocated(pbold))      deallocate(pbold)
     if (allocated(pbold2))     deallocate(pbold2)
-    if (allocated(ncocc))      deallocate(ncocc)
-    if (allocated(ncvir))      deallocate(ncvir)
-    if (allocated(nncf))       deallocate(nncf)
-    if (allocated(nnce))       deallocate(nnce)
-    if (allocated(icocc))      deallocate(icocc)
-    if (allocated(icvir))      deallocate(icvir)
+  if (allocated(ncocc))      deallocate(ncocc)
+  if (allocated(ncvir))      deallocate(ncvir)
+  if (allocated(nncf))       deallocate(nncf)
+  if (allocated(nnce))       deallocate(nnce)
+  if (allocated(icocc))      deallocate(icocc)
+  if (allocated(icvir))      deallocate(icvir)
+  if (allocated(gpu_occ_enabled)) deallocate(gpu_occ_enabled)
+  if (allocated(gpu_virt_enabled)) deallocate(gpu_virt_enabled)
     if (allocated(kopt))       deallocate(kopt)
     if (allocated(ncf))        deallocate(ncf)
     if (allocated(nce))        deallocate(nce)

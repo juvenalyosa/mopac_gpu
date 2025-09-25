@@ -24,7 +24,8 @@ subroutine iter_for_MOZYME (ee)
          cocc_dim, icocc_dim, icvir_dim, cvir_dim, nelred, &
          norred, numred, ncf, nce, scfref, thresh, ovmax, tiny, shift, &
          energy_diff, sumt, sumb, ijc, use_three_point_extrap, &
-         ws, p1, p2, p3, partf, partp, idiag, mode
+         ws, p1, p2, p3, partf, partp, idiag, mode, &
+         gpu_occ_enabled, gpu_virt_enabled, at_res, allres
 !
     use funcon_C, only: fpc_9
 #ifdef GPU
@@ -69,6 +70,8 @@ subroutine iter_for_MOZYME (ee)
     double precision, external :: helecz, reada
     integer, dimension (:), allocatable :: iwork
     double precision, dimension (:), allocatable :: rwork
+    integer :: bad_occ, bad_virt, res_idx
+    character(len=4) :: res_name
     add_niter = 0
 !
         80  continue
@@ -482,26 +485,57 @@ subroutine iter_for_MOZYME (ee)
 !
 !  Correct any small errors in normalization
 !
-      call check (nocc1, nncf, ncf, icocc, icocc_dim, iorbs, ncocc, cocc, cocc_dim)
+      bad_occ = 0
+      call check (nocc1, nncf, ncf, icocc, icocc_dim, iorbs, ncocc, cocc, cocc_dim, allow_recover=.true., bad_index=bad_occ)
 #ifdef GPU
       if (moperr) then
-        ! If MOZYME GPU was enabled and a CHECK error occurred, disable MOZYME GPU and restart once.
         if (lgpu .and. mozyme_gpu) then
-          write (iw, '(//,1x,a)') 'MOZYME GPU: CHECK failure detected; disabling MOZYME GPU and retrying.'
+          if (bad_occ >= 1 .and. bad_occ <= size(gpu_occ_enabled)) then
+            gpu_occ_enabled(bad_occ) = .false.
+            if (bad_occ >= 1 .and. bad_occ <= size(nncf)-1 .and. nncf(bad_occ)+1 <= size(icocc)) then
+              res_idx = at_res(icocc(nncf(bad_occ)+1))
+              if (res_idx >= lbound(allres,1) .and. res_idx <= ubound(allres,1)) then
+                res_name = allres(res_idx)
+              else
+                res_name = '    '
+              end if
+              write (iw, '(//,1x,a,1x,i6,1x,a,1x,a)') 'MOZYME GPU: disabling occupied LMO', bad_occ, 'for residue', trim(res_name)
+            else
+              write (iw, '(//,1x,a,1x,i6)') 'MOZYME GPU: disabling occupied LMO', bad_occ
+            end if
+          else
+            write (iw, '(//,1x,a)') 'MOZYME GPU: CHECK failure detected; disabling MOZYME GPU globally.'
+            mozyme_gpu = .false.
+          end if
           moperr = .false.
-          mozyme_gpu = .false.
           goto 80
         end if
       end if
 #endif
       if (moperr) return
-      call check (nvir1, nnce, nce, icvir, icvir_dim, iorbs, ncvir, cvir, cvir_dim)
+      bad_virt = 0
+      call check (nvir1, nnce, nce, icvir, icvir_dim, iorbs, ncvir, cvir, cvir_dim, allow_recover=.true., bad_index=bad_virt)
 #ifdef GPU
       if (moperr) then
         if (lgpu .and. mozyme_gpu) then
-          write (iw, '(//,1x,a)') 'MOZYME GPU: CHECK failure (virtual) detected; disabling MOZYME GPU and retrying.'
+          if (bad_virt >= 1 .and. bad_virt <= size(gpu_virt_enabled)) then
+            gpu_virt_enabled(bad_virt) = .false.
+            if (bad_virt >= 1 .and. bad_virt <= size(nnce)-1 .and. nnce(bad_virt)+1 <= size(icvir)) then
+              res_idx = at_res(icvir(nnce(bad_virt)+1))
+              if (res_idx >= lbound(allres,1) .and. res_idx <= ubound(allres,1)) then
+                res_name = allres(res_idx)
+              else
+                res_name = '    '
+              end if
+              write (iw, '(//,1x,a,1x,i6,1x,a,1x,a)') 'MOZYME GPU: disabling virtual LMO', bad_virt, 'for residue', trim(res_name)
+            else
+              write (iw, '(//,1x,a,1x,i6)') 'MOZYME GPU: disabling virtual LMO', bad_virt
+            end if
+          else
+            write (iw, '(//,1x,a)') 'MOZYME GPU: CHECK failure (virtual) detected; disabling MOZYME GPU globally.'
+            mozyme_gpu = .false.
+          end if
           moperr = .false.
-          mozyme_gpu = .false.
           goto 80
         end if
       end if

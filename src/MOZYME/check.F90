@@ -23,7 +23,7 @@ subroutine check (nvec, nnc, nc, icvec, ic_dim, iorbs, ncvec, cvec, c_dim)
    !   program.
    !
    !***********************************************************************
-    use molkst_C, only: numat
+    use molkst_C, only: numat, moperr
     use chanel_C, only: iw
     use MOZYME_C, only : ws
    !
@@ -36,10 +36,13 @@ subroutine check (nvec, nnc, nc, icvec, ic_dim, iorbs, ncvec, cvec, c_dim)
     integer, dimension (nvec+1), intent (in) :: nc, ncvec, nnc
     integer, dimension (numat), intent (in) :: iorbs
     double precision, dimension (c_dim), intent (inout) :: cvec
+    logical, intent(in), optional :: allow_recover
+    integer, intent(out), optional :: bad_index
    !
    !.. Local Scalars ..
     integer :: i, j, k, l, m, mm, n
     double precision :: error, sum
+    logical :: recover
    !
    !.. Intrinsic Functions ..
     intrinsic Abs, Sqrt
@@ -47,6 +50,9 @@ subroutine check (nvec, nnc, nc, icvec, ic_dim, iorbs, ncvec, cvec, c_dim)
    ! ... Executable Statements ...
    !
     error = 0.d0
+    recover = .false.
+    if (present(allow_recover)) recover = allow_recover
+    if (present(bad_index)) bad_index = 0
    !
    !   RENORMALIZE L.M.O.s
    !
@@ -79,6 +85,18 @@ subroutine check (nvec, nnc, nc, icvec, ic_dim, iorbs, ncvec, cvec, c_dim)
       end do
     end do
     if (error <= 0.1d0) return
+    if (present(bad_index)) then
+      do i = 1, nvec
+        if (Abs(ws(i)-1.d0) > 0.1d0) then
+          bad_index = i
+          exit
+        end if
+      end do
+    end if
+    if (recover) then
+      moperr = .true.
+      return
+    end if
    !
    !   SEVERE ERROR IN LMO's.  QUIT THE JOB
    !
