@@ -15,12 +15,13 @@
 
 subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp, iopc)
 #ifdef GPU
-      Use mod_vars_cuda, only: real_cuda, prec, nthreads_gpu, nblocks_gpu, ngpus
+      Use mod_vars_cuda, only: real_cuda, prec, nthreads_gpu, nblocks_gpu, ngpus, resident_scf
       Use iso_c_binding
       Use density_cuda_i
       Use mopac_cublas_interfaces
       use gpu_density_interfaces
       use gpu_diag_state, only: have_device_eigvecs, device_eigvecs_n, gpu_diag_clear
+      use gpu_runtime_interfaces, only: mopac_cuda_set_resident_mode
 #endif
       implicit none
       Integer :: ndubl, nsingl, mode, mpack, norbs, nl1, nl2, nu1, nu2, i, j, l, &
@@ -85,6 +86,8 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
         end if
       end if
       gpu_density_used = .false.
+      resident_scf = use_resident
+      call mopac_cuda_set_resident_mode(merge(1,0,use_resident))
       Select case (iopc_eff)
 #else
       Select case (iopc)

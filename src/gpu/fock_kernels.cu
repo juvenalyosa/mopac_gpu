@@ -36,6 +36,10 @@ __global__ void dfock2_hh_parallel_kernel(int norbs, int mpack, int numat,
 __device__ __host__ inline int ifact_idx(int i) { return (i * (i - 1)) / 2; }
 
 extern "C" bool mopac_cuda_density_copy_cached(double *dest, size_t len, const double *host_ptr);
+extern "C" int mopac_cuda_get_resident_mode();
+extern "C" void mopac_cuda_clear_fock_cache();
+extern "C" void mopac_cuda_register_fock_device(int linear, double *host_ptr, const double *src_dev);
+extern "C" bool mopac_cuda_fock_copy_cached(double *dest, size_t len, const double *host_ptr);
 
 // Atomic add for double that works on pre-6.0 architectures via CAS
 __device__ inline double atomicAdd_double(double* address, double val) {
@@ -370,8 +374,13 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
     if (h_lh_j) free(h_lh_j); if (h_lh_off) free(h_lh_off);
     if (h_hh_j) free(h_hh_j); if (h_hh_off) free(h_hh_off);
   }
-  // Copy back result
+  // Copy back result and populate resident cache when requested
   cudaMemcpy(fout, s_d_f, sizeof(double)*mpack_e, cudaMemcpyDeviceToHost);
+  if (mopac_cuda_get_resident_mode() != 0) {
+    mopac_cuda_register_fock_device(mpack, fout, s_d_f);
+  } else {
+    mopac_cuda_clear_fock_cache();
+  }
   return true;
 }
 

@@ -26,6 +26,22 @@ static inline void ensure_w_verbose() {
   }
 }
 
+static int g_resident_mode = -1; // -1=unset, 0=off, 1=on
+static inline bool resident_mode_enabled() {
+  if (g_resident_mode >= 0) return g_resident_mode != 0;
+  const char* env = std::getenv("MOPAC_RESIDENT_SCF");
+  if (env && *env) {
+    if (std::strcmp(env, "0") == 0 || std::strcmp(env, "off") == 0 || std::strcmp(env, "false") == 0 || std::strcmp(env, "n") == 0 || std::strcmp(env, "N") == 0) {
+      g_resident_mode = 0;
+    } else {
+      g_resident_mode = 1;
+    }
+  } else {
+    g_resident_mode = 1; // default on when not specified
+  }
+  return g_resident_mode != 0;
+}
+
 // Simple grow-only device buffer cache helper (C++ only; placed outside C linkage)
 template <typename T>
 struct DevBuf {
@@ -229,6 +245,37 @@ static inline void invalidate_packed_density() {
   g_packed_density.valid = false;
   g_packed_density.host_ptr = nullptr;
   g_packed_density.len = 0;
+}
+
+struct PackedCache {
+  DevBuf<double> buf;
+  size_t len = 0;
+  const double* host_ptr = nullptr;
+  bool valid = false;
+};
+
+static PackedCache g_fock_cache;
+
+static inline void invalidate_fock_cache() {
+  g_fock_cache.valid = false;
+  g_fock_cache.host_ptr = nullptr;
+  g_fock_cache.len = 0;
+}
+
+static void register_fock_cache(int linear, const double *host_ptr, const double *src_dev) {
+  if (!resident_mode_enabled()) return;
+  if (linear <= 0 || !src_dev) {
+    invalidate_fock_cache();
+    return;
+  }
+  size_t bytes = sizeof(double) * (size_t)linear;
+  cudaStream_t s = g_stream ? g_stream : 0;
+  g_fock_cache.buf.ensure(bytes);
+  cudaMemcpyAsync(g_fock_cache.buf.ptr, src_dev, bytes, cudaMemcpyDeviceToDevice, s);
+  cudaStreamSynchronize(s);
+  g_fock_cache.len = (size_t)linear;
+  g_fock_cache.host_ptr = host_ptr;
+  g_fock_cache.valid = true;
 }
 
 // cuSOLVERMg profiling accumulators (populated when requested)
@@ -1554,6 +1601,8 @@ void mopac_cuda_destroy_resources() {
   g_density_full_valid = false; g_density_full_n = 0; g_density_full_ld = 0;
   g_packed_density.buf.release();
   invalidate_packed_density();
+  g_fock_cache.buf.release();
+  invalidate_fock_cache();
   g_lt_workspace.release();
   // Release cached pinned host buffers
   h_gemm_A.release(); h_gemm_B.release(); h_gemm_C.release();
@@ -1567,6 +1616,7 @@ void mopac_cuda_destroy_resources() {
   h2_gemm_A.release(); h2_gemm_B.release(); h2_gemm_C.release();
   h2_syrk_A.release(); h2_syrk_C.release();
   h2_rot_V.release();
+  g_resident_mode = -1;
 }
 
 void mopac_cuda_clear_density_cache() {
@@ -1577,6 +1627,7 @@ void mopac_cuda_clear_density_cache() {
 }
 
 void mopac_cuda_density_add_diag(int n, double value) {
+  if (!resident_mode_enabled()) return;
   if (!g_density_full_valid) return;
   if (n != g_density_full_n) return;
   if (value == 0.0) return;
@@ -1588,6 +1639,10 @@ void mopac_cuda_density_add_diag(int n, double value) {
 }
 
 void mopac_cuda_register_packed_density(int linear, double *packed_host) {
+  if (!resident_mode_enabled()) {
+    invalidate_packed_density();
+    return;
+  }
   if (!g_density_full_valid) {
     invalidate_packed_density();
     return;
@@ -1614,11 +1669,42 @@ void mopac_cuda_register_packed_density(int linear, double *packed_host) {
 
 bool mopac_cuda_density_copy_cached(double *dest, size_t len, const double *host_ptr) {
   if (!dest || !host_ptr) return false;
+  if (!resident_mode_enabled()) return false;
   if (!g_packed_density.valid) return false;
   if (g_packed_density.host_ptr != host_ptr) return false;
   if (g_packed_density.len != len) return false;
-  cudaMemcpy(dest, g_packed_density.buf.ptr, len * sizeof(double), cudaMemcpyDeviceToDevice);
+  if (cudaMemcpy(dest, g_packed_density.buf.ptr, len * sizeof(double), cudaMemcpyDeviceToDevice) != cudaSuccess) return false;
   return true;
+}
+
+void mopac_cuda_clear_fock_cache() {
+  invalidate_fock_cache();
+}
+
+void mopac_cuda_set_resident_mode(int flag) {
+  g_resident_mode = (flag > 0) ? 1 : 0;
+  if (flag <= 0) {
+    invalidate_packed_density();
+    invalidate_fock_cache();
+  }
+}
+
+int mopac_cuda_get_resident_mode() {
+  return resident_mode_enabled() ? 1 : 0;
+}
+
+bool mopac_cuda_fock_copy_cached(double *dest, size_t len, const double *host_ptr) {
+  if (!dest || !host_ptr) return false;
+  if (!resident_mode_enabled()) return false;
+  if (!g_fock_cache.valid) return false;
+  if (g_fock_cache.host_ptr != host_ptr) return false;
+  if (g_fock_cache.len != len) return false;
+  if (cudaMemcpy(dest, g_fock_cache.buf.ptr, len * sizeof(double), cudaMemcpyDeviceToDevice) != cudaSuccess) return false;
+  return true;
+}
+
+void mopac_cuda_register_fock_device(int linear, double *host_ptr, const double *src_dev) {
+  register_fock_cache(linear, host_ptr, src_dev);
 }
 
 } // extern "C"
@@ -2177,30 +2263,50 @@ extern "C" {
 // and C, W are n x n (column-major). Uses cuBLAS GEMM on an unpacked full symmetric F.
 void mopac_cuda_fmulC(int n, const double *F_packed, const double *C, int ldc, double *W, int ldw) {
   if (!g_blas) create_handle();
-  // Unpack F on pinned host into full n x n symmetric matrix (lower to both triangles)
   size_t bytesN = (size_t)n * (size_t)n * sizeof(double);
-  static HostBuf<double> hF;
-  hF.ensure(bytesN);
-  // Fill zeros
-  for (int j = 0; j < n*n; ++j) hF.ptr[j] = 0.0;
-  // Unpack lower triangle
-  size_t idx = 0;
-  for (int col = 0; col < n; ++col) {
-    for (int row = col; row < n; ++row) {
-      double v = F_packed[idx++];
-      hF.ptr[row + (size_t)col * (size_t)n] = v; // lower
-      hF.ptr[col + (size_t)row * (size_t)n] = v; // mirror to upper
+  size_t linear = (size_t)n * ((size_t)n + 1) / 2;
+  cudaStream_t s = g_stream ? g_stream : 0;
+
+  bool used_cache = false;
+  DevBuf<double> dPacked;
+  if (resident_mode_enabled()) {
+    dPacked.ensure(sizeof(double) * linear);
+    if (mopac_cuda_fock_copy_cached(dPacked.ptr, linear, F_packed)) {
+      used_cache = true;
     }
   }
-  // Device buffers
+
   DevBuf<double> dF, dC, dW;
   dF.ensure(bytesN);
   dC.ensure(bytesN);
   dW.ensure(bytesN);
-  // Copy F and C to device
-  cudaMemcpyAsync(dF.ptr, hF.ptr, bytesN, cudaMemcpyHostToDevice, g_stream);
-  cudaMemcpyAsync(dC.ptr, C, bytesN, cudaMemcpyHostToDevice, g_stream);
-  // GEMM: W = F * C
+  cudaMemcpyAsync(dC.ptr, C, bytesN, cudaMemcpyHostToDevice, s);
+
+  if (used_cache) {
+    int total = n * n;
+    int block = 256;
+    int grid = (total + block - 1) / block;
+    unpack_lower_to_full_kernel<<<grid, block, 0, s>>>(dPacked.ptr, dF.ptr, n);
+    cudaStreamSynchronize(s);
+  } else {
+    static HostBuf<double> hF;
+    hF.ensure(bytesN);
+    size_t idx = 0;
+    for (int col = 0; col < n; ++col) {
+      for (int row = 0; row < n; ++row) {
+        hF.ptr[row + (size_t)col * (size_t)n] = 0.0;
+      }
+    }
+    for (int col = 0; col < n; ++col) {
+      for (int row = col; row < n; ++row) {
+        double v = F_packed[idx++];
+        hF.ptr[row + (size_t)col * (size_t)n] = v;
+        hF.ptr[col + (size_t)row * (size_t)n] = v;
+      }
+    }
+    cudaMemcpyAsync(dF.ptr, hF.ptr, bytesN, cudaMemcpyHostToDevice, s);
+  }
+
   double alpha = 1.0, beta = 0.0;
   cublasDgemm(g_blas, CUBLAS_OP_N, CUBLAS_OP_N,
               n, n, n, &alpha,
@@ -2208,9 +2314,8 @@ void mopac_cuda_fmulC(int n, const double *F_packed, const double *C, int ldc, d
               dC.ptr, ldc,
               &beta,
               dW.ptr, ldw);
-  // Copy back
-  cudaMemcpyAsync(W, dW.ptr, bytesN, cudaMemcpyDeviceToHost, g_stream);
-  cudaStreamSynchronize(g_stream);
+  cudaMemcpyAsync(W, dW.ptr, bytesN, cudaMemcpyDeviceToHost, s);
+  cudaStreamSynchronize(s);
 }
 
 } // extern "C"

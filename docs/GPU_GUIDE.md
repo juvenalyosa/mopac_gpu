@@ -28,6 +28,7 @@ Device Selection and Enablement
   - `MOPAC_NOGPU=1`: disable GPU (overrides auto‑enable).
   - `MOPAC_MIN_CC=7.0`: require minimum compute capability (e.g., 7.0 for Volta+).
   - `MOPAC_GPU_DEBUG=1`: print a summary of detected GPUs, chosen devices, and MOZYME GPU settings in the output.
+  - `MOPAC_RESIDENT_SCF=1`: keep density/Fock/DIIS work buffers on the GPU across SCF iterations (default on; set to 0 to force host copies).
 
 Eigensolver (cuSOLVER) and Density
 - Threshold to use GPU eigensolver: `MOPAC_GPU_EIGEN_MIN` (default 400 AOs).
@@ -46,7 +47,7 @@ BLAS Acceleration and Multi‑GPU
   - `MOPAC_CUBLASXT_DEVICES="0,1"`: choose devices by index (0‑based).
   - `MOPAC_CUBLASXT_BLOCK=256`: set Xt block size.
   - CPU ratio (kept at 0 by default for portability).
-- `MOZYME_GPU_FORCE=1`: keep MOZYME GPU enabled even on GPUs with compute capability < 6.0 (default auto policy disables it).
+  - `MOZYME_GPU_FORCE=1`: keep MOZYME GPU enabled even on GPUs with compute capability < 6.0 (default auto policy disables it).
 
 Streams, Pinning, and Determinism
 - Streams: enable/disable CUDA streams for wrappers with `MOPAC_STREAMS=off` (defaults on).

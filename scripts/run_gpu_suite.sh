@@ -87,6 +87,8 @@ run_case() {
     mg_large_dense_*)
       # Informational only: MG may fall back cleanly; do not fail if logs absent
       : ;;
+    resident_scf_density)
+      : ;;
   esac
   echo "Result: $status (${elapsed}s), GPU logs: $gpu_hits"
   if [[ -z "$reason" && "$status" == "OK" ]]; then
@@ -101,6 +103,11 @@ run_case() {
       multigpu_blas_cublasxt)
         if grep -q "\[GPU\].*DGEMM" "$log"; then
           reason="Xt active"
+        fi
+        ;;
+      resident_scf_density)
+        if grep -q "resident_scf= T" "$log"; then
+          reason="resident"
         fi
         ;;
     esac
@@ -154,6 +161,10 @@ run_case "dense_sanity_single_gpu" "examples/water_pm7_gpu.mop" \
 # 2) Gradient device F reuse
 run_case "gradient_device_reuse" "examples/h2o_gpu_force.mop" \
   "export CUDA_VISIBLE_DEVICES=0; export MOPAC_GPU_PROFILE=1;"
+
+# Resident SCF cache check
+run_case "resident_scf_density" "examples/water_pm7_gpu.mop" \
+  "export CUDA_VISIBLE_DEVICES=0; export MOPAC_RESIDENT_SCF=1; export MOPAC_GPU_DEBUG=1;"
 
 # 3) DIIS on GPU (full B)
 run_case "diis_gpu_bfull" "examples/benzene.mop" \
