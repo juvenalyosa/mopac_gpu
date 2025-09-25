@@ -130,8 +130,6 @@ module MOZYME_C
     cocc           ! Atomic orbital coefficients of the LMO's
   logical, dimension(:), allocatable :: &
     gpu_occ_enabled
-  logical, dimension(:), allocatable :: &
-    gpu_occ_enabled
 !
 !                                Virtual set
 !
@@ -146,8 +144,6 @@ module MOZYME_C
     ncvir          ! Starting address of te atomic orbital coefficients in each LMO
   double precision, dimension (:), allocatable :: &
     cvir           ! Atomic orbital coefficients of the LMO's
-  logical, dimension(:), allocatable :: &
-    gpu_virt_enabled
   logical, dimension(:), allocatable :: &
     gpu_virt_enabled
 !
