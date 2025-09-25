@@ -179,7 +179,7 @@ PROT_PDB="$REPO_ROOT/examples/test_dense.pdb"
 PROT_MOP="$REPO_ROOT/examples/mozyme_protein_auto.mop"
 if [[ -f "$PROT_PDB" && -f "$PROT_MOP" ]]; then
   run_case "mozyme_protein_auto" "$PROT_MOP" \
-    "export CUDA_VISIBLE_DEVICES=0; export MOZYME_GPU_FORCE=1;"
+    "export CUDA_VISIBLE_DEVICES=0; export MOZYME_GPU_FORCE=1; export MOPAC_GPU_VERBOSE=1;"
   # If MOZYME CHECK failed, retry with MOZYME GPU disabled (CPU MOZYME) as an automatic fallback
   if [[ "$LAST_STATUS" != "OK" ]] && grep -q "ERROR DETECTED IN SUBROUTINE CHECK" "$LAST_LOG"; then
     echo "Retrying MOZYME protein with MOZYME_GPU_OFF=1 (CPU MOZYME fallback)"
