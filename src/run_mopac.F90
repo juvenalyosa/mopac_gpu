@@ -101,6 +101,7 @@
       ! Env parsing helpers for GPU selection
       integer :: stat_env
       character(len=64) :: env
+      character(len=32) :: mg_grid_str, mg_bs_str, mg_thr_str
       double precision :: min_cc
 #endif
 #ifdef BUILD_MDI
@@ -479,15 +480,14 @@
             env = '' ; i = 1
             call get_environment_variable('MOPAC_EIG_MG', env, status=i)
             if (i == 0 .and. trim(adjustl(env)) /= '') then
-              character(len=32) :: grid, bs, thr
-              grid = '' ; bs = '' ; thr = ''
-              i = 1 ; call get_environment_variable('MOPAC_EIG_MG_GRID', grid, status=i)
-              i = 1 ; call get_environment_variable('MOPAC_EIG_MG_BLKSIZE', bs, status=i)
-              i = 1 ; call get_environment_variable('MOPAC_EIG_MG_MIN', thr, status=i)
-              if (len_trim(grid) == 0) grid = '2x1'
-              if (len_trim(bs) == 0)   bs   = '256'
-              if (len_trim(thr) == 0)  thr  = '3000'
-              write(iw,'(3x,a,1x,a,3x,a,1x,a,3x,a,1x,a)') 'EIG_MG=on', 'grid='//trim(grid), 'blksize='//trim(bs), 'thr='//trim(thr)
+              mg_grid_str = '' ; mg_bs_str = '' ; mg_thr_str = ''
+              i = 1 ; call get_environment_variable('MOPAC_EIG_MG_GRID', mg_grid_str, status=i)
+              i = 1 ; call get_environment_variable('MOPAC_EIG_MG_BLKSIZE', mg_bs_str, status=i)
+              i = 1 ; call get_environment_variable('MOPAC_EIG_MG_MIN', mg_thr_str, status=i)
+              if (len_trim(mg_grid_str) == 0) mg_grid_str = '2x1'
+              if (len_trim(mg_bs_str)   == 0) mg_bs_str   = '256'
+              if (len_trim(mg_thr_str)  == 0) mg_thr_str  = '3000'
+              write(iw,'(3x,a,1x,a,3x,a,1x,a,3x,a,1x,a)') 'EIG_MG=on', 'grid='//trim(mg_grid_str), 'blksize='//trim(mg_bs_str), 'thr='//trim(mg_thr_str)
             else
               write(iw,'(3x,a)') 'EIG_MG=off'
             end if
