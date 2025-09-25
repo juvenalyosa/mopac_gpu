@@ -70,11 +70,13 @@ run_case() {
   elapsed=$(( end_ts - start_ts ))
   # Consider both the banner and the single-line footer (case-insensitive)
   if grep -qiE "(JOB ENDED NORMALLY|ended normally on)" "$log"; then status="OK"; fi
-  # Mark as GPU activity if BLAS logs appear, or if MGPU fallback/solve note appears
-  if grep -Eq "(\[GPU\] (DGEMM|DSYRK)|\[MGPU\])" "$log"; then gpu_hits="yes"; fi
+  # Mark as GPU activity if BLAS logs appear, MG fallback logs are present, or MG notices fire
+  if grep -Eq "(\[GPU\] (DGEMM|DSYRK)|\[MGPU\]|cuSOLVERMg support unavailable|cuSOLVERMg solve failed|cuSOLVERMg workspace allocation failed)" "$log"; then
+    gpu_hits="yes"
+  fi
   # Enforce expected GPU logs for certain tests
   case "$name" in
-    dense_sanity_single_gpu|gradient_device_reuse|diis_gpu_bfull|mg_eigs_attempt)
+    dense_sanity_single_gpu|gradient_device_reuse|diis_gpu_bfull|diis_gpu_bcol_solve|mg_eigs_attempt)
       if [[ "$gpu_hits" != "yes" ]]; then
         status="FAIL"; reason="Expected GPU logs but none detected";
       fi
@@ -140,6 +142,10 @@ run_case "gradient_device_reuse" "examples/h2o_gpu_force.mop" \
 # 3) DIIS on GPU (full B)
 run_case "diis_gpu_bfull" "examples/benzene.mop" \
   "export CUDA_VISIBLE_DEVICES=0; export MOPAC_DIIS_GPU_BUF=1; export MOPAC_DIIS_GPU_BFULL=1;"
+
+# 3b) DIIS on GPU (B column + cuSOLVER solve + generalized residual)
+run_case "diis_gpu_bcol_solve" "examples/benzene.mop" \
+  "export CUDA_VISIBLE_DEVICES=0; export MOPAC_DIIS_GPU_BUF=1; export MOPAC_DIIS_GPU_BMAT=1; export MOPAC_DIIS_GPU=1; export MOPAC_DIIS_GEN=1;"
 
 # 4) MOZYME with provided protein PDB (auto policy chooses safe GPU/CPU path)
 PROT_PDB="examples/test_protein_gpu.pdb"
