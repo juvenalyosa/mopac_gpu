@@ -42,7 +42,7 @@ static inline bool resident_mode_enabled() {
   return g_resident_mode != 0;
 }
 
-extern __global__ void unpack_lower_to_full_kernel(const double *packed, double *full, int n);
+extern "C" __global__ void unpack_lower_to_full_kernel(const double *packed, double *full, int n);
 
 // Simple grow-only device buffer cache helper (C++ only; placed outside C linkage)
 template <typename T>
