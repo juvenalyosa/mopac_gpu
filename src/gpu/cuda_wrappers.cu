@@ -345,6 +345,28 @@ void call_gemm_cublas(char tra, char trb,
   size_t bytesA = (size_t)lda * (size_t)k * sizeof(double);
   size_t bytesB = (size_t)ldb * (size_t)n * sizeof(double);
   size_t bytesC = (size_t)ldc * (size_t)n * sizeof(double);
+
+  size_t free_mem = 0, total_mem = 0;
+  cudaMemGetInfo(&free_mem, &total_mem);
+  size_t reserve = (size_t)(free_mem * 0.8);
+  bool can_tile = (opA == CUBLAS_OP_N && opB == CUBLAS_OP_N);
+  bool use_tiling = false;
+  int tile_n = n;
+  if (reserve > 0 && can_tile) {
+    if (bytesA + bytesB + bytesC > reserve && bytesA < reserve) {
+      size_t span = reserve - bytesA;
+      size_t denom = ((size_t)ldb + (size_t)ldc) * sizeof(double);
+      size_t max_tile = denom ? span / denom : 0;
+      if (max_tile == 0 && span > 0) max_tile = 1;
+      if (max_tile > 0 && max_tile < (size_t)n) {
+        tile_n = (int)max_tile;
+        if (tile_n < 1) tile_n = 1;
+        use_tiling = true;
+      }
+    }
+  }
+
+  if (!use_tiling) {
   g_gemm_A.ensure(bytesA);
   g_gemm_B.ensure(bytesB);
   g_gemm_C.ensure(bytesC);
@@ -418,6 +440,74 @@ void call_gemm_cublas(char tra, char trb,
     cudaStreamSynchronize(g_stream);
     std::memcpy(C, h_gemm_C.ptr, bytesC);
   }
+  } else {
+    // Tiled path (columns)
+    if (bytesA > reserve || tile_n <= 0) {
+      // Fallback to single tile (will likely fail, but keep behavior consistent)
+      g_gemm_A.ensure(bytesA);
+      g_gemm_B.ensure(bytesB);
+      g_gemm_C.ensure(bytesC);
+      double *d_A = g_gemm_A.ptr;
+      double *d_B = g_gemm_B.ptr;
+      double *d_C = g_gemm_C.ptr;
+      h_gemm_A.ensure(bytesA);
+      h_gemm_B.ensure(bytesB);
+      h_gemm_C.ensure(bytesC);
+      std::memcpy(h_gemm_A.ptr, A, bytesA);
+      std::memcpy(h_gemm_B.ptr, B, bytesB);
+      cudaMemcpyAsync(d_A, h_gemm_A.ptr, bytesA, cudaMemcpyHostToDevice, g_stream);
+      cudaMemcpyAsync(d_B, h_gemm_B.ptr, bytesB, cudaMemcpyHostToDevice, g_stream);
+      if (beta != 0.0) {
+        std::memcpy(h_gemm_C.ptr, C, bytesC);
+        cudaMemcpyAsync(d_C, h_gemm_C.ptr, bytesC, cudaMemcpyHostToDevice, g_stream);
+      }
+      cublasDgemm(g_blas, opA, opB, m, n, k, &alpha, d_A, lda, d_B, ldb, &beta, d_C, ldc);
+      cudaMemcpyAsync(h_gemm_C.ptr, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
+      cudaStreamSynchronize(g_stream);
+      std::memcpy(C, h_gemm_C.ptr, bytesC);
+      return;
+    }
+
+    size_t bytesA_tile = (size_t)lda * (size_t)k * sizeof(double);
+    g_gemm_A.ensure(bytesA_tile);
+    double *d_A = g_gemm_A.ptr;
+    h_gemm_A.ensure(bytesA_tile);
+    std::memcpy(h_gemm_A.ptr, A, bytesA_tile);
+    cudaMemcpyAsync(d_A, h_gemm_A.ptr, bytesA_tile, cudaMemcpyHostToDevice, g_stream);
+    cudaStreamSynchronize(g_stream);
+
+    for (int col0 = 0; col0 < n; col0 += tile_n) {
+      int tn = std::min(tile_n, n - col0);
+      size_t bytesB_tile = (size_t)ldb * (size_t)tn * sizeof(double);
+      size_t bytesC_tile = (size_t)ldc * (size_t)tn * sizeof(double);
+      g_gemm_B.ensure(bytesB_tile);
+      g_gemm_C.ensure(bytesC_tile);
+      double *d_B = g_gemm_B.ptr;
+      double *d_C = g_gemm_C.ptr;
+
+      const double *B_tile = B + (size_t)col0 * (size_t)ldb;
+      double *C_tile = C + (size_t)col0 * (size_t)ldc;
+
+      cudaMemcpy2DAsync(d_B, ldb * sizeof(double),
+                        B_tile, ldb * sizeof(double),
+                        (size_t)tn * sizeof(double), (size_t)k,
+                        cudaMemcpyHostToDevice, g_stream);
+      if (beta != 0.0) {
+        cudaMemcpy2DAsync(d_C, ldc * sizeof(double),
+                          C_tile, ldc * sizeof(double),
+                          (size_t)tn * sizeof(double), (size_t)m,
+                          cudaMemcpyHostToDevice, g_stream);
+      }
+      cublasStatus_t st = cublasDgemm(g_blas, opA, opB, m, tn, k,
+                                      &alpha, d_A, lda, d_B, ldb, &beta, d_C, ldc);
+      (void)st;
+      cudaMemcpy2DAsync(C_tile, ldc * sizeof(double),
+                        d_C, ldc * sizeof(double),
+                        (size_t)tn * sizeof(double), (size_t)m,
+                        cudaMemcpyDeviceToHost, g_stream);
+      cudaStreamSynchronize(g_stream);
+    }
+  }
 }
 
 // SYRK via cuBLAS (uses cached device buffers)
@@ -433,37 +523,77 @@ void call_syrk_cublas(char uplo, char tra,
   cublasOperation_t opA = (tra == 'T' || tra == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
   size_t bytesA = (size_t)lda * (size_t)((opA==CUBLAS_OP_N)?k:n) * sizeof(double);
   size_t bytesC = (size_t)ldc * (size_t)n * sizeof(double);
-  g_syrk_A.ensure(bytesA);
+
+  size_t free_mem = 0, total_mem = 0;
+  cudaMemGetInfo(&free_mem, &total_mem);
+  size_t reserve = (size_t)(free_mem * 0.8);
+  bool can_tile = (opA == CUBLAS_OP_N);
+  bool use_tiling = false;
+  int tile_k = k;
+  if (reserve > 0 && can_tile) {
+    if (bytesA + bytesC > reserve && bytesC < reserve) {
+      size_t span = reserve - bytesC;
+      size_t denom = (size_t)lda * sizeof(double);
+      size_t max_tile = denom ? span / denom : 0;
+      if (max_tile == 0 && span > 0) max_tile = 1;
+      if (max_tile > 0 && max_tile < (size_t)k) {
+        tile_k = (int)max_tile;
+        if (tile_k < 1) tile_k = 1;
+        use_tiling = true;
+      }
+    }
+  }
+
   g_syrk_C.ensure(bytesC);
-  double *d_A = g_syrk_A.ptr;
   double *d_C = g_syrk_C.ptr;
-  // Simpler and safer: copy directly from user pointers (unpinned OK)
-  cudaMemcpyAsync(d_A, A, bytesA, cudaMemcpyHostToDevice, g_stream ? g_stream : 0);
-  if (beta != 0.0) {
-    cudaMemcpyAsync(d_C, C, bytesC, cudaMemcpyHostToDevice, g_stream ? g_stream : 0);
+  cudaStream_t stream = g_stream ? g_stream : 0;
+
+  if (!use_tiling) {
+    g_syrk_A.ensure(bytesA);
+    double *d_A = g_syrk_A.ptr;
+    cudaMemcpyAsync(d_A, A, bytesA, cudaMemcpyHostToDevice, stream);
+    if (beta != 0.0) {
+      cudaMemcpyAsync(d_C, C, bytesC, cudaMemcpyHostToDevice, stream);
+    }
+    float ms = 0.0f; cudaEvent_t ev0 = nullptr, ev1 = nullptr;
+    if (w_verbose) {
+      if (cudaEventCreate(&ev0) != cudaSuccess) { ev0 = nullptr; }
+      if (cudaEventCreate(&ev1) != cudaSuccess) { if (ev0) cudaEventDestroy(ev0); ev0 = nullptr; ev1 = nullptr; }
+      if (ev0) cudaEventRecord(ev0, stream);
+    }
+    cublasStatus_t st2 = cublasDsyrk(g_blas, u, opA, n, k, &alpha, d_A, lda, &beta, d_C, ldc);
+    if (w_verbose && ev0 && ev1 && st2 == CUBLAS_STATUS_SUCCESS) {
+      cudaEventRecord(ev1, stream);
+      cudaEventSynchronize(ev1);
+      cudaEventElapsedTime(&ms, ev0, ev1);
+      cudaEventDestroy(ev0); cudaEventDestroy(ev1);
+      double flops = 2.0 * (double)n * (double)n * (double)k; // rough upper-bound
+      double gflops = flops / 1.0e9 / (ms/1000.0);
+      std::fprintf(stderr, "[GPU] DSYRK n=%d k=%d: %.3f ms, %.1f GF/s\n", n,k, ms, gflops);
+    } else if (w_verbose) {
+      if (ev0) cudaEventDestroy(ev0);
+      if (ev1) cudaEventDestroy(ev1);
+    }
+    cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+  } else {
+    cudaMemcpyAsync(d_C, C, bytesC, cudaMemcpyHostToDevice, stream);
+    for (int k0 = 0; k0 < k; k0 += tile_k) {
+      int kc = std::min(tile_k, k - k0);
+      size_t bytesA_tile = (size_t)lda * (size_t)kc * sizeof(double);
+      g_syrk_A.ensure(bytesA_tile);
+      double *d_Atile = g_syrk_A.ptr;
+      const double *A_tile = A + (size_t)k0 * (size_t)lda;
+      cudaMemcpy2DAsync(d_Atile, lda * sizeof(double),
+                        A_tile, lda * sizeof(double),
+                        (size_t)kc * sizeof(double), (size_t)n,
+                        cudaMemcpyHostToDevice, stream);
+      double beta_local = (k0 == 0) ? beta : 1.0;
+      cublasDsyrk(g_blas, u, CUBLAS_OP_N, n, kc, &alpha, d_Atile, lda, &beta_local, d_C, ldc);
+    }
+    cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
   }
-  float ms = 0.0f; cudaEvent_t ev0 = nullptr, ev1 = nullptr;
-  cudaStream_t s2 = g_stream ? g_stream : 0;
-  if (w_verbose) {
-    if (cudaEventCreate(&ev0) != cudaSuccess) { ev0 = nullptr; }
-    if (cudaEventCreate(&ev1) != cudaSuccess) { if (ev0) cudaEventDestroy(ev0); ev0 = nullptr; ev1 = nullptr; }
-    if (ev0) cudaEventRecord(ev0, s2);
-  }
-  cublasStatus_t st2 = cublasDsyrk(g_blas, u, opA, n, k, &alpha, d_A, lda, &beta, d_C, ldc);
-  if (w_verbose && ev0 && ev1 && st2 == CUBLAS_STATUS_SUCCESS) {
-    cudaEventRecord(ev1, s2);
-    cudaEventSynchronize(ev1);
-    cudaEventElapsedTime(&ms, ev0, ev1);
-    cudaEventDestroy(ev0); cudaEventDestroy(ev1);
-    double flops = 2.0 * (double)n * (double)n * (double)k; // rough upper-bound
-    double gflops = flops / 1.0e9 / (ms/1000.0);
-    std::fprintf(stderr, "[GPU] DSYRK n=%d k=%d: %.3f ms, %.1f GF/s\n", n,k, ms, gflops);
-  } else if (w_verbose) {
-    if (ev0) cudaEventDestroy(ev0);
-    if (ev1) cudaEventDestroy(ev1);
-  }
-  cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream ? g_stream : 0);
-  cudaStreamSynchronize(g_stream ? g_stream : 0);
 }
 
 // 2-GPU outer product helpers and wrappers are further below.
