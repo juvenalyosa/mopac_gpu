@@ -239,6 +239,9 @@ static bool lt_dgemm(cublasOperation_t opA, cublasOperation_t opB,
                      double beta,
                      double *d_C, int ldc) {
   if (!g_blasLt) return false;
+#if CUBLAS_VERSION < 11700
+  return false;
+#else
   cublasStatus_t st;
   cublasLtMatmulDesc_t op_desc = nullptr;
   cublasLtMatrixLayout_t layoutA = nullptr, layoutB = nullptr, layoutC = nullptr, layoutD = nullptr;
@@ -248,8 +251,8 @@ static bool lt_dgemm(cublasOperation_t opA, cublasOperation_t opB,
   do {
     st = cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_64F, CUDA_R_64F);
     if (st != CUBLAS_STATUS_SUCCESS) break;
-    cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSFORM_A, &opA, sizeof(opA));
-    cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSFORM_B, &opB, sizeof(opB));
+    cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSA, &opA, sizeof(opA));
+    cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSB, &opB, sizeof(opB));
 
     int64_t rowsA = (opA == CUBLAS_OP_N) ? m : k;
     int64_t colsA = (opA == CUBLAS_OP_N) ? k : m;
@@ -300,13 +303,6 @@ static bool lt_dgemm(cublasOperation_t opA, cublasOperation_t opB,
 
     for (int idx = 0; idx < returnCount; ++idx) {
       if (heuristics[idx].state != CUBLAS_STATUS_SUCCESS) continue;
-      uint64_t caps = 0;
-      cublasLtMatmulAlgoGetAttribute(&heuristics[idx].algo,
-                                     CUBLASLT_ALGO_CAPS,
-                                     &caps,
-                                     sizeof(caps),
-                                     nullptr);
-      if ((caps & CUBLASLT_ALGO_CAPS_DETERMINISTIC) == 0) continue;
       if (heuristics[idx].workspaceSize > workspace_limit) continue;
       st = cublasLtMatmul(g_blasLt,
                           op_desc,
@@ -336,6 +332,7 @@ static bool lt_dgemm(cublasOperation_t opA, cublasOperation_t opB,
   if (op_desc) cublasLtMatmulDescDestroy(op_desc);
   return success;
 }
+#endif
 
 void create_handle() {
   if (!g_blas) {
