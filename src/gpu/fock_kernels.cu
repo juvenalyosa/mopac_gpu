@@ -910,6 +910,7 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
   bool want_timing = (verbose != 0) || (csv_enabled != 0) || (prof_collect != 0);
   cudaEvent_t t_all_start = nullptr, t_all_stop = nullptr; float ms_all = 0.f;
   bool total_timed = false;
+  float ll_ms_total = 0.f, lh_ms_total = 0.f, hh_ms_total = 0.f;
   int *h_ll_j = nullptr, *h_ll_off = nullptr;
   int *h_lh_j = nullptr, *h_lh_off = nullptr;
   int *h_hh_j = nullptr, *h_hh_off = nullptr;
@@ -995,7 +996,6 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
     }
   }
   // Launch parallel LL/LH/HH kernels if possible; otherwise serial
-  float ll_ms_total = 0.f, lh_ms_total = 0.f, hh_ms_total = 0.f;
   if ((lh_count == 0) && (hh_count == 0) && (ll_count >= 64)) {
     if (verbose) printf("GPU grad: LL-only; counts LL=%d LH=%d HH=%d\n", ll_count, lh_count, hh_count);
     // Parallel LL-only
