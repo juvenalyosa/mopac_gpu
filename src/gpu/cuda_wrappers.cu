@@ -231,6 +231,35 @@ static inline void invalidate_packed_density() {
   g_packed_density.len = 0;
 }
 
+// cuSOLVERMg profiling accumulators (populated when requested)
+static long long mg_calls = 0;
+static long long mg_failures = 0;
+static double mg_total_ms = 0.0;
+static long long mg_total_dim = 0;
+static long long mg_total_devices = 0;
+static int mg_profile_flag = 0;
+static int mg_profile_inited = 0;
+static int mg_profile_env_requested = 0;
+static inline bool mg_profile_enabled() {
+  if (!mg_profile_inited) {
+    const char* s = std::getenv("MOPAC_EIG_MG_PROFILE");
+    if (s && *s) {
+      if (std::strcmp(s, "0") == 0 || std::strcmp(s, "off") == 0 || std::strcmp(s, "false") == 0) {
+        mg_profile_flag = 0;
+        mg_profile_env_requested = 0;
+      } else {
+        mg_profile_flag = 1;
+        mg_profile_env_requested = 1;
+      }
+    } else {
+      mg_profile_flag = 0;
+      mg_profile_env_requested = 0;
+    }
+    mg_profile_inited = 1;
+  }
+  return mg_profile_flag != 0;
+}
+
 static bool lt_dgemm(cublasOperation_t opA, cublasOperation_t opB,
                      int m, int n, int k,
                      double alpha,
@@ -455,6 +484,7 @@ void call_gemm_cublas(char tra, char trb,
                       double beta,
                       double *C, int ldc) {
   ensure_w_verbose();
+  bool profile_enabled = mg_profile_enabled() || w_verbose;
   if (!g_blas) create_handle();
   cublasOperation_t opA = (tra == 'T' || tra == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
   cublasOperation_t opB = (trb == 'T' || trb == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -1497,6 +1527,14 @@ void mopac_cuda_destroy_resources() {
   if (skip && *skip) return;
   if (already) return;
   already = true;
+  if ((mg_profile_env_requested || w_verbose) && (mg_calls > 0 || mg_failures > 0)) {
+    double avg_ms = (mg_calls > 0) ? (mg_total_ms / (double)mg_calls) : 0.0;
+    double avg_dim = (mg_calls > 0) ? (mg_total_dim / (double)mg_calls) : 0.0;
+    double avg_dev = (mg_calls > 0) ? (mg_total_devices / (double)mg_calls) : 0.0;
+    std::fprintf(stderr,
+                 "[MGPU] summary: calls=%lld failures=%lld avg_ms=%.3f total_ms=%.3f avg_dim=%.1f avg_devices=%.2f\n",
+                 mg_calls, mg_failures, avg_ms, mg_total_ms, avg_dim, avg_dev);
+  }
   // Try to quiesce all pending GPU work before releasing resources
   // This helps avoid tearing down streams/handles while async copies are in-flight.
   cudaDeviceSynchronize();
@@ -1613,6 +1651,7 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
   int devCount = 0;
   cudaGetDeviceCount(&devCount);
   if (devCount <= 0) {
+    if (profile_enabled) mg_failures++;
     mopac_cuda_dsyevd(n, A, lda, W, info);
     return;
   }
@@ -1648,10 +1687,14 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
     if (mh) cusolverMgDestroy(mh);
     if (orig_dev >= 0) cudaSetDevice(orig_dev);
   };
+  auto record_failure = [&]() {
+    if (profile_enabled) mg_failures++;
+  };
 
   cusolverStatus_t s = cusolverMgCreate(&mh);
   if (s != CUSOLVER_STATUS_SUCCESS || !mh) {
     if (w_verbose) std::fprintf(stderr, "[MGPU] cusolverMgCreate failed; fallback to single-GPU DSYEVD\n");
+    if (profile_enabled) mg_failures++;
     mopac_cuda_dsyevd(n, A, lda, W, info);
     return;
   }
@@ -1661,6 +1704,7 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
   cudaError_t cerr = cudaLibMgCreateGrid(&grid, gx, gy, devs.data());
   if (cerr != cudaSuccess || !grid) {
     if (w_verbose) std::fprintf(stderr, "[MGPU] cudaLibMgCreateGrid failed; fallback to single-GPU DSYEVD\n");
+    record_failure();
     cleanup();
     mopac_cuda_dsyevd(n, A, lda, W, info);
     return;
@@ -1675,6 +1719,7 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
                                    grid);
   if (cerr != cudaSuccess || !desc) {
     if (w_verbose) std::fprintf(stderr, "[MGPU] cudaLibMgCreateMatrixDesc failed; fallback to single-GPU DSYEVD\n");
+    record_failure();
     cleanup();
     mopac_cuda_dsyevd(n, A, lda, W, info);
     return;
@@ -1697,6 +1742,7 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
     if (cur >= 0) cudaSetDevice(cur);
     if (cerr != cudaSuccess) {
       if (w_verbose) std::fprintf(stderr, "[MGPU] cudaMalloc tile failed on device %d; fallback\n", devs[did]);
+      record_failure();
       cleanup();
       mopac_cuda_dsyevd(n, A, lda, W, info);
       return;
@@ -1706,6 +1752,7 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
   cerr = cusolverMgMemcpyH2D(mh, Adev.data(), 0, 0, desc, A, lda);
   if (cerr != cudaSuccess) {
     if (w_verbose) std::fprintf(stderr, "[MGPU] cusolverMgMemcpyH2D failed; fallback\n");
+    record_failure();
     cleanup();
     mopac_cuda_dsyevd(n, A, lda, W, info);
     return;
@@ -1724,6 +1771,7 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
                                  &lwork);
   if (s != CUSOLVER_STATUS_SUCCESS || lwork == 0) {
     if (w_verbose) std::fprintf(stderr, "[MGPU] cusolverMgSyevd_bufferSize failed; fallback\n");
+    record_failure();
     cleanup();
     mopac_cuda_dsyevd(n, A, lda, W, info);
     return;
@@ -1737,6 +1785,7 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
     if (cur >= 0) cudaSetDevice(cur);
     if (cerr != cudaSuccess) {
       if (w_verbose) std::fprintf(stderr, "[MGPU] cudaMalloc workspace failed on device %d; fallback\n", devs[did]);
+      record_failure();
       cleanup();
       mopac_cuda_dsyevd(n, A, lda, W, info);
       return;
@@ -1760,6 +1809,7 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
 
   if (s != CUSOLVER_STATUS_SUCCESS || linfo != 0) {
     if (w_verbose) std::fprintf(stderr, "[MGPU] cusolverMgSyevd error (stat=%d, info=%d); fallback\n", (int)s, linfo);
+    record_failure();
     cleanup();
     mopac_cuda_dsyevd(n, A, lda, W, info);
     return;
@@ -1768,17 +1818,23 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
   cerr = cusolverMgMemcpyD2H(mh, A, lda, Adev.data(), 0, 0, desc);
   if (cerr != cudaSuccess) {
     if (w_verbose) std::fprintf(stderr, "[MGPU] cusolverMgMemcpyD2H failed; fallback\n");
+    record_failure();
     cleanup();
     mopac_cuda_dsyevd(n, A, lda, W, info);
     return;
   }
 
   auto t1 = std::chrono::high_resolution_clock::now();
+  double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
   cleanup();
-
+  if (profile_enabled) {
+    mg_calls += 1;
+    mg_total_ms += elapsed_ms;
+    mg_total_dim += n;
+    mg_total_devices += need;
+  }
   if (w_verbose) {
-    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    std::fprintf(stderr, "[MGPU] DSYEVD n=%d grid=%dx%d blksz=%d: %.3f ms\n", n, gx, gy, blksz, ms);
+    std::fprintf(stderr, "[MGPU] DSYEVD n=%d grid=%dx%d blksz=%d: %.3f ms\n", n, gx, gy, blksz, elapsed_ms);
   }
 
   if (info) *info = linfo;

@@ -55,12 +55,15 @@ Streams, Pinning, and Determinism
 Verbose/Profiling
 - `MOPAC_GPU_VERBOSE=1`: prints per‑call timings/GF/s for GEMM/SYRK and high‑level kernels; MG eigensolver logs under `[MGPU]`.
 - `MOPAC_GPU_CSV=1`: prints a CSV‑style summary for gradient kernels at teardown.
+- `MOPAC_GPU_PROFILE=1`: collect aggregated gradient kernel statistics (atom count, pair mix, cumulative ms) and emit a summary at teardown.
+- `MOPAC_EIG_MG_PROFILE=1`: gather cuSOLVERMg solve statistics (calls, failures, average runtime/devices) and print a single summary when GPU resources are released.
 
 Multi‑GPU Eigensolver (cuSOLVERMg)
 - Enable: `MOPAC_EIG_MG=1` with `ngpus>1` and set `MOPAC_EIG_MG_MIN` (e.g., `3000`).
 - Tuning: `MOPAC_EIG_MG_GRID=PxQ` (e.g., `2x1`, `2x2`) and `MOPAC_EIG_MG_BLKSIZE=256`.
 - Logging: with `MOPAC_GPU_VERBOSE=1`, prints `[MGPU] DSYEVD n=… grid=PxQ blksz=B: … ms`.
 - Fallbacks: on any MG error or missing library, MOPAC safely falls back to the single‑GPU cuSOLVER path and notes it in logs.
+- Profiling: enable `MOPAC_EIG_MG_PROFILE=1` to receive a one-line aggregate summary of MG solves (call/failure counts, average wall time, average active devices).
 
 Cleanup and Safety
 - GPU resources are released automatically at end of run. You can skip teardown via `MOPAC_SKIP_GPU_DESTROY=1` for debugging on fragile drivers.

@@ -59,6 +59,8 @@ static double *s_d_ptot = nullptr, *s_d_p = nullptr, *s_d_w = nullptr, *s_d_f = 
 static size_t cap_atoms = 0, cap_mpack = 0, cap_w = 0;
 static int verbose = 0; static int verbose_inited = 0;
 static int csv_enabled = 0; static int csv_inited = 0;
+static int prof_collect = 0; static int prof_inited = 0;
+static int prof_env_requested = 0;
 static int th_ll MOPAC_UNUSED = 64;
 static int th_lh MOPAC_UNUSED = 32;
 static int th_hh MOPAC_UNUSED = 16;
@@ -89,6 +91,22 @@ static inline void ensure_csv() {
     const char* s = std::getenv("MOPAC_GPU_CSV");
     if (s && (std::strcmp(s,"1")==0 || std::strcmp(s,"on")==0 || std::strcmp(s,"true")==0)) csv_enabled = 1;
     csv_inited = 1;
+  }
+}
+static inline void ensure_profile_collect() {
+  if (!prof_inited) {
+    const char* s = std::getenv("MOPAC_GPU_PROFILE");
+    if (s && *s) {
+      prof_env_requested = 1;
+      if (std::strcmp(s, "0") == 0 || std::strcmp(s, "off") == 0 || std::strcmp(s, "false") == 0) {
+        prof_collect = 0;
+      } else {
+        prof_collect = 1;
+      }
+    } else {
+      prof_collect = 1;
+    }
+    prof_inited = 1;
   }
 }
 static inline bool ensure_buf_int(int **ptr, size_t *cap_elems, size_t need_elems) {
@@ -223,7 +241,7 @@ void mopac_cuda_fmulC_from_dev(int n, const double *C, int ldc, double *W, int l
 
 void mopac_cuda_grad_buffers_release() {
   // Print end-of-run profiling summary if enabled
-  if (verbose && prof_atoms > 0) {
+  if ((verbose || prof_env_requested) && prof_atoms > 0) {
     double avg_ms = prof_total_ms / (double)prof_atoms;
     printf("GPU grad summary: atoms=%lld total_ms=%.3f avg_ms=%.3f LL_pairs=%lld LH_pairs=%lld HH_pairs=%lld LL_ms=%.3f LH_ms=%.3f HH_ms=%.3f\n",
            prof_atoms, prof_total_ms, avg_ms, prof_ll_pairs, prof_lh_pairs, prof_hh_pairs, prof_ll_ms, prof_lh_ms, prof_hh_ms);
@@ -259,7 +277,7 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
                           const int *nfirst, const int *nlast,
                           const double *ptot, const double *p,
                           const double *w, double *fout) {
-  ensure_verbose(); ensure_thresholds(); ensure_csv();
+  ensure_verbose(); ensure_thresholds(); ensure_csv(); ensure_profile_collect();
   // Prepare buffers
   size_t atoms_e = (size_t)numat;
   size_t mpack_e = (size_t)mpack;
@@ -311,13 +329,13 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
     if (lh_count>0) { h_lh_j=(int*)malloc(sizeof(int)*lh_count); h_lh_off=(int*)malloc(sizeof(int)*lh_count); }
     if (hh_count>0) { h_hh_j=(int*)malloc(sizeof(int)*hh_count); h_hh_off=(int*)malloc(sizeof(int)*hh_count); }
     // Fill
-    int il=0, ih=0, ihh=0;
+    int il=0, ilh=0, ihh=0;
     for (int jj = 1; jj < ii; ++jj) {
       int ja = nfirst[jj - 1]; int jb = nlast[jj - 1]; if ((jb - ja) < 0) continue;
       int di = ib - ia; int dj = jb - ja;
-      if (di < 3 && dj < 3) { if (h_ll_j){ h_ll_j[il]=jj; h_ll_off[il]=(int)kk_cursor; il++; } kk_cursor += 1; }
-      else if (di >= 3 && dj >= 3) { if (h_hh_j){ h_hh_j[ihh]=jj; h_hh_off[ihh]=(int)kk_cursor; ihh++; } kk_cursor += 100; }
-      else { if (h_lh_j){ h_lh_j[ih]=jj; h_lh_off[ih]=(int)kk_cursor; ih++; } kk_cursor += 10; }
+      if (di < 3 && dj < 3) { if (h_ll_j){ h_ll_j[il]=jj; h_ll_off[il]=(int)kk_cursor; } il++; kk_cursor += 1; }
+      else if (di >= 3 && dj >= 3) { if (h_hh_j){ h_hh_j[ihh]=jj; h_hh_off[ihh]=(int)kk_cursor; } ihh++; kk_cursor += 100; }
+      else { if (h_lh_j){ h_lh_j[ilh]=jj; h_lh_off[ilh]=(int)kk_cursor; } ilh++; kk_cursor += 10; }
     }
     // Launch kernels in sequence
     int *d_j=nullptr, *d_off=nullptr;
@@ -857,7 +875,7 @@ __global__ void dfock2_hh_parallel_kernel(int norbs, int mpack, int numat,
   kab_update(ia, ja, pk, w + kk, f);
 }
 
-// Packed inputs; currently supports only all light-light pairs for atom nati.
+// Packed inputs; handles light-light, light-heavy, and heavy-heavy pairs for atom nati.
 // Returns true if GPU handled the update; false to fall back to CPU dfock2.
 bool mopac_cuda_fock2(int norbs, int mpack, int numat,
                       const int *nfirst, const int *nlast,
@@ -888,7 +906,10 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
 
   // Stage inputs to persistent device buffers
   // Predeclare timing and host list buffers before any goto to satisfy nvcc
+  ensure_profile_collect();
+  bool want_timing = (verbose != 0) || (csv_enabled != 0) || (prof_collect != 0);
   cudaEvent_t t_all_start = nullptr, t_all_stop = nullptr; float ms_all = 0.f;
+  bool total_timed = false;
   int *h_ll_j = nullptr, *h_ll_off = nullptr;
   int *h_lh_j = nullptr, *h_lh_off = nullptr;
   int *h_hh_j = nullptr, *h_hh_off = nullptr;
@@ -916,7 +937,16 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
   e = cudaMemcpy(s_d_f, f, sizeof(double)*mpack_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
   e = cudaMemcpy(s_d_w, w, sizeof(double)*w_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
   // Total timing start
-  if (verbose) { cudaEventCreate(&t_all_start); cudaEventCreate(&t_all_stop); cudaEventRecord(t_all_start); }
+  if (want_timing) {
+    if (cudaEventCreate(&t_all_start) == cudaSuccess && cudaEventCreate(&t_all_stop) == cudaSuccess) {
+      cudaEventRecord(t_all_start);
+      total_timed = true;
+    } else {
+      if (t_all_start) cudaEventDestroy(t_all_start);
+      if (t_all_stop) cudaEventDestroy(t_all_stop);
+      t_all_start = nullptr; t_all_stop = nullptr; total_timed = false;
+    }
+  }
 
   // Build compact pair lists with w offsets
   if (!all_ll) {
@@ -941,7 +971,7 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
     if (lh_count > 0) { h_lh_j = (int*)malloc(sizeof(int)*lh_count); h_lh_off = (int*)malloc(sizeof(int)*lh_count); }
     if (hh_count > 0) { h_hh_j = (int*)malloc(sizeof(int)*hh_count); h_hh_off = (int*)malloc(sizeof(int)*hh_count); }
     // Fill
-    kk_cursor = 0; int il = 0, ih = 0;
+    kk_cursor = 0; int il = 0, ilh = 0, ihh = 0;
     for (int jj = 1; jj <= numat; ++jj) {
       if (jj == nati) continue;
       int ja = nfirst[jj - 1];
@@ -950,18 +980,22 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
       int di = ib - ia;
       int dj = jb - ja;
       if (di < 3 && dj < 3) {
-        if (h_ll_j) { h_ll_j[il] = jj; h_ll_off[il] = kk_cursor; il++; }
+        if (h_ll_j) { h_ll_j[il] = jj; h_ll_off[il] = kk_cursor; }
+        il++;
         kk_cursor += 1;
       } else if (di >= 3 && dj >= 3) {
-        if (h_hh_j) { h_hh_j[ih] = jj; h_hh_off[ih] = kk_cursor; ih++; }
+        if (h_hh_j) { h_hh_j[ihh] = jj; h_hh_off[ihh] = kk_cursor; }
+        ihh++;
         kk_cursor += 100;
       } else {
-        if (h_lh_j) { h_lh_j[ih] = jj; h_lh_off[ih] = kk_cursor; ih++; }
+        if (h_lh_j) { h_lh_j[ilh] = jj; h_lh_off[ilh] = kk_cursor; }
+        ilh++;
         kk_cursor += 10;
       }
     }
   }
   // Launch parallel LL/LH/HH kernels if possible; otherwise serial
+  float ll_ms_total = 0.f, lh_ms_total = 0.f, hh_ms_total = 0.f;
   if ((lh_count == 0) && (hh_count == 0) && (ll_count >= 64)) {
     if (verbose) printf("GPU grad: LL-only; counts LL=%d LH=%d HH=%d\n", ll_count, lh_count, hh_count);
     // Parallel LL-only
@@ -972,10 +1006,26 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
     e = cudaMemcpy(d_off, h_ll_off, sizeof(int)*ll_count, cudaMemcpyHostToDevice); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto SERIAL; }
     int block = 256, grid = (ll_count + block - 1) / block;
     if (verbose) printf("GPU grad: LL-only parallel, pairs=%d\n", ll_count);
-    cudaEvent_t ev1, ev2; float ms=0.f; if (verbose) { cudaEventCreate(&ev1); cudaEventCreate(&ev2); cudaEventRecord(ev1); }
+    cudaEvent_t ev1 = nullptr, ev2 = nullptr; float ms = 0.f; bool timed = false;
+    if (want_timing) {
+      if (cudaEventCreate(&ev1) == cudaSuccess && cudaEventCreate(&ev2) == cudaSuccess) {
+        cudaEventRecord(ev1);
+        timed = true;
+      }
+    }
     dfock2_ll_parallel_kernel<<<grid, block>>>(norbs, mpack, numat, s_d_nf, s_d_nl, s_d_ptot, s_d_p, s_d_w, nati, d_j, d_off, ll_count, s_d_f);
-    if (verbose) { cudaEventRecord(ev2); cudaEventSynchronize(ev2); cudaEventElapsedTime(&ms, ev1, ev2); printf("GPU grad: LL kernel time = %.3f ms\n", ms); cudaEventDestroy(ev1); cudaEventDestroy(ev2); }
+    if (timed) {
+      cudaEventRecord(ev2);
+      cudaEventSynchronize(ev2);
+      cudaEventElapsedTime(&ms, ev1, ev2);
+      cudaEventDestroy(ev1);
+      cudaEventDestroy(ev2);
+    }
+    if (verbose && timed) {
+      printf("GPU grad: LL kernel time = %.3f ms\n", ms);
+    }
     e = cudaDeviceSynchronize(); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto FAIL; }
+    ll_ms_total += ms;
     cudaFree(d_j); cudaFree(d_off);
   } else if (ll_count + lh_count + hh_count > 0 && (lh_count >= 32 || ll_count >= 32 || hh_count >= 16)) {
     if (verbose) printf("GPU grad: mixed LL/LH/HH; counts L=%d H=%d HH=%d\n", ll_count, lh_count, hh_count);
@@ -988,10 +1038,26 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
       e = cudaMemcpy(d_off, h_ll_off, sizeof(int)*ll_count, cudaMemcpyHostToDevice); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto SERIAL; }
       int block = 256, grid = (ll_count + block - 1) / block;
       if (verbose) printf("GPU grad: LL-parallel, pairs=%d\n", ll_count);
-      cudaEvent_t e1,e2; float ms=0.f; if (verbose) { cudaEventCreate(&e1); cudaEventCreate(&e2); cudaEventRecord(e1); }
+      cudaEvent_t e1 = nullptr, e2 = nullptr; float ms = 0.f; bool timed = false;
+      if (want_timing) {
+        if (cudaEventCreate(&e1) == cudaSuccess && cudaEventCreate(&e2) == cudaSuccess) {
+          cudaEventRecord(e1);
+          timed = true;
+        }
+      }
       dfock2_ll_parallel_kernel<<<grid, block>>>(norbs, mpack, numat, s_d_nf, s_d_nl, s_d_ptot, s_d_p, s_d_w, nati, d_j, d_off, ll_count, s_d_f);
-      if (verbose) { cudaEventRecord(e2); cudaEventSynchronize(e2); cudaEventElapsedTime(&ms, e1, e2); printf("GPU grad: LL kernel time = %.3f ms\n", ms); cudaEventDestroy(e1); cudaEventDestroy(e2); }
+      if (timed) {
+        cudaEventRecord(e2);
+        cudaEventSynchronize(e2);
+        cudaEventElapsedTime(&ms, e1, e2);
+        cudaEventDestroy(e1);
+        cudaEventDestroy(e2);
+      }
+      if (verbose && timed) {
+        printf("GPU grad: LL kernel time = %.3f ms\n", ms);
+      }
       e = cudaDeviceSynchronize(); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto FAIL; }
+      ll_ms_total += ms;
       cudaFree(d_j); cudaFree(d_off); d_j = nullptr; d_off = nullptr;
     }
     if (lh_count > 0) {
@@ -1001,10 +1067,26 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
       e = cudaMemcpy(d_off, h_lh_off, sizeof(int)*lh_count, cudaMemcpyHostToDevice); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto SERIAL; }
       int block = 256, grid = (lh_count + block - 1) / block;
       if (verbose) printf("GPU grad: LH-parallel, pairs=%d\n", lh_count);
-      cudaEvent_t e3,e4; float ms2=0.f; if (verbose) { cudaEventCreate(&e3); cudaEventCreate(&e4); cudaEventRecord(e3); }
+      cudaEvent_t e3 = nullptr, e4 = nullptr; float ms2 = 0.f; bool timed2 = false;
+      if (want_timing) {
+        if (cudaEventCreate(&e3) == cudaSuccess && cudaEventCreate(&e4) == cudaSuccess) {
+          cudaEventRecord(e3);
+          timed2 = true;
+        }
+      }
       dfock2_lh_parallel_kernel<<<grid, block>>>(norbs, mpack, numat, s_d_nf, s_d_nl, s_d_ptot, s_d_p, s_d_w, nati, d_j, d_off, lh_count, s_d_f);
-      if (verbose) { cudaEventRecord(e4); cudaEventSynchronize(e4); cudaEventElapsedTime(&ms2, e3, e4); printf("GPU grad: LH kernel time = %.3f ms\n", ms2); cudaEventDestroy(e3); cudaEventDestroy(e4); }
+      if (timed2) {
+        cudaEventRecord(e4);
+        cudaEventSynchronize(e4);
+        cudaEventElapsedTime(&ms2, e3, e4);
+        cudaEventDestroy(e3);
+        cudaEventDestroy(e4);
+      }
+      if (verbose && timed2) {
+        printf("GPU grad: LH kernel time = %.3f ms\n", ms2);
+      }
       e = cudaDeviceSynchronize(); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto FAIL; }
+      lh_ms_total += ms2;
       cudaFree(d_j); cudaFree(d_off);
     }
     if (hh_count > 0) {
@@ -1014,25 +1096,60 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
       e = cudaMemcpy(d_off, h_hh_off, sizeof(int)*hh_count, cudaMemcpyHostToDevice); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto SERIAL; }
       int block = 128, grid = (hh_count + block - 1) / block;
       if (verbose) printf("GPU grad: HH-parallel, pairs=%d\n", hh_count);
-      cudaEvent_t e5,e6; float ms3=0.f; if (verbose) { cudaEventCreate(&e5); cudaEventCreate(&e6); cudaEventRecord(e5); }
+      cudaEvent_t e5 = nullptr, e6 = nullptr; float ms3 = 0.f; bool timed3 = false;
+      if (want_timing) {
+        if (cudaEventCreate(&e5) == cudaSuccess && cudaEventCreate(&e6) == cudaSuccess) {
+          cudaEventRecord(e5);
+          timed3 = true;
+        }
+      }
       dfock2_hh_parallel_kernel<<<grid, block>>>(norbs, mpack, numat, s_d_nf, s_d_nl, s_d_ptot, s_d_p, s_d_w, nati, d_j, d_off, hh_count, s_d_f);
-      if (verbose) { cudaEventRecord(e6); cudaEventSynchronize(e6); cudaEventElapsedTime(&ms3, e5, e6); printf("GPU grad: HH kernel time = %.3f ms\n", ms3); cudaEventDestroy(e5); cudaEventDestroy(e6); }
+      if (timed3) {
+        cudaEventRecord(e6);
+        cudaEventSynchronize(e6);
+        cudaEventElapsedTime(&ms3, e5, e6);
+        cudaEventDestroy(e5);
+        cudaEventDestroy(e6);
+      }
+      if (verbose && timed3) {
+        printf("GPU grad: HH kernel time = %.3f ms\n", ms3);
+      }
       e = cudaDeviceSynchronize(); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto FAIL; }
+      hh_ms_total += ms3;
       cudaFree(d_j); cudaFree(d_off);
     }
   } else {
 SERIAL:
     if (verbose) printf("GPU grad: serial kernel; counts LL=%d LH=%d HH=%d\n", ll_count, lh_count, hh_count);
+    cudaEvent_t evs = nullptr, eve = nullptr; float serial_ms = 0.f; bool timed_serial = false;
+    if (want_timing) {
+      if (cudaEventCreate(&evs) == cudaSuccess && cudaEventCreate(&eve) == cudaSuccess) {
+        cudaEventRecord(evs);
+        timed_serial = true;
+      }
+    }
     dfock2_ll_lh_kernel<<<1,1>>>(norbs, mpack, numat, s_d_nf, s_d_nl, s_d_ptot, s_d_p, s_d_w, nati, s_d_f);
     e = cudaDeviceSynchronize(); if (e!=cudaSuccess) goto FAIL;
+    if (timed_serial) {
+      cudaEventRecord(eve);
+      cudaEventSynchronize(eve);
+      cudaEventElapsedTime(&serial_ms, evs, eve);
+      cudaEventDestroy(evs);
+      cudaEventDestroy(eve);
+      ll_ms_total += serial_ms;
+    }
   }
 
   // Total timing stop and summary
-  if (verbose) {
-    cudaEventRecord(t_all_stop); cudaEventSynchronize(t_all_stop);
+  if (total_timed) {
+    cudaEventRecord(t_all_stop);
+    cudaEventSynchronize(t_all_stop);
     cudaEventElapsedTime(&ms_all, t_all_start, t_all_stop);
+    cudaEventDestroy(t_all_start);
+    cudaEventDestroy(t_all_stop);
+  }
+  if (verbose && total_timed) {
     printf("GPU grad: atom %d total = %.3f ms (LL=%d LH=%d HH=%d)\n", nati, ms_all, ll_count, lh_count, hh_count);
-    cudaEventDestroy(t_all_start); cudaEventDestroy(t_all_stop);
   }
 
   if (h_ll_j) free(h_ll_j);
@@ -1041,6 +1158,17 @@ SERIAL:
   if (h_lh_off) free(h_lh_off);
   if (h_hh_j) free(h_hh_j);
   if (h_hh_off) free(h_hh_off);
+
+  if (prof_collect) {
+    prof_atoms += 1;
+    prof_ll_pairs += ll_count;
+    prof_lh_pairs += lh_count;
+    prof_hh_pairs += hh_count;
+    prof_ll_ms += (double)ll_ms_total;
+    prof_lh_ms += (double)lh_ms_total;
+    prof_hh_ms += (double)hh_ms_total;
+    prof_total_ms += (double)ms_all;
+  }
 
   // Copy updated F back
   e = cudaMemcpy(f, s_d_f, sizeof(double)*mpack_e, cudaMemcpyDeviceToHost); if (e!=cudaSuccess) goto FAIL;

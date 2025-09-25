@@ -319,7 +319,7 @@ if(GPU)
   # Link CUDA runtime and math libraries needed by wrappers
   target_link_libraries(mopac-core PUBLIC CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
   # Optional: cuSOLVERMg detection for experimental multi-GPU eigensolver stub
-  option(ENABLE_CUSOLVER_MG "Enable cuSOLVERMg detection and stubs" OFF)
+  option(ENABLE_CUSOLVER_MG "Enable cuSOLVERMg detection and stubs" ON)
   if(ENABLE_CUSOLVER_MG)
     find_library(CUSOLVERMG_LIBRARY NAMES cusolverMg PATHS $ENV{CUDA_HOME}/lib64 $ENV{CUDA_HOME}/lib $ENV{CUDAToolkit_ROOT}/lib64)
     if(CUSOLVERMG_LIBRARY)
