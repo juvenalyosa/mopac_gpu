@@ -23,7 +23,7 @@ subroutine check (nvec, nnc, nc, icvec, ic_dim, iorbs, ncvec, cvec, c_dim)
    !   program.
    !
    !***********************************************************************
-    use molkst_C, only: numat, moperr
+    use molkst_C, only: numat
     use chanel_C, only: iw
     use MOZYME_C, only : ws
    !
@@ -36,13 +36,10 @@ subroutine check (nvec, nnc, nc, icvec, ic_dim, iorbs, ncvec, cvec, c_dim)
     integer, dimension (nvec+1), intent (in) :: nc, ncvec, nnc
     integer, dimension (numat), intent (in) :: iorbs
     double precision, dimension (c_dim), intent (inout) :: cvec
-    logical, intent(in), optional :: allow_recover
-    integer, intent(out), optional :: bad_index
    !
    !.. Local Scalars ..
     integer :: i, j, k, l, m, mm, n
     double precision :: error, sum
-    logical :: recover
    !
    !.. Intrinsic Functions ..
     intrinsic Abs, Sqrt
@@ -50,9 +47,6 @@ subroutine check (nvec, nnc, nc, icvec, ic_dim, iorbs, ncvec, cvec, c_dim)
    ! ... Executable Statements ...
    !
     error = 0.d0
-    recover = .false.
-    if (present(allow_recover)) recover = allow_recover
-    if (present(bad_index)) bad_index = 0
    !
    !   RENORMALIZE L.M.O.s
    !
@@ -85,18 +79,6 @@ subroutine check (nvec, nnc, nc, icvec, ic_dim, iorbs, ncvec, cvec, c_dim)
       end do
     end do
     if (error <= 0.1d0) return
-    if (present(bad_index)) then
-      do i = 1, nvec
-        if (Abs(ws(i)-1.d0) > 0.1d0) then
-          bad_index = i
-          exit
-        end if
-      end do
-    end if
-    if (recover) then
-      moperr = .true.
-      return
-    end if
    !
    !   SEVERE ERROR IN LMO's.  QUIT THE JOB
    !
@@ -129,3 +111,61 @@ subroutine check (nvec, nnc, nc, icvec, ic_dim, iorbs, ncvec, cvec, c_dim)
       end if
     end do
 end subroutine check
+
+subroutine check_gpu(nvec, nnc, nc, icvec, ic_dim, iorbs, ncvec, cvec, c_dim, gpu_error, bad_index)
+   use molkst_C, only: numat
+   use MOZYME_C, only : ws
+   implicit none
+   integer, intent (in) :: ic_dim, c_dim, nvec
+   integer, dimension (ic_dim), intent (in) :: icvec
+   integer, dimension (nvec+1), intent (in) :: nc, ncvec, nnc
+   integer, dimension (numat), intent (in) :: iorbs
+   double precision, dimension (c_dim), intent (inout) :: cvec
+   logical, intent(out) :: gpu_error
+   integer, intent(out) :: bad_index
+   integer :: i, j, k, l, m, mm, n
+   double precision :: error, sum
+
+   error = 0.d0
+   do i = 1, nvec
+      m = nnc(i)
+      sum = 0.d0
+      n = 0
+      do j = 1, nc(i)
+        m = m + 1
+        k = icvec(m)
+        do mm = 1, iorbs(k)
+          n = n + 1
+          sum = sum + cvec(ncvec(i)+n) ** 2
+        end do
+      end do
+      error = error + Abs (1.d0-sum)
+      ws(i) = sum
+    end do
+    do i = 1, nvec
+      m = nnc(i)
+      sum = 1.d0 / Sqrt (ws(i))
+      n = 0
+      do j = 1, nc(i)
+        m = m + 1
+        k = icvec(m)
+        do mm = 1, iorbs(k)
+          n = n + 1
+          cvec(ncvec(i)+n) = cvec(ncvec(i)+n) * sum
+        end do
+      end do
+    end do
+    if (error <= 0.1d0) then
+      gpu_error = .false.
+      bad_index = 0
+      return
+    end if
+    gpu_error = .true.
+    bad_index = 0
+    do i = 1, nvec
+      if (Abs (ws(i)-1.d0) > 0.1d0) then
+        bad_index = i
+        exit
+      end if
+    end do
+end subroutine check_gpu

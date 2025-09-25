@@ -67,11 +67,13 @@ subroutine iter_for_MOZYME (ee)
     double precision, save :: selcon, eold,  sum
     integer, external :: ijbo
     logical, external :: PLS_faulty
+    external :: check_gpu
     double precision, external :: helecz, reada
     integer, dimension (:), allocatable :: iwork
     double precision, dimension (:), allocatable :: rwork
     integer :: bad_occ, bad_virt, res_idx
     character(len=4) :: res_name
+    logical :: gpu_error_occ, gpu_error_virt
     add_niter = 0
 !
         80  continue
@@ -486,7 +488,17 @@ subroutine iter_for_MOZYME (ee)
 !  Correct any small errors in normalization
 !
       bad_occ = 0
-      call check (nocc1, nncf, ncf, icocc, icocc_dim, iorbs, ncocc, cocc, cocc_dim, allow_recover=.true., bad_index=bad_occ)
+#ifdef GPU
+      if (mozyme_gpu .and. lgpu) then
+        gpu_error_occ = .false.
+        call check_gpu(nocc1, nncf, ncf, icocc, icocc_dim, iorbs, ncocc, cocc, cocc_dim, gpu_error_occ, bad_occ)
+        moperr = gpu_error_occ
+      else
+        call check(nocc1, nncf, ncf, icocc, icocc_dim, iorbs, ncocc, cocc, cocc_dim)
+      end if
+#else
+      call check(nocc1, nncf, ncf, icocc, icocc_dim, iorbs, ncocc, cocc, cocc_dim)
+#endif
 #ifdef GPU
       if (moperr) then
         if (lgpu .and. mozyme_gpu) then
@@ -514,7 +526,17 @@ subroutine iter_for_MOZYME (ee)
 #endif
       if (moperr) return
       bad_virt = 0
-      call check (nvir1, nnce, nce, icvir, icvir_dim, iorbs, ncvir, cvir, cvir_dim, allow_recover=.true., bad_index=bad_virt)
+#ifdef GPU
+      if (mozyme_gpu .and. lgpu) then
+        gpu_error_virt = .false.
+        call check_gpu(nvir1, nnce, nce, icvir, icvir_dim, iorbs, ncvir, cvir, cvir_dim, gpu_error_virt, bad_virt)
+        moperr = gpu_error_virt
+      else
+        call check(nvir1, nnce, nce, icvir, icvir_dim, iorbs, ncvir, cvir, cvir_dim)
+      end if
+#else
+      call check(nvir1, nnce, nce, icvir, icvir_dim, iorbs, ncvir, cvir, cvir_dim)
+#endif
 #ifdef GPU
       if (moperr) then
         if (lgpu .and. mozyme_gpu) then
