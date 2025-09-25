@@ -89,6 +89,22 @@ run_case() {
       : ;;
   esac
   echo "Result: $status (${elapsed}s), GPU logs: $gpu_hits"
+  if [[ -z "$reason" && "$status" == "OK" ]]; then
+    case "$name" in
+      mg_* )
+        if grep -q "\[MGPU\] DSYEVD" "$log"; then
+          reason="MG solve"
+        elif grep -q "\[MGPU\].*fallback" "$log"; then
+          reason="MG fallback"
+        fi
+        ;;
+      multigpu_blas_cublasxt)
+        if grep -q "\[GPU\].*DGEMM" "$log"; then
+          reason="Xt active"
+        fi
+        ;;
+    esac
+  fi
   if [[ "$status" != "OK" ]]; then
     echo "--- Failure details ($name) ---"
     if grep -q "UNRECOGNIZED KEY-WORDS" "$log"; then

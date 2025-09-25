@@ -64,6 +64,7 @@ Multi‑GPU Eigensolver (cuSOLVERMg)
 - Logging: with `MOPAC_GPU_VERBOSE=1`, prints `[MGPU] DSYEVD n=… grid=PxQ blksz=B: … ms`.
 - Fallbacks: on any MG error or missing library, MOPAC safely falls back to the single‑GPU cuSOLVER path and notes it in logs.
 - Profiling: enable `MOPAC_EIG_MG_PROFILE=1` to receive a one-line aggregate summary of MG solves (call/failure counts, average wall time, average active devices).
+- Distribution: when cuSOLVERMg is active, the dense matrix is block-cyclic distributed across the selected GPUs, solved in place, and gathered back automatically—no user tiling required.
 
 Cleanup and Safety
 - GPU resources are released automatically at end of run. You can skip teardown via `MOPAC_SKIP_GPU_DESTROY=1` for debugging on fragile drivers.

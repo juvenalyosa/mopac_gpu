@@ -1639,6 +1639,9 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
   return;
 #else
   ensure_w_verbose();
+  if (info) *info = -1;
+  bool profile_enabled = mg_profile_enabled();
+  bool want_log = (w_verbose || profile_enabled);
   int gx = 2, gy = 1, blksz = 256;
   {
     const char* g = std::getenv("MOPAC_EIG_MG_GRID");
@@ -1652,6 +1655,7 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
   cudaGetDeviceCount(&devCount);
   if (devCount <= 0) {
     if (profile_enabled) mg_failures++;
+    if (want_log) std::fprintf(stderr, "[MGPU] no CUDA devices detected; fallback to single-GPU DSYEVD\n");
     mopac_cuda_dsyevd(n, A, lda, W, info);
     return;
   }
@@ -1669,8 +1673,8 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
   cudaLibMgGrid_t grid = nullptr;
   cudaLibMgMatrixDesc_t desc = nullptr;
   std::vector<int> devs(need);
-  std::vector<void*> Adev(need, nullptr);
-  std::vector<void*> Work(need, nullptr);
+  std::vector<double*> Adev(need, nullptr);
+  std::vector<double*> Work(need, nullptr);
   auto cleanup = [&]() {
     for (int did = 0; did < need; ++did) {
       if (!devs.empty()) {
@@ -1693,7 +1697,7 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
 
   cusolverStatus_t s = cusolverMgCreate(&mh);
   if (s != CUSOLVER_STATUS_SUCCESS || !mh) {
-    if (w_verbose) std::fprintf(stderr, "[MGPU] cusolverMgCreate failed; fallback to single-GPU DSYEVD\n");
+    if (want_log) std::fprintf(stderr, "[MGPU] cusolverMgCreate failed; fallback to single-GPU DSYEVD\n");
     if (profile_enabled) mg_failures++;
     mopac_cuda_dsyevd(n, A, lda, W, info);
     return;
@@ -1701,9 +1705,20 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
 
   for (int i = 0; i < need; ++i) devs[i] = i;
 
+#if defined(CUSOLVER_VERSION) && (CUSOLVER_VERSION >= 11000)
+  s = cusolverMgDeviceSelect(mh, need, devs.data());
+  if (s != CUSOLVER_STATUS_SUCCESS) {
+    if (want_log) std::fprintf(stderr, "[MGPU] cusolverMgDeviceSelect failed; fallback to single-GPU DSYEVD\n");
+    record_failure();
+    cleanup();
+    mopac_cuda_dsyevd(n, A, lda, W, info);
+    return;
+  }
+#endif
+
   cudaError_t cerr = cudaLibMgCreateGrid(&grid, gx, gy, devs.data());
   if (cerr != cudaSuccess || !grid) {
-    if (w_verbose) std::fprintf(stderr, "[MGPU] cudaLibMgCreateGrid failed; fallback to single-GPU DSYEVD\n");
+    if (want_log) std::fprintf(stderr, "[MGPU] cudaLibMgCreateGrid failed; fallback to single-GPU DSYEVD\n");
     record_failure();
     cleanup();
     mopac_cuda_dsyevd(n, A, lda, W, info);
@@ -1718,7 +1733,7 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
                                    blksz, blksz,
                                    grid);
   if (cerr != cudaSuccess || !desc) {
-    if (w_verbose) std::fprintf(stderr, "[MGPU] cudaLibMgCreateMatrixDesc failed; fallback to single-GPU DSYEVD\n");
+    if (want_log) std::fprintf(stderr, "[MGPU] cudaLibMgCreateMatrixDesc failed; fallback to single-GPU DSYEVD\n");
     record_failure();
     cleanup();
     mopac_cuda_dsyevd(n, A, lda, W, info);
@@ -1729,19 +1744,28 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
   for (int did = 0; did < need; ++did) {
     int prow = did % gx;
     int pcol = did / gx;
-    size_t rows = 0, cols = 0;
-    cudaLibMgGetLocalMatrixSize(n, n, blksz, blksz, gx, gy, prow, pcol, &rows, &cols);
-    size_t bytes = rows * cols * sizeof(double);
+    int64_t rows = 0, cols = 0;
+    cudaError_t szerr = cudaLibMgGetLocalMatrixSize(n, n, blksz, blksz, gx, gy, prow, pcol, &rows, &cols);
+    if (szerr != cudaSuccess) {
+      if (want_log) std::fprintf(stderr, "[MGPU] cudaLibMgGetLocalMatrixSize failed for device %d; fallback to single-GPU DSYEVD\n", devs[did]);
+      record_failure();
+      cleanup();
+      mopac_cuda_dsyevd(n, A, lda, W, info);
+      return;
+    }
+    size_t ld_local = (rows > 0) ? static_cast<size_t>(rows) : 1u;
+    size_t cd_local = (cols > 0) ? static_cast<size_t>(cols) : 1u;
+    size_t bytes = ld_local * cd_local * sizeof(double);
     if (bytes == 0) {
-      bytes = sizeof(double); // allocate a minimal buffer to keep pointer valid
+      bytes = sizeof(double);
     }
     int cur = -1;
     cudaGetDevice(&cur);
     cudaSetDevice(devs[did]);
-    cerr = cudaMalloc(&Adev[did], bytes);
+    cerr = cudaMalloc(reinterpret_cast<void**>(&Adev[did]), bytes);
     if (cur >= 0) cudaSetDevice(cur);
     if (cerr != cudaSuccess) {
-      if (w_verbose) std::fprintf(stderr, "[MGPU] cudaMalloc tile failed on device %d; fallback\n", devs[did]);
+      if (want_log) std::fprintf(stderr, "[MGPU] cudaMalloc tile failed on device %d; fallback to single-GPU DSYEVD\n", devs[did]);
       record_failure();
       cleanup();
       mopac_cuda_dsyevd(n, A, lda, W, info);
@@ -1749,28 +1773,35 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
     }
   }
 
-  cerr = cusolverMgMemcpyH2D(mh, Adev.data(), 0, 0, desc, A, lda);
-  if (cerr != cudaSuccess) {
-    if (w_verbose) std::fprintf(stderr, "[MGPU] cusolverMgMemcpyH2D failed; fallback\n");
+  const int64_t IA = 1;
+  const int64_t JA = 1;
+  cusolverStatus_t st_copy_h2d = cusolverMgMemcpyH2D(mh,
+                                                     reinterpret_cast<void* const*>(Adev.data()),
+                                                     IA, JA,
+                                                     desc,
+                                                     A,
+                                                     lda);
+  if (st_copy_h2d != CUSOLVER_STATUS_SUCCESS) {
+    if (want_log) std::fprintf(stderr, "[MGPU] cusolverMgMemcpyH2D failed; fallback to single-GPU DSYEVD\n");
     record_failure();
     cleanup();
     mopac_cuda_dsyevd(n, A, lda, W, info);
     return;
   }
 
-  size_t lwork = 0;
+  int64_t lwork = 0;
   s = cusolverMgSyevd_bufferSize(mh,
                                  CUSOLVER_EIG_MODE_VECTOR,
                                  CUBLAS_FILL_MODE_UPPER,
                                  n,
-                                 Adev.data(),
-                                 0,
-                                 0,
+                                 reinterpret_cast<double* const*>(Adev.data()),
+                                 IA,
+                                 JA,
                                  desc,
                                  W,
                                  &lwork);
-  if (s != CUSOLVER_STATUS_SUCCESS || lwork == 0) {
-    if (w_verbose) std::fprintf(stderr, "[MGPU] cusolverMgSyevd_bufferSize failed; fallback\n");
+  if (s != CUSOLVER_STATUS_SUCCESS || lwork <= 0) {
+    if (want_log) std::fprintf(stderr, "[MGPU] cusolverMgSyevd_bufferSize failed; fallback to single-GPU DSYEVD\n");
     record_failure();
     cleanup();
     mopac_cuda_dsyevd(n, A, lda, W, info);
@@ -1781,10 +1812,11 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
     int cur = -1;
     cudaGetDevice(&cur);
     cudaSetDevice(devs[did]);
-    cerr = cudaMalloc(&Work[did], lwork);
+    size_t work_bytes = sizeof(double) * static_cast<size_t>(std::max<int64_t>(lwork, 1));
+    cerr = cudaMalloc(reinterpret_cast<void**>(&Work[did]), work_bytes);
     if (cur >= 0) cudaSetDevice(cur);
     if (cerr != cudaSuccess) {
-      if (w_verbose) std::fprintf(stderr, "[MGPU] cudaMalloc workspace failed on device %d; fallback\n", devs[did]);
+      if (want_log) std::fprintf(stderr, "[MGPU] cudaMalloc workspace failed on device %d; fallback to single-GPU DSYEVD\n", devs[did]);
       record_failure();
       cleanup();
       mopac_cuda_dsyevd(n, A, lda, W, info);
@@ -1798,26 +1830,32 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
                       CUSOLVER_EIG_MODE_VECTOR,
                       CUBLAS_FILL_MODE_UPPER,
                       n,
-                      Adev.data(),
-                      0,
-                      0,
+                      reinterpret_cast<double* const*>(Adev.data()),
+                      IA,
+                      JA,
                       desc,
                       W,
-                      Work.data(),
+                      reinterpret_cast<double* const*>(Work.data()),
                       lwork,
                       &linfo);
 
   if (s != CUSOLVER_STATUS_SUCCESS || linfo != 0) {
-    if (w_verbose) std::fprintf(stderr, "[MGPU] cusolverMgSyevd error (stat=%d, info=%d); fallback\n", (int)s, linfo);
+    if (want_log) std::fprintf(stderr, "[MGPU] cusolverMgSyevd error (stat=%d, info=%d); fallback to single-GPU DSYEVD\n", (int)s, linfo);
     record_failure();
     cleanup();
     mopac_cuda_dsyevd(n, A, lda, W, info);
     return;
   }
 
-  cerr = cusolverMgMemcpyD2H(mh, A, lda, Adev.data(), 0, 0, desc);
-  if (cerr != cudaSuccess) {
-    if (w_verbose) std::fprintf(stderr, "[MGPU] cusolverMgMemcpyD2H failed; fallback\n");
+  cusolverStatus_t st_copy_d2h = cusolverMgMemcpyD2H(mh,
+                                                     A,
+                                                     lda,
+                                                     reinterpret_cast<void* const*>(Adev.data()),
+                                                     IA,
+                                                     JA,
+                                                     desc);
+  if (st_copy_d2h != CUSOLVER_STATUS_SUCCESS) {
+    if (want_log) std::fprintf(stderr, "[MGPU] cusolverMgMemcpyD2H failed; fallback to single-GPU DSYEVD\n");
     record_failure();
     cleanup();
     mopac_cuda_dsyevd(n, A, lda, W, info);
@@ -1833,7 +1871,7 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
     mg_total_dim += n;
     mg_total_devices += need;
   }
-  if (w_verbose) {
+  if (want_log) {
     std::fprintf(stderr, "[MGPU] DSYEVD n=%d grid=%dx%d blksz=%d: %.3f ms\n", n, gx, gy, blksz, elapsed_ms);
   }
 
