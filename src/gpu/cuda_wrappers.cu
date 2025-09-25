@@ -151,6 +151,14 @@ void get_current_device_cc(int *major, int *minor) {
   if (minor) *minor = prop.minor;
 }
 
+bool mopac_cuda_has_cusolvermg() {
+#if defined(HAVE_CUSOLVER_MG)
+  return true;
+#else
+  return false;
+#endif
+}
+
 // Select device by index
 void setDevice(int idevice, bool *stat) {
   cudaError_t cerr = cudaSetDevice(idevice);

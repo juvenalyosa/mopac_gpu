@@ -52,6 +52,7 @@
       double precision :: etol
       ! Multi-GPU eigensolver threshold
       integer :: thr_mg
+      logical, save :: mg_checked = .false., mg_available = .false., mg_warned = .false.
       ! Current device CC for auto policy
       integer(c_int) :: ccmaj, ccmin
       interface
@@ -108,6 +109,10 @@ end if
           read(env, *, end=10, err=10) thr_min
         end if
 10      continue
+        if (.not. mg_checked) then
+          mg_available = (mopac_cuda_has_cusolvermg())
+          mg_checked = .true.
+        end if
         call get_environment_variable('MOPAC_FASTGPU', fast, status=stat_env)
         if (stat_env == 0) fastgpu = (trim(adjustl(fast)) /= '')
         call get_environment_variable('MOPAC_EIG2HOST', fetch, status=stat_env)
@@ -191,19 +196,35 @@ end if
           env = ''
           call get_environment_variable('MOPAC_EIG_MG', env, status=stat_env)
           if (ngpus > 1 .and. ndim >= thr_mg .and. stat_env == 0 .and. trim(adjustl(env)) /= '') then
-            ! Provide a full matrix to the MG wrapper; on success, return.
-            ! The placeholder returns info<0 to trigger fallback paths.
-            allocate(Sfull(ndim,ndim), stat=i)
-            if (i == 0) then
-              Sfull = eigenvecs
-              i = 0
-              call mopac_cusolvermg_dsyevd(ndim, Sfull, ndim, eigvals, i)
-              if (i == 0) then
-                eigenvecs = Sfull
-                deallocate(Sfull)
-                return
+            if (.not. mg_available) then
+              if (.not. mg_warned) then
+                write(iw, '(a)') ' cuSOLVERMg support unavailable; falling back to single-GPU eigensolver.'
+                mg_warned = .true.
               end if
-              deallocate(Sfull)
+            else
+              allocate(Sfull(ndim,ndim), stat=i)
+              if (i == 0) then
+                Sfull = eigenvecs
+                i = 0
+                call mopac_cusolvermg_dsyevd(ndim, Sfull, ndim, eigvals, i)
+                if (i == 0) then
+                  eigenvecs = Sfull
+                  deallocate(Sfull)
+                  return
+                end if
+                deallocate(Sfull)
+                mg_available = .false.
+                if (.not. mg_warned) then
+                  write(iw, '(a)') ' cuSOLVERMg solve failed; disabling further multi-GPU attempts this run.'
+                  mg_warned = .true.
+                end if
+              else
+                mg_available = .false.
+                if (.not. mg_warned) then
+                  write(iw, '(a)') ' cuSOLVERMg workspace allocation failed; disabling multi-GPU path.'
+                  mg_warned = .true.
+                end if
+              end if
             end if
           end if
           if (fastgpu) then

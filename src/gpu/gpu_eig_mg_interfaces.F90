@@ -10,6 +10,9 @@ module gpu_eig_mg_interfaces
       real(c_double)        :: w(n)
       integer(c_int)        :: info
     end subroutine mopac_cusolvermg_dsyevd
+
+    logical(c_bool) function mopac_cuda_has_cusolvermg() bind(C, name='mopac_cuda_has_cusolvermg')
+      import :: c_bool
+    end function mopac_cuda_has_cusolvermg
   end interface
 end module gpu_eig_mg_interfaces
-
