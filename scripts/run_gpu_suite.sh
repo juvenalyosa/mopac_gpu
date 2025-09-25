@@ -174,16 +174,12 @@ run_case "diis_gpu_bfull" "examples/benzene.mop" \
 run_case "diis_gpu_bcol_solve" "examples/benzene.mop" \
   "export CUDA_VISIBLE_DEVICES=0; export MOPAC_DIIS_GPU_BUF=1; export MOPAC_DIIS_GPU_BMAT=1; export MOPAC_DIIS_GPU=1; export MOPAC_DIIS_GEN=1; export MOPAC_GPU_PROFILE=1;"
 
-# 4) MOZYME with provided protein PDB (auto policy chooses safe GPU/CPU path)
-PROT_PDB="examples/test_protein_gpu.pdb"
-PROT_MOP="$OUT_DIR/test_protein_gpu.mop"
-if [[ -f "$PROT_PDB" ]]; then
-  cat > "$PROT_MOP" <<EOF
-PM7 GEO_DAT=$PROT_PDB MOZYME 1SCF PULAY SHIFT=-50 ITRY=200 NEWPDB CHARGE=-9
-Test MOZYME GPU auto-policy run (CHARGE=-9)
-
-EOF
-  run_case "mozyme_protein_auto" "$PROT_MOP" "export CUDA_VISIBLE_DEVICES=0;"
+# 4) MOZYME with large protein (test_dense.pdb)
+PROT_PDB="$REPO_ROOT/examples/test_dense.pdb"
+PROT_MOP="$REPO_ROOT/examples/mozyme_protein_auto.mop"
+if [[ -f "$PROT_PDB" && -f "$PROT_MOP" ]]; then
+  run_case "mozyme_protein_auto" "$PROT_MOP" \
+    "export CUDA_VISIBLE_DEVICES=0; export MOZYME_GPU_FORCE=1;"
   # If MOZYME CHECK failed, retry with MOZYME GPU disabled (CPU MOZYME) as an automatic fallback
   if [[ "$LAST_STATUS" != "OK" ]] && grep -q "ERROR DETECTED IN SUBROUTINE CHECK" "$LAST_LOG"; then
     echo "Retrying MOZYME protein with MOZYME_GPU_OFF=1 (CPU MOZYME fallback)"
@@ -191,7 +187,7 @@ EOF
       "export CUDA_VISIBLE_DEVICES=0; export MOZYME_GPU_OFF=1;"
   fi
 else
-  echo "NOTE: $PROT_PDB not found; skipping protein MOZYME test"
+  echo "NOTE: $PROT_PDB or $PROT_MOP not found; skipping protein MOZYME test"
 fi
 
 # 5) Multi-GPU BLAS (cuBLASXt) if >=2 GPUs; otherwise mark as SKIP in summary

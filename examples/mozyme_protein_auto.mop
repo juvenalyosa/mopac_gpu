@@ -1,0 +1,3 @@
+PM7 GEO_DAT=examples/test_dense.pdb MOZYME PULAY SHIFT=-50 ITRY=200 NEWPDB CHARGE=-9 1SCF
+Large protein MOZYME GPU auto-policy run
+
