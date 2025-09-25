@@ -87,6 +87,12 @@ run_case() {
     mg_large_dense_*)
       # Informational only: MG may fall back cleanly; do not fail if logs absent
       : ;;
+    mozyme_protein_auto)
+      if grep -q "mozyme_gpu= T" "$log"; then
+        gpu_hits="yes"
+        reason="MOZYME"
+      fi
+      ;;
     resident_scf_density)
       : ;;
   esac
