@@ -137,15 +137,15 @@ run_case "dense_sanity_single_gpu" "examples/water_pm7_gpu.mop" \
 
 # 2) Gradient device F reuse
 run_case "gradient_device_reuse" "examples/h2o_gpu_force.mop" \
-  "export CUDA_VISIBLE_DEVICES=0;"
+  "export CUDA_VISIBLE_DEVICES=0; export MOPAC_GPU_PROFILE=1;"
 
 # 3) DIIS on GPU (full B)
 run_case "diis_gpu_bfull" "examples/benzene.mop" \
-  "export CUDA_VISIBLE_DEVICES=0; export MOPAC_DIIS_GPU_BUF=1; export MOPAC_DIIS_GPU_BFULL=1;"
+  "export CUDA_VISIBLE_DEVICES=0; export MOPAC_DIIS_GPU_BUF=1; export MOPAC_DIIS_GPU_BFULL=1; export MOPAC_GPU_PROFILE=1;"
 
 # 3b) DIIS on GPU (B column + cuSOLVER solve + generalized residual)
 run_case "diis_gpu_bcol_solve" "examples/benzene.mop" \
-  "export CUDA_VISIBLE_DEVICES=0; export MOPAC_DIIS_GPU_BUF=1; export MOPAC_DIIS_GPU_BMAT=1; export MOPAC_DIIS_GPU=1; export MOPAC_DIIS_GEN=1;"
+  "export CUDA_VISIBLE_DEVICES=0; export MOPAC_DIIS_GPU_BUF=1; export MOPAC_DIIS_GPU_BMAT=1; export MOPAC_DIIS_GPU=1; export MOPAC_DIIS_GEN=1; export MOPAC_GPU_PROFILE=1;"
 
 # 4) MOZYME with provided protein PDB (auto policy chooses safe GPU/CPU path)
 PROT_PDB="examples/test_protein_gpu.pdb"
@@ -180,10 +180,10 @@ if [[ "$gpu_count" -ge 2 ]]; then
   fi
   if [[ -n "$DENSE_FOR_MG_BLAS" ]]; then
     run_case "multigpu_blas_cublasxt" "$DENSE_FOR_MG_BLAS" \
-      "export CUDA_VISIBLE_DEVICES=0,1; export MOPAC_CUBLASXT_DEVICES=0,1;"
+      "export CUDA_VISIBLE_DEVICES=0,1; export MOPAC_CUBLASXT_DEVICES=0,1; export MOPAC_GPU_PROFILE=1;"
   else
     run_case "multigpu_blas_cublasxt" "$REPO_ROOT/examples/peptide_gg_2gpu.mop" \
-      "export CUDA_VISIBLE_DEVICES=0,1; export MOPAC_CUBLASXT_DEVICES=0,1;"
+      "export CUDA_VISIBLE_DEVICES=0,1; export MOPAC_CUBLASXT_DEVICES=0,1; export MOPAC_GPU_PROFILE=1;"
   fi
 else
   name="multigpu_blas_cublasxt"; status="SKIP"; elapsed=0; gpu_hits="no"; reason="<2 GPUs"
@@ -194,7 +194,7 @@ fi
 
 # 6) MG eigensolver attempt (safe fallback)
 run_case "mg_eigs_attempt" "examples/water_pm7_gpu.mop" \
-  "export CUDA_VISIBLE_DEVICES=0; export MOPAC_EIG_MG=1; export MOPAC_EIG_MG_MIN=1;"
+  "export CUDA_VISIBLE_DEVICES=0; export MOPAC_EIG_MG=1; export MOPAC_EIG_MG_MIN=1; export MOPAC_EIG_MG_PROFILE=1;"
 
 # 7) MG eigensolver on larger dense input (if provided)
 # Prefer explicit path via MOPAC_MG_LARGE_INPUT. Otherwise, try examples/dense_test.mop (preferred),
@@ -223,10 +223,10 @@ if [[ -n "$MG_DENSE_IN" && -f "$MG_DENSE_IN" ]]; then
   # Prefer testing across 2 GPUs if available
   if [[ "$gpu_count" -ge 2 ]]; then
     run_case "mg_large_dense_multigpu" "$MG_DENSE_IN" \
-      "export CUDA_VISIBLE_DEVICES=0,1; export MOPAC_EIG_MG=1; export MOPAC_EIG_MG_MIN=1; export MOPAC_EIG_MG_GRID=2x1;"
+      "export CUDA_VISIBLE_DEVICES=0,1; export MOPAC_EIG_MG=1; export MOPAC_EIG_MG_MIN=1; export MOPAC_EIG_MG_GRID=2x1; export MOPAC_EIG_MG_PROFILE=1;"
   else
     run_case "mg_large_dense_singlegpu" "$MG_DENSE_IN" \
-      "export CUDA_VISIBLE_DEVICES=0; export MOPAC_EIG_MG=1; export MOPAC_EIG_MG_MIN=1;"
+      "export CUDA_VISIBLE_DEVICES=0; export MOPAC_EIG_MG=1; export MOPAC_EIG_MG_MIN=1; export MOPAC_EIG_MG_PROFILE=1;"
   fi
 else
   echo "NOTE: No larger dense input provided (set MOPAC_MG_LARGE_INPUT or add examples/large_dense.mop); skipping MG large test"
