@@ -1272,8 +1272,6 @@ void mopac_cuda_destroy_resources() {
   h2_rot_V.release();
 }
 
-extern "C" {
-
 void mopac_cuda_clear_density_cache() {
   g_density_full_valid = false;
   g_density_full_n = 0;
