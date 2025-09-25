@@ -419,12 +419,19 @@
         if (i == 0) then
           if (trim(adjustl(line)) /= '') mozyme_gpu = .false.
         end if
-        ! Auto-policy: disable MOZYME GPU on older GPUs (e.g., CC < 6.0) for stability
+        ! Auto-policy: disable MOZYME GPU on older GPUs unless user forces it
         if (mozyme .and. lgpu) then
-          if (nDevices > 0) then
-            j = gpu_id + 1
-            if (j >= 1 .and. j <= nDevices) then
-              if (major(j) < 6) mozyme_gpu = .false.
+          call get_environment_variable('MOZYME_GPU_FORCE', line, status=i)
+          if (i == 0) then
+            if (trim(adjustl(line)) /= '') then
+              mozyme_gpu = .true.
+            end if
+          else
+            if (nDevices > 0) then
+              j = gpu_id + 1
+              if (j >= 1 .and. j <= nDevices) then
+                if (major(j) < 6) mozyme_gpu = .false.
+              end if
             end if
           end if
         end if
