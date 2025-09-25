@@ -1,6 +1,7 @@
 // Portable CUDA interop for MOPAC: cuBLAS GEMM, cuSOLVER SYEVD, and basic GPU info
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include <cublasLt.h>
 #include <cublasXt.h>
 #include <cusolverDn.h>
 #if defined(HAVE_CUSOLVER_MG)
@@ -9,6 +10,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <cstdint>
 #include <algorithm>
 #include <cstdio>
 #include <chrono>
@@ -167,6 +169,7 @@ void setDevice(int idevice, bool *stat) {
 
 // Global cuBLAS handle
 static cublasHandle_t  g_blas = nullptr;
+static cublasLtHandle_t g_blasLt = nullptr;
 static cublasXtHandle_t g_blasXt = nullptr;
 static cudaStream_t   g_stream = nullptr;     // single-GPU general stream
 static cudaStream_t   g_stream0 = nullptr;    // 2-GPU device0 stream
@@ -205,6 +208,8 @@ static HostBuf<double> h2_gemm_A, h2_gemm_B, h2_gemm_C;
 static HostBuf<double> h2_syrk_A, h2_syrk_C;
 static HostBuf<double> h2_rot_V;
 
+static DevBuf<uint8_t> g_lt_workspace;
+
 // Density residency cache (full matrix + packed upper triangle)
 static DevBuf<double> g_density_full;
 static int g_density_full_n = 0;
@@ -226,6 +231,112 @@ static inline void invalidate_packed_density() {
   g_packed_density.len = 0;
 }
 
+static bool lt_dgemm(cublasOperation_t opA, cublasOperation_t opB,
+                     int m, int n, int k,
+                     double alpha,
+                     const double *d_A, int lda,
+                     const double *d_B, int ldb,
+                     double beta,
+                     double *d_C, int ldc) {
+  if (!g_blasLt) return false;
+  cublasStatus_t st;
+  cublasLtMatmulDesc_t op_desc = nullptr;
+  cublasLtMatrixLayout_t layoutA = nullptr, layoutB = nullptr, layoutC = nullptr, layoutD = nullptr;
+  cublasLtMatmulPreference_t pref = nullptr;
+  bool success = false;
+
+  do {
+    st = cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_64F, CUDA_R_64F);
+    if (st != CUBLAS_STATUS_SUCCESS) break;
+    cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSFORM_A, &opA, sizeof(opA));
+    cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSFORM_B, &opB, sizeof(opB));
+
+    int64_t rowsA = (opA == CUBLAS_OP_N) ? m : k;
+    int64_t colsA = (opA == CUBLAS_OP_N) ? k : m;
+    int64_t rowsB = (opB == CUBLAS_OP_N) ? k : n;
+    int64_t colsB = (opB == CUBLAS_OP_N) ? n : k;
+    int64_t rowsC = m;
+    int64_t colsC = n;
+
+    st = cublasLtMatrixLayoutCreate(&layoutA, CUDA_R_64F, rowsA, colsA, lda);
+    if (st != CUBLAS_STATUS_SUCCESS) break;
+    st = cublasLtMatrixLayoutCreate(&layoutB, CUDA_R_64F, rowsB, colsB, ldb);
+    if (st != CUBLAS_STATUS_SUCCESS) break;
+    st = cublasLtMatrixLayoutCreate(&layoutC, CUDA_R_64F, rowsC, colsC, ldc);
+    if (st != CUBLAS_STATUS_SUCCESS) break;
+    st = cublasLtMatrixLayoutCreate(&layoutD, CUDA_R_64F, rowsC, colsC, ldc);
+    if (st != CUBLAS_STATUS_SUCCESS) break;
+
+    cublasLtOrder_t order = CUBLASLT_ORDER_COL;
+    cublasLtMatrixLayoutSetAttribute(layoutA, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+    cublasLtMatrixLayoutSetAttribute(layoutB, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+    cublasLtMatrixLayoutSetAttribute(layoutC, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+    cublasLtMatrixLayoutSetAttribute(layoutD, CUBLASLT_MATRIX_LAYOUT_ORDER, &order, sizeof(order));
+
+    st = cublasLtMatmulPreferenceCreate(&pref);
+    if (st != CUBLAS_STATUS_SUCCESS) break;
+
+    size_t workspace_limit = 1ULL << 23; // 8 MB
+    g_lt_workspace.ensure(workspace_limit);
+    cublasLtMatmulPreferenceSetAttribute(pref,
+                                         CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                         &workspace_limit,
+                                         sizeof(workspace_limit));
+
+    const int requestedAlgoCount = 8;
+    cublasLtMatmulHeuristicResult_t heuristics[requestedAlgoCount];
+    int returnCount = 0;
+    st = cublasLtMatmulAlgoGetHeuristic(g_blasLt,
+                                        op_desc,
+                                        layoutA,
+                                        layoutB,
+                                        layoutC,
+                                        layoutD,
+                                        pref,
+                                        requestedAlgoCount,
+                                        heuristics,
+                                        &returnCount);
+    if (st != CUBLAS_STATUS_SUCCESS || returnCount == 0) break;
+
+    for (int idx = 0; idx < returnCount; ++idx) {
+      if (heuristics[idx].state != CUBLAS_STATUS_SUCCESS) continue;
+      uint64_t caps = 0;
+      cublasLtMatmulAlgoGetAttribute(&heuristics[idx].algo,
+                                     CUBLASLT_ALGO_CAPS,
+                                     &caps,
+                                     sizeof(caps),
+                                     nullptr);
+      if ((caps & CUBLASLT_ALGO_CAPS_DETERMINISTIC) == 0) continue;
+      if (heuristics[idx].workspaceSize > workspace_limit) continue;
+      st = cublasLtMatmul(g_blasLt,
+                          op_desc,
+                          &alpha,
+                          d_A, layoutA,
+                          d_B, layoutB,
+                          &beta,
+                          d_C, layoutC,
+                          d_C, layoutD,
+                          &heuristics[idx].algo,
+                          g_lt_workspace.ptr,
+                          heuristics[idx].workspaceSize,
+                          g_stream ? g_stream : 0);
+      if (st == CUBLAS_STATUS_SUCCESS) {
+        success = true;
+        cudaStreamSynchronize(g_stream ? g_stream : 0);
+        break;
+      }
+    }
+  } while (0);
+
+  if (pref) cublasLtMatmulPreferenceDestroy(pref);
+  if (layoutD) cublasLtMatrixLayoutDestroy(layoutD);
+  if (layoutC) cublasLtMatrixLayoutDestroy(layoutC);
+  if (layoutB) cublasLtMatrixLayoutDestroy(layoutB);
+  if (layoutA) cublasLtMatrixLayoutDestroy(layoutA);
+  if (op_desc) cublasLtMatmulDescDestroy(op_desc);
+  return success;
+}
+
 void create_handle() {
   if (!g_blas) {
     cublasCreate(&g_blas);
@@ -239,6 +350,11 @@ void create_handle() {
 #if defined(CUBLAS_VERSION)
       cublasSetMathMode(g_blas, CUBLAS_DEFAULT_MATH);
 #endif
+    }
+    if (!g_blasLt) {
+      if (cublasLtCreate(&g_blasLt) != CUBLAS_STATUS_SUCCESS) {
+        g_blasLt = nullptr;
+      }
     }
     const char* env = std::getenv("MOPAC_STREAMS");
     if (env) {
@@ -314,6 +430,10 @@ void destroy_handle() {
   if (g_blas) {
     cublasDestroy(g_blas);
     g_blas = nullptr;
+  }
+  if (g_blasLt) {
+    cublasLtDestroy(g_blasLt);
+    g_blasLt = nullptr;
   }
   if (g_blasXt) {
     cublasXtDestroy(g_blasXt);
@@ -407,26 +527,37 @@ void call_gemm_cublas(char tra, char trb,
       cudaMemcpyAsync(d_C, h_gemm_C.ptr, bytesC, cudaMemcpyHostToDevice, g_stream);
     }
   }
-  // Compute C = alpha*op(A)*op(B) + beta*C
-  float ms = 0.0f; cudaEvent_t ev0 = nullptr, ev1 = nullptr;
-  cudaStream_t s = g_stream ? g_stream : 0;
-  if (w_verbose) {
-    if (cudaEventCreate(&ev0) != cudaSuccess) { ev0 = nullptr; }
-    if (cudaEventCreate(&ev1) != cudaSuccess) { if (ev0) cudaEventDestroy(ev0); ev0 = nullptr; ev1 = nullptr; }
-    if (ev0) cudaEventRecord(ev0, s);
+
+  bool lt_used = false;
+  if (!use_tiling) {
+    lt_used = lt_dgemm(opA, opB, m, n, k, alpha, d_A, lda, d_B, ldb, beta, d_C, ldc);
+    if (lt_used && w_verbose) {
+      std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: cuBLASLt path\n", m, n, k);
+    }
   }
-  cublasStatus_t st = cublasDgemm(g_blas, opA, opB, m, n, k, &alpha, d_A, lda, d_B, ldb, &beta, d_C, ldc);
-  if (w_verbose && ev0 && ev1 && st == CUBLAS_STATUS_SUCCESS) {
-    cudaEventRecord(ev1, s);
-    cudaEventSynchronize(ev1);
-    cudaEventElapsedTime(&ms, ev0, ev1);
-    cudaEventDestroy(ev0); cudaEventDestroy(ev1);
-    double flops = 2.0 * (double)m * (double)n * (double)k;
-    double gflops = flops / 1.0e9 / (ms/1000.0);
-    std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: %.3f ms, %.1f GF/s\n", m,n,k, ms, gflops);
-  } else if (w_verbose) {
-    if (ev0) cudaEventDestroy(ev0);
-    if (ev1) cudaEventDestroy(ev1);
+
+  if (!lt_used) {
+    // Compute C = alpha*op(A)*op(B) + beta*C using classic cuBLAS
+    float ms = 0.0f; cudaEvent_t ev0 = nullptr, ev1 = nullptr;
+    cudaStream_t s = g_stream ? g_stream : 0;
+    if (w_verbose) {
+      if (cudaEventCreate(&ev0) != cudaSuccess) { ev0 = nullptr; }
+      if (cudaEventCreate(&ev1) != cudaSuccess) { if (ev0) cudaEventDestroy(ev0); ev0 = nullptr; ev1 = nullptr; }
+      if (ev0) cudaEventRecord(ev0, s);
+    }
+    cublasStatus_t st = cublasDgemm(g_blas, opA, opB, m, n, k, &alpha, d_A, lda, d_B, ldb, &beta, d_C, ldc);
+    if (w_verbose && ev0 && ev1 && st == CUBLAS_STATUS_SUCCESS) {
+      cudaEventRecord(ev1, s);
+      cudaEventSynchronize(ev1);
+      cudaEventElapsedTime(&ms, ev0, ev1);
+      cudaEventDestroy(ev0); cudaEventDestroy(ev1);
+      double flops = 2.0 * (double)m * (double)n * (double)k;
+      double gflops = flops / 1.0e9 / (ms/1000.0);
+      std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: %.3f ms, %.1f GF/s\n", m,n,k, ms, gflops);
+    } else if (w_verbose) {
+      if (ev0) cudaEventDestroy(ev0);
+      if (ev1) cudaEventDestroy(ev1);
+    }
   }
   if (pinned) {
     cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
@@ -1388,6 +1519,7 @@ void mopac_cuda_destroy_resources() {
   g_density_full_valid = false; g_density_full_n = 0; g_density_full_ld = 0;
   g_packed_density.buf.release();
   invalidate_packed_density();
+  g_lt_workspace.release();
   // Release cached pinned host buffers
   h_gemm_A.release(); h_gemm_B.release(); h_gemm_C.release();
   h_syrk_A.release(); h_syrk_C.release();
