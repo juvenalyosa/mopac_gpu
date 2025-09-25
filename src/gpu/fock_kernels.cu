@@ -35,6 +35,8 @@ __global__ void dfock2_hh_parallel_kernel(int norbs, int mpack, int numat,
 
 __device__ __host__ inline int ifact_idx(int i) { return (i * (i - 1)) / 2; }
 
+extern "C" bool mopac_cuda_density_copy_cached(double *dest, size_t len, const double *host_ptr);
+
 // Atomic add for double that works on pre-6.0 architectures via CAS
 __device__ inline double atomicAdd_double(double* address, double val) {
 #if __CUDA_ARCH__ >= 600
@@ -280,8 +282,12 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   // Copy inputs and zero F
   cudaMemcpy(s_d_nf, nfirst, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
   cudaMemcpy(s_d_nl, nlast, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
-  cudaMemcpy(s_d_ptot, ptot, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
-  cudaMemcpy(s_d_p, p, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
+  if (!mopac_cuda_density_copy_cached(s_d_ptot, mpack_e, ptot)) {
+    cudaMemcpy(s_d_ptot, ptot, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
+  }
+  if (!mopac_cuda_density_copy_cached(s_d_p, mpack_e, p)) {
+    cudaMemcpy(s_d_p, p, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
+  }
   cudaMemcpy(s_d_w, w, sizeof(double)*w_len, cudaMemcpyHostToDevice);
   cudaMemset(s_d_f, 0, sizeof(double)*mpack_e);
 
@@ -901,8 +907,12 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
   // Copy arrays
   e = cudaMemcpy(s_d_nf, nfirst, sizeof(int)*atoms_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
   e = cudaMemcpy(s_d_nl, nlast, sizeof(int)*atoms_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
-  e = cudaMemcpy(s_d_ptot, ptot, sizeof(double)*mpack_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
-  e = cudaMemcpy(s_d_p, p, sizeof(double)*mpack_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
+  if (!mopac_cuda_density_copy_cached(s_d_ptot, mpack_e, ptot)) {
+    e = cudaMemcpy(s_d_ptot, ptot, sizeof(double)*mpack_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
+  }
+  if (!mopac_cuda_density_copy_cached(s_d_p, mpack_e, p)) {
+    e = cudaMemcpy(s_d_p, p, sizeof(double)*mpack_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
+  }
   e = cudaMemcpy(s_d_f, f, sizeof(double)*mpack_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
   e = cudaMemcpy(s_d_w, w, sizeof(double)*w_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
   // Total timing start

@@ -18,6 +18,20 @@ module gpu_density_interfaces
       real(c_double), value :: sign, frac
       real(c_double)        :: xmat(ldx, n)
     end subroutine mopac_cuda_density_from_dev_gemm
+
+    subroutine mopac_cuda_density_add_diag(n, value) bind(C,name='mopac_cuda_density_add_diag')
+      import :: c_int, c_double
+      integer(c_int), value :: n
+      real(c_double), value :: value
+    end subroutine mopac_cuda_density_add_diag
+
+    subroutine mopac_cuda_register_packed_density(linear, packed) bind(C,name='mopac_cuda_register_packed_density')
+      import :: c_int, c_double
+      integer(c_int), value :: linear
+      real(c_double)        :: packed(*)
+    end subroutine mopac_cuda_register_packed_density
+
+    subroutine mopac_cuda_clear_density_cache() bind(C,name='mopac_cuda_clear_density_cache')
+    end subroutine mopac_cuda_clear_density_cache
   end interface
 end module gpu_density_interfaces
-

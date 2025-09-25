@@ -205,6 +205,27 @@ static HostBuf<double> h2_gemm_A, h2_gemm_B, h2_gemm_C;
 static HostBuf<double> h2_syrk_A, h2_syrk_C;
 static HostBuf<double> h2_rot_V;
 
+// Density residency cache (full matrix + packed upper triangle)
+static DevBuf<double> g_density_full;
+static int g_density_full_n = 0;
+static int g_density_full_ld = 0;
+static bool g_density_full_valid = false;
+
+struct PackedDensityCache {
+  DevBuf<double> buf;
+  size_t len = 0;
+  const double* host_ptr = nullptr;
+  bool valid = false;
+};
+
+static PackedDensityCache g_packed_density;
+
+static inline void invalidate_packed_density() {
+  g_packed_density.valid = false;
+  g_packed_density.host_ptr = nullptr;
+  g_packed_density.len = 0;
+}
+
 void create_handle() {
   if (!g_blas) {
     cublasCreate(&g_blas);
@@ -792,15 +813,20 @@ void mopac_cuda_density_from_dev_syrk(int n, int ndubl, double alpha, double *C,
     // Fallback: just zero C
     size_t bytesC = (size_t)ldc * (size_t)n * sizeof(double);
     std::memset(C, 0, bytesC);
+    g_density_full_valid = false;
+    invalidate_packed_density();
     return;
   }
   size_t bytesC = (size_t)ldc * (size_t)n * sizeof(double);
-  DevBuf<double> dC;
-  dC.ensure(bytesC);
+  g_density_full.ensure(bytesC);
   double *d_A = g_dsyevd_A.ptr; // eigenvectors on device
-  double *d_C = dC.ptr;
+  double *d_C = g_density_full.ptr;
   double beta = 0.0;
   cublasDsyrk(g_blas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, n, ndubl, &alpha, d_A, n, &beta, d_C, ldc);
+  g_density_full_valid = true;
+  g_density_full_n = n;
+  g_density_full_ld = ldc;
+  invalidate_packed_density();
   cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
   cudaStreamSynchronize(g_stream);
 }
@@ -817,13 +843,14 @@ void mopac_cuda_density_from_dev_gemm(int n,
   if (!g_have_device_eigvecs || n != g_device_eigvecs_n) {
     size_t bytesC = (size_t)ldc * (size_t)n * sizeof(double);
     std::memset(C, 0, bytesC);
+    g_density_full_valid = false;
+    invalidate_packed_density();
     return;
   }
   size_t bytesC = (size_t)ldc * (size_t)n * sizeof(double);
-  DevBuf<double> dC;
-  dC.ensure(bytesC);
+  g_density_full.ensure(bytesC);
   double *d_A = g_dsyevd_A.ptr; // eigenvectors on device
-  double *d_C = dC.ptr;
+  double *d_C = g_density_full.ptr;
   // Zero C (beta=0 in first SYRK covers it)
   // First block: columns [nl2..nu2]
   int k1 = (nu2 >= nl2) ? (nu2 - nl2 + 1) : 0;
@@ -844,6 +871,10 @@ void mopac_cuda_density_from_dev_gemm(int n,
     const double *d_block2 = d_A + (size_t)(nl1 - 1) * (size_t)n;
     cublasDsyrk(g_blas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, n, k2, &alpha2, d_block2, n, &beta, d_C, ldc);
   }
+  g_density_full_valid = true;
+  g_density_full_n = n;
+  g_density_full_ld = ldc;
+  invalidate_packed_density();
   cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
   cudaStreamSynchronize(g_stream);
 }
@@ -1182,6 +1213,25 @@ void call_rot_cuda_2gpu_gpu(const double *fmo, const double *eig,
 }
 
 // Provide a single cleanup entry point for Fortran.
+__global__ void pack_upper_kernel(const double *full, int ld, int n, double *packed) {
+  size_t idx = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+  size_t total = (size_t)n * (n + 1) / 2;
+  if (idx >= total) return;
+  double d = (double)idx;
+  double col_d = floor((sqrt(8.0 * d + 1.0) - 1.0) * 0.5);
+  int col = (int)col_d;
+  size_t start = (size_t)col * (col + 1) / 2;
+  int row = (int)(idx - start);
+  packed[idx] = full[row + (size_t)col * (size_t)ld];
+}
+
+__global__ void add_diag_kernel(double *full, int ld, int n, double value) {
+  int col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (col < n) {
+    full[col + (size_t)col * (size_t)ld] += value;
+  }
+}
+
 void mopac_cuda_destroy_resources() {
   static bool already = false;
   // Allow skipping destroy on some platforms where driver teardown is fragile
@@ -1204,6 +1254,10 @@ void mopac_cuda_destroy_resources() {
   g_syrk_A.release(); g_syrk_C.release();
   g_dsyevd_A.release(); g_dsyevd_W.release(); g_dsyevd_work.release(); g_dsyevd_info.release();
   g_rot_V.release(); g_rot_i.release(); g_rot_j.release(); g_rot_a.release(); g_rot_b.release();
+  g_density_full.release();
+  g_density_full_valid = false; g_density_full_n = 0; g_density_full_ld = 0;
+  g_packed_density.buf.release();
+  invalidate_packed_density();
   // Release cached pinned host buffers
   h_gemm_A.release(); h_gemm_B.release(); h_gemm_C.release();
   h_syrk_A.release(); h_syrk_C.release();
@@ -1216,6 +1270,60 @@ void mopac_cuda_destroy_resources() {
   h2_gemm_A.release(); h2_gemm_B.release(); h2_gemm_C.release();
   h2_syrk_A.release(); h2_syrk_C.release();
   h2_rot_V.release();
+}
+
+extern "C" {
+
+void mopac_cuda_clear_density_cache() {
+  g_density_full_valid = false;
+  g_density_full_n = 0;
+  g_density_full_ld = 0;
+  invalidate_packed_density();
+}
+
+void mopac_cuda_density_add_diag(int n, double value) {
+  if (!g_density_full_valid) return;
+  if (n != g_density_full_n) return;
+  if (value == 0.0) return;
+  cudaStream_t s = g_stream ? g_stream : 0;
+  int block = 256;
+  int grid = (n + block - 1) / block;
+  add_diag_kernel<<<grid, block, 0, s>>>(g_density_full.ptr, g_density_full_ld, n, value);
+  invalidate_packed_density();
+}
+
+void mopac_cuda_register_packed_density(int linear, double *packed_host) {
+  if (!g_density_full_valid) {
+    invalidate_packed_density();
+    return;
+  }
+  if (linear <= 0) {
+    invalidate_packed_density();
+    return;
+  }
+  size_t expected = (size_t)g_density_full_n * (g_density_full_n + 1) / 2;
+  if ((size_t)linear != expected) {
+    invalidate_packed_density();
+    return;
+  }
+  size_t bytes = (size_t)linear * sizeof(double);
+  g_packed_density.buf.ensure(bytes);
+  cudaStream_t s = g_stream ? g_stream : 0;
+  int block = 256;
+  int grid = ((size_t)linear + block - 1) / block;
+  pack_upper_kernel<<<grid, block, 0, s>>>(g_density_full.ptr, g_density_full_ld, g_density_full_n, g_packed_density.buf.ptr);
+  g_packed_density.len = (size_t)linear;
+  g_packed_density.host_ptr = packed_host;
+  g_packed_density.valid = true;
+}
+
+bool mopac_cuda_density_copy_cached(double *dest, size_t len, const double *host_ptr) {
+  if (!dest || !host_ptr) return false;
+  if (!g_packed_density.valid) return false;
+  if (g_packed_density.host_ptr != host_ptr) return false;
+  if (g_packed_density.len != len) return false;
+  cudaMemcpy(dest, g_packed_density.buf.ptr, len * sizeof(double), cudaMemcpyDeviceToDevice);
+  return true;
 }
 
 } // extern "C"
@@ -1534,15 +1642,20 @@ void mopac_cuda_density_from_c(int n, int nocc, const double *Cocc, int ldc,
   if (!g_blas) create_handle();
   size_t bytesC = (size_t)ldc * (size_t)nocc * sizeof(double);
   size_t bytesP = (size_t)ldp * (size_t)n * sizeof(double);
-  DevBuf<double> dC, dP;
-  dC.ensure(bytesC); dP.ensure(bytesP);
+  DevBuf<double> dC;
+  dC.ensure(bytesC);
+  g_density_full.ensure(bytesP);
   cudaMemcpyAsync(dC.ptr, Cocc, bytesC, cudaMemcpyHostToDevice, g_stream);
-  cudaMemsetAsync(dP.ptr, 0, bytesP, g_stream);
+  cudaMemsetAsync(g_density_full.ptr, 0, bytesP, g_stream);
   double alpha = scale;
   double beta  = 0.0;
   cublasDsyrk(g_blas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, n, nocc,
-              &alpha, dC.ptr, ldc, &beta, dP.ptr, ldp);
-  cudaMemcpyAsync(P, dP.ptr, bytesP, cudaMemcpyDeviceToHost, g_stream);
+              &alpha, dC.ptr, ldc, &beta, g_density_full.ptr, ldp);
+  g_density_full_valid = true;
+  g_density_full_n = n;
+  g_density_full_ld = ldp;
+  invalidate_packed_density();
+  cudaMemcpyAsync(P, g_density_full.ptr, bytesP, cudaMemcpyDeviceToHost, g_stream);
   cudaStreamSynchronize(g_stream);
 }
 
