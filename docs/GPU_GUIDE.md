@@ -53,15 +53,14 @@ Streams, Pinning, and Determinism
 - Deterministic cuBLAS settings: `MOPAC_DETERMINISTIC=1` (no atomics, host pointer mode, default math).
 
 Verbose/Profiling
-- `MOPAC_GPU_VERBOSE=1`: prints per‑call timings/GF/s for GEMM/SYRK and high‑level kernels.
+- `MOPAC_GPU_VERBOSE=1`: prints per‑call timings/GF/s for GEMM/SYRK and high‑level kernels; MG eigensolver logs under `[MGPU]`.
 - `MOPAC_GPU_CSV=1`: prints a CSV‑style summary for gradient kernels at teardown.
 
-Multi‑GPU Eigensolver (Roadmap)
-- Placeholder envs:
-  - `MOPAC_EIG_MG=1`: enable attempt of cuSOLVERMg path when `ngpus>1`.
-  - `MOPAC_EIG_MG_MIN=3000`: matrix size threshold to attempt MG.
-  - Future tuning (reserved): `MOPAC_EIG_MG_BLKSIZE`, `MOPAC_EIG_MG_GRID`, `MOPAC_EIG_MG_VERBOSE`.
-- Current status: The infrastructure and Fortran bindings exist; production cuSOLVERMg is not yet wired.
+Multi‑GPU Eigensolver (cuSOLVERMg)
+- Enable: `MOPAC_EIG_MG=1` with `ngpus>1` and set `MOPAC_EIG_MG_MIN` (e.g., `3000`).
+- Tuning: `MOPAC_EIG_MG_GRID=PxQ` (e.g., `2x1`, `2x2`) and `MOPAC_EIG_MG_BLKSIZE=256`.
+- Logging: with `MOPAC_GPU_VERBOSE=1`, prints `[MGPU] DSYEVD n=… grid=PxQ blksz=B: … ms`.
+- Fallbacks: on any MG error or missing library, MOPAC safely falls back to the single‑GPU cuSOLVER path and notes it in logs.
 
 Cleanup and Safety
 - GPU resources are released automatically at end of run. You can skip teardown via `MOPAC_SKIP_GPU_DESTROY=1` for debugging on fragile drivers.
@@ -75,9 +74,9 @@ Large Biomolecules (Proteins/DNA/RNA)
 - Troubleshooting: Enable `MOPAC_GPU_VERBOSE=1` to see per‑call timings. If timing causes issues on old drivers, unset `MOPAC_STREAMS` (use default stream) and re‑run.
 
 Multi‑GPU Eigensolver (cuSOLVERMg)
-- Enable attempt with `MOPAC_EIG_MG=1` and set a size threshold via `MOPAC_EIG_MG_MIN` (e.g., `3000`). Requires multiple GPUs (`ngpus>1`).
-- Current status: a safe stub is wired; if MG cannot be used, the code falls back to single‑GPU/cuSOLVER or CPU. A full cusolverMg implementation with 2D distribution is planned.
-- Future tuning (reserved): `MOPAC_EIG_MG_GRID` (e.g., `2x2`), `MOPAC_EIG_MG_BLKSIZE`, `MOPAC_EIG_MG_VERBOSE`.
+- Implemented using cuSOLVERMg with 2D block‑cyclic distribution and robust fallbacks.
+- Enable with `MOPAC_EIG_MG=1` (and `ngpus>1`), set threshold via `MOPAC_EIG_MG_MIN`. Use `MOPAC_EIG_MG_GRID`/`MOPAC_EIG_MG_BLKSIZE` to tune.
+- If cuSOLVERMg is not available at build or runtime errors occur, a single‑GPU cuSOLVER solve is used automatically.
 
 Best‑Practice Recipe
 - Export: `MOPAC_FORCEGPU=1 MOPAC_FASTGPU=1 MOPAC_DETERMINISTIC=1`

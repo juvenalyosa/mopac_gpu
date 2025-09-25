@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <chrono>
+#include <vector>
 
 // Lightweight verbose/timing control for BLAS wrappers
 static int w_verbose = 0; static int w_inited = 0;
@@ -1222,44 +1223,160 @@ extern "C" {
 // If cuSOLVERMg headers/support are not available, return a nonzero info to trigger fallback.
 void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
 #if !defined(HAVE_CUSOLVER_MG)
-  if (info) *info = -777; // clearly non-zero to trigger safe fallback
+  if (info) *info = -777;
   (void)n; (void)A; (void)lda; (void)W;
   return;
 #else
-  // Parse environment for grid and block size
-  int gx = 2, gy = 2, blksz = 256;
+  ensure_w_verbose();
+  int gx = 2, gy = 1, blksz = 256;
   {
     const char* g = std::getenv("MOPAC_EIG_MG_GRID");
     if (g && *g) {
-      int a=0,b=0;
-      if (std::sscanf(g, "%dx%d", &a, &b) == 2 && a>0 && b>0) { gx = a; gy = b; }
+      int a=0,b=0; if (std::sscanf(g, "%dx%d", &a, &b) == 2 && a>0 && b>0) { gx=a; gy=b; }
     }
     const char* bs = std::getenv("MOPAC_EIG_MG_BLKSIZE");
     if (bs && *bs) { int tmp = std::atoi(bs); if (tmp > 0) blksz = tmp; }
   }
   int devCount = 0; cudaGetDeviceCount(&devCount);
+  if (devCount <= 0) { mopac_cuda_dsyevd(n, A, lda, W, info); return; }
   int need = gx * gy;
-  if (devCount < need) {
-    if (w_verbose) std::fprintf(stderr, "[MGPU] DSYEVD requested but only %d GPU(s) available; need %d (%dx%d)\n", devCount, need, gx, gy);
-    // Fallback: use single-GPU eigensolver on current/best device
+  if (need > devCount) { gx = std::max(1, std::min(devCount, gx)); gy = std::max(1, devCount / gx); need = gx*gy; }
+
+  // Create cuSOLVERMg handle and grid/descriptor; on any error, fallback
+  cusolverMgHandle_t mh = nullptr;
+  cusolverStatus_t s = cusolverMgCreate(&mh);
+  if (s != CUSOLVER_STATUS_SUCCESS || !mh) {
+    if (w_verbose) std::fprintf(stderr, "[MGPU] cusolverMgCreate failed; fallback to single-GPU DSYEVD\n");
     mopac_cuda_dsyevd(n, A, lda, W, info);
     return;
   }
-  // TODO: Implement cusolverMg 2D block-cyclic distribution and solve.
-  // For now, select a best device by CC and memory and run single-GPU as a safe fallback.
-  int best = 0; int best_cc = -1; size_t best_mem = 0;
-  for (int d = 0; d < devCount; ++d) {
-    cudaDeviceProp prop{}; cudaGetDeviceProperties(&prop, d);
-    int cc = prop.major * 10 + prop.minor;
-    size_t mem = prop.totalGlobalMem;
-    if (cc > best_cc || (cc == best_cc && mem > best_mem)) { best = d; best_cc = cc; best_mem = mem; }
+
+  // Build a simple device list 0..need-1; honor CUDA_VISIBLE_DEVICES externally
+  std::vector<int> devs(need);
+  for (int i = 0; i < need; ++i) devs[i] = i;
+
+  cudaLibMgGrid_t grid = nullptr;
+  cudaError_t cerr;
+  // Create a 2D device grid (row-major device order)
+  cerr = cudaLibMgCreateGrid(&grid, gx, gy, devs.data());
+  if (cerr != cudaSuccess || !grid) {
+    if (w_verbose) std::fprintf(stderr, "[MGPU] cudaLibMgCreateGrid failed; fallback to single-GPU DSYEVD\n");
+    cusolverMgDestroy(mh);
+    mopac_cuda_dsyevd(n, A, lda, W, info);
+    return;
   }
-  int cur = -1; cudaGetDevice(&cur);
-  if (cur != best) cudaSetDevice(best);
-  if (w_verbose) std::fprintf(stderr, "[MGPU] DSYEVD n=%d grid=%dx%d blksz=%d: using single-GPU fallback on device %d (CC %d.%d)\n",
-                               n, gx, gy, blksz, best, best_cc/10, best_cc%10);
-  mopac_cuda_dsyevd(n, A, lda, W, info);
-  if (cur >= 0 && cur != best) cudaSetDevice(cur);
+
+  cudaLibMgMatrixDesc_t desc = nullptr;
+  cerr = cudaLibMgCreateMatrixDesc(&desc,
+                                   CUBLAS_FILL_MODE_UPPER,
+                                   CUDA_R_64F,
+                                   n, n,
+                                   lda,
+                                   blksz, blksz,
+                                   grid);
+  if (cerr != cudaSuccess || !desc) {
+    if (w_verbose) std::fprintf(stderr, "[MGPU] cudaLibMgCreateMatrixDesc failed; fallback to single-GPU DSYEVD\n");
+    cudaLibMgDestroyGrid(grid);
+    cusolverMgDestroy(mh);
+    mopac_cuda_dsyevd(n, A, lda, W, info);
+    return;
+  }
+
+  // Allocate distributed buffers on devices and scatter A
+  std::vector<void*> Adev(need, nullptr);
+  std::vector<size_t> ldloc(need, 0), nrloc(need, 0), ncloc(need, 0);
+  // Query local extents for each device
+  for (int did = 0; did < need; ++did) {
+    int prow = did % gx;
+    int pcol = did / gx;
+    size_t rows = 0, cols = 0;
+    cudaLibMgGetLocalMatrixSize(n, n, blksz, blksz, gx, gy, prow, pcol, &rows, &cols);
+    nrloc[did] = rows; ncloc[did] = cols; ldloc[did] = (size_t)rows;
+    size_t bytes = rows * cols * sizeof(double);
+    int cur = -1; cudaGetDevice(&cur);
+    cudaSetDevice(devs[did]);
+    if (bytes > 0) cerr = cudaMalloc(&Adev[did], bytes); else cerr = cudaSuccess;
+    if (cur >= 0) cudaSetDevice(cur);
+    if (cerr != cudaSuccess) {
+      if (w_verbose) std::fprintf(stderr, "[MGPU] cudaMalloc(local tile) failed on dev %d; fallback\n", devs[did]);
+      // Cleanup partial
+      for (int k = 0; k < did; ++k) { if (Adev[k]) { int cur2=-1; cudaGetDevice(&cur2); cudaSetDevice(devs[k]); cudaFree(Adev[k]); if (cur2>=0) cudaSetDevice(cur2);} }
+      cudaLibMgDestroyMatrixDesc(desc);
+      cudaLibMgDestroyGrid(grid);
+      cusolverMgDestroy(mh);
+      mopac_cuda_dsyevd(n, A, lda, W, info);
+      return;
+    }
+  }
+
+  // Copy from host column-major A into distributed tiles
+  cerr = cusolverMgMemcpyH2D(mh, Adev.data(), 0, 0, desc, A, lda);
+  if (cerr != cudaSuccess) {
+    if (w_verbose) std::fprintf(stderr, "[MGPU] cusolverMgMemcpyH2D failed; fallback\n");
+    for (int k = 0; k < need; ++k) { if (Adev[k]) { int cur=-1; cudaGetDevice(&cur); cudaSetDevice(devs[k]); cudaFree(Adev[k]); if (cur>=0) cudaSetDevice(cur);} }
+    cudaLibMgDestroyMatrixDesc(desc);
+    cudaLibMgDestroyGrid(grid);
+    cusolverMgDestroy(mh);
+    mopac_cuda_dsyevd(n, A, lda, W, info);
+    return;
+  }
+
+  // Query MG workspace and run DSYEVD
+  size_t lwork = 0;
+  s = cusolverMgSyevd_bufferSize(mh, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
+                                 n, Adev.data(), 0, 0, desc, W, &lwork);
+  if (s != CUSOLVER_STATUS_SUCCESS || lwork == 0) {
+    if (w_verbose) std::fprintf(stderr, "[MGPU] cusolverMgSyevd_bufferSize failed; fallback\n");
+    for (int k = 0; k < need; ++k) { if (Adev[k]) { int cur=-1; cudaGetDevice(&cur); cudaSetDevice(devs[k]); cudaFree(Adev[k]); if (cur>=0) cudaSetDevice(cur);} }
+    cudaLibMgDestroyMatrixDesc(desc);
+    cudaLibMgDestroyGrid(grid);
+    cusolverMgDestroy(mh);
+    mopac_cuda_dsyevd(n, A, lda, W, info);
+    return;
+  }
+
+  std::vector<void*> Work(need, nullptr);
+  for (int did = 0; did < need; ++did) {
+    int cur=-1; cudaGetDevice(&cur); cudaSetDevice(devs[did]);
+    cerr = cudaMalloc(&Work[did], lwork);
+    if (cur>=0) cudaSetDevice(cur);
+    if (cerr != cudaSuccess) { Work[did] = nullptr; }
+  }
+
+  auto t0 = std::chrono::high_resolution_clock::now();
+  int linfo = 0;
+  s = cusolverMgSyevd(mh, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
+                      n, Adev.data(), 0, 0, desc, W, Work.data(), lwork, &linfo);
+
+  if (s != CUSOLVER_STATUS_SUCCESS || linfo != 0) {
+    if (w_verbose) std::fprintf(stderr, "[MGPU] cusolverMgSyevd error (stat=%d, info=%d); fallback\n", (int)s, linfo);
+    // Cleanup and fallback
+    for (int k = 0; k < need; ++k) { int cur=-1; cudaGetDevice(&cur); cudaSetDevice(devs[k]); if (Work[k]) cudaFree(Work[k]); if (Adev[k]) cudaFree(Adev[k]); if (cur>=0) cudaSetDevice(cur); }
+    cudaLibMgDestroyMatrixDesc(desc);
+    cudaLibMgDestroyGrid(grid);
+    cusolverMgDestroy(mh);
+    mopac_cuda_dsyevd(n, A, lda, W, info);
+    return;
+  }
+
+  // Gather eigenvectors back into A on host
+  cerr = cusolverMgMemcpyD2H(mh, A, lda, Adev.data(), 0, 0, desc);
+  auto t1 = std::chrono::high_resolution_clock::now();
+  if (w_verbose) {
+    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    std::fprintf(stderr, "[MGPU] DSYEVD n=%d grid=%dx%d blksz=%d: %.3f ms\n", n, gx, gy, blksz, ms);
+  }
+
+  for (int k = 0; k < need; ++k) {
+    int cur=-1; cudaGetDevice(&cur); cudaSetDevice(devs[k]);
+    if (Work[k]) cudaFree(Work[k]);
+    if (Adev[k]) cudaFree(Adev[k]);
+    if (cur>=0) cudaSetDevice(cur);
+  }
+  cudaLibMgDestroyMatrixDesc(desc);
+  cudaLibMgDestroyGrid(grid);
+  cusolverMgDestroy(mh);
+  if (info) *info = 0;
   return;
 #endif
 }

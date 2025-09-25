@@ -441,6 +441,56 @@
             end do
             write(iw,'(3x,a,1x,l1,3x,a,1x,i0)') 'mozyme_gpu=', mozyme_gpu, 'mozyme_minblk=', mozyme_gpu_min_block
             write(iw,'(3x,a,1x,l1)') 'mozyme_2gpu=', mozyme_force_2gpu
+
+            ! Policy: ORTHO on GPU (auto on for CC>=7.0 unless env says otherwise)
+            env = '' ; i = 1
+            call get_environment_variable('MOPAC_ORTHO_GPU', env, status=i)
+            if (i == 0) then
+              write(iw,'(3x,a,1x,a)') 'ORTHO_GPU=(env)', trim(adjustl(env))
+            else
+              if (nDevices > 0) then
+                ! Print policy for the selected device
+                j = gpu_id + 1
+                if (j < 1 .or. j > nDevices) j = 1
+                if (major(j) >= 7) then
+                  write(iw,'(3x,a,1x,a,1x,i0,a,i0,a)') 'ORTHO_GPU=(auto)', 'on (CC', major(j), '.', minor(j), ')'
+                else
+                  write(iw,'(3x,a,1x,a,1x,i0,a,i0,a)') 'ORTHO_GPU=(auto)', 'off (CC', major(j), '.', minor(j), ')'
+                end if
+              end if
+            end if
+
+            ! Policy: keep eigenvectors on device by default
+            env = '' ; i = 1
+            call get_environment_variable('MOPAC_EIG2HOST', env, status=i)
+            if (i == 0 .and. trim(adjustl(env)) /= '') then
+              write(iw,'(3x,a)') 'Keep eigvecs on device=no (EIG2HOST)'
+            else
+              env = '' ; i = 1
+              call get_environment_variable('MOPAC_CLEAR_DEVICE', env, status=i)
+              if (i == 0 .and. trim(adjustl(env)) /= '') then
+                write(iw,'(3x,a)') 'Keep eigvecs on device=no (CLEAR_DEVICE)'
+              else
+                write(iw,'(3x,a)') 'Keep eigvecs on device=(default) yes'
+              end if
+            end if
+
+            ! Multi-GPU eigensolver (cuSOLVERMg) config summary
+            env = '' ; i = 1
+            call get_environment_variable('MOPAC_EIG_MG', env, status=i)
+            if (i == 0 .and. trim(adjustl(env)) /= '') then
+              character(len=32) :: grid, bs, thr
+              grid = '' ; bs = '' ; thr = ''
+              i = 1 ; call get_environment_variable('MOPAC_EIG_MG_GRID', grid, status=i)
+              i = 1 ; call get_environment_variable('MOPAC_EIG_MG_BLKSIZE', bs, status=i)
+              i = 1 ; call get_environment_variable('MOPAC_EIG_MG_MIN', thr, status=i)
+              if (len_trim(grid) == 0) grid = '2x1'
+              if (len_trim(bs) == 0)   bs   = '256'
+              if (len_trim(thr) == 0)  thr  = '3000'
+              write(iw,'(3x,a,1x,a,3x,a,1x,a,3x,a,1x,a)') 'EIG_MG=on', 'grid='//trim(grid), 'blksize='//trim(bs), 'thr='//trim(thr)
+            else
+              write(iw,'(3x,a)') 'EIG_MG=off'
+            end if
           end if
         end if
 #endif

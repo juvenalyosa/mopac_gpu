@@ -9,14 +9,14 @@ Data layout considerations
 - MOPAC currently forms dense full matrices (host and device) with column-major storage.
 - A staging step is needed to redistribute the full dense matrix into Mg descriptors (grid, block sizes, device contexts).
 
-Plan (staged)
-1) Detection (done): add CMake option ENABLE_CUSOLVER_MG and define HAVE_CUSOLVER_MG if library is found.
-2) Plumbing (placeholder present): Fortran interface + C wrapper function that will own MG setup.
-3) Distribution design: choose block size (e.g., 128 or 256) and form device grid (e.g., PxQ devices).
-4) Implement host-to-Mg copy: allocate distributed buffers, scatter columns/rows according to block-cyclic mapping.
-5) Call cusolverMgSyevd (or equivalent) to compute eigenpairs on-device.
-6) Gather back the full eigenvector matrix into host column-major layout (and optionally leave on one device).
-7) Fall back: if Mg reports an error (or resources insufficient), revert to the single-GPU path.
+Plan (status)
+1) Detection: ENABLE_CUSOLVER_MG defines HAVE_CUSOLVER_MG when library is found. (done)
+2) Plumbing: Fortran interface + C wrapper in `src/gpu/cuda_wrappers.cu` (`mopac_cusolvermg_dsyevd`). (done)
+3) Distribution: 2D block-cyclic with `MOPAC_EIG_MG_GRID` and `MOPAC_EIG_MG_BLKSIZE`. (done)
+4) Host↔Mg copy: use cuSOLVERMg descriptors and memcpy helpers. (done)
+5) DSYEVD call: `cusolverMgSyevd[_bufferSize]`. (done)
+6) Gather: copy eigenvectors back to host full column-major and return eigenvalues. (done)
+7) Fallback: on any error or insufficient devices, revert to single-GPU DSYEVD with a clear log note. (done)
 
 Initial scope
 - RHF/UHF core eigensolve (square, symmetric, upper triangle input), double precision.
@@ -27,6 +27,5 @@ Open questions
 - Cross-device communication: NCCL vs. peer-to-peer; cuSOLVERMg manages its internal transfers but upstream paths may benefit from pinned buffers.
 
 Testing
-- Add a moderate-size test (n≈4k) on 2x GPUs gated by ENABLE_GPU_TESTS and ENABLE_CUSOLVER_MG.
+- Use `scripts/run_gpu_suite.sh` with `MOPAC_EIG_MG=1` on 2+ GPUs; expect `[MGPU] DSYEVD …` logs and parity with single-GPU.
 - Compare eigenvalue spectrum and orthogonality checks vs. single-GPU reference.
-
