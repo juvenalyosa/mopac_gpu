@@ -487,7 +487,8 @@
               if (len_trim(mg_grid_str) == 0) mg_grid_str = '2x1'
               if (len_trim(mg_bs_str)   == 0) mg_bs_str   = '256'
               if (len_trim(mg_thr_str)  == 0) mg_thr_str  = '3000'
-              write(iw,'(3x,a,1x,a,3x,a,1x,a,3x,a,1x,a)') 'EIG_MG=on', 'grid='//trim(mg_grid_str), 'blksize='//trim(mg_bs_str), 'thr='//trim(mg_thr_str)
+              write(iw,'(3x,a,1x,a,3x,a,1x,a,3x,a,1x,a)') 'EIG_MG=on', 'grid='//trim(mg_grid_str), &
+     &          'blksize='//trim(mg_bs_str), 'thr='//trim(mg_thr_str)
             else
               write(iw,'(3x,a)') 'EIG_MG=off'
             end if
