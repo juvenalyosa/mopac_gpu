@@ -16,6 +16,7 @@
   subroutine set_up_MOZYME_arrays()
     use MOZYME_C, only : jopt, ncocc, ncvir, nncf, nnce, icocc, icvir, kopt, &
     noccupied, nvirtual, icocc_dim, icvir_dim, ncf, nce, cocc, cvir, &
+    gpu_occ_enabled, gpu_virt_enabled, &
     ipad2,  ipad4, cocc_dim, cvir_dim, numred, norred, nelred, &
     fmo_dim, part_dxyz, p1, p2, p3, ws, partf, parth, &
     partp, idiag, nfmo, fmo, ifmo, iorbs, mode, rapid
@@ -84,10 +85,6 @@
   j = j + i
   allocate (gpu_virt_enabled(nvirtual), stat = i)
   j = j + i
-  allocate (gpu_occ_enabled(noccupied), stat = i)
-  j = j + i
-  allocate (gpu_virt_enabled(nvirtual), stat = i)
-  j = j + i
   allocate(ifact(norbs), stat = i)
   j = j + i
   allocate(cocc(cocc_dim), cvir(cvir_dim), stat = i)
@@ -133,8 +130,6 @@
   ncvir = 0
   gpu_occ_enabled = .true.
   gpu_virt_enabled = .true.
-  gpu_occ_enabled = .true.
-  gpu_virt_enabled = .true.
 !
 !   Create the ijbo array, if it exists?
 !
@@ -157,7 +152,7 @@
     use MOZYME_C, only : jopt, ncocc, ncvir, nncf, nnce, icocc, icvir, kopt, &
     ncf, nce, cocc, cvir, ions, iopt, nijbo, &
     part_dxyz, p1, p2, p3, ws, partf, parth, &
-    partp, idiag, nfmo, fmo, ifmo, iorbs
+    partp, idiag, nfmo, fmo, ifmo, iorbs, gpu_occ_enabled, gpu_virt_enabled
 !
     use common_arrays_C, only : h, w, wk, p, f, ifact, fb, q, c, dxyz, eigs, errfn
 !
@@ -183,14 +178,12 @@
     if (allocated(pbold2))     deallocate(pbold2)
     if (allocated(ncocc))      deallocate(ncocc)
     if (allocated(ncvir))      deallocate(ncvir)
-  if (allocated(nncf))       deallocate(nncf)
-  if (allocated(nnce))       deallocate(nnce)
-  if (allocated(icocc))      deallocate(icocc)
+    if (allocated(nncf))       deallocate(nncf)
+    if (allocated(nnce))       deallocate(nnce)
+    if (allocated(icocc))      deallocate(icocc)
     if (allocated(icvir))      deallocate(icvir)
     if (allocated(gpu_occ_enabled)) deallocate(gpu_occ_enabled)
     if (allocated(gpu_virt_enabled)) deallocate(gpu_virt_enabled)
-  if (allocated(gpu_occ_enabled)) deallocate(gpu_occ_enabled)
-  if (allocated(gpu_virt_enabled)) deallocate(gpu_virt_enabled)
     if (allocated(kopt))       deallocate(kopt)
     if (allocated(ncf))        deallocate(ncf)
     if (allocated(nce))        deallocate(nce)
