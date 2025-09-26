@@ -144,9 +144,12 @@ double precision function disp_DnX(l_grad)
               end select
             end do
           end do
-          istat_gpu = mopac_cuda_disp_eval(int(npairs, c_int), sum2_list, sum3_list, rab_list, val_list, deriv_list)
-          if (istat_gpu == 0) then
-            sum = sum(val_list)
+         istat_gpu = mopac_cuda_disp_eval(int(npairs, c_int), sum2_list, sum3_list, rab_list, val_list, deriv_list)
+         if (istat_gpu == 0) then
+            sum = 0.d0
+            do idx = 1, npairs
+              sum = sum + val_list(idx)
+            end do
             e_disp = e_disp + sum
             deallocate(sum2_list, sum3_list, rab_list, val_list, deriv_list)
             disp_DnX = sum
