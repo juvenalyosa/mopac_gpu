@@ -37,9 +37,6 @@ static inline bool resident_mode_enabled() {
       g_resident_mode = 1;
     }
   } else {
-    if (w_verbose) {
-      std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: tiled columns (tile_n=%d)\n", m, n, k, tile_n);
-    }
     g_resident_mode = 1; // default on when not specified
   }
   return g_resident_mode != 0;
@@ -651,6 +648,9 @@ void call_gemm_cublas(char tra, char trb,
     std::memcpy(C, h_gemm_C.ptr, bytesC);
   }
   } else {
+    if (w_verbose) {
+      std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: tiled columns (tile_n=%d)\n", m, n, k, tile_n);
+    }
     // Tiled path (columns)
     if (bytesA > reserve || tile_n <= 0) {
       // Fallback to single tile (will likely fail, but keep behavior consistent)
