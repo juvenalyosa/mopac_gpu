@@ -18,7 +18,7 @@
 #include <cctype>
 
 #if defined(__has_include)
-#  if __has_include(<nvToolsExt.h>)
+#  if __has_include(<nvToolsExt.h>) && defined(MOPAC_ENABLE_NVTX)
 #    define MOPAC_HAVE_NVTX 1
 #    include <nvToolsExt.h>
 #  else
@@ -439,7 +439,7 @@ static long long mg_total_devices = 0;
 static int mg_profile_flag = 0;
 static int mg_profile_inited = 0;
 static int mg_profile_env_requested = 0;
-static inline bool mg_profile_enabled() {
+static inline bool mg_profile_enabled() MOPAC_UNUSED {
   if (!mg_profile_inited) {
     const char* s = std::getenv("MOPAC_EIG_MG_PROFILE");
     if (s && *s) {
