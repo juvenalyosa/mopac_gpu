@@ -89,7 +89,8 @@ run_case() {
       # Informational only: MG may fall back cleanly; do not fail if logs absent
       : ;;
     mozyme_protein_auto)
-      if grep -Eq "mozyme_gpu= *T" "$log" || grep -Eq "Large protein MOZYME GPU" "$log"; then
+      if awk 'BEGIN{m=""} /mozyme_gpu=/{for(i=1;i<=NF;i++){if($i ~ /mozyme_gpu=/){split($i,a,"="); if(length(a[2])==0){if((i+1)<=NF) m=$(i+1); else m="";} else {m=a[2];}}} if(m=="T") exit 0; else exit 1} END{exit (m=="T"?0:1)}' "$log" \
+         || grep -Eq "Large protein MOZYME GPU" "$log"; then
         gpu_hits="yes"
         reason="MOZYME"
       fi
