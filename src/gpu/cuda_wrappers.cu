@@ -441,8 +441,8 @@ static long long mg_failures = 0;
 static double mg_total_ms = 0.0;
 static long long mg_total_dim = 0;
 static long long mg_total_devices = 0;
-static int mg_profile_flag = 0;
-static int mg_profile_inited = 0;
+static int mg_profile_flag MOPAC_UNUSED = 0;
+static int mg_profile_inited MOPAC_UNUSED = 0;
 static int mg_profile_env_requested = 0;
 #if defined(HAVE_CUSOLVER_MG)
 static inline bool mg_profile_enabled() {
@@ -465,7 +465,7 @@ static inline bool mg_profile_enabled() {
   return mg_profile_flag != 0;
 }
 #else
-static inline bool mg_profile_enabled() { return false; }
+static inline bool mg_profile_enabled() MOPAC_UNUSED { return false; }
 #endif
 
 static bool lt_dgemm(cublasOperation_t opA, cublasOperation_t opB,
