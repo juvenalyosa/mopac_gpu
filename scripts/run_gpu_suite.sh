@@ -58,6 +58,7 @@ run_case() {
   local log="$OUT_DIR/${name// /_}.out"
   local start_ts end_ts elapsed status="FAIL" gpu_hits="no" reason=""
   echo "==> Running $name"
+  echo "Log: $log"
   if [[ ! -f "$infile" ]]; then
     echo "SKIP: missing input $infile" | tee "$log"
     summary+=("$name;SKIP;0;no")

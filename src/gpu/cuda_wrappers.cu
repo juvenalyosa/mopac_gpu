@@ -37,6 +37,9 @@ static inline bool resident_mode_enabled() {
       g_resident_mode = 1;
     }
   } else {
+    if (w_verbose) {
+      std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: tiled columns (tile_n=%d)\n", m, n, k, tile_n);
+    }
     g_resident_mode = 1; // default on when not specified
   }
   return g_resident_mode != 0;
@@ -707,7 +710,9 @@ void call_gemm_cublas(char tra, char trb,
       }
       cublasStatus_t st = cublasDgemm(g_blas, opA, opB, m, tn, k,
                                       &alpha, d_A, lda, d_B, ldb, &beta, d_C, ldc);
-      (void)st;
+      if (w_verbose && st == CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "[GPU] DGEMM tile m=%d n=%d k=%d\n", m, tn, k);
+      }
       cudaMemcpy2DAsync(C_tile, ldc * sizeof(double),
                         d_C, ldc * sizeof(double),
                         (size_t)tn * sizeof(double), (size_t)m,
@@ -784,6 +789,9 @@ void call_syrk_cublas(char uplo, char tra,
     cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
   } else {
+    if (w_verbose) {
+      std::fprintf(stderr, "[GPU] DSYRK n=%d k=%d: tiled panels (tile_k=%d)\n", n, k, tile_k);
+    }
     cudaMemcpyAsync(d_C, C, bytesC, cudaMemcpyHostToDevice, stream);
     for (int k0 = 0; k0 < k; k0 += tile_k) {
       int kc = std::min(tile_k, k - k0);
@@ -796,7 +804,10 @@ void call_syrk_cublas(char uplo, char tra,
                         (size_t)kc * sizeof(double), (size_t)n,
                         cudaMemcpyHostToDevice, stream);
       double beta_local = (k0 == 0) ? beta : 1.0;
-      cublasDsyrk(g_blas, u, CUBLAS_OP_N, n, kc, &alpha, d_Atile, lda, &beta_local, d_C, ldc);
+      cublasStatus_t st2 = cublasDsyrk(g_blas, u, CUBLAS_OP_N, n, kc, &alpha, d_Atile, lda, &beta_local, d_C, ldc);
+      if (w_verbose && st2 == CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "[GPU] DSYRK tile n=%d k=%d beta=%.1f\n", n, kc, beta_local);
+      }
     }
     cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
@@ -834,6 +845,10 @@ void call_gemm_cublas_2gpu(char tra, char trb,
     return;
   }
   ensure_pair_streams();
+  if (w_verbose) {
+    std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: 2-GPU outer split (%d,%d)\n",
+                 m, n, k, g_pair_dev0, g_pair_dev1);
+  }
   int n0 = m / 2;
   int n1 = m - n0;
   // Device allocations and copies with caching per device
@@ -933,6 +948,10 @@ void call_syrk_cublas_2gpu(char uplo, char tra,
     return;
   }
   ensure_pair_streams();
+  if (w_verbose) {
+    std::fprintf(stderr, "[GPU] DSYRK n=%d k=%d: 2-GPU outer split (%d,%d)\n",
+                 n, k, g_pair_dev0, g_pair_dev1);
+  }
   int n0 = n / 2;
   int n1 = n - n0;
   // Copy full vector v to both devices and split C by rows (cached per device)
