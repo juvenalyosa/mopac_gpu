@@ -28,6 +28,14 @@
 #  define MOPAC_HAVE_NVTX 0
 #endif
 
+#if !defined(MOPAC_UNUSED)
+#  if defined(__GNUC__) || defined(__clang__)
+#    define MOPAC_UNUSED __attribute__((unused))
+#  else
+#    define MOPAC_UNUSED
+#  endif
+#endif
+
 // Lightweight verbose/timing control for BLAS wrappers
 static int w_verbose = 0; static int w_inited = 0;
 static inline void ensure_w_verbose() {
@@ -792,8 +800,7 @@ void call_gemm_cublas(char tra, char trb,
     }
   } else {
     if (w_verbose) {
-      std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: tiled columns (tile_n=%d)
-", m, n, k, tile_n);
+      std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: tiled columns (tile_n=%d)\n", m, n, k, tile_n);
     }
     if (bytesA > reserve || tile_n <= 0) {
       g_gemm_A.ensure(bytesA);
