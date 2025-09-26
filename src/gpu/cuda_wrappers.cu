@@ -15,6 +15,18 @@
 #include <cstdio>
 #include <chrono>
 #include <vector>
+#include <cctype>
+
+#if defined(__has_include)
+#  if __has_include(<nvToolsExt.h>)
+#    define MOPAC_HAVE_NVTX 1
+#    include <nvToolsExt.h>
+#  else
+#    define MOPAC_HAVE_NVTX 0
+#  endif
+#else
+#  define MOPAC_HAVE_NVTX 0
+#endif
 
 // Lightweight verbose/timing control for BLAS wrappers
 static int w_verbose = 0; static int w_inited = 0;
@@ -24,6 +36,134 @@ static inline void ensure_w_verbose() {
     if (v && (std::strcmp(v, "1")==0 || std::strcmp(v, "on")==0 || std::strcmp(v, "true")==0)) w_verbose = 1;
     w_inited = 1;
   }
+}
+
+static inline bool equals_ci(const char* a, const char* b) {
+  if (!a || !b) return false;
+  while (*a && *b) {
+    if (std::tolower(static_cast<unsigned char>(*a)) != std::tolower(static_cast<unsigned char>(*b))) return false;
+    ++a; ++b;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+static int g_gpu_profile_level = 0;
+static int g_gpu_profile_inited = 0;
+static int g_gpu_profile_env_requested MOPAC_UNUSED = 0;
+
+static inline int gpu_profile_level() {
+  if (!g_gpu_profile_inited) {
+    const char* s = std::getenv("MOPAC_GPU_PROFILE");
+    if (s && *s) {
+      g_gpu_profile_env_requested = 1;
+      if (equals_ci(s, "0") || equals_ci(s, "off") || equals_ci(s, "false")) {
+        g_gpu_profile_level = 0;
+      } else if (equals_ci(s, "2") || equals_ci(s, "full") || equals_ci(s, "2+") || equals_ci(s, "verbose")) {
+        g_gpu_profile_level = 2;
+      } else {
+        g_gpu_profile_level = 1;
+      }
+    } else {
+      g_gpu_profile_level = 0;
+    }
+    g_gpu_profile_inited = 1;
+  }
+  return g_gpu_profile_level;
+}
+
+static inline bool gpu_profile_enabled() {
+  return gpu_profile_level() >= 2;
+}
+
+struct NvtxRange {
+#if MOPAC_HAVE_NVTX
+  bool active;
+  NvtxRange(const char* name, uint32_t color) : active(false) {
+    if (name && gpu_profile_enabled()) {
+      nvtxEventAttributes_t attr{};
+      attr.version = NVTX_VERSION;
+      attr.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+      attr.colorType = NVTX_COLOR_ARGB;
+      attr.color = color;
+      attr.messageType = NVTX_MESSAGE_TYPE_ASCII;
+      attr.message.ascii = name;
+      nvtxRangePushEx(&attr);
+      active = true;
+    }
+  }
+  ~NvtxRange() {
+    if (active) nvtxRangePop();
+  }
+#else
+  NvtxRange(const char*, uint32_t) {}
+#endif
+};
+
+struct BlasProfileEntry {
+  long long calls = 0;
+  long long tiled_calls = 0;
+  long long tiles = 0;
+  double total_ms = 0.0;
+  double min_ms = 0.0;
+  double max_ms = 0.0;
+  double total_flops = 0.0;
+};
+
+static BlasProfileEntry g_prof_gemm_single;
+static BlasProfileEntry g_prof_syrk_single;
+static BlasProfileEntry g_prof_gemm_pair;
+static BlasProfileEntry g_prof_syrk_pair;
+static BlasProfileEntry g_prof_disp_eval;
+
+struct ScopedBlasProfile {
+  BlasProfileEntry* entry;
+  double flops;
+  bool active;
+  bool noted_tiled = false;
+  long long tile_accum = 0;
+  std::chrono::high_resolution_clock::time_point t0;
+  ScopedBlasProfile(BlasProfileEntry* e, double flop_count)
+      : entry(e), flops(flop_count) {
+    active = gpu_profile_enabled() && entry;
+    if (!active) return;
+    entry->calls += 1;
+    entry->total_flops += flop_count;
+    t0 = std::chrono::high_resolution_clock::now();
+  }
+  void note_tiles(long long tiles) {
+    if (!active || tiles <= 0) return;
+    tile_accum += tiles;
+    if (!noted_tiled) {
+      noted_tiled = true;
+      entry->tiled_calls += 1;
+    }
+  }
+  ~ScopedBlasProfile() {
+    if (!active) return;
+    if (noted_tiled) entry->tiles += tile_accum;
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+    entry->total_ms += ms;
+    if (entry->calls == 1) {
+      entry->min_ms = entry->max_ms = ms;
+    } else {
+      entry->min_ms = std::min(entry->min_ms, ms);
+      entry->max_ms = std::max(entry->max_ms, ms);
+    }
+  }
+};
+
+static void print_blas_profile(const char* label, const BlasProfileEntry& e) {
+  if (e.calls == 0) return;
+  double avg_ms = e.total_ms / (double)e.calls;
+  double gflops_eff = (e.total_ms > 1e-12) ? (e.total_flops / 1.0e9) / (e.total_ms / 1000.0) : 0.0;
+  std::fprintf(stderr,
+               "[GPU] profile %-12s calls=%lld avg_ms=%.3f min=%.3f max=%.3f eff_GF/s=%.2f",
+               label, e.calls, avg_ms, e.min_ms, e.max_ms, gflops_eff);
+  if (e.tiled_calls > 0) {
+    double avg_tiles = e.tiles > 0 ? (double)e.tiles / (double)e.tiled_calls : 0.0;
+    std::fprintf(stderr, " tiled=%lld avg_tiles=%.2f", e.tiled_calls, avg_tiles);
+  }
+  std::fprintf(stderr, "\n");
 }
 
 static int g_resident_mode = -1; // -1=unset, 0=off, 1=on
@@ -217,6 +357,8 @@ static DevBuf<double> g_gemm_A, g_gemm_B, g_gemm_C;
 static DevBuf<double> g_syrk_A, g_syrk_C;
 static HostBuf<double> h_gemm_A, h_gemm_B, h_gemm_C;
 static HostBuf<double> h_syrk_A, h_syrk_C;
+static DevBuf<double> g_disp_sum2, g_disp_sum3, g_disp_r, g_disp_val, g_disp_der;
+static HostBuf<double> h_disp_val, h_disp_der;
 // 2-GPU caches
 static DevBuf<double> g2_gemm_a0, g2_gemm_b0, g2_gemm_c0;
 static DevBuf<double> g2_gemm_a1, g2_gemm_b1, g2_gemm_c1;
@@ -533,11 +675,17 @@ void call_gemm_cublas(char tra, char trb,
                       double beta,
                       double *C, int ldc) {
   ensure_w_verbose();
-  bool profile_enabled = mg_profile_enabled() || w_verbose;
+  char nv_name[64];
+  const char* nv_ptr = nullptr;
+  if (gpu_profile_enabled()) {
+    std::snprintf(nv_name, sizeof(nv_name), "GEMM %dx%dx%d", m, n, k);
+    nv_ptr = nv_name;
+  }
+  NvtxRange nv_scope(nv_ptr, 0xFF1F77B4);
+  ScopedBlasProfile prof_scope(&g_prof_gemm_single, 2.0 * (double)m * (double)n * (double)k);
   if (!g_blas) create_handle();
   cublasOperation_t opA = (tra == 'T' || tra == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
   cublasOperation_t opB = (trb == 'T' || trb == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
-  // Allocate device buffers and copy inputs
   size_t bytesA = (size_t)lda * (size_t)k * sizeof(double);
   size_t bytesB = (size_t)ldb * (size_t)n * sizeof(double);
   size_t bytesC = (size_t)ldc * (size_t)n * sizeof(double);
@@ -563,97 +711,91 @@ void call_gemm_cublas(char tra, char trb,
   }
 
   if (!use_tiling) {
-  g_gemm_A.ensure(bytesA);
-  g_gemm_B.ensure(bytesB);
-  g_gemm_C.ensure(bytesC);
-  double *d_A = g_gemm_A.ptr;
-  double *d_B = g_gemm_B.ptr;
-  double *d_C = g_gemm_C.ptr;
-  bool pinned = false;
-  if (g_pin_user) {
-    if (cudaHostRegister((void*)A, bytesA, cudaHostRegisterDefault) == cudaSuccess &&
-        cudaHostRegister((void*)B, bytesB, cudaHostRegisterDefault) == cudaSuccess) {
-      if (beta != 0.0) {
-        if (cudaHostRegister((void*)C, bytesC, cudaHostRegisterDefault) == cudaSuccess) {
-          pinned = true;
+    g_gemm_A.ensure(bytesA);
+    g_gemm_B.ensure(bytesB);
+    g_gemm_C.ensure(bytesC);
+    double *d_A = g_gemm_A.ptr;
+    double *d_B = g_gemm_B.ptr;
+    double *d_C = g_gemm_C.ptr;
+    bool pinned = false;
+    if (g_pin_user) {
+      if (cudaHostRegister((void*)A, bytesA, cudaHostRegisterDefault) == cudaSuccess &&
+          cudaHostRegister((void*)B, bytesB, cudaHostRegisterDefault) == cudaSuccess) {
+        if (beta != 0.0) {
+          if (cudaHostRegister((void*)C, bytesC, cudaHostRegisterDefault) == cudaSuccess) {
+            pinned = true;
+          } else {
+            cudaHostUnregister((void*)A);
+            cudaHostUnregister((void*)B);
+          }
         } else {
-          cudaHostUnregister((void*)A);
-          cudaHostUnregister((void*)B);
+          pinned = true;
         }
-      } else {
-        pinned = true;
       }
     }
-  }
-  if (pinned) {
-    cudaMemcpyAsync(d_A, A, bytesA, cudaMemcpyHostToDevice, g_stream);
-    cudaMemcpyAsync(d_B, B, bytesB, cudaMemcpyHostToDevice, g_stream);
-    if (beta != 0.0) cudaMemcpyAsync(d_C, C, bytesC, cudaMemcpyHostToDevice, g_stream);
-  } else {
-    h_gemm_A.ensure(bytesA);
-    h_gemm_B.ensure(bytesB);
-    h_gemm_C.ensure(bytesC);
-    std::memcpy(h_gemm_A.ptr, A, bytesA);
-    std::memcpy(h_gemm_B.ptr, B, bytesB);
-    cudaMemcpyAsync(d_A, h_gemm_A.ptr, bytesA, cudaMemcpyHostToDevice, g_stream);
-    cudaMemcpyAsync(d_B, h_gemm_B.ptr, bytesB, cudaMemcpyHostToDevice, g_stream);
-    if (beta != 0.0) {
-      // Only need initial C when beta != 0
-      std::memcpy(h_gemm_C.ptr, C, bytesC);
-      cudaMemcpyAsync(d_C, h_gemm_C.ptr, bytesC, cudaMemcpyHostToDevice, g_stream);
+    if (pinned) {
+      cudaMemcpyAsync(d_A, A, bytesA, cudaMemcpyHostToDevice, g_stream);
+      cudaMemcpyAsync(d_B, B, bytesB, cudaMemcpyHostToDevice, g_stream);
+      if (beta != 0.0) cudaMemcpyAsync(d_C, C, bytesC, cudaMemcpyHostToDevice, g_stream);
+    } else {
+      h_gemm_A.ensure(bytesA);
+      h_gemm_B.ensure(bytesB);
+      h_gemm_C.ensure(bytesC);
+      std::memcpy(h_gemm_A.ptr, A, bytesA);
+      std::memcpy(h_gemm_B.ptr, B, bytesB);
+      cudaMemcpyAsync(d_A, h_gemm_A.ptr, bytesA, cudaMemcpyHostToDevice, g_stream);
+      cudaMemcpyAsync(d_B, h_gemm_B.ptr, bytesB, cudaMemcpyHostToDevice, g_stream);
+      if (beta != 0.0) {
+        std::memcpy(h_gemm_C.ptr, C, bytesC);
+        cudaMemcpyAsync(d_C, h_gemm_C.ptr, bytesC, cudaMemcpyHostToDevice, g_stream);
+      }
     }
-  }
 
-  bool lt_used = false;
-  if (!use_tiling) {
-    lt_used = lt_dgemm(opA, opB, m, n, k, alpha, d_A, lda, d_B, ldb, beta, d_C, ldc);
+    bool lt_used = lt_dgemm(opA, opB, m, n, k, alpha, d_A, lda, d_B, ldb, beta, d_C, ldc);
     if (lt_used && w_verbose) {
       std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: cuBLASLt path\n", m, n, k);
     }
-  }
 
-  if (!lt_used) {
-    // Compute C = alpha*op(A)*op(B) + beta*C using classic cuBLAS
-    float ms = 0.0f; cudaEvent_t ev0 = nullptr, ev1 = nullptr;
-    cudaStream_t s = g_stream ? g_stream : 0;
-    if (w_verbose) {
-      if (cudaEventCreate(&ev0) != cudaSuccess) { ev0 = nullptr; }
-      if (cudaEventCreate(&ev1) != cudaSuccess) { if (ev0) cudaEventDestroy(ev0); ev0 = nullptr; ev1 = nullptr; }
-      if (ev0) cudaEventRecord(ev0, s);
+    if (!lt_used) {
+      float ms = 0.0f; cudaEvent_t ev0 = nullptr, ev1 = nullptr;
+      cudaStream_t s = g_stream ? g_stream : 0;
+      if (w_verbose) {
+        if (cudaEventCreate(&ev0) != cudaSuccess) { ev0 = nullptr; }
+        if (cudaEventCreate(&ev1) != cudaSuccess) { if (ev0) cudaEventDestroy(ev0); ev0 = nullptr; ev1 = nullptr; }
+        if (ev0) cudaEventRecord(ev0, s);
+      }
+      cublasStatus_t st = cublasDgemm(g_blas, opA, opB, m, n, k, &alpha, d_A, lda, d_B, ldb, &beta, d_C, ldc);
+      if (w_verbose && ev0 && ev1 && st == CUBLAS_STATUS_SUCCESS) {
+        cudaEventRecord(ev1, s);
+        cudaEventSynchronize(ev1);
+        cudaEventElapsedTime(&ms, ev0, ev1);
+        cudaEventDestroy(ev0); cudaEventDestroy(ev1);
+        double flops = 2.0 * (double)m * (double)n * (double)k;
+        double gflops = flops / 1.0e9 / (ms/1000.0);
+        std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: %.3f ms, %.1f GF/s\n", m, n, k, ms, gflops);
+      } else if (w_verbose) {
+        if (ev0) cudaEventDestroy(ev0);
+        if (ev1) cudaEventDestroy(ev1);
+      }
     }
-    cublasStatus_t st = cublasDgemm(g_blas, opA, opB, m, n, k, &alpha, d_A, lda, d_B, ldb, &beta, d_C, ldc);
-    if (w_verbose && ev0 && ev1 && st == CUBLAS_STATUS_SUCCESS) {
-      cudaEventRecord(ev1, s);
-      cudaEventSynchronize(ev1);
-      cudaEventElapsedTime(&ms, ev0, ev1);
-      cudaEventDestroy(ev0); cudaEventDestroy(ev1);
-      double flops = 2.0 * (double)m * (double)n * (double)k;
-      double gflops = flops / 1.0e9 / (ms/1000.0);
-      std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: %.3f ms, %.1f GF/s\n", m,n,k, ms, gflops);
-    } else if (w_verbose) {
-      if (ev0) cudaEventDestroy(ev0);
-      if (ev1) cudaEventDestroy(ev1);
+
+    if (pinned) {
+      cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
+      cudaStreamSynchronize(g_stream);
+      cudaHostUnregister((void*)A);
+      cudaHostUnregister((void*)B);
+      if (beta != 0.0) cudaHostUnregister((void*)C);
+    } else {
+      cudaMemcpyAsync(h_gemm_C.ptr, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
+      cudaStreamSynchronize(g_stream);
+      std::memcpy(C, h_gemm_C.ptr, bytesC);
     }
-  }
-  if (pinned) {
-    cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
-    cudaStreamSynchronize(g_stream);
-    // Unregister
-    cudaHostUnregister((void*)A);
-    cudaHostUnregister((void*)B);
-    if (beta != 0.0) cudaHostUnregister((void*)C);
   } else {
-    cudaMemcpyAsync(h_gemm_C.ptr, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
-    cudaStreamSynchronize(g_stream);
-    std::memcpy(C, h_gemm_C.ptr, bytesC);
-  }
-  } else {
     if (w_verbose) {
-      std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: tiled columns (tile_n=%d)\n", m, n, k, tile_n);
+      std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: tiled columns (tile_n=%d)
+", m, n, k, tile_n);
     }
-    // Tiled path (columns)
     if (bytesA > reserve || tile_n <= 0) {
-      // Fallback to single tile (will likely fail, but keep behavior consistent)
       g_gemm_A.ensure(bytesA);
       g_gemm_B.ensure(bytesB);
       g_gemm_C.ensure(bytesC);
@@ -686,7 +828,9 @@ void call_gemm_cublas(char tra, char trb,
     cudaMemcpyAsync(d_A, h_gemm_A.ptr, bytesA_tile, cudaMemcpyHostToDevice, g_stream);
     cudaStreamSynchronize(g_stream);
 
+    long long tile_chunks = 0;
     for (int col0 = 0; col0 < n; col0 += tile_n) {
+      tile_chunks++;
       int tn = std::min(tile_n, n - col0);
       size_t bytesB_tile = (size_t)ldb * (size_t)tn * sizeof(double);
       size_t bytesC_tile = (size_t)ldc * (size_t)tn * sizeof(double);
@@ -719,6 +863,7 @@ void call_gemm_cublas(char tra, char trb,
                         cudaMemcpyDeviceToHost, g_stream);
       cudaStreamSynchronize(g_stream);
     }
+    prof_scope.note_tiles(tile_chunks);
   }
 }
 
@@ -730,6 +875,14 @@ void call_syrk_cublas(char uplo, char tra,
                       double beta,
                       double *C, int ldc) {
   ensure_w_verbose();
+  char nv_name[64];
+  const char* nv_ptr = nullptr;
+  if (gpu_profile_enabled()) {
+    std::snprintf(nv_name, sizeof(nv_name), "SYRK n=%d k=%d", n, k);
+    nv_ptr = nv_name;
+  }
+  NvtxRange nv_scope(nv_ptr, 0xFF2CA02C);
+  ScopedBlasProfile prof_scope(&g_prof_syrk_single, 2.0 * (double)n * (double)n * (double)k);
   if (!g_blas) create_handle();
   cublasFillMode_t u = (uplo == 'U' || uplo == 'u') ? CUBLAS_FILL_MODE_UPPER : CUBLAS_FILL_MODE_LOWER;
   cublasOperation_t opA = (tra == 'T' || tra == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -793,7 +946,9 @@ void call_syrk_cublas(char uplo, char tra,
       std::fprintf(stderr, "[GPU] DSYRK n=%d k=%d: tiled panels (tile_k=%d)\n", n, k, tile_k);
     }
     cudaMemcpyAsync(d_C, C, bytesC, cudaMemcpyHostToDevice, stream);
+    long long tile_chunks = 0;
     for (int k0 = 0; k0 < k; k0 += tile_k) {
+      tile_chunks++;
       int kc = std::min(tile_k, k - k0);
       size_t bytesA_tile = (size_t)lda * (size_t)kc * sizeof(double);
       g_syrk_A.ensure(bytesA_tile);
@@ -809,12 +964,80 @@ void call_syrk_cublas(char uplo, char tra,
         std::fprintf(stderr, "[GPU] DSYRK tile n=%d k=%d beta=%.1f\n", n, kc, beta_local);
       }
     }
+    prof_scope.note_tiles(tile_chunks);
     cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
   }
 }
 
 // 2-GPU outer product helpers and wrappers are further below.
+
+__global__ void disp_eval_kernel(int n,
+                                 const double *sum2,
+                                 const double *sum3,
+                                 const double *rab,
+                                 double *val_out,
+                                 double *deriv_out) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= n) return;
+  double s2 = sum2[tid];
+  double s3 = sum3[tid];
+  double r = rab[tid];
+  double val = s2 * exp(s3 * r);
+  val_out[tid] = val;
+  if (deriv_out) deriv_out[tid] = val * s3;
+}
+
+extern "C" int mopac_cuda_disp_eval(int npairs,
+                                     const double *sum2,
+                                     const double *sum3,
+                                     const double *rab,
+                                     double *val_out,
+                                     double *deriv_out) {
+  if (npairs <= 0 || !sum2 || !sum3 || !rab || !val_out) return 0;
+  char nv_name[48];
+  const char* nv_ptr = nullptr;
+  if (gpu_profile_enabled()) {
+    std::snprintf(nv_name, sizeof(nv_name), "DISP pairs=%d", npairs);
+    nv_ptr = nv_name;
+  }
+  NvtxRange nv_scope(nv_ptr, 0xFF8C564B);
+  ScopedBlasProfile prof_scope(&g_prof_disp_eval, (double)npairs);
+
+  cudaStream_t s = g_stream ? g_stream : 0;
+  size_t bytes = sizeof(double) * (size_t)npairs;
+  g_disp_sum2.ensure(bytes);
+  g_disp_sum3.ensure(bytes);
+  g_disp_r.ensure(bytes);
+  g_disp_val.ensure(bytes);
+  if (deriv_out) g_disp_der.ensure(bytes);
+
+  if (cudaMemcpyAsync(g_disp_sum2.ptr, sum2, bytes, cudaMemcpyHostToDevice, s) != cudaSuccess) return 1;
+  if (cudaMemcpyAsync(g_disp_sum3.ptr, sum3, bytes, cudaMemcpyHostToDevice, s) != cudaSuccess) return 1;
+  if (cudaMemcpyAsync(g_disp_r.ptr, rab, bytes, cudaMemcpyHostToDevice, s) != cudaSuccess) return 1;
+
+  int block = 256;
+  int grid = (npairs + block - 1) / block;
+  disp_eval_kernel<<<grid, block, 0, s>>>(npairs,
+                                          g_disp_sum2.ptr,
+                                          g_disp_sum3.ptr,
+                                          g_disp_r.ptr,
+                                          g_disp_val.ptr,
+                                          deriv_out ? g_disp_der.ptr : nullptr);
+  if (cudaPeekAtLastError() != cudaSuccess) return 2;
+
+  h_disp_val.ensure(bytes);
+  if (cudaMemcpyAsync(h_disp_val.ptr, g_disp_val.ptr, bytes, cudaMemcpyDeviceToHost, s) != cudaSuccess) return 1;
+  if (deriv_out) {
+    h_disp_der.ensure(bytes);
+    if (cudaMemcpyAsync(h_disp_der.ptr, g_disp_der.ptr, bytes, cudaMemcpyDeviceToHost, s) != cudaSuccess) return 1;
+  }
+  if (cudaStreamSynchronize(s) != cudaSuccess) return 1;
+
+  std::memcpy(val_out, h_disp_val.ptr, bytes);
+  if (deriv_out) std::memcpy(deriv_out, h_disp_der.ptr, bytes);
+  return 0;
+}
 
 // Device kernels for outer product updates
 __global__ void outer_update_rows(double *Csub, int rows, int ncols,
@@ -844,6 +1067,14 @@ void call_gemm_cublas_2gpu(char tra, char trb,
     call_gemm_cublas(tra, trb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
     return;
   }
+  char nv_name[64];
+  const char* nv_ptr = nullptr;
+  if (gpu_profile_enabled()) {
+    std::snprintf(nv_name, sizeof(nv_name), "GEMM-2GPU %dx%dx%d", m, n, k);
+    nv_ptr = nv_name;
+  }
+  NvtxRange nv_scope(nv_ptr, 0xFF9467BD);
+  ScopedBlasProfile prof_scope(&g_prof_gemm_pair, 2.0 * (double)m * (double)n * (double)k);
   ensure_pair_streams();
   if (w_verbose) {
     std::fprintf(stderr, "[GPU] DGEMM %dx%dx%d: 2-GPU outer split (%d,%d)\n",
@@ -947,6 +1178,14 @@ void call_syrk_cublas_2gpu(char uplo, char tra,
     call_syrk_cublas(uplo, tra, n, k, alpha, A, lda, beta, C, ldc);
     return;
   }
+  char nv_name[64];
+  const char* nv_ptr = nullptr;
+  if (gpu_profile_enabled()) {
+    std::snprintf(nv_name, sizeof(nv_name), "SYRK-2GPU n=%d k=%d", n, k);
+    nv_ptr = nv_name;
+  }
+  NvtxRange nv_scope(nv_ptr, 0xFFE377C2);
+  ScopedBlasProfile prof_scope(&g_prof_syrk_pair, 2.0 * (double)n * (double)n * (double)k);
   ensure_pair_streams();
   if (w_verbose) {
     std::fprintf(stderr, "[GPU] DSYRK n=%d k=%d: 2-GPU outer split (%d,%d)\n",
@@ -1603,6 +1842,13 @@ void mopac_cuda_destroy_resources() {
                  "[MGPU] summary: calls=%lld failures=%lld avg_ms=%.3f total_ms=%.3f avg_dim=%.1f avg_devices=%.2f\n",
                  mg_calls, mg_failures, avg_ms, mg_total_ms, avg_dim, avg_dev);
   }
+  if (gpu_profile_enabled()) {
+    print_blas_profile("gemm", g_prof_gemm_single);
+    print_blas_profile("gemm-2gpu", g_prof_gemm_pair);
+    print_blas_profile("syrk", g_prof_syrk_single);
+    print_blas_profile("syrk-2gpu", g_prof_syrk_pair);
+    print_blas_profile("disp", g_prof_disp_eval);
+  }
   // Try to quiesce all pending GPU work before releasing resources
   // This helps avoid tearing down streams/handles while async copies are in-flight.
   cudaDeviceSynchronize();
@@ -1637,6 +1883,9 @@ void mopac_cuda_destroy_resources() {
   h2_gemm_A.release(); h2_gemm_B.release(); h2_gemm_C.release();
   h2_syrk_A.release(); h2_syrk_C.release();
   h2_rot_V.release();
+  g_disp_sum2.release(); g_disp_sum3.release(); g_disp_r.release();
+  g_disp_val.release(); g_disp_der.release();
+  h_disp_val.release(); h_disp_der.release();
   g_resident_mode = -1;
 }
 
@@ -1745,6 +1994,13 @@ void mopac_cusolvermg_dsyevd(int n, double *A, int lda, double *W, int *info) {
   (void)n; (void)A; (void)lda; (void)W;
   return;
 #else
+  char nv_name[64];
+  const char* nv_ptr = nullptr;
+  if (gpu_profile_enabled()) {
+    std::snprintf(nv_name, sizeof(nv_name), "MG-DSYEVD n=%d", n);
+    nv_ptr = nv_name;
+  }
+  NvtxRange nv_scope(nv_ptr, 0xFF17BECF);
   ensure_w_verbose();
   if (info) *info = -1;
   bool profile_enabled = mg_profile_enabled();

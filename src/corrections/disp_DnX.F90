@@ -16,6 +16,10 @@
 double precision function disp_DnX(l_grad)
    use common_arrays_C, only: nat, dxyz, cell_ijk, vab
    use molkst_C, only : numat, l123, l1u, l2u, l3u, method_PM6_DH2X, e_disp
+   use iso_c_binding, only: c_int, c_double
+#ifdef GPU
+   use mod_vars_cuda, only: lgpu
+#endif
    implicit none
    logical, intent (in) :: l_grad
 !
@@ -26,6 +30,19 @@ double precision function disp_DnX(l_grad)
    logical :: first = .true.
    logical, external :: connected
    double precision, external :: distance
+#ifdef GPU
+   logical :: try_gpu
+   integer :: npairs, idx, istat_gpu, istat_env
+   character(len=32) :: env_disp
+   real(c_double), allocatable :: sum2_list(:), sum3_list(:), rab_list(:), val_list(:), deriv_list(:)
+   interface
+     integer(c_int) function mopac_cuda_disp_eval(npairs, sum2, sum3, rab, val_out, deriv_out) bind(C, name="mopac_cuda_disp_eval")
+       use iso_c_binding
+       integer(c_int), value :: npairs
+       real(c_double) :: sum2(*), sum3(*), rab(*), val_out(*), deriv_out(*)
+     end function mopac_cuda_disp_eval
+   end interface
+#endif
    save
       if (first) then
           first = .false.
@@ -75,6 +92,70 @@ double precision function disp_DnX(l_grad)
           jOorN(8)  = 2
           jOorN(16) = 3
       end if
+#ifdef GPU
+      try_gpu = lgpu
+      env_disp = ''
+      istat_env = 1
+      call get_environment_variable('MOPAC_DISP_GPU', env_disp, status=istat_env)
+      if (istat_env == 0) then
+        env_disp = adjustl(env_disp)
+        if (len_trim(env_disp) > 0) then
+          select case (env_disp(1:1))
+          case ('0','f','F','n','N','o','O')
+            try_gpu = .false.
+          case default
+            try_gpu = .true.
+          end select
+        end if
+      end if
+      if (.not. lgpu) try_gpu = .false.
+      if (try_gpu .and. .not. l_grad) then
+        npairs = 0
+        do i = 1, numat
+          if (nat(i) /= 17 .and. nat(i) /= 35 .and. nat(i) /= 53) cycle
+          k = nat(i)
+          do j = 1, numat
+            select case (nat(j))
+            case (7, 8, 16)
+              if (k /= 53 .and. nat(j) == 16) cycle
+              npairs = npairs + 1
+            end select
+          end do
+        end do
+        if (npairs > 0) then
+          allocate(sum2_list(npairs), sum3_list(npairs), rab_list(npairs), &
+                   val_list(npairs), deriv_list(npairs))
+          idx = 0
+          do i = 1, numat
+            if (nat(i) /= 17 .and. nat(i) /= 35 .and. nat(i) /= 53) cycle
+            k = nat(i)
+            do j = 1, numat
+              select case (nat(j))
+              case (7, 8, 16)
+                if (k /= 53 .and. nat(j) == 16) cycle
+                l = nat(j)
+                Rab = distance(i, j)
+                sum2 = a_X(iX(k),jOorN(l))
+                sum3 = b_X(iX(k),jOorN(l))
+                idx = idx + 1
+                sum2_list(idx) = sum2
+                sum3_list(idx) = sum3
+                rab_list(idx) = Rab
+              end select
+            end do
+          end do
+          istat_gpu = mopac_cuda_disp_eval(int(npairs, c_int), sum2_list, sum3_list, rab_list, val_list, deriv_list)
+          if (istat_gpu == 0) then
+            sum = sum(val_list)
+            e_disp = e_disp + sum
+            deallocate(sum2_list, sum3_list, rab_list, val_list, deriv_list)
+            disp_DnX = sum
+            return
+          end if
+          deallocate(sum2_list, sum3_list, rab_list, val_list, deriv_list)
+        end if
+      end if
+#endif
       sum = 0.d0
       do i = 1, numat
         if (nat(i) /= 17 .and. nat(i) /= 35 .and. nat(i) /= 53) cycle ! crude, but fast

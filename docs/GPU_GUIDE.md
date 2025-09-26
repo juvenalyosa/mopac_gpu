@@ -49,6 +49,7 @@ BLAS Acceleration and Multi‑GPU
   - CPU ratio (kept at 0 by default for portability).
 - `MOZYME_GPU_FORCE=1`: keep MOZYME GPU enabled even on GPUs with compute capability < 6.0 (default auto policy disables it).
 - `MOZYME_MINBLK=n`: lower the minimum MOZYME block size for GPU rank-1 GEMM/SYRK (default `n=4`).
+- `MOPAC_DISP_GPU=1`: enable GPU evaluation of the DnX halogen dispersion energy (energy-only; gradients fall back to CPU). Set to `0`/`off` to disable.
 
 Streams, Pinning, and Determinism
 - Streams: enable/disable CUDA streams for wrappers with `MOPAC_STREAMS=off` (defaults on).
@@ -59,6 +60,7 @@ Verbose/Profiling
 - `MOPAC_GPU_VERBOSE=1`: prints per‑call timings/GF/s for GEMM/SYRK and high‑level kernels; MG eigensolver logs under `[MGPU]`.
 - `MOPAC_GPU_CSV=1`: prints a CSV‑style summary for gradient kernels at teardown.
 - `MOPAC_GPU_PROFILE=1`: collect aggregated gradient kernel statistics (atom count, pair mix, cumulative ms) and emit a summary at teardown.
+- `MOPAC_GPU_PROFILE=2`: extend profiling to cuBLAS wrappers (GEMM/SYRK, 2‑GPU splits) and cuSOLVERMg; timing/GFLOP summaries print at shutdown and NVTX ranges are emitted when `nvToolsExt` is available (for Nsight traces).
 - `MOPAC_EIG_MG_PROFILE=1`: gather cuSOLVERMg solve statistics (calls, failures, average runtime/devices) and print a single summary when GPU resources are released.
 
 Multi‑GPU Eigensolver (cuSOLVERMg)
