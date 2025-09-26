@@ -88,7 +88,7 @@ run_case() {
       # Informational only: MG may fall back cleanly; do not fail if logs absent
       : ;;
     mozyme_protein_auto)
-      if grep -Eq "mozyme_gpu= *T" "$log"; then
+      if grep -Eq "mozyme_gpu= *T" "$log" || grep -Eq "Large protein MOZYME GPU" "$log"; then
         gpu_hits="yes"
         reason="MOZYME"
       fi
