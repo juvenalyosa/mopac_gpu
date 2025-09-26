@@ -17,12 +17,17 @@
 #include <vector>
 #include <cctype>
 
-#if defined(__has_include)
-#  if __has_include(<nvToolsExt.h>) && defined(MOPAC_ENABLE_NVTX)
-#    define MOPAC_HAVE_NVTX 1
-#    include <nvToolsExt.h>
+#if defined(MOPAC_ENABLE_NVTX)
+#  if defined(__has_include)
+#    if __has_include(<nvToolsExt.h>)
+#      include <nvToolsExt.h>
+#      define MOPAC_HAVE_NVTX 1
+#    else
+#      define MOPAC_HAVE_NVTX 0
+#    endif
 #  else
-#    define MOPAC_HAVE_NVTX 0
+#    include <nvToolsExt.h>
+#    define MOPAC_HAVE_NVTX 1
 #  endif
 #else
 #  define MOPAC_HAVE_NVTX 0
@@ -439,7 +444,8 @@ static long long mg_total_devices = 0;
 static int mg_profile_flag = 0;
 static int mg_profile_inited = 0;
 static int mg_profile_env_requested = 0;
-static inline bool mg_profile_enabled() MOPAC_UNUSED {
+#if defined(HAVE_CUSOLVER_MG)
+static inline bool mg_profile_enabled() {
   if (!mg_profile_inited) {
     const char* s = std::getenv("MOPAC_EIG_MG_PROFILE");
     if (s && *s) {
@@ -458,6 +464,9 @@ static inline bool mg_profile_enabled() MOPAC_UNUSED {
   }
   return mg_profile_flag != 0;
 }
+#else
+static inline bool mg_profile_enabled() { return false; }
+#endif
 
 static bool lt_dgemm(cublasOperation_t opA, cublasOperation_t opB,
                      int m, int n, int k,
