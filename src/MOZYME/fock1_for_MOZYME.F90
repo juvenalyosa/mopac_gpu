@@ -14,6 +14,10 @@
 ! limitations under the License.
 
 subroutine fock1_for_MOZYME (f, ptot, w, kr, iab, ilim)
+#ifdef GPU
+    use mod_vars_cuda, only: lgpu, mozyme_gpu
+    use gpu_fock_interfaces, only: mopac_cuda_mozyme_fock1
+#endif
     implicit none
     integer, intent (in) :: iab, ilim
     integer, intent (inout) :: kr
@@ -22,6 +26,9 @@ subroutine fock1_for_MOZYME (f, ptot, w, kr, iab, ilim)
     double precision, dimension (ilim, ilim), intent (in) :: w
 !
     integer :: i, ij, ijp, ijw, ikw, im, ip, j, jlw, jm, jp, k, klw, l
+#ifdef GPU
+    integer :: gpu_info
+#endif
     double precision :: sum
    ! *********************************************************************
    !
@@ -34,6 +41,16 @@ subroutine fock1_for_MOZYME (f, ptot, w, kr, iab, ilim)
    !  F(i,j)=F(i,j)+sum(k,l)((PA(k,l)+PB(k,l))*<i,j|k,l>
    !                        -(PA(k,l)        )*<i,k|j,l>), k,l on atom II.
    !
+#ifdef GPU
+    if (lgpu .and. mozyme_gpu) then
+      gpu_info = mopac_cuda_mozyme_fock1(iab, ilim, ptot, f, w)
+      if (gpu_info == 0) then
+        kr = kr + ilim ** 2
+        return
+      end if
+    end if
+#endif
+
     do i = 1, iab
       do j = 1, i
          !

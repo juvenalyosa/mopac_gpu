@@ -372,6 +372,8 @@ static HostBuf<double> h_gemm_A, h_gemm_B, h_gemm_C;
 static HostBuf<double> h_syrk_A, h_syrk_C;
 static DevBuf<double> g_disp_sum2, g_disp_sum3, g_disp_r, g_disp_val, g_disp_der;
 static HostBuf<double> h_disp_val, h_disp_der;
+static DevBuf<double> g_mz_fock_ptot, g_mz_fock_w, g_mz_fock_out;
+static HostBuf<double> h_mz_fock_out;
 // 2-GPU caches
 static DevBuf<double> g2_gemm_a0, g2_gemm_b0, g2_gemm_c0;
 static DevBuf<double> g2_gemm_a1, g2_gemm_b1, g2_gemm_c1;
@@ -1052,6 +1054,87 @@ extern "C" int mopac_cuda_disp_eval(int npairs,
 
   std::memcpy(val_out, h_disp_val.ptr, bytes);
   if (deriv_out) std::memcpy(deriv_out, h_disp_der.ptr, bytes);
+  return 0;
+}
+
+// ===== MOZYME one-center Coulomb/exchange =====
+
+__device__ __forceinline__ void unpack_pair(int idx, int &i, int &j) {
+  int acc = 0;
+  int row = 0;
+  while (true) {
+    int row_count = row + 1;
+    if (idx < acc + row_count) {
+      i = row;
+      j = idx - acc;
+      return;
+    }
+    acc += row_count;
+    row += 1;
+  }
+}
+
+__device__ __forceinline__ int pack_pair(int a, int b) {
+  if (a < b) {
+    int tmp = a; a = b; b = tmp;
+  }
+  return a * (a + 1) / 2 + b;
+}
+
+__global__ void mozyme_fock1_kernel(int iab,
+                                    int pairCount,
+                                    const double *ptot,
+                                    const double *w,
+                                    double *out) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= pairCount) return;
+  int i = 0, j = 0;
+  unpack_pair(tid, i, j);
+  double sum = 0.0;
+  int ilim = pairCount;
+  for (int k = 0; k < iab; ++k) {
+    for (int l = 0; l < iab; ++l) {
+      int ijp = pack_pair(k, l);
+      int klw = pack_pair(k, l);
+      int ikw = pack_pair(k, j);
+      int jlw = pack_pair(l, i);
+      double p = ptot[ijp];
+      sum += p * w[tid + (size_t)klw * ilim] - 0.5 * p * w[ikw + (size_t)jlw * ilim];
+    }
+  }
+  out[tid] = sum;
+}
+
+extern "C" int mopac_cuda_mozyme_fock1(int iab,
+                                        int ilim,
+                                        const double *ptot,
+                                        double *f,
+                                        const double *w) {
+  if (iab <= 0 || ilim <= 0 || !ptot || !f || !w) return 1;
+  int pairCount = ilim;
+  if (pairCount <= 0) return 1;
+  cudaStream_t s = g_stream ? g_stream : 0;
+  size_t bytes_pairs = sizeof(double) * (size_t)pairCount;
+  size_t bytes_w = sizeof(double) * (size_t)pairCount * (size_t)pairCount;
+  g_mz_fock_ptot.ensure(bytes_pairs);
+  g_mz_fock_w.ensure(bytes_w);
+  g_mz_fock_out.ensure(bytes_pairs);
+  h_mz_fock_out.ensure(bytes_pairs);
+
+  if (cudaMemcpyAsync(g_mz_fock_ptot.ptr, ptot, bytes_pairs, cudaMemcpyHostToDevice, s) != cudaSuccess) return 2;
+  if (cudaMemcpyAsync(g_mz_fock_w.ptr, w, bytes_w, cudaMemcpyHostToDevice, s) != cudaSuccess) return 2;
+
+  int threads = 128;
+  int blocks = (pairCount + threads - 1) / threads;
+  mozyme_fock1_kernel<<<blocks, threads, 0, s>>>(iab, pairCount, g_mz_fock_ptot.ptr, g_mz_fock_w.ptr, g_mz_fock_out.ptr);
+  if (cudaPeekAtLastError() != cudaSuccess) return 3;
+
+  if (cudaMemcpyAsync(h_mz_fock_out.ptr, g_mz_fock_out.ptr, bytes_pairs, cudaMemcpyDeviceToHost, s) != cudaSuccess) return 2;
+  if (cudaStreamSynchronize(s) != cudaSuccess) return 2;
+
+  for (int idx = 0; idx < pairCount; ++idx) {
+    f[idx] += h_mz_fock_out.ptr[idx];
+  }
   return 0;
 }
 
@@ -1902,6 +1985,8 @@ void mopac_cuda_destroy_resources() {
   g_disp_sum2.release(); g_disp_sum3.release(); g_disp_r.release();
   g_disp_val.release(); g_disp_der.release();
   h_disp_val.release(); h_disp_der.release();
+  g_mz_fock_ptot.release(); g_mz_fock_w.release(); g_mz_fock_out.release();
+  h_mz_fock_out.release();
   g_resident_mode = -1;
 }
 

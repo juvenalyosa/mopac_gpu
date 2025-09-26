@@ -35,5 +35,13 @@ module gpu_fock_interfaces
       real(c_double)        :: fout(mpack)
       logical(c_bool)       :: ok
     end function mopac_cuda_fock2_scf
+
+    function mopac_cuda_mozyme_fock1(iab, ilim, ptot, f, w) &
+      bind(C,name='mopac_cuda_mozyme_fock1') result(code)
+      use iso_c_binding
+      integer(c_int), value :: iab, ilim
+      real(c_double)        :: ptot(*), f(*), w(*)
+      integer(c_int)        :: code
+    end function mopac_cuda_mozyme_fock1
   end interface
 end module gpu_fock_interfaces
