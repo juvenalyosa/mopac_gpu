@@ -35,6 +35,7 @@ double precision function disp_DnX(l_grad)
    integer :: npairs, idx, istat_gpu, istat_env
    character(len=32) :: env_disp
    real(c_double), allocatable :: sum2_list(:), sum3_list(:), rab_list(:), val_list(:), deriv_list(:)
+   integer, allocatable :: pair_i(:), pair_j(:)
    interface
      integer(c_int) function mopac_cuda_disp_eval(npairs, sum2, sum3, rab, val_out, deriv_out) bind(C, name="mopac_cuda_disp_eval")
        use iso_c_binding
@@ -124,7 +125,7 @@ double precision function disp_DnX(l_grad)
         end do
         if (npairs > 0) then
           allocate(sum2_list(npairs), sum3_list(npairs), rab_list(npairs), &
-                   val_list(npairs), deriv_list(npairs))
+                   val_list(npairs), deriv_list(npairs), pair_i(npairs), pair_j(npairs))
           idx = 0
           do i = 1, numat
             if (nat(i) /= 17 .and. nat(i) /= 35 .and. nat(i) /= 53) cycle
@@ -141,21 +142,44 @@ double precision function disp_DnX(l_grad)
                 sum2_list(idx) = sum2
                 sum3_list(idx) = sum3
                 rab_list(idx) = Rab
+                pair_i(idx) = i
+                pair_j(idx) = j
               end select
             end do
           end do
-         istat_gpu = mopac_cuda_disp_eval(int(npairs, c_int), sum2_list, sum3_list, rab_list, val_list, deriv_list)
-         if (istat_gpu == 0) then
+          istat_gpu = mopac_cuda_disp_eval(int(npairs, c_int), sum2_list, sum3_list, rab_list, val_list, deriv_list)
+          if (istat_gpu == 0) then
             sum = 0.d0
             do idx = 1, npairs
               sum = sum + val_list(idx)
             end do
             e_disp = e_disp + sum
-            deallocate(sum2_list, sum3_list, rab_list, val_list, deriv_list)
+            if (l_grad) then
+              do idx = 1, npairs
+                i = pair_i(idx)
+                j = pair_j(idx)
+                Rab = distance(i, j)
+                if (.not. connected(i,j, 8.d0**2)) cycle
+                iii = l123*(i - 1)
+                jjj = l123*(j - 1)
+                kkkk = (l3u - cell_ijk(3)) + (2*l3u + 1)*(l2u - cell_ijk(2) + (2*l2u + 1)*(l1u - cell_ijk(1)))
+                i_cell = iii + kkkk
+                j_cell = jjj - kkkk
+                do l = 1,3
+                  dxyz(i_cell*3 + l) = dxyz(i_cell*3 + l) + Vab(l)*deriv_list(idx)/Rab
+                  dxyz(j_cell*3 + l) = dxyz(j_cell*3 + l) - Vab(l)*deriv_list(idx)/Rab
+                end do
+              end do
+            else
+              disp_DnX = sum
+              deallocate(sum2_list, sum3_list, rab_list, val_list, deriv_list, pair_i, pair_j)
+              return
+            end if
+            deallocate(sum2_list, sum3_list, rab_list, val_list, deriv_list, pair_i, pair_j)
             disp_DnX = sum
             return
           end if
-          deallocate(sum2_list, sum3_list, rab_list, val_list, deriv_list)
+          deallocate(sum2_list, sum3_list, rab_list, val_list, deriv_list, pair_i, pair_j)
         end if
       end if
 #endif

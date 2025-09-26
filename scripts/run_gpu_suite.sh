@@ -182,6 +182,10 @@ run_case "diis_gpu_bfull" "examples/benzene.mop" \
 run_case "diis_gpu_bcol_solve" "examples/benzene.mop" \
   "export CUDA_VISIBLE_DEVICES=0; export MOPAC_DIIS_GPU_BUF=1; export MOPAC_DIIS_GPU_BMAT=1; export MOPAC_DIIS_GPU=1; export MOPAC_DIIS_GEN=1; export MOPAC_GPU_PROFILE=1;"
 
+# Dispersion halogen contact (energy-only)
+run_case "disp_halogen_gpu" "examples/halogen_disp.mop" \
+  "export CUDA_VISIBLE_DEVICES=0; export MOPAC_DISP_GPU=1; export MOPAC_GPU_PROFILE=2;"
+
 # 4) MOZYME with large protein (test_dense.pdb)
 PROT_PDB="$REPO_ROOT/examples/test_dense.pdb"
 PROT_MOP="$REPO_ROOT/examples/mozyme_protein_auto.mop"
