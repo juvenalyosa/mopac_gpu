@@ -47,7 +47,8 @@ BLAS Acceleration and Multi‑GPU
   - `MOPAC_CUBLASXT_DEVICES="0,1"`: choose devices by index (0‑based).
   - `MOPAC_CUBLASXT_BLOCK=256`: set Xt block size.
   - CPU ratio (kept at 0 by default for portability).
-  - `MOZYME_GPU_FORCE=1`: keep MOZYME GPU enabled even on GPUs with compute capability < 6.0 (default auto policy disables it).
+- `MOZYME_GPU_FORCE=1`: keep MOZYME GPU enabled even on GPUs with compute capability < 6.0 (default auto policy disables it).
+- `MOZYME_MINBLK=n`: lower the minimum MOZYME block size for GPU rank-1 GEMM/SYRK (default `n=4`).
 
 Streams, Pinning, and Determinism
 - Streams: enable/disable CUDA streams for wrappers with `MOPAC_STREAMS=off` (defaults on).
