@@ -1,4 +1,3 @@
-use mod_vars_cuda, only: lgpu, mozyme_gpu
 ! Molecular Orbital PACkage (MOPAC)
 ! Copyright 2021 Virginia Polytechnic Institute and State University
 !
