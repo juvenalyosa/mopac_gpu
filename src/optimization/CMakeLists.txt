@@ -17,7 +17,7 @@
 # Create a list of source files (src_list) with the .F90 extension
 set(src_list 
     nllsq flepo linmin locmin parsav powsq dfpsav
-    exchng lbfgs ef_C ef
+    exchng lbfgs ef_C ef hmtr
    )
 #-----------------------------------------------
 # Add a list of source files to the target

@@ -18,6 +18,8 @@
       & time0, moperr, nscf, limscf, tdump, last, cosine, line, use_disk
       use common_arrays_C, only : hesinv, grad
       USE chanel_C, only : iw, ilog, log, input_fn
+      use hmtr_optimizer_mod, only : hmtr_optimize_torsions, hmtr_compfg_evaluator, &
+     & hmtr_gpu_available, HMTR_DEFAULT_POPULATION
       implicit none
       integer  :: nvar
       double precision  :: funct1
@@ -37,6 +39,10 @@
         beta, smval, dropn, totim, xn, tx, tf, bsmvf, tcycle, tprt
       logical :: restrt, geook, dfp, saddle, minprt, print, thiel, okf, &
         resfil, lgrad
+      double precision, allocatable :: hmtr_best_coords(:), hmtr_best_grad(:)
+      double precision :: hmtr_energy
+      integer :: hmtr_status
+      logical :: hmtr_active, hmtr_use_gpu
       character :: txt
       double precision, external :: ddot, reada, seconds
       save mdfp, icalcn, rst, sfact, dell, einc, igg1, del, restrt, geook, dfp&
@@ -253,6 +259,33 @@
             emin = 0.D0
             return
           end if
+        end if
+
+        hmtr_active = index(keywrd,'HMTR') /= 0
+        if (hmtr_active .and. nvar > 0) then
+          hmtr_use_gpu = hmtr_gpu_available
+          hmtr_status = 0
+          allocate(hmtr_best_coords(nvar), hmtr_best_grad(nvar), stat=hmtr_status)
+          if (hmtr_status == 0) then
+            hmtr_best_coords = xparam
+            hmtr_best_grad = 0.0d0
+            call hmtr_optimize_torsions(xseed=xparam, evaluator=hmtr_compfg_evaluator, &
+                 best_coords=hmtr_best_coords, best_energy=hmtr_energy, best_grad=hmtr_best_grad, &
+                 max_iters=50, pop_size=HMTR_DEFAULT_POPULATION, use_gpu=hmtr_use_gpu, &
+                 grad_tol=1.0d-3, wrap_angles=.false., ierr=hmtr_status)
+            if (hmtr_status == 0) then
+              xparam = hmtr_best_coords
+              call compfg(xparam, .TRUE., funct1, .TRUE., grad, .TRUE.)
+              if (moperr) then
+                if (allocated(hmtr_best_coords)) deallocate(hmtr_best_coords)
+                if (allocated(hmtr_best_grad)) deallocate(hmtr_best_grad)
+                return
+              end if
+              gvar = grad
+            end if
+          end if
+          if (allocated(hmtr_best_coords)) deallocate(hmtr_best_coords)
+          if (allocated(hmtr_best_grad)) deallocate(hmtr_best_grad)
         end if
 !
 !   END OF ONCE-ONLY SETUP

@@ -60,8 +60,12 @@ if(GPU)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_diis_interfaces.F90)
     # Fortran interfaces for GPU Fock build
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_fock_interfaces.F90)
+    # Fortran interfaces for HMTR optimizer
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_hmtr_interfaces.F90)
     # CUDA Fock kernels (scaffold)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/fock_kernels.cu)
+    # CUDA HMTR optimizer kernels
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hmtr_optimizer.cu)
 endif()
 
 # Small API control module is added from src/interface/CMakeLists.txt
@@ -79,6 +83,7 @@ if(GPU)
     set_source_files_properties(
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/cuda_wrappers.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/fock_kernels.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hmtr_optimizer.cu
         PROPERTIES LANGUAGE CUDA
     )
 endif()

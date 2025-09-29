@@ -167,6 +167,7 @@ set_target_properties(mopac-core PROPERTIES Fortran_MODULE_DIRECTORY "${CMAKE_BI
 target_include_directories(mopac-core
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/mod/core>
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
 )
 
 # Adjust legacy PGI compiler behavior: disable C-style backslash characters & warn about CRLF handling
