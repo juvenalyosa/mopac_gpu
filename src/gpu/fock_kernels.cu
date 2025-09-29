@@ -3,6 +3,8 @@
 #include <cublas_v2.h>
 #include <cstdio>
 #include <cstring>
+#include <vector>
+#include <algorithm>
 
 // Silence intentional placeholders to avoid noisy nvcc warnings
 #if !defined(MOPAC_UNUSED)
@@ -14,24 +16,6 @@
 #endif
 
 extern "C" {
-
-// Forward declarations for dfock2 kernels used before their definitions (C linkage)
-__global__ void dfock2_ll_lh_kernel(int norbs, int mpack, int numat,
-                                    const int* nfirst, const int* nlast,
-                                    const double* ptot, const double* p, const double* w,
-                                    int nati, double* f);
-__global__ void dfock2_ll_parallel_kernel(int norbs, int mpack, int numat,
-                                          const int* nfirst, const int* nlast,
-                                          const double* ptot, const double* p, const double* w,
-                                          int ii, const int* jlist, const int* offlist, int count, double* f);
-__global__ void dfock2_lh_parallel_kernel(int norbs, int mpack, int numat,
-                                          const int* nfirst, const int* nlast,
-                                          const double* ptot, const double* p, const double* w,
-                                          int ii, const int* jlist, const int* offlist, int count, double* f);
-__global__ void dfock2_hh_parallel_kernel(int norbs, int mpack, int numat,
-                                          const int* nfirst, const int* nlast,
-                                          const double* ptot, const double* p, const double* w,
-                                          int ii, const int* jlist, const int* offlist, int count, double* f);
 
 __device__ __host__ inline int ifact_idx(int i) { return (i * (i - 1)) / 2; }
 
@@ -60,8 +44,9 @@ __device__ inline double atomicAdd_double(double* address, double val) {
 // Persistent buffer helpers and verbose/tuning controls
 static int    *s_d_nf = nullptr, *s_d_nl = nullptr;
 static double *s_d_ptot = nullptr, *s_d_p = nullptr, *s_d_w = nullptr, *s_d_f = nullptr;
+static int    *s_d_pair_i = nullptr, *s_d_pair_j = nullptr, *s_d_pair_off = nullptr;
 static size_t cap_nf = 0, cap_nl = 0;
-static size_t cap_ptot = 0, cap_p = 0, cap_f = 0, cap_w = 0;
+static size_t cap_ptot = 0, cap_p = 0, cap_f = 0, cap_w = 0, cap_pairs = 0;
 static int verbose = 0; static int verbose_inited = 0;
 static int csv_enabled = 0; static int csv_inited = 0;
 static int prof_collect = 0; static int prof_inited = 0;
@@ -145,6 +130,118 @@ static inline bool ensure_buf_double(double **ptr, size_t *cap_elems, size_t nee
   return true;
 }
 
+static inline bool ensure_pair_buffers(size_t need_pairs) {
+  if (cap_pairs < need_pairs) {
+    if (s_d_pair_i) cudaFree(s_d_pair_i);
+    if (s_d_pair_j) cudaFree(s_d_pair_j);
+    if (s_d_pair_off) cudaFree(s_d_pair_off);
+    s_d_pair_i = s_d_pair_j = s_d_pair_off = nullptr;
+    cap_pairs = 0;
+    if (need_pairs > 0) {
+      if (cudaMalloc((void**)&s_d_pair_i, sizeof(int) * need_pairs) != cudaSuccess) return false;
+      if (cudaMalloc((void**)&s_d_pair_j, sizeof(int) * need_pairs) != cudaSuccess) return false;
+      if (cudaMalloc((void**)&s_d_pair_off, sizeof(int) * need_pairs) != cudaSuccess) return false;
+      cap_pairs = need_pairs;
+    }
+  }
+  return true;
+}
+
+__host__ __device__ inline int packed_index(int a, int b) {
+  if (a >= b) {
+    return ifact_idx(a) + b - 1;
+  } else {
+    return ifact_idx(b) + a - 1;
+  }
+}
+
+__device__ void fock_pair_update(int ia, int ib, int ja, int jb,
+                                 const double *ptot, const double *p,
+                                 const double *w, double *f) {
+  if (ia > ja) {
+    int kr = 0;
+    for (int i = ia; i <= ib; ++i) {
+      for (int j = ia; j <= i; ++j) {
+        double aa = (i == j) ? 1.0 : 2.0;
+        int ij = packed_index(i, j);
+        for (int k = ja; k <= jb; ++k) {
+          for (int l = ja; l <= k; ++l) {
+            double bb = (k == l) ? 1.0 : 2.0;
+            int kl = packed_index(k, l);
+            int ik = packed_index(i, k);
+            int il = packed_index(i, l);
+            int jk = packed_index(j, k);
+            int jl = packed_index(j, l);
+            double a = w[kr++];
+            atomicAdd_double(&f[ij - 1], bb * a * ptot[kl - 1]);
+            atomicAdd_double(&f[kl - 1], aa * a * ptot[ij - 1]);
+            double exch = a * aa * bb * 0.25;
+            atomicAdd_double(&f[ik - 1], -exch * p[jl - 1]);
+            atomicAdd_double(&f[il - 1], -exch * p[jk - 1]);
+            atomicAdd_double(&f[jk - 1], -exch * p[il - 1]);
+            atomicAdd_double(&f[jl - 1], -exch * p[ik - 1]);
+          }
+        }
+      }
+    }
+  } else {
+    int nn = pair_count(jb - ja + 1);
+    if (nn <= 0) return;
+    int n1 = 0;
+    for (int i = ja; i <= jb; ++i) {
+      for (int j = ja; j <= i; ++j) {
+        n1 += 1;
+        double aa = (i == j) ? 1.0 : 2.0;
+        int ij = packed_index(i, j);
+        int n2 = 0;
+        for (int k = ia; k <= ib; ++k) {
+          for (int l = ia; l <= k; ++l) {
+            n2 += 1;
+            double bb = (k == l) ? 1.0 : 2.0;
+            int kl = packed_index(k, l);
+            int ik = packed_index(i, k);
+            int il = packed_index(i, l);
+            int jk = packed_index(j, k);
+            int jl = packed_index(j, l);
+            int idx = (n2 - 1) * nn + (n1 - 1);
+            double a = w[idx];
+            atomicAdd_double(&f[ij - 1], bb * a * ptot[kl - 1]);
+            atomicAdd_double(&f[kl - 1], aa * a * ptot[ij - 1]);
+            double exch = a * aa * bb * 0.25;
+            atomicAdd_double(&f[ik - 1], -exch * p[jl - 1]);
+            atomicAdd_double(&f[il - 1], -exch * p[jk - 1]);
+            atomicAdd_double(&f[jk - 1], -exch * p[il - 1]);
+            atomicAdd_double(&f[jl - 1], -exch * p[ik - 1]);
+          }
+        }
+      }
+    }
+  }
+}
+
+__global__ void fock_pairs_kernel(int npairs,
+                                  const int *pair_i,
+                                  const int *pair_j,
+                                  const int *pair_off,
+                                  const int *nfirst,
+                                  const int *nlast,
+                                  const double *ptot,
+                                  const double *p,
+                                  const double *w,
+                                  double *f) {
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= npairs) return;
+  int ii = pair_i[tid];
+  int jj = pair_j[tid];
+  int ia = nfirst[ii - 1];
+  int ib = nlast[ii - 1];
+  int ja = nfirst[jj - 1];
+  int jb = nlast[jj - 1];
+  if ((ib - ia) < 0 || (jb - ja) < 0) return;
+  const double *w_block = w + pair_off[tid];
+  fock_pair_update(ia, ib, ja, jb, ptot, p, w_block, f);
+}
+
 // ================= Device-resident gradient buffers and ops =================
 extern "C" {
 
@@ -186,48 +283,63 @@ bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
   int ia = nfirst[nati - 1];
   int ib = nlast[nati - 1];
   if ((ib - ia) < 0) return false;
-  // Compute w_len
-  size_t w_len = 0;
-  for (int jj = 1; jj <= numat; ++jj) {
-    if (jj == nati) continue;
-    int ja = nfirst[jj - 1];
-    int jb = nlast[jj - 1];
-    if ((jb - ja) < 0) continue;
-    int span_i = span_count(ia, ib);
-    int span_j = span_count(ja, jb);
-    int pairs_i = pair_count(span_i);
-    int pairs_j = pair_count(span_j);
-    if (pairs_i == 0 || pairs_j == 0) continue;
-    w_len += (size_t)pairs_i * (size_t)pairs_j;
-  }
-  if (w_len == 0) return true;
-  bool unsupported_span = false;
   int span_i = span_count(ia, ib);
-  for (int jj = 1; jj <= numat; ++jj) {
-    if (jj == nati) continue;
+  if (span_i <= 0) return true;
+
+  std::vector<int> pair_i;
+  std::vector<int> pair_j;
+  std::vector<int> pair_off;
+  pair_i.reserve(std::max(0, nati - 1));
+
+  size_t w_len = 0;
+  int pairs_i = pair_count(span_i);
+  for (int jj = 1; jj < nati; ++jj) {
     int ja = nfirst[jj - 1];
     int jb = nlast[jj - 1];
-    if ((jb - ja) < 0) continue;
     int span_j = span_count(ja, jb);
-    if (span_i > 4 || span_j > 4) { unsupported_span = true; break; }
+    if (span_j <= 0) continue;
+    int pairs_j = pair_count(span_j);
+    int chunk = pairs_i * pairs_j;
+    if (chunk <= 0) continue;
+    pair_i.push_back(nati);
+    pair_j.push_back(jj);
+    pair_off.push_back(static_cast<int>(w_len));
+    w_len += static_cast<size_t>(chunk);
   }
-  if (unsupported_span) return false;
-  // Ensure persistent buffers
-  size_t atoms_e = (size_t)numat, mpack_e = (size_t)mpack, w_e = w_len;
+
+  if (w_len == 0) return true;
+
+  size_t atoms_e = (size_t)numat;
+  size_t mpack_e = (size_t)mpack;
   if (!ensure_buf_int(&s_d_nf, &cap_nf, atoms_e)) return false;
   if (!ensure_buf_int(&s_d_nl, &cap_nl, atoms_e)) return false;
   if (!ensure_buf_double(&s_d_ptot, &cap_ptot, mpack_e)) return false;
   if (!ensure_buf_double(&s_d_p, &cap_p, mpack_e)) return false;
   if (!ensure_buf_double(&s_d_f, &cap_f, mpack_e)) return false;
-  if (!ensure_buf_double(&s_d_w, &cap_w, w_e)) return false;
+  if (!ensure_buf_double(&s_d_w, &cap_w, w_len)) return false;
+  if (!ensure_pair_buffers(pair_i.size())) return false;
+
   cudaMemcpy(s_d_nf, nfirst, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
   cudaMemcpy(s_d_nl, nlast, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
   cudaMemcpy(s_d_ptot, ptot, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
   cudaMemcpy(s_d_p, p, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
-  cudaMemcpy(s_d_w, w, sizeof(double)*w_e, cudaMemcpyHostToDevice);
-  if (verbose) printf("GPU grad keep: serial kernel\n");
-  dfock2_ll_lh_kernel<<<1,1>>>(norbs, mpack, numat, s_d_nf, s_d_nl, s_d_ptot, s_d_p, s_d_w, nati, s_d_f);
-  cudaError_t e = cudaDeviceSynchronize(); if (e!=cudaSuccess) return false;
+  if (w_len > 0) {
+    cudaMemcpy(s_d_w, w, sizeof(double)*w_len, cudaMemcpyHostToDevice);
+  }
+  if (!pair_i.empty()) {
+    cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int)*pair_i.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int)*pair_j.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_off, pair_off.data(), sizeof(int)*pair_off.size(), cudaMemcpyHostToDevice);
+    int threads = 64;
+    int blocks = static_cast<int>((pair_i.size() + threads - 1) / threads);
+    fock_pairs_kernel<<<blocks, threads>>>(static_cast<int>(pair_i.size()),
+                                           s_d_pair_i, s_d_pair_j, s_d_pair_off,
+                                           s_d_nf, s_d_nl,
+                                           s_d_ptot, s_d_p,
+                                           s_d_w, s_d_f);
+    cudaError_t e = cudaDeviceSynchronize(); if (e != cudaSuccess) return false;
+  }
+
   g_lastF_dev = s_d_f; g_lastF_bytes = sizeof(double)*mpack_e; g_lastF_n = norbs;
   return true;
 }
@@ -290,6 +402,10 @@ void mopac_cuda_grad_buffers_release() {
   if (s_d_p) cudaFree(s_d_p); s_d_p = nullptr; cap_p = 0;
   if (s_d_w) cudaFree(s_d_w); s_d_w = nullptr; cap_w = 0;
   if (s_d_f) cudaFree(s_d_f); s_d_f = nullptr; cap_f = 0;
+  if (s_d_pair_i) cudaFree(s_d_pair_i); s_d_pair_i = nullptr;
+  if (s_d_pair_j) cudaFree(s_d_pair_j); s_d_pair_j = nullptr;
+  if (s_d_pair_off) cudaFree(s_d_pair_off); s_d_pair_off = nullptr;
+  cap_pairs = 0;
   g_lastF_dev = nullptr; g_lastF_bytes = 0; g_lastF_n = 0;
   if (g_blas_local) { cublasDestroy(g_blas_local); g_blas_local = nullptr; }
   if (g_stream_local) { cudaStreamDestroy(g_stream_local); g_stream_local = nullptr; }
@@ -305,32 +421,52 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
                           const double *ptot, const double *p,
                           const double *w, double *fout) {
   ensure_verbose(); ensure_thresholds(); ensure_csv(); ensure_profile_collect();
-  // Prepare buffers
   size_t atoms_e = (size_t)numat;
   size_t mpack_e = (size_t)mpack;
-  // Estimate total w length: emulate Fortran kk progression (jj<ii only)
+
+  std::vector<int> pair_i;
+  std::vector<int> pair_j;
+  std::vector<int> pair_off;
+  pair_i.reserve(std::max(1, numat));
+
   size_t w_len = 0;
-  bool unsupported_span = false;
+  long long ll_pairs = 0, lh_pairs = 0, hh_pairs = 0;
   for (int ii = 1; ii <= numat; ++ii) {
-    int ia = nfirst[ii - 1]; int ib = nlast[ii - 1]; if ((ib - ia) < 0) continue;
+    int ia = nfirst[ii - 1];
+    int ib = nlast[ii - 1];
     int span_i = span_count(ia, ib);
+    if (span_i <= 0) continue;
+    int pairs_i = pair_count(span_i);
     for (int jj = 1; jj < ii; ++jj) {
-      int ja = nfirst[jj - 1]; int jb = nlast[jj - 1]; if ((jb - ja) < 0) continue;
+      int ja = nfirst[jj - 1];
+      int jb = nlast[jj - 1];
       int span_j = span_count(ja, jb);
-      if (span_i > 4 || span_j > 4) { unsupported_span = true; break; }
-      int di = ib - ia; int dj = jb - ja;
-      if (di >= 3 && dj >= 3) w_len += 100; else if (di >= 3 || dj >= 3) w_len += 10; else w_len += 1;
+      if (span_j <= 0) continue;
+      int pairs_j = pair_count(span_j);
+      int chunk = pairs_i * pairs_j;
+      if (chunk <= 0) continue;
+      pair_i.push_back(ii);
+      pair_j.push_back(jj);
+      pair_off.push_back(static_cast<int>(w_len));
+      w_len += static_cast<size_t>(chunk);
+      if (span_i == 1 && span_j == 1) {
+        ll_pairs++;
+      } else if (span_i == 1 || span_j == 1) {
+        lh_pairs++;
+      } else {
+        hh_pairs++;
+      }
     }
-    if (unsupported_span) break;
   }
-  if (unsupported_span) return false;
+
   if (!ensure_buf_int(&s_d_nf, &cap_nf, atoms_e)) return false;
   if (!ensure_buf_int(&s_d_nl, &cap_nl, atoms_e)) return false;
   if (!ensure_buf_double(&s_d_ptot, &cap_ptot, mpack_e)) return false;
   if (!ensure_buf_double(&s_d_p, &cap_p, mpack_e)) return false;
   if (!ensure_buf_double(&s_d_f, &cap_f, mpack_e)) return false;
   if (!ensure_buf_double(&s_d_w, &cap_w, w_len)) return false;
-  // Copy inputs and zero F
+  if (!ensure_pair_buffers(pair_i.size())) return false;
+
   cudaMemcpy(s_d_nf, nfirst, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
   cudaMemcpy(s_d_nl, nlast, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
   if (!mopac_cuda_density_copy_cached(s_d_ptot, mpack_e, ptot)) {
@@ -339,71 +475,58 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   if (!mopac_cuda_density_copy_cached(s_d_p, mpack_e, p)) {
     cudaMemcpy(s_d_p, p, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
   }
-  cudaMemcpy(s_d_w, w, sizeof(double)*w_len, cudaMemcpyHostToDevice);
   cudaMemset(s_d_f, 0, sizeof(double)*mpack_e);
-
-  // For each atom ii, build pair lists (jj<ii) with absolute w offsets and launch kernels
-  size_t kk_cursor = 0;
-  for (int ii = 1; ii <= numat; ++ii) {
-    int ia = nfirst[ii - 1]; int ib = nlast[ii - 1]; if ((ib - ia) < 0) continue;
-    // Count pairs for this ii
-    int ll_count = 0, lh_count = 0, hh_count = 0;
-    size_t kk_tmp = kk_cursor;
-    for (int jj = 1; jj < ii; ++jj) {
-      int ja = nfirst[jj - 1]; int jb = nlast[jj - 1]; if ((jb - ja) < 0) continue;
-      int di = ib - ia; int dj = jb - ja;
-      if (di < 3 && dj < 3) { ll_count++; kk_tmp += 1; }
-      else if (di >= 3 && dj >= 3) { hh_count++; kk_tmp += 100; }
-      else { lh_count++; kk_tmp += 10; }
-    }
-    if (ll_count + lh_count + hh_count == 0) continue;
-    int *h_ll_j = nullptr, *h_ll_off=nullptr, *h_lh_j=nullptr, *h_lh_off=nullptr, *h_hh_j=nullptr, *h_hh_off=nullptr;
-    if (ll_count>0) { h_ll_j=(int*)malloc(sizeof(int)*ll_count); h_ll_off=(int*)malloc(sizeof(int)*ll_count); }
-    if (lh_count>0) { h_lh_j=(int*)malloc(sizeof(int)*lh_count); h_lh_off=(int*)malloc(sizeof(int)*lh_count); }
-    if (hh_count>0) { h_hh_j=(int*)malloc(sizeof(int)*hh_count); h_hh_off=(int*)malloc(sizeof(int)*hh_count); }
-    // Fill
-    int il=0, ilh=0, ihh=0;
-    for (int jj = 1; jj < ii; ++jj) {
-      int ja = nfirst[jj - 1]; int jb = nlast[jj - 1]; if ((jb - ja) < 0) continue;
-      int di = ib - ia; int dj = jb - ja;
-      if (di < 3 && dj < 3) { if (h_ll_j){ h_ll_j[il]=jj; h_ll_off[il]=(int)kk_cursor; } il++; kk_cursor += 1; }
-      else if (di >= 3 && dj >= 3) { if (h_hh_j){ h_hh_j[ihh]=jj; h_hh_off[ihh]=(int)kk_cursor; } ihh++; kk_cursor += 100; }
-      else { if (h_lh_j){ h_lh_j[ilh]=jj; h_lh_off[ilh]=(int)kk_cursor; } ilh++; kk_cursor += 10; }
-    }
-    // Launch kernels in sequence
-    int *d_j=nullptr, *d_off=nullptr;
-    if (ll_count>0) {
-      cudaMalloc((void**)&d_j, sizeof(int)*ll_count);
-      cudaMalloc((void**)&d_off, sizeof(int)*ll_count);
-      cudaMemcpy(d_j, h_ll_j, sizeof(int)*ll_count, cudaMemcpyHostToDevice);
-      cudaMemcpy(d_off, h_ll_off, sizeof(int)*ll_count, cudaMemcpyHostToDevice);
-      int block=256, grid=(ll_count+block-1)/block;
-      dfock2_ll_parallel_kernel<<<grid, block>>>(norbs, mpack, numat, s_d_nf, s_d_nl, s_d_ptot, s_d_p, s_d_w, ii, d_j, d_off, ll_count, s_d_f);
-      cudaDeviceSynchronize(); cudaFree(d_j); cudaFree(d_off);
-    }
-    if (lh_count>0) {
-      cudaMalloc((void**)&d_j, sizeof(int)*lh_count);
-      cudaMalloc((void**)&d_off, sizeof(int)*lh_count);
-      cudaMemcpy(d_j, h_lh_j, sizeof(int)*lh_count, cudaMemcpyHostToDevice);
-      cudaMemcpy(d_off, h_lh_off, sizeof(int)*lh_count, cudaMemcpyHostToDevice);
-      int block=256, grid=(lh_count+block-1)/block;
-      dfock2_lh_parallel_kernel<<<grid, block>>>(norbs, mpack, numat, s_d_nf, s_d_nl, s_d_ptot, s_d_p, s_d_w, ii, d_j, d_off, lh_count, s_d_f);
-      cudaDeviceSynchronize(); cudaFree(d_j); cudaFree(d_off);
-    }
-    if (hh_count>0) {
-      cudaMalloc((void**)&d_j, sizeof(int)*hh_count);
-      cudaMalloc((void**)&d_off, sizeof(int)*hh_count);
-      cudaMemcpy(d_j, h_hh_j, sizeof(int)*hh_count, cudaMemcpyHostToDevice);
-      cudaMemcpy(d_off, h_hh_off, sizeof(int)*hh_count, cudaMemcpyHostToDevice);
-      int block=128, grid=(hh_count+block-1)/block;
-      dfock2_hh_parallel_kernel<<<grid, block>>>(norbs, mpack, numat, s_d_nf, s_d_nl, s_d_ptot, s_d_p, s_d_w, ii, d_j, d_off, hh_count, s_d_f);
-      cudaDeviceSynchronize(); cudaFree(d_j); cudaFree(d_off);
-    }
-    if (h_ll_j) free(h_ll_j); if (h_ll_off) free(h_ll_off);
-    if (h_lh_j) free(h_lh_j); if (h_lh_off) free(h_lh_off);
-    if (h_hh_j) free(h_hh_j); if (h_hh_off) free(h_hh_off);
+  if (w_len > 0) {
+    cudaMemcpy(s_d_w, w, sizeof(double)*w_len, cudaMemcpyHostToDevice);
   }
-  // Copy back result and populate resident cache when requested
+  if (!pair_i.empty()) {
+    cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int)*pair_i.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int)*pair_j.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_off, pair_off.data(), sizeof(int)*pair_off.size(), cudaMemcpyHostToDevice);
+  }
+
+  bool want_timing = (verbose != 0) || (csv_enabled != 0) || (prof_collect != 0);
+  cudaEvent_t t_start = nullptr, t_stop = nullptr;
+  if (want_timing && !pair_i.empty()) {
+    cudaEventCreate(&t_start);
+    cudaEventCreate(&t_stop);
+    cudaEventRecord(t_start);
+  }
+
+  if (!pair_i.empty()) {
+    int threads = 128;
+    int blocks = static_cast<int>((pair_i.size() + threads - 1) / threads);
+    fock_pairs_kernel<<<blocks, threads>>>(static_cast<int>(pair_i.size()),
+                                           s_d_pair_i, s_d_pair_j, s_d_pair_off,
+                                           s_d_nf, s_d_nl,
+                                           s_d_ptot, s_d_p,
+                                           s_d_w, s_d_f);
+    cudaError_t err = cudaDeviceSynchronize(); if (err != cudaSuccess) return false;
+  }
+
+  if (want_timing && t_start && t_stop) {
+    cudaEventRecord(t_stop);
+    cudaEventSynchronize(t_stop);
+    float ms_total = 0.0f;
+    cudaEventElapsedTime(&ms_total, t_start, t_stop);
+    cudaEventDestroy(t_start);
+    cudaEventDestroy(t_stop);
+    if (prof_collect) {
+      prof_atoms += numat;
+      prof_total_ms += ms_total;
+      prof_ll_pairs += ll_pairs;
+      prof_lh_pairs += lh_pairs;
+      prof_hh_pairs += hh_pairs;
+      long long total_pairs = ll_pairs + lh_pairs + hh_pairs;
+      if (total_pairs > 0) {
+        double share = ms_total / (double)total_pairs;
+        prof_ll_ms += share * (double)ll_pairs;
+        prof_lh_ms += share * (double)lh_pairs;
+        prof_hh_ms += share * (double)hh_pairs;
+      }
+    }
+  }
+
   cudaMemcpy(fout, s_d_f, sizeof(double)*mpack_e, cudaMemcpyDeviceToHost);
   if (mopac_cuda_get_resident_mode() != 0) {
     mopac_cuda_register_fock_device(mpack, fout, s_d_f);
@@ -413,810 +536,79 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   return true;
 }
 
+
 } // extern "C"
 
-// Device helpers: heavy–heavy Coulomb (jab) and exchange (kab)
-__device__ void jab_update(int ia, int ja, const double *pja, const double *pjb,
-                           const double *w, double *f) {
-  double suma[10];
-  double sumb[10];
-  // Ported from src/integrals/jab.F90 (1-based -> 0-based)
-  suma[0] = pja[0]*w[0] + pja[1]*w[10] + pja[2]*w[30] + pja[3]*w[60] + pja[4]*w[10] + pja[5]*w[20] + pja[6]*w[40] + pja[7]*w[70] + pja[8]*w[30] + pja[9]*w[40] + pja[10]*w[50] + pja[11]*w[80] + pja[12]*w[60] + pja[13]*w[70] + pja[14]*w[80] + pja[15]*w[90];
-  suma[1] = pja[0]*w[1] + pja[1]*w[11] + pja[2]*w[31] + pja[3]*w[61] + pja[4]*w[11] + pja[5]*w[21] + pja[6]*w[41] + pja[7]*w[71] + pja[8]*w[31] + pja[9]*w[41] + pja[10]*w[51] + pja[11]*w[81] + pja[12]*w[61] + pja[13]*w[71] + pja[14]*w[81] + pja[15]*w[91];
-  suma[2] = pja[0]*w[2] + pja[1]*w[12] + pja[2]*w[32] + pja[3]*w[62] + pja[4]*w[12] + pja[5]*w[22] + pja[6]*w[42] + pja[7]*w[72] + pja[8]*w[32] + pja[9]*w[42] + pja[10]*w[52] + pja[11]*w[82] + pja[12]*w[62] + pja[13]*w[72] + pja[14]*w[82] + pja[15]*w[92];
-  suma[3] = pja[0]*w[3] + pja[1]*w[13] + pja[2]*w[33] + pja[3]*w[63] + pja[4]*w[13] + pja[5]*w[23] + pja[6]*w[43] + pja[7]*w[73] + pja[8]*w[33] + pja[9]*w[43] + pja[10]*w[53] + pja[11]*w[83] + pja[12]*w[63] + pja[13]*w[73] + pja[14]*w[83] + pja[15]*w[93];
-  suma[4] = pja[0]*w[4] + pja[1]*w[14] + pja[2]*w[34] + pja[3]*w[64] + pja[4]*w[14] + pja[5]*w[24] + pja[6]*w[44] + pja[7]*w[74] + pja[8]*w[34] + pja[9]*w[44] + pja[10]*w[54] + pja[11]*w[84] + pja[12]*w[64] + pja[13]*w[74] + pja[14]*w[84] + pja[15]*w[94];
-  suma[5] = pja[0]*w[5] + pja[1]*w[15] + pja[2]*w[35] + pja[3]*w[65] + pja[4]*w[15] + pja[5]*w[25] + pja[6]*w[45] + pja[7]*w[75] + pja[8]*w[35] + pja[9]*w[45] + pja[10]*w[55] + pja[11]*w[85] + pja[12]*w[65] + pja[13]*w[75] + pja[14]*w[85] + pja[15]*w[95];
-  suma[6] = pja[0]*w[6] + pja[1]*w[16] + pja[2]*w[36] + pja[3]*w[66] + pja[4]*w[16] + pja[5]*w[26] + pja[6]*w[46] + pja[7]*w[76] + pja[8]*w[36] + pja[9]*w[46] + pja[10]*w[56] + pja[11]*w[86] + pja[12]*w[66] + pja[13]*w[76] + pja[14]*w[86] + pja[15]*w[96];
-  suma[7] = pja[0]*w[7] + pja[1]*w[17] + pja[2]*w[37] + pja[3]*w[67] + pja[4]*w[17] + pja[5]*w[27] + pja[6]*w[47] + pja[7]*w[77] + pja[8]*w[37] + pja[9]*w[47] + pja[10]*w[57] + pja[11]*w[87] + pja[12]*w[67] + pja[13]*w[77] + pja[14]*w[87] + pja[15]*w[97];
-  suma[8] = pja[0]*w[8] + pja[1]*w[18] + pja[2]*w[38] + pja[3]*w[68] + pja[4]*w[18] + pja[5]*w[28] + pja[6]*w[48] + pja[7]*w[78] + pja[8]*w[38] + pja[9]*w[48] + pja[10]*w[58] + pja[11]*w[88] + pja[12]*w[68] + pja[13]*w[78] + pja[14]*w[88] + pja[15]*w[98];
-  suma[9] = pja[0]*w[9] + pja[1]*w[19] + pja[2]*w[39] + pja[3]*w[69] + pja[4]*w[19] + pja[5]*w[29] + pja[6]*w[49] + pja[7]*w[79] + pja[8]*w[39] + pja[9]*w[49] + pja[10]*w[59] + pja[11]*w[89] + pja[12]*w[69] + pja[13]*w[79] + pja[14]*w[89] + pja[15]*w[99];
-  sumb[0] = pjb[0]*w[0] + pjb[1]*w[1] + pjb[2]*w[3] + pjb[3]*w[6] + pjb[4]*w[1] + pjb[5]*w[2] + pjb[6]*w[4] + pjb[7]*w[7] + pjb[8]*w[3] + pjb[9]*w[4] + pjb[10]*w[5] + pjb[11]*w[8] + pjb[12]*w[6] + pjb[13]*w[7] + pjb[14]*w[8] + pjb[15]*w[9];
-  sumb[1] = pjb[0]*w[10] + pjb[1]*w[11] + pjb[2]*w[13] + pjb[3]*w[16] + pjb[4]*w[11] + pjb[5]*w[12] + pjb[6]*w[14] + pjb[7]*w[17] + pjb[8]*w[13] + pjb[9]*w[14] + pjb[10]*w[15] + pjb[11]*w[18] + pjb[12]*w[16] + pjb[13]*w[17] + pjb[14]*w[18] + pjb[15]*w[19];
-  sumb[2] = pjb[0]*w[20] + pjb[1]*w[21] + pjb[2]*w[23] + pjb[3]*w[26] + pjb[4]*w[21] + pjb[5]*w[22] + pjb[6]*w[24] + pjb[7]*w[27] + pjb[8]*w[23] + pjb[9]*w[24] + pjb[10]*w[25] + pjb[11]*w[28] + pjb[12]*w[26] + pjb[13]*w[27] + pjb[14]*w[28] + pjb[15]*w[29];
-  sumb[3] = pjb[0]*w[30] + pjb[1]*w[31] + pjb[2]*w[33] + pjb[3]*w[36] + pjb[4]*w[31] + pjb[5]*w[32] + pjb[6]*w[34] + pjb[7]*w[37] + pjb[8]*w[33] + pjb[9]*w[34] + pjb[10]*w[35] + pjb[11]*w[38] + pjb[12]*w[36] + pjb[13]*w[37] + pjb[14]*w[38] + pjb[15]*w[39];
-  sumb[4] = pjb[0]*w[40] + pjb[1]*w[41] + pjb[2]*w[43] + pjb[3]*w[46] + pjb[4]*w[41] + pjb[5]*w[42] + pjb[6]*w[44] + pjb[7]*w[47] + pjb[8]*w[43] + pjb[9]*w[44] + pjb[10]*w[45] + pjb[11]*w[48] + pjb[12]*w[46] + pjb[13]*w[47] + pjb[14]*w[48] + pjb[15]*w[49];
-  sumb[5] = pjb[0]*w[50] + pjb[1]*w[51] + pjb[2]*w[53] + pjb[3]*w[56] + pjb[4]*w[51] + pjb[5]*w[52] + pjb[6]*w[54] + pjb[7]*w[57] + pjb[8]*w[53] + pjb[9]*w[54] + pjb[10]*w[55] + pjb[11]*w[58] + pjb[12]*w[56] + pjb[13]*w[57] + pjb[14]*w[58] + pjb[15]*w[59];
-  sumb[6] = pjb[0]*w[60] + pjb[1]*w[61] + pjb[2]*w[63] + pjb[3]*w[66] + pjb[4]*w[61] + pjb[5]*w[62] + pjb[6]*w[64] + pjb[7]*w[67] + pjb[8]*w[63] + pjb[9]*w[64] + pjb[10]*w[65] + pjb[11]*w[68] + pjb[12]*w[66] + pjb[13]*w[67] + pjb[14]*w[68] + pjb[15]*w[69];
-  sumb[7] = pjb[0]*w[70] + pjb[1]*w[71] + pjb[2]*w[73] + pjb[3]*w[76] + pjb[4]*w[71] + pjb[5]*w[72] + pjb[6]*w[74] + pjb[7]*w[77] + pjb[8]*w[73] + pjb[9]*w[74] + pjb[10]*w[75] + pjb[11]*w[78] + pjb[12]*w[76] + pjb[13]*w[77] + pjb[14]*w[78] + pjb[15]*w[79];
-  sumb[8] = pjb[0]*w[80] + pjb[1]*w[81] + pjb[2]*w[83] + pjb[3]*w[86] + pjb[4]*w[81] + pjb[5]*w[82] + pjb[6]*w[84] + pjb[7]*w[87] + pjb[8]*w[83] + pjb[9]*w[84] + pjb[10]*w[85] + pjb[11]*w[88] + pjb[12]*w[86] + pjb[13]*w[87] + pjb[14]*w[88] + pjb[15]*w[89];
-  sumb[9] = pjb[0]*w[90] + pjb[1]*w[91] + pjb[2]*w[93] + pjb[3]*w[96] + pjb[4]*w[91] + pjb[5]*w[92] + pjb[6]*w[94] + pjb[7]*w[97] + pjb[8]*w[93] + pjb[9]*w[94] + pjb[10]*w[95] + pjb[11]*w[98] + pjb[12]*w[96] + pjb[13]*w[97] + pjb[14]*w[98] + pjb[15]*w[99];
-
-  int i = 0;
-  for (int i5 = 1; i5 <= 4; ++i5) {
-    int iia = ia + i5 - 1;
-    int ija = ja + i5 - 1;
-    int ioff = ifact_idx(iia) + ia - 1;
-    int joff = ifact_idx(ija) + ja - 1;
-    for (int i6 = 1; i6 <= i5; ++i6) {
-      ioff += 1; joff += 1; i += 1;
-      atomicAdd_double(&f[ioff - 1], sumb[i - 1]);
-      atomicAdd_double(&f[joff - 1], suma[i - 1]);
-    }
-  }
-}
-
-__device__ void kab_update(int ia, int ja, const double *pk, const double *w, double *f) {
-  double sum[16];
-  // Ported from src/integrals/kab.F90 (1-based -> 0-based)
-  sum[0] = pk[0]*w[0] + pk[1]*w[1] + pk[2]*w[3] + pk[3]*w[6] + pk[4]*w[10] + pk[5]*w[11] + pk[6]*w[13] + pk[7]*w[16] + pk[8]*w[30] + pk[9]*w[31] + pk[10]*w[33] + pk[11]*w[36] + pk[12]*w[60] + pk[13]*w[61] + pk[14]*w[63] + pk[15]*w[66];
-  sum[1] = pk[0]*w[1] + pk[1]*w[2] + pk[2]*w[4] + pk[3]*w[7] + pk[4]*w[11] + pk[5]*w[12] + pk[6]*w[14] + pk[7]*w[17] + pk[8]*w[31] + pk[9]*w[32] + pk[10]*w[34] + pk[11]*w[37] + pk[12]*w[61] + pk[13]*w[62] + pk[14]*w[64] + pk[15]*w[67];
-  sum[2] = pk[0]*w[3] + pk[1]*w[4] + pk[2]*w[5] + pk[3]*w[8] + pk[4]*w[13] + pk[5]*w[14] + pk[6]*w[15] + pk[7]*w[18] + pk[8]*w[33] + pk[9]*w[34] + pk[10]*w[35] + pk[11]*w[38] + pk[12]*w[63] + pk[13]*w[64] + pk[14]*w[65] + pk[15]*w[68];
-  sum[3] = pk[0]*w[6] + pk[1]*w[7] + pk[2]*w[8] + pk[3]*w[9] + pk[4]*w[16] + pk[5]*w[17] + pk[6]*w[18] + pk[7]*w[19] + pk[8]*w[36] + pk[9]*w[37] + pk[10]*w[38] + pk[11]*w[39] + pk[12]*w[66] + pk[13]*w[67] + pk[14]*w[68] + pk[15]*w[69];
-  sum[4] = pk[0]*w[10] + pk[1]*w[11] + pk[2]*w[13] + pk[3]*w[16] + pk[4]*w[20] + pk[5]*w[21] + pk[6]*w[23] + pk[7]*w[26] + pk[8]*w[40] + pk[9]*w[41] + pk[10]*w[43] + pk[11]*w[46] + pk[12]*w[70] + pk[13]*w[71] + pk[14]*w[73] + pk[15]*w[76];
-  sum[5] = pk[0]*w[11] + pk[1]*w[12] + pk[2]*w[14] + pk[3]*w[17] + pk[4]*w[21] + pk[5]*w[22] + pk[6]*w[24] + pk[7]*w[27] + pk[8]*w[41] + pk[9]*w[42] + pk[10]*w[44] + pk[11]*w[47] + pk[12]*w[71] + pk[13]*w[72] + pk[14]*w[74] + pk[15]*w[77];
-  sum[6] = pk[0]*w[13] + pk[1]*w[14] + pk[2]*w[15] + pk[3]*w[18] + pk[4]*w[23] + pk[5]*w[24] + pk[6]*w[25] + pk[7]*w[28] + pk[8]*w[43] + pk[9]*w[44] + pk[10]*w[45] + pk[11]*w[48] + pk[12]*w[73] + pk[13]*w[74] + pk[14]*w[75] + pk[15]*w[78];
-  sum[7] = pk[0]*w[16] + pk[1]*w[17] + pk[2]*w[18] + pk[3]*w[19] + pk[4]*w[26] + pk[5]*w[27] + pk[6]*w[28] + pk[7]*w[29] + pk[8]*w[46] + pk[9]*w[47] + pk[10]*w[48] + pk[11]*w[49] + pk[12]*w[76] + pk[13]*w[77] + pk[14]*w[78] + pk[15]*w[79];
-  sum[8] = pk[0]*w[30] + pk[1]*w[31] + pk[2]*w[33] + pk[3]*w[36] + pk[4]*w[40] + pk[5]*w[41] + pk[6]*w[43] + pk[7]*w[46] + pk[8]*w[50] + pk[9]*w[51] + pk[10]*w[53] + pk[11]*w[56] + pk[12]*w[80] + pk[13]*w[81] + pk[14]*w[83] + pk[15]*w[86];
-  sum[9] = pk[0]*w[31] + pk[1]*w[32] + pk[2]*w[34] + pk[3]*w[37] + pk[4]*w[41] + pk[5]*w[42] + pk[6]*w[44] + pk[7]*w[47] + pk[8]*w[51] + pk[9]*w[52] + pk[10]*w[54] + pk[11]*w[57] + pk[12]*w[81] + pk[13]*w[82] + pk[14]*w[84] + pk[15]*w[87];
-  sum[10] = pk[0]*w[33] + pk[1]*w[34] + pk[2]*w[35] + pk[3]*w[38] + pk[4]*w[43] + pk[5]*w[44] + pk[6]*w[45] + pk[7]*w[48] + pk[8]*w[53] + pk[9]*w[54] + pk[10]*w[55] + pk[11]*w[58] + pk[12]*w[83] + pk[13]*w[84] + pk[14]*w[85] + pk[15]*w[88];
-  sum[11] = pk[0]*w[36] + pk[1]*w[37] + pk[2]*w[38] + pk[3]*w[39] + pk[4]*w[46] + pk[5]*w[47] + pk[6]*w[48] + pk[7]*w[49] + pk[8]*w[56] + pk[9]*w[57] + pk[10]*w[58] + pk[11]*w[59] + pk[12]*w[86] + pk[13]*w[87] + pk[14]*w[88] + pk[15]*w[89];
-  sum[12] = pk[0]*w[60] + pk[1]*w[61] + pk[2]*w[63] + pk[3]*w[66] + pk[4]*w[70] + pk[5]*w[71] + pk[6]*w[73] + pk[7]*w[76] + pk[8]*w[80] + pk[9]*w[81] + pk[10]*w[83] + pk[11]*w[86] + pk[12]*w[90] + pk[13]*w[91] + pk[14]*w[93] + pk[15]*w[96];
-  sum[13] = pk[0]*w[61] + pk[1]*w[62] + pk[2]*w[64] + pk[3]*w[67] + pk[4]*w[71] + pk[5]*w[72] + pk[6]*w[74] + pk[7]*w[77] + pk[8]*w[81] + pk[9]*w[82] + pk[10]*w[84] + pk[11]*w[87] + pk[12]*w[91] + pk[13]*w[92] + pk[14]*w[94] + pk[15]*w[97];
-  sum[14] = pk[0]*w[63] + pk[1]*w[64] + pk[2]*w[65] + pk[3]*w[68] + pk[4]*w[73] + pk[5]*w[74] + pk[6]*w[75] + pk[7]*w[78] + pk[8]*w[83] + pk[9]*w[84] + pk[10]*w[85] + pk[11]*w[88] + pk[12]*w[93] + pk[13]*w[94] + pk[14]*w[95] + pk[15]*w[98];
-  sum[15] = pk[0]*w[66] + pk[1]*w[67] + pk[2]*w[68] + pk[3]*w[69] + pk[4]*w[76] + pk[5]*w[77] + pk[6]*w[78] + pk[7]*w[79] + pk[8]*w[86] + pk[9]*w[87] + pk[10]*w[88] + pk[11]*w[89] + pk[12]*w[96] + pk[13]*w[97] + pk[14]*w[98] + pk[15]*w[99];
-
-  if (ia > ja) {
-    int m = 0;
-    for (int j1 = ia; j1 <= ia + 3; ++j1) {
-      int j = ifact_idx(j1);
-      for (int off = 0; off < 4; ++off) {
-        atomicAdd_double(&f[(j + ja + off) - 1], -sum[m + off]);
-      }
-      m += 4;
-    }
-  } else {
-    int m = 0;
-    for (int j1 = ia; j1 <= ia + 3; ++j1) {
-      for (int j2 = ja; j2 <= ja + 3; ++j2) {
-        m += 1;
-        int j3 = ifact_idx(j2) + j1;
-        atomicAdd_double(&f[j3 - 1], -sum[m - 1]);
-      }
-    }
-  }
-}
-
-__global__ void dfock2_ll_lh_kernel(int norbs, int mpack, int numat,
-                                    const int *nfirst, const int *nlast,
-                                    const double *ptot, const double *p,
-                                    const double *w, int nati, double *f) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid != 0) return; // single-thread kernel
-  int ii = nati;
-  int ia = nfirst[ii - 1];
-  int ib = nlast[ii - 1];
-  int kk = 0;
-  // Precompute jindex mapping (only relevant for single-heavy cases)
-  int jindex[256];
-  int m = 0;
-  for (int i = 1; i <= 4; ++i) {
-    for (int j = 1; j <= 4; ++j) {
-      int ij = (i < j) ? i : j;
-      int ji = i + j - ij;
-      for (int k = 1; k <= 4; ++k) {
-        for (int l = 1; l <= 4; ++l) {
-          m += 1;
-          int kl = (k < l) ? k : l;
-          int lk = k + l - kl;
-          int ifact_ji = ifact_idx(ji);
-          int ifact_lk = ifact_idx(lk);
-          jindex[m-1] = (ifact_ji + ij) * 10 + ifact_lk + kl - 10; // Fortran 1-based
-        }
-      }
-    }
-  }
-  for (int jj = 1; jj <= numat; ++jj) {
-    if (jj == ii) continue;
-    int ja = nfirst[jj - 1];
-    int jb = nlast[jj - 1];
-    // Skip sparkles
-    if ((ib - ia) < 0 || (jb - ja) < 0) continue;
-    int di = ib - ia;
-    int dj = jb - ja;
-    if (di >= 3 && dj >= 3) {
-      // heavy-heavy branch: build pja, pjb (16) and pk (16); use 100 w-terms
-      double pja[16], pjb[16], pk[16];
-      // pja from ptot
-      {
-        int mloc = 0;
-        for (int j = ia; j <= ib; ++j) {
-          for (int k = ia; k <= ib; ++k) {
-            mloc += 1;
-            int jk = (j < k) ? j : k;
-            int kj = j + k - jk;
-            int packed = jk + ifact_idx(kj);
-            pja[mloc - 1] = ptot[packed - 1];
-          }
-        }
-      }
-      // pjb from ptot
-      {
-        int mloc = 0;
-        for (int j = ja; j <= jb; ++j) {
-          for (int k = ja; k <= jb; ++k) {
-            mloc += 1;
-            int jk = (j < k) ? j : k;
-            int kj = j + k - jk;
-            int packed = jk + ifact_idx(kj);
-            pjb[mloc - 1] = ptot[packed - 1];
-          }
-        }
-      }
-      // pk from p intersection
-      if (ia > ja) {
-        int l = 0;
-        for (int i2 = ia; i2 <= ib; ++i2) {
-          int base = ifact_idx(i2) + ja;
-          for (int col = 0; col <= (jb - ja); ++col) {
-            l += 1; pk[l - 1] = p[(base + col) - 1];
-          }
-        }
-      } else {
-        int l = 0;
-        for (int i2 = ia; i2 <= ib; ++i2) {
-          for (int j2 = ja; j2 <= jb; ++j2) {
-            l += 1; pk[l - 1] = p[(ifact_idx(j2) + i2) - 1];
-          }
-        }
-      }
-      // Apply J (Coulomb) and K (exchange)
-      jab_update(ia, ja, pja, pjb, w + kk, f);
-      kab_update(ia, ja, pk, w + kk, f);
-      kk += 100;
-    } else if (di >= 3 || dj >= 3) {
-      // Single-heavy branch: Coulomb + exchange using 10 w-terms
-      double sumdia = 0.0, sumoff = 0.0;
-      int k = 0;
-      if (di >= 3) {
-        // ii heavy, jj light
-        int ll = ifact_idx(ja) + ja; // i1fact(ja)
-        for (int ii2 = 0; ii2 <= 3; ++ii2) {
-          int j1 = ifact_idx(ia + ii2) + ia - 1;
-          for (int j2 = 0; j2 < ii2; ++j2) {
-            k += 1; j1 += 1;
-            f[j1 - 1] += ptot[ll - 1] * w[kk + (k - 1)];
-            sumoff += ptot[j1 - 1] * w[kk + (k - 1)];
-          }
-          j1 = j1 + 1; k += 1;
-          f[j1 - 1] += ptot[ll - 1] * w[kk + (k - 1)];
-          sumdia += ptot[j1 - 1] * w[kk + (k - 1)];
-        }
-        f[ll - 1] += sumoff * 2.0 + sumdia;
-        // Exchange
-        if (ia > ja) {
-          int k2 = 0;
-          for (int i3 = ia; i3 <= ib; ++i3) {
-            int i1 = ifact_idx(i3) + ja;
-            double sum = 0.0;
-            for (int j3 = ia; j3 <= ib; ++j3) {
-              k2 += 1;
-              int j1 = ifact_idx(j3) + ja;
-              sum += p[j1 - 1] * w[kk + (jindex[k2 - 1] - 1)];
-            }
-            f[i1 - 1] -= sum;
-          }
-        } else {
-          int k2 = 0;
-          for (int i3 = ia; i3 <= ib; ++i3) {
-            int i1 = ifact_idx(ja) + i3;
-            double sum = 0.0;
-            for (int j3 = ia; j3 <= ib; ++j3) {
-              k2 += 1;
-              int j1 = ifact_idx(ja) + j3;
-              sum += p[j1 - 1] * w[kk + (jindex[k2 - 1] - 1)];
-            }
-            f[i1 - 1] -= sum;
-          }
-        }
-      } else {
-        // jj heavy, ii light
-        int ll = ifact_idx(ia) + ia; // i1fact(ia)
-        for (int ii2 = 0; ii2 <= 3; ++ii2) {
-          int j1 = ifact_idx(ja + ii2) + ja - 1;
-          for (int j2 = 0; j2 < ii2; ++j2) {
-            k += 1; j1 += 1;
-            f[j1 - 1] += ptot[ll - 1] * w[kk + (k - 1)];
-            sumoff += ptot[j1 - 1] * w[kk + (k - 1)];
-          }
-          j1 = j1 + 1; k += 1;
-          f[j1 - 1] += ptot[ll - 1] * w[kk + (k - 1)];
-          sumdia += ptot[j1 - 1] * w[kk + (k - 1)];
-        }
-        f[ll - 1] += sumoff * 2.0 + sumdia;
-        // Exchange
-        if (ia > ja) {
-          int k2 = ifact_idx(ia) + ja; // starting pos
-          int jacc = 0;
-          int base = ifact_idx(ia) + ja;
-          for (int irow = base; irow <= base + 3; ++irow) {
-            double sum = 0.0;
-            for (int lcol = base; lcol <= base + 3; ++lcol) {
-              jacc += 1;
-              sum += p[lcol - 1] * w[kk + (jindex[jacc - 1] - 1)];
-            }
-            f[irow - 1] -= sum;
-          }
-        } else {
-          int jacc = 0;
-          for (int k2 = ja; k2 <= ja + 3; ++k2) {
-            int iidx = ifact_idx(k2) + ia;
-            double sum = 0.0;
-            for (int ll2 = ja; ll2 <= ja + 3; ++ll2) {
-              int lidx = ifact_idx(ll2) + ia;
-              jacc += 1;
-              sum += p[lidx - 1] * w[kk + (jindex[jacc - 1] - 1)];
-            }
-            f[iidx - 1] -= sum;
-          }
-        }
-      }
-      kk += 10;
-    } else {
-      // light-light branch
-      double elrep = w[kk]; // Fortran w(kk+1)
-      int i1 = ifact_idx(ia) + ia;
-      int j1 = ifact_idx(ja) + ja;
-      int pos_i1 = i1 - 1;
-      int pos_j1 = j1 - 1;
-      // Diagonal updates
-      f[pos_i1] += ptot[pos_j1] * elrep;
-      f[pos_j1] += ptot[pos_i1] * elrep;
-      // Off-diagonal update
-      int ij;
-      if (ia > ja) {
-        ij = i1 + (ja - ia);
-      } else {
-        ij = j1 + (ia - ja);
-      }
-      int pos_ij = ij - 1;
-      f[pos_ij] -= p[pos_ij] * elrep;
-      kk += 1;
-    }
-  }
-}
-
-// Parallel LL kernel: one thread per contributing jj pair
-__global__ void dfock2_ll_parallel_kernel(int norbs, int mpack, int numat,
-                                          const int *nfirst, const int *nlast,
-                                          const double *ptot, const double *p,
-                                          const double *w, int nati,
-                                          const int *jlist, const int *woff,
-                                          int nn, double *f) {
-  int tid = blockDim.x * blockIdx.x + threadIdx.x;
-  if (tid >= nn) return;
-  int ia = nfirst[nati - 1];
-  int ib = nlast[nati - 1];
-  int jj = jlist[tid];
-  int ja = nfirst[jj - 1];
-  int jb = nlast[jj - 1];
-  if ((ib - ia) < 0 || (jb - ja) < 0) return;
-  int k0 = woff[tid];
-  double elrep = w[k0];
-  int i1 = ifact_idx(ia) + ia;
-  int j1 = ifact_idx(ja) + ja;
-  int pos_i1 = i1 - 1;
-  int pos_j1 = j1 - 1;
-  atomicAdd_double(&f[pos_i1], ptot[pos_j1] * elrep);
-  atomicAdd_double(&f[pos_j1], ptot[pos_i1] * elrep);
-  int ij = (ia > ja) ? (i1 + (ja - ia)) : (j1 + (ia - ja));
-  int pos_ij = ij - 1;
-  atomicAdd_double(&f[pos_ij], -p[pos_ij] * elrep);
-}
-
-// Parallel single-heavy kernel: one thread per (nati, jj) LH pair, 10-term block
-__global__ void dfock2_lh_parallel_kernel(int norbs, int mpack, int numat,
-                                          const int *nfirst, const int *nlast,
-                                          const double *ptot, const double *p,
-                                          const double *w, int nati,
-                                          const int *jlist, const int *woff,
-                                          int nn, double *f) {
-  int tid = blockDim.x * blockIdx.x + threadIdx.x;
-  if (tid >= nn) return;
-  int ii = nati;
-  int ia = nfirst[ii - 1];
-  int ib = nlast[ii - 1];
-  int jj = jlist[tid];
-  int ja = nfirst[jj - 1];
-  int jb = nlast[jj - 1];
-  if ((ib - ia) < 0 || (jb - ja) < 0) return;
-  int di = ib - ia;
-  int dj = jb - ja;
-  int kk = woff[tid];
-  // Build jindex mapping (256)
-  __shared__ int jindex[256];
-  if (threadIdx.x == 0) {
-    int m = 0;
-    for (int i = 1; i <= 4; ++i) {
-      for (int j = 1; j <= 4; ++j) {
-        int ij = (i < j) ? i : j;
-        int ji = i + j - ij;
-        for (int k = 1; k <= 4; ++k) {
-          for (int l = 1; l <= 4; ++l) {
-            m += 1;
-            int kl = (k < l) ? k : l;
-            int lk = k + l - kl;
-            int ifact_ji = ifact_idx(ji);
-            int ifact_lk = ifact_idx(lk);
-            jindex[m-1] = (ifact_ji + ij) * 10 + ifact_lk + kl - 10;
-          }
-        }
-      }
-    }
-  }
-  __syncthreads();
-  // Coulomb terms
-  double sumdia = 0.0, sumoff = 0.0;
-  int k = 0;
-  if (di >= 3 && dj < 3) {
-    // ii heavy, jj light
-    int ll = ifact_idx(ja) + ja; // i1fact(ja)
-    for (int i = 0; i <= 3; ++i) {
-      int j1 = ifact_idx(ia + i) + ia - 1;
-      for (int j = 0; j < i; ++j) {
-        k += 1; j1 += 1;
-        atomicAdd_double(&f[j1 - 1], ptot[ll - 1] * w[kk + (k - 1)]);
-        sumoff += ptot[j1 - 1] * w[kk + (k - 1)];
-      }
-      j1 = j1 + 1; k += 1;
-      atomicAdd_double(&f[j1 - 1], ptot[ll - 1] * w[kk + (k - 1)]);
-      sumdia += ptot[j1 - 1] * w[kk + (k - 1)];
-    }
-    atomicAdd_double(&f[ll - 1], sumoff * 2.0 + sumdia);
-    // Exchange
-    if (ia > ja) {
-      int k2 = 0;
-      for (int i3 = ia; i3 <= ib; ++i3) {
-        int i1 = ifact_idx(i3) + ja;
-        double sum = 0.0;
-        for (int j3 = ia; j3 <= ib; ++j3) {
-          k2 += 1;
-          int j1 = ifact_idx(j3) + ja;
-          sum += p[j1 - 1] * w[kk + (jindex[k2 - 1] - 1)];
-        }
-        atomicAdd_double(&f[i1 - 1], -sum);
-      }
-    } else {
-      int k2 = 0;
-      for (int i3 = ia; i3 <= ib; ++i3) {
-        int i1 = ifact_idx(ja) + i3;
-        double sum = 0.0;
-        for (int j3 = ia; j3 <= ib; ++j3) {
-          k2 += 1;
-          int j1 = ifact_idx(ja) + j3;
-          sum += p[j1 - 1] * w[kk + (jindex[k2 - 1] - 1)];
-        }
-        atomicAdd_double(&f[i1 - 1], -sum);
-      }
-    }
-  } else if (dj >= 3 && di < 3) {
-    // jj heavy, ii light
-    int ll = ifact_idx(ia) + ia; // i1fact(ia)
-    for (int i = 0; i <= 3; ++i) {
-      int j1 = ifact_idx(ja + i) + ja - 1;
-      for (int j = 0; j < i; ++j) {
-        k += 1; j1 += 1;
-        atomicAdd_double(&f[j1 - 1], ptot[ll - 1] * w[kk + (k - 1)]);
-        sumoff += ptot[j1 - 1] * w[kk + (k - 1)];
-      }
-      j1 = j1 + 1; k += 1;
-      atomicAdd_double(&f[j1 - 1], ptot[ll - 1] * w[kk + (k - 1)]);
-      sumdia += ptot[j1 - 1] * w[kk + (k - 1)];
-    }
-    atomicAdd_double(&f[ll - 1], sumoff * 2.0 + sumdia);
-    // Exchange
-    if (ia > ja) {
-      int jacc = 0;
-      int base = ifact_idx(ia) + ja;
-      for (int irow = base; irow <= base + 3; ++irow) {
-        double sum = 0.0;
-        for (int lcol = base; lcol <= base + 3; ++lcol) {
-          jacc += 1;
-          sum += p[lcol - 1] * w[kk + (jindex[jacc - 1] - 1)];
-        }
-        atomicAdd_double(&f[irow - 1], -sum);
-      }
-    } else {
-      int jacc = 0;
-      for (int k2 = ja; k2 <= ja + 3; ++k2) {
-        int iidx = ifact_idx(k2) + ia;
-        double sum = 0.0;
-        for (int ll2 = ja; ll2 <= ja + 3; ++ll2) {
-          int lidx = ifact_idx(ll2) + ia;
-          jacc += 1;
-          sum += p[lidx - 1] * w[kk + (jindex[jacc - 1] - 1)];
-        }
-        atomicAdd_double(&f[iidx - 1], -sum);
-      }
-    }
-  }
-}
-
-// Parallel heavy–heavy kernel: one thread per HH pair, 100 w-terms
-__global__ void dfock2_hh_parallel_kernel(int norbs, int mpack, int numat,
-                                          const int *nfirst, const int *nlast,
-                                          const double *ptot, const double *p,
-                                          const double *w, int nati,
-                                          const int *jlist, const int *woff,
-                                          int nn, double *f) {
-  int tid = blockDim.x * blockIdx.x + threadIdx.x;
-  if (tid >= nn) return;
-  int ii = nati;
-  int ia = nfirst[ii - 1];
-  int ib = nlast[ii - 1];
-  int jj = jlist[tid];
-  int ja = nfirst[jj - 1];
-  int jb = nlast[jj - 1];
-  if ((ib - ia) < 0 || (jb - ja) < 0) return;
-  int kk = woff[tid];
-  // Build pja/pjb
-  double pja[16], pjb[16], pk[16];
-  int mloc = 0;
-  for (int j = ia; j <= ib; ++j) {
-    for (int k = ia; k <= ib; ++k) {
-      mloc += 1;
-      int jk = (j < k) ? j : k;
-      int kj = j + k - jk;
-      int packed = jk + ifact_idx(kj);
-      pja[mloc - 1] = ptot[packed - 1];
-    }
-  }
-  mloc = 0;
-  for (int j = ja; j <= jb; ++j) {
-    for (int k = ja; k <= jb; ++k) {
-      mloc += 1;
-      int jk = (j < k) ? j : k;
-      int kj = j + k - jk;
-      int packed = jk + ifact_idx(kj);
-      pjb[mloc - 1] = ptot[packed - 1];
-    }
-  }
-  // pk
-  if (ia > ja) {
-    int l = 0;
-    for (int i2 = ia; i2 <= ib; ++i2) {
-      int base = ifact_idx(i2) + ja;
-      for (int col = 0; col <= (jb - ja); ++col) {
-        l += 1; pk[l - 1] = p[(base + col) - 1];
-      }
-    }
-  } else {
-    int l = 0;
-    for (int i2 = ia; i2 <= ib; ++i2) {
-      for (int j2 = ja; j2 <= jb; ++j2) {
-        l += 1; pk[l - 1] = p[(ifact_idx(j2) + i2) - 1];
-      }
-    }
-  }
-  // Apply updates using atomic add inside helpers
-  jab_update(ia, ja, pja, pjb, w + kk, f);
-  kab_update(ia, ja, pk, w + kk, f);
-}
-
-// Packed inputs; handles light-light, light-heavy, and heavy-heavy pairs for atom nati.
-// Returns true if GPU handled the update; false to fall back to CPU dfock2.
 bool mopac_cuda_fock2(int norbs, int mpack, int numat,
                       const int *nfirst, const int *nlast,
                       const double *ptot, const double *p,
                       const double *w, int nati,
                       double *f) {
   (void)norbs; (void)mpack;
-  // Pre-scan to categorize pairs and estimate w length
   int ia = nfirst[nati - 1];
   int ib = nlast[nati - 1];
-  if ((ib - ia) < 0) return false; // sparkle
-  size_t w_len = 0;
-  int nn_pairs = 0;
-  bool all_ll = true;
+  if ((ib - ia) < 0) return false;
+
   int span_i = span_count(ia, ib);
-  for (int jj = 1; jj <= numat; ++jj) {
-    if (jj == nati) continue;
+  if (span_i <= 0) return true;
+
+  std::vector<int> pair_i;
+  std::vector<int> pair_j;
+  std::vector<int> pair_off;
+  pair_i.reserve(std::max(0, nati - 1));
+
+  size_t w_len = 0;
+  int pairs_i = pair_count(span_i);
+  for (int jj = 1; jj < nati; ++jj) {
     int ja = nfirst[jj - 1];
     int jb = nlast[jj - 1];
-    if ((jb - ja) < 0) continue; // sparkle
     int span_j = span_count(ja, jb);
-    if (span_i > 4 || span_j > 4) return false;
-    int di = ib - ia;
-    int dj = jb - ja;
-    if (di >= 3 && dj >= 3) { w_len += 100; all_ll = false; }
-    else if (di >= 3 || dj >= 3) { w_len += 10; all_ll = false; }
-    else { w_len += 1; }
-    nn_pairs++;
+    if (span_j <= 0) continue;
+    int pairs_j = pair_count(span_j);
+    int chunk = pairs_i * pairs_j;
+    if (chunk <= 0) continue;
+    pair_i.push_back(nati);
+    pair_j.push_back(jj);
+    pair_off.push_back(static_cast<int>(w_len));
+    w_len += static_cast<size_t>(chunk);
   }
-  if (w_len == 0) return true; // nothing to do
 
-  // Stage inputs to persistent device buffers
-  // Predeclare timing and host list buffers before any goto to satisfy nvcc
-  ensure_profile_collect();
-  bool want_timing = (verbose != 0) || (csv_enabled != 0) || (prof_collect != 0);
-  cudaEvent_t t_all_start = nullptr, t_all_stop = nullptr; float ms_all = 0.f;
-  bool total_timed = false;
-  float ll_ms_total = 0.f, lh_ms_total = 0.f, hh_ms_total = 0.f;
-  int *h_ll_j = nullptr, *h_ll_off = nullptr;
-  int *h_lh_j = nullptr, *h_lh_off = nullptr;
-  int *h_hh_j = nullptr, *h_hh_off = nullptr;
-  int ll_count = 0, lh_count = 0, hh_count = 0;
   size_t atoms_e = (size_t)numat;
   size_t mpack_e = (size_t)mpack;
-  size_t w_e = w_len;
-  cudaError_t e;
-  if (!ensure_buf_int(&s_d_nf, &cap_nf, atoms_e)) goto FAIL;
-  if (!ensure_buf_int(&s_d_nl, &cap_nl, atoms_e)) goto FAIL;
-  if (!ensure_buf_double(&s_d_ptot, &cap_ptot, mpack_e)) goto FAIL;
-  if (!ensure_buf_double(&s_d_p, &cap_p, mpack_e)) goto FAIL;
-  if (!ensure_buf_double(&s_d_f, &cap_f, mpack_e)) goto FAIL;
-  if (!ensure_buf_double(&s_d_w, &cap_w, w_e)) goto FAIL;
+  if (!ensure_buf_int(&s_d_nf, &cap_nf, atoms_e)) return false;
+  if (!ensure_buf_int(&s_d_nl, &cap_nl, atoms_e)) return false;
+  if (!ensure_buf_double(&s_d_ptot, &cap_ptot, mpack_e)) return false;
+  if (!ensure_buf_double(&s_d_p, &cap_p, mpack_e)) return false;
+  if (!ensure_buf_double(&s_d_f, &cap_f, mpack_e)) return false;
+  if (!ensure_buf_double(&s_d_w, &cap_w, w_len)) return false;
+  if (!ensure_pair_buffers(pair_i.size())) return false;
 
-  // Copy arrays
-  e = cudaMemcpy(s_d_nf, nfirst, sizeof(int)*atoms_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
-  e = cudaMemcpy(s_d_nl, nlast, sizeof(int)*atoms_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
+  cudaMemcpy(s_d_nf, nfirst, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
+  cudaMemcpy(s_d_nl, nlast, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
   if (!mopac_cuda_density_copy_cached(s_d_ptot, mpack_e, ptot)) {
-    e = cudaMemcpy(s_d_ptot, ptot, sizeof(double)*mpack_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
+    cudaMemcpy(s_d_ptot, ptot, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
   }
   if (!mopac_cuda_density_copy_cached(s_d_p, mpack_e, p)) {
-    e = cudaMemcpy(s_d_p, p, sizeof(double)*mpack_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
+    cudaMemcpy(s_d_p, p, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
   }
-  e = cudaMemcpy(s_d_f, f, sizeof(double)*mpack_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
-  e = cudaMemcpy(s_d_w, w, sizeof(double)*w_e, cudaMemcpyHostToDevice); if (e!=cudaSuccess) goto FAIL;
-  // Total timing start
-  if (want_timing) {
-    if (cudaEventCreate(&t_all_start) == cudaSuccess && cudaEventCreate(&t_all_stop) == cudaSuccess) {
-      cudaEventRecord(t_all_start);
-      total_timed = true;
-    } else {
-      if (t_all_start) cudaEventDestroy(t_all_start);
-      if (t_all_stop) cudaEventDestroy(t_all_stop);
-      t_all_start = nullptr; t_all_stop = nullptr; total_timed = false;
-    }
-  }
-
-  // Build compact pair lists with w offsets
-  if (!all_ll) {
-    // We still may have a mix of LL and LH without HH
-  }
-  // Second pass to fill lists and offsets
-  {
-    int kk_cursor = 0;
-    // Count first
-    for (int jj = 1; jj <= numat; ++jj) {
-      if (jj == nati) continue;
-      int ja = nfirst[jj - 1];
-      int jb = nlast[jj - 1];
-      if ((jb - ja) < 0) continue;
-      int di = ib - ia;
-      int dj = jb - ja;
-      if (di < 3 && dj < 3) { ll_count++; kk_cursor += 1; }
-      else if (di >= 3 && dj >= 3) { hh_count++; kk_cursor += 100; }
-      else { lh_count++; kk_cursor += 10; }
-    }
-    if (ll_count > 0) { h_ll_j = (int*)malloc(sizeof(int)*ll_count); h_ll_off = (int*)malloc(sizeof(int)*ll_count); }
-    if (lh_count > 0) { h_lh_j = (int*)malloc(sizeof(int)*lh_count); h_lh_off = (int*)malloc(sizeof(int)*lh_count); }
-    if (hh_count > 0) { h_hh_j = (int*)malloc(sizeof(int)*hh_count); h_hh_off = (int*)malloc(sizeof(int)*hh_count); }
-    // Fill
-    kk_cursor = 0; int il = 0, ilh = 0, ihh = 0;
-    for (int jj = 1; jj <= numat; ++jj) {
-      if (jj == nati) continue;
-      int ja = nfirst[jj - 1];
-      int jb = nlast[jj - 1];
-      if ((jb - ja) < 0) continue;
-      int di = ib - ia;
-      int dj = jb - ja;
-      if (di < 3 && dj < 3) {
-        if (h_ll_j) { h_ll_j[il] = jj; h_ll_off[il] = kk_cursor; }
-        il++;
-        kk_cursor += 1;
-      } else if (di >= 3 && dj >= 3) {
-        if (h_hh_j) { h_hh_j[ihh] = jj; h_hh_off[ihh] = kk_cursor; }
-        ihh++;
-        kk_cursor += 100;
-      } else {
-        if (h_lh_j) { h_lh_j[ilh] = jj; h_lh_off[ilh] = kk_cursor; }
-        ilh++;
-        kk_cursor += 10;
-      }
-    }
-  }
-  // Launch parallel LL/LH/HH kernels if possible; otherwise serial
-  if ((lh_count == 0) && (hh_count == 0) && (ll_count >= 64)) {
-    if (verbose) printf("GPU grad: LL-only; counts LL=%d LH=%d HH=%d\n", ll_count, lh_count, hh_count);
-    // Parallel LL-only
-    int *d_j = nullptr, *d_off = nullptr;
-    e = cudaMalloc((void**)&d_j, sizeof(int)*ll_count); if (e!=cudaSuccess) goto SERIAL;
-    e = cudaMalloc((void**)&d_off, sizeof(int)*ll_count); if (e!=cudaSuccess) { cudaFree(d_j); goto SERIAL; }
-    e = cudaMemcpy(d_j, h_ll_j, sizeof(int)*ll_count, cudaMemcpyHostToDevice); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto SERIAL; }
-    e = cudaMemcpy(d_off, h_ll_off, sizeof(int)*ll_count, cudaMemcpyHostToDevice); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto SERIAL; }
-    int block = 256, grid = (ll_count + block - 1) / block;
-    if (verbose) printf("GPU grad: LL-only parallel, pairs=%d\n", ll_count);
-    cudaEvent_t ev1 = nullptr, ev2 = nullptr; float ms = 0.f; bool timed = false;
-    if (want_timing) {
-      if (cudaEventCreate(&ev1) == cudaSuccess && cudaEventCreate(&ev2) == cudaSuccess) {
-        cudaEventRecord(ev1);
-        timed = true;
-      }
-    }
-    dfock2_ll_parallel_kernel<<<grid, block>>>(norbs, mpack, numat, s_d_nf, s_d_nl, s_d_ptot, s_d_p, s_d_w, nati, d_j, d_off, ll_count, s_d_f);
-    if (timed) {
-      cudaEventRecord(ev2);
-      cudaEventSynchronize(ev2);
-      cudaEventElapsedTime(&ms, ev1, ev2);
-      cudaEventDestroy(ev1);
-      cudaEventDestroy(ev2);
-    }
-    if (verbose && timed) {
-      printf("GPU grad: LL kernel time = %.3f ms\n", ms);
-    }
-    e = cudaDeviceSynchronize(); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto FAIL; }
-    ll_ms_total += ms;
-    cudaFree(d_j); cudaFree(d_off);
-  } else if (ll_count + lh_count + hh_count > 0 && (lh_count >= 32 || ll_count >= 32 || hh_count >= 16)) {
-    if (verbose) printf("GPU grad: mixed LL/LH/HH; counts L=%d H=%d HH=%d\n", ll_count, lh_count, hh_count);
-    // Mixed LL/LH/HH: launch in sequence
-    int *d_j = nullptr, *d_off = nullptr;
-    if (ll_count > 0) {
-      e = cudaMalloc((void**)&d_j, sizeof(int)*ll_count); if (e!=cudaSuccess) goto SERIAL;
-      e = cudaMalloc((void**)&d_off, sizeof(int)*ll_count); if (e!=cudaSuccess) { cudaFree(d_j); goto SERIAL; }
-      e = cudaMemcpy(d_j, h_ll_j, sizeof(int)*ll_count, cudaMemcpyHostToDevice); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto SERIAL; }
-      e = cudaMemcpy(d_off, h_ll_off, sizeof(int)*ll_count, cudaMemcpyHostToDevice); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto SERIAL; }
-      int block = 256, grid = (ll_count + block - 1) / block;
-      if (verbose) printf("GPU grad: LL-parallel, pairs=%d\n", ll_count);
-      cudaEvent_t e1 = nullptr, e2 = nullptr; float ms = 0.f; bool timed = false;
-      if (want_timing) {
-        if (cudaEventCreate(&e1) == cudaSuccess && cudaEventCreate(&e2) == cudaSuccess) {
-          cudaEventRecord(e1);
-          timed = true;
-        }
-      }
-      dfock2_ll_parallel_kernel<<<grid, block>>>(norbs, mpack, numat, s_d_nf, s_d_nl, s_d_ptot, s_d_p, s_d_w, nati, d_j, d_off, ll_count, s_d_f);
-      if (timed) {
-        cudaEventRecord(e2);
-        cudaEventSynchronize(e2);
-        cudaEventElapsedTime(&ms, e1, e2);
-        cudaEventDestroy(e1);
-        cudaEventDestroy(e2);
-      }
-      if (verbose && timed) {
-        printf("GPU grad: LL kernel time = %.3f ms\n", ms);
-      }
-      e = cudaDeviceSynchronize(); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto FAIL; }
-      ll_ms_total += ms;
-      cudaFree(d_j); cudaFree(d_off); d_j = nullptr; d_off = nullptr;
-    }
-    if (lh_count > 0) {
-      e = cudaMalloc((void**)&d_j, sizeof(int)*lh_count); if (e!=cudaSuccess) goto SERIAL;
-      e = cudaMalloc((void**)&d_off, sizeof(int)*lh_count); if (e!=cudaSuccess) { cudaFree(d_j); goto SERIAL; }
-      e = cudaMemcpy(d_j, h_lh_j, sizeof(int)*lh_count, cudaMemcpyHostToDevice); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto SERIAL; }
-      e = cudaMemcpy(d_off, h_lh_off, sizeof(int)*lh_count, cudaMemcpyHostToDevice); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto SERIAL; }
-      int block = 256, grid = (lh_count + block - 1) / block;
-      if (verbose) printf("GPU grad: LH-parallel, pairs=%d\n", lh_count);
-      cudaEvent_t e3 = nullptr, e4 = nullptr; float ms2 = 0.f; bool timed2 = false;
-      if (want_timing) {
-        if (cudaEventCreate(&e3) == cudaSuccess && cudaEventCreate(&e4) == cudaSuccess) {
-          cudaEventRecord(e3);
-          timed2 = true;
-        }
-      }
-      dfock2_lh_parallel_kernel<<<grid, block>>>(norbs, mpack, numat, s_d_nf, s_d_nl, s_d_ptot, s_d_p, s_d_w, nati, d_j, d_off, lh_count, s_d_f);
-      if (timed2) {
-        cudaEventRecord(e4);
-        cudaEventSynchronize(e4);
-        cudaEventElapsedTime(&ms2, e3, e4);
-        cudaEventDestroy(e3);
-        cudaEventDestroy(e4);
-      }
-      if (verbose && timed2) {
-        printf("GPU grad: LH kernel time = %.3f ms\n", ms2);
-      }
-      e = cudaDeviceSynchronize(); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto FAIL; }
-      lh_ms_total += ms2;
-      cudaFree(d_j); cudaFree(d_off);
-    }
-    if (hh_count > 0) {
-      e = cudaMalloc((void**)&d_j, sizeof(int)*hh_count); if (e!=cudaSuccess) goto SERIAL;
-      e = cudaMalloc((void**)&d_off, sizeof(int)*hh_count); if (e!=cudaSuccess) { cudaFree(d_j); goto SERIAL; }
-      e = cudaMemcpy(d_j, h_hh_j, sizeof(int)*hh_count, cudaMemcpyHostToDevice); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto SERIAL; }
-      e = cudaMemcpy(d_off, h_hh_off, sizeof(int)*hh_count, cudaMemcpyHostToDevice); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto SERIAL; }
-      int block = 128, grid = (hh_count + block - 1) / block;
-      if (verbose) printf("GPU grad: HH-parallel, pairs=%d\n", hh_count);
-      cudaEvent_t e5 = nullptr, e6 = nullptr; float ms3 = 0.f; bool timed3 = false;
-      if (want_timing) {
-        if (cudaEventCreate(&e5) == cudaSuccess && cudaEventCreate(&e6) == cudaSuccess) {
-          cudaEventRecord(e5);
-          timed3 = true;
-        }
-      }
-      dfock2_hh_parallel_kernel<<<grid, block>>>(norbs, mpack, numat, s_d_nf, s_d_nl, s_d_ptot, s_d_p, s_d_w, nati, d_j, d_off, hh_count, s_d_f);
-      if (timed3) {
-        cudaEventRecord(e6);
-        cudaEventSynchronize(e6);
-        cudaEventElapsedTime(&ms3, e5, e6);
-        cudaEventDestroy(e5);
-        cudaEventDestroy(e6);
-      }
-      if (verbose && timed3) {
-        printf("GPU grad: HH kernel time = %.3f ms\n", ms3);
-      }
-      e = cudaDeviceSynchronize(); if (e!=cudaSuccess) { cudaFree(d_j); cudaFree(d_off); goto FAIL; }
-      hh_ms_total += ms3;
-      cudaFree(d_j); cudaFree(d_off);
-    }
-  } else {
-SERIAL:
-    if (verbose) printf("GPU grad: serial kernel; counts LL=%d LH=%d HH=%d\n", ll_count, lh_count, hh_count);
-    cudaEvent_t evs = nullptr, eve = nullptr; float serial_ms = 0.f; bool timed_serial = false;
-    if (want_timing) {
-      if (cudaEventCreate(&evs) == cudaSuccess && cudaEventCreate(&eve) == cudaSuccess) {
-        cudaEventRecord(evs);
-        timed_serial = true;
-      }
-    }
-    dfock2_ll_lh_kernel<<<1,1>>>(norbs, mpack, numat, s_d_nf, s_d_nl, s_d_ptot, s_d_p, s_d_w, nati, s_d_f);
-    e = cudaDeviceSynchronize(); if (e!=cudaSuccess) goto FAIL;
-    if (timed_serial) {
-      cudaEventRecord(eve);
-      cudaEventSynchronize(eve);
-      cudaEventElapsedTime(&serial_ms, evs, eve);
-      cudaEventDestroy(evs);
-      cudaEventDestroy(eve);
-      ll_ms_total += serial_ms;
-    }
+  cudaMemcpy(s_d_w, w, sizeof(double)*w_len, cudaMemcpyHostToDevice);
+  cudaMemcpy(s_d_f, f, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
+  if (!pair_i.empty()) {
+    cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int)*pair_i.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int)*pair_j.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_off, pair_off.data(), sizeof(int)*pair_off.size(), cudaMemcpyHostToDevice);
+    int threads = 64;
+    int blocks = static_cast<int>((pair_i.size() + threads - 1) / threads);
+    fock_pairs_kernel<<<blocks, threads>>>(static_cast<int>(pair_i.size()),
+                                           s_d_pair_i, s_d_pair_j, s_d_pair_off,
+                                           s_d_nf, s_d_nl,
+                                           s_d_ptot, s_d_p,
+                                           s_d_w, s_d_f);
+    cudaError_t err = cudaDeviceSynchronize(); if (err != cudaSuccess) return false;
   }
 
-  // Total timing stop and summary
-  if (total_timed) {
-    cudaEventRecord(t_all_stop);
-    cudaEventSynchronize(t_all_stop);
-    cudaEventElapsedTime(&ms_all, t_all_start, t_all_stop);
-    cudaEventDestroy(t_all_start);
-    cudaEventDestroy(t_all_stop);
-  }
-  if (verbose && total_timed) {
-    printf("GPU grad: atom %d total = %.3f ms (LL=%d LH=%d HH=%d)\n", nati, ms_all, ll_count, lh_count, hh_count);
-  }
-
-  if (h_ll_j) free(h_ll_j);
-  if (h_ll_off) free(h_ll_off);
-  if (h_lh_j) free(h_lh_j);
-  if (h_lh_off) free(h_lh_off);
-  if (h_hh_j) free(h_hh_j);
-  if (h_hh_off) free(h_hh_off);
-
-  if (prof_collect) {
-    prof_atoms += 1;
-    prof_ll_pairs += ll_count;
-    prof_lh_pairs += lh_count;
-    prof_hh_pairs += hh_count;
-    prof_ll_ms += (double)ll_ms_total;
-    prof_lh_ms += (double)lh_ms_total;
-    prof_hh_ms += (double)hh_ms_total;
-    prof_total_ms += (double)ms_all;
-  }
-
-  // Copy updated F back
-  e = cudaMemcpy(f, s_d_f, sizeof(double)*mpack_e, cudaMemcpyDeviceToHost); if (e!=cudaSuccess) goto FAIL;
+  cudaMemcpy(f, s_d_f, sizeof(double)*mpack_e, cudaMemcpyDeviceToHost);
   return true;
-
-FAIL:
-  return false;
 }
 
 }
