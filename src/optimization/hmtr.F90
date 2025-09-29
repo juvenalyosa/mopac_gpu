@@ -261,7 +261,8 @@ contains
     end do
   end subroutine enforce_bounds
 
-  subroutine hmtr_optimize_torsions(xseed, evaluator, best_coords, best_energy, best_grad, max_iters, pop_size, use_gpu, grad_tol, wrap_angles, ierr)
+  subroutine hmtr_optimize_torsions(xseed, evaluator, best_coords, best_energy, best_grad, &
+       max_iters, pop_size, use_gpu, grad_tol, wrap_angles, ierr)
     real(dp), intent(in) :: xseed(:)
     procedure(hmtr_evaluator) :: evaluator
     real(dp), intent(out) :: best_coords(:)
@@ -403,7 +404,7 @@ contains
     call compfg(coords, .true., energy, .true., grad_local, want_grad)
     grad = grad_local
     if (allocated(grad_local)) deallocate(grad_local)
-    if (moperr /= 0) ierr = moperr
+    if (moperr) ierr = 1
   end subroutine hmtr_compfg_evaluator
 
 end module hmtr_optimizer_mod
