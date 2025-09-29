@@ -732,6 +732,7 @@ subroutine wrtchk (allkey)
       if (Index (keywrd, " H-PRIO")   /= 0) i = i + 1
       if (Index (keywrd, " X-PRIO")   /= 0) i = i + 1
       if (Index (keywrd, " T-PRIO")   /= 0) i = i + 1
+      if (Index (keywrd, " HMTR")     /= 0) i = i + 1
       if (Index (keywrd, " MECI")     /= 0) i = i + 1
       if (Index (keywrd, " HESSIAN")  /= 0) i = i + 1
       if (Index (keywrd, " LOCAL")    /= 0) i = i + 1
@@ -1714,6 +1715,7 @@ subroutine wrtout (allkey)
   if (myword(allkey, " MAKVEC"))  write (iw,'(" *  MAKVEC     - PRINT DETAILS OF SUBROUTINE MAKVEC")')
   if (myword(allkey, " DIIS"))    write (iw,'(" *  DIIS       - PRINT DETAILS OF SUBROUTINE DIIS  ")')
   if (myword(allkey, " FLEPO"))   write (iw,'(" *  FLEPO      - PRINT DETAILS OF SUBROUTINE FLEPO ")')
+  if (myword(allkey, " HMTR"))    write (iw,'(" *  HMTR       - Enable hierarchical memetic trust-region pre-optimization")')
   if (myword(allkey, " FMAT"))    write (iw,'(" *  FMAT       - PRINT DETAILS OF SUBROUTINE FMAT  ")')
   if (myword(allkey, " DFORCE"))  write (iw,'(" *  DFORCE     - PRINT FORCE MATRIX OVER CARTESIAN COORDINATES")')
   if (myword(allkey, " HCORE"))   write (iw,'(" *  HCORE      - PRINT DETAILS OF SUBROUTINE HCORE ")')
