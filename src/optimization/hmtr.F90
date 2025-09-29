@@ -61,18 +61,24 @@ module hmtr_optimizer_mod
      real(dp), allocatable :: pbest_energy(:)
      real(dp), allocatable :: pbest_grad(:,:)
      real(dp), allocatable :: gbest(:)
-      real(dp), allocatable :: gbest_grad(:)
+     real(dp), allocatable :: gbest_grad(:)
      real(dp), allocatable :: rand1(:,:)
      real(dp), allocatable :: rand2(:,:)
+     integer, allocatable :: torsion_idx(:)
+     real(dp), allocatable :: base_coords(:)
+     real(dp), allocatable :: pbest_grad_full(:,:)
+     real(dp), allocatable :: gbest_grad_full(:)
   end type hmtr_population
 
 contains
 
-  subroutine hmtr_initialize(pop, torsion_init, params, use_gpu, ierr)
+  subroutine hmtr_initialize(pop, torsion_init, params, use_gpu, torsion_idx, base_coords, ierr)
     type(hmtr_population), intent(inout) :: pop
     real(dp), intent(in) :: torsion_init(:,:)
     type(hmtr_params_type), intent(in), optional :: params
     logical, intent(in), optional :: use_gpu
+    integer, intent(in) :: torsion_idx(:)
+    real(dp), intent(in) :: base_coords(:)
     integer, intent(out), optional :: ierr
     integer :: stat
     logical :: want_gpu
@@ -98,6 +104,10 @@ contains
     allocate(pop%gbest_grad(pop%dim))
     allocate(pop%rand1(pop%population, pop%dim))
     allocate(pop%rand2(pop%population, pop%dim))
+    allocate(pop%torsion_idx(pop%dim))
+    allocate(pop%base_coords(size(base_coords)))
+    allocate(pop%pbest_grad_full(pop%population, size(base_coords)))
+    allocate(pop%gbest_grad_full(size(base_coords)))
 
     pop%params = hmtr_params_type()
     if (present(params)) pop%params = params
@@ -108,6 +118,11 @@ contains
     pop%pbest_energy = huge(1.0_dp)
     pop%gbest = torsion_init(1,:)
     pop%gbest_grad = 0.0_dp
+    pop%pbest_grad = 0.0_dp
+    pop%torsion_idx = torsion_idx
+    pop%base_coords = base_coords
+    pop%pbest_grad_full = 0.0_dp
+    pop%gbest_grad_full = 0.0_dp
 #ifdef GPU
     if (want_gpu) then
        cfg%torsion_dim = pop%dim
@@ -149,6 +164,10 @@ contains
     if (allocated(pop%gbest_grad)) deallocate(pop%gbest_grad)
     if (allocated(pop%rand1)) deallocate(pop%rand1)
     if (allocated(pop%rand2)) deallocate(pop%rand2)
+    if (allocated(pop%torsion_idx)) deallocate(pop%torsion_idx)
+    if (allocated(pop%base_coords)) deallocate(pop%base_coords)
+    if (allocated(pop%pbest_grad_full)) deallocate(pop%pbest_grad_full)
+    if (allocated(pop%gbest_grad_full)) deallocate(pop%gbest_grad_full)
     pop%population = 0
     pop%dim = 0
     pop%gpu_enabled = .false.
@@ -187,10 +206,11 @@ contains
 #endif
   end function hmtr_global_step
 
-  subroutine hmtr_update_best(pop, energies, gradients)
+  subroutine hmtr_update_best(pop, energies, gradients, gradients_full)
     type(hmtr_population), intent(inout) :: pop
     real(dp), intent(in) :: energies(:)
     real(dp), intent(in) :: gradients(:,:)
+    real(dp), intent(in) :: gradients_full(:,:)
     integer :: i
     integer :: best_idx(1)
 
@@ -200,11 +220,13 @@ contains
           pop%pbest_energy(i) = energies(i)
           pop%pbest(i,:) = pop%torsions(i,:)
           pop%pbest_grad(i,:) = gradients(i,:)
+          pop%pbest_grad_full(i,:) = gradients_full(i,:)
        end if
     end do
     best_idx = minloc(pop%pbest_energy)
     pop%gbest = pop%pbest(best_idx(1),:)
     pop%gbest_grad = pop%pbest_grad(best_idx(1),:)
+    pop%gbest_grad_full = pop%pbest_grad_full(best_idx(1),:)
   end subroutine hmtr_update_best
 
   subroutine hmtr_cpu_update(pop)
@@ -264,6 +286,7 @@ contains
 
   subroutine hmtr_optimize_torsions(xseed, evaluator, best_coords, best_energy, best_grad, &
        max_iters, pop_size, use_gpu, grad_tol, wrap_angles, ierr)
+    use common_arrays_C, only : loc, lopt
     real(dp), intent(in) :: xseed(:)
     procedure(hmtr_evaluator) :: evaluator
     real(dp), intent(out) :: best_coords(:)
@@ -277,11 +300,15 @@ contains
 
     type(hmtr_population) :: pop
     type(hmtr_params_type) :: params
-    integer :: iterations, population, nvar, member, ev_stat, status, iter_idx, i
-    real(dp) :: tolerance
-    real(dp), allocatable :: init(:,:), energies(:), gradients(:,:)
+    integer :: iterations, population, nvar, member, ev_stat, status, iter_idx
+    real(dp) :: tolerance, base_energy
+    real(dp), allocatable :: init(:,:), energies(:), gradients(:,:), gradients_full(:,:)
+    real(dp), allocatable :: candidate(:), grad_full(:), base_grad(:)
+    integer, allocatable :: torsion_idx(:)
+    integer :: ntors, i
 
     nvar = size(xseed)
+    hmtr_force_gpu_eval = .false.
     population = HMTR_DEFAULT_POPULATION
     if (present(pop_size)) population = max(1, pop_size)
     iterations = HMTR_DEFAULT_GLOBAL_ITERS
@@ -300,83 +327,123 @@ contains
        return
     end if
 
+    allocate(base_grad(nvar))
+    call evaluator(xseed, base_energy, base_grad, status)
+    if (status /= 0) then
+       best_coords = xseed
+        best_energy = base_energy
+        best_grad = base_grad
+        if (present(ierr)) ierr = status
+        deallocate(base_grad)
+        return
+    end if
+
+    allocate(torsion_idx(nvar))
+    ntors = 0
+    do i = 1, nvar
+       if (loc(2,i) == 3 .and. loc(1,i) > 0) then
+          if (lopt(3,loc(1,i)) /= 0) then
+             ntors = ntors + 1
+             torsion_idx(ntors) = i
+          end if
+       end if
+    end do
+    if (ntors == 0) then
+       best_coords = xseed
+       best_energy = base_energy
+       best_grad = base_grad
+       if (present(ierr)) ierr = 0
+       deallocate(base_grad, torsion_idx)
+       return
+    end if
+    torsion_idx = torsion_idx(:ntors)
+
     params = hmtr_params_type()
     if (present(wrap_angles)) params%use_wrap = wrap_angles
 
-    allocate(init(population, nvar))
+    allocate(init(population, ntors))
     do i = 1, population
-       init(i,:) = xseed
+       init(i,:) = xseed(torsion_idx)
     end do
-    if (population > 1) then
-       call perturb_initial(init, params%use_wrap)
-    end if
+    if (population > 1) call perturb_initial(init, params%use_wrap)
 
     if (present(use_gpu)) then
-       call hmtr_initialize(pop, init, params, use_gpu=use_gpu, ierr=status)
+       call hmtr_initialize(pop, init, params, use_gpu=use_gpu, torsion_idx=torsion_idx, base_coords=xseed, ierr=status)
     else
-       call hmtr_initialize(pop, init, params, ierr=status)
+       call hmtr_initialize(pop, init, params, torsion_idx=torsion_idx, base_coords=xseed, ierr=status)
     end if
     if (status /= 0) then
        if (present(ierr)) ierr = status
        call hmtr_finalize(pop)
-       deallocate(init)
-       hmtr_force_gpu_eval = .false.
+       deallocate(init, torsion_idx, base_grad)
        return
     end if
 
     hmtr_force_gpu_eval = pop%gpu_enabled
 
     allocate(energies(population))
-    allocate(gradients(population, nvar))
+    allocate(gradients(population, ntors))
+    allocate(gradients_full(population, nvar))
+    allocate(candidate(nvar))
+    allocate(grad_full(nvar))
 
     status = 0
     ev_stat = 0
     do member = 1, population
-       call evaluator(pop%torsions(member,:), energies(member), gradients(member,:), ev_stat)
+       candidate = pop%base_coords
+       candidate(pop%torsion_idx) = pop%torsions(member,:)
+       call evaluator(candidate, energies(member), grad_full, ev_stat)
        if (ev_stat /= 0) then
           status = ev_stat
           exit
        end if
+       gradients(member,:) = grad_full(pop%torsion_idx)
+       gradients_full(member,:) = grad_full
     end do
     if (status /= 0) then
        call hmtr_finalize(pop)
-       deallocate(init, energies, gradients)
+       deallocate(init, energies, gradients, gradients_full, candidate, grad_full, torsion_idx, base_grad)
        if (present(ierr)) ierr = status
        hmtr_force_gpu_eval = .false.
        return
     end if
-    call hmtr_update_best(pop, energies, gradients)
+    call hmtr_update_best(pop, energies, gradients, gradients_full)
 
     do iter_idx = 1, iterations
        status = hmtr_global_step(pop)
        if (status /= 0) exit
        ev_stat = 0
        do member = 1, population
-          call evaluator(pop%torsions(member,:), energies(member), gradients(member,:), ev_stat)
+          candidate = pop%base_coords
+          candidate(pop%torsion_idx) = pop%torsions(member,:)
+          call evaluator(candidate, energies(member), grad_full, ev_stat)
           if (ev_stat /= 0) exit
+          gradients(member,:) = grad_full(pop%torsion_idx)
+          gradients_full(member,:) = grad_full
        end do
        if (ev_stat /= 0) then
           status = ev_stat
           exit
        end if
-       call hmtr_update_best(pop, energies, gradients)
+       call hmtr_update_best(pop, energies, gradients, gradients_full)
        if (maxval(abs(pop%gbest_grad)) < tolerance) exit
     end do
 
     if (status /= 0) then
        call hmtr_finalize(pop)
-        deallocate(init, energies, gradients)
-        if (present(ierr)) ierr = status
-        hmtr_force_gpu_eval = .false.
-        return
+       deallocate(init, energies, gradients, gradients_full, candidate, grad_full, torsion_idx, base_grad)
+       if (present(ierr)) ierr = status
+       hmtr_force_gpu_eval = .false.
+       return
     end if
 
-    best_coords = pop%gbest
+    best_coords = pop%base_coords
+    best_coords(pop%torsion_idx) = pop%gbest
     best_energy = minval(pop%pbest_energy)
-    best_grad = pop%gbest_grad
+    best_grad = pop%gbest_grad_full
     if (present(ierr)) ierr = status
 
-    deallocate(init, energies, gradients)
+    deallocate(init, energies, gradients, gradients_full, candidate, grad_full, torsion_idx, base_grad)
     call hmtr_finalize(pop)
     hmtr_force_gpu_eval = .false.
   end subroutine hmtr_optimize_torsions
