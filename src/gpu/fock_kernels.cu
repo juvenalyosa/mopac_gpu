@@ -60,7 +60,8 @@ __device__ inline double atomicAdd_double(double* address, double val) {
 // Persistent buffer helpers and verbose/tuning controls
 static int    *s_d_nf = nullptr, *s_d_nl = nullptr;
 static double *s_d_ptot = nullptr, *s_d_p = nullptr, *s_d_w = nullptr, *s_d_f = nullptr;
-static size_t cap_atoms = 0, cap_mpack = 0, cap_w = 0;
+static size_t cap_nf = 0, cap_nl = 0;
+static size_t cap_ptot = 0, cap_p = 0, cap_f = 0, cap_w = 0;
 static int verbose = 0; static int verbose_inited = 0;
 static int csv_enabled = 0; static int csv_inited = 0;
 static int prof_collect = 0; static int prof_inited = 0;
@@ -191,11 +192,11 @@ bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
   if (w_len == 0) return true;
   // Ensure persistent buffers
   size_t atoms_e = (size_t)numat, mpack_e = (size_t)mpack, w_e = w_len;
-  if (!ensure_buf_int(&s_d_nf, &cap_atoms, atoms_e)) return false;
-  if (!ensure_buf_int(&s_d_nl, &cap_atoms, atoms_e)) return false;
-  if (!ensure_buf_double(&s_d_ptot, &cap_mpack, mpack_e)) return false;
-  if (!ensure_buf_double(&s_d_p, &cap_mpack, mpack_e)) return false;
-  if (!ensure_buf_double(&s_d_f, &cap_mpack, mpack_e)) return false;
+  if (!ensure_buf_int(&s_d_nf, &cap_nf, atoms_e)) return false;
+  if (!ensure_buf_int(&s_d_nl, &cap_nl, atoms_e)) return false;
+  if (!ensure_buf_double(&s_d_ptot, &cap_ptot, mpack_e)) return false;
+  if (!ensure_buf_double(&s_d_p, &cap_p, mpack_e)) return false;
+  if (!ensure_buf_double(&s_d_f, &cap_f, mpack_e)) return false;
   if (!ensure_buf_double(&s_d_w, &cap_w, w_e)) return false;
   cudaMemcpy(s_d_nf, nfirst, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
   cudaMemcpy(s_d_nl, nlast, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
@@ -261,12 +262,12 @@ void mopac_cuda_grad_buffers_release() {
   prof_atoms = 0; prof_total_ms = 0.0;
   prof_ll_pairs = 0; prof_lh_pairs = 0; prof_hh_pairs = 0;
   prof_ll_ms = 0.0; prof_lh_ms = 0.0; prof_hh_ms = 0.0;
-  if (s_d_nf) cudaFree(s_d_nf); s_d_nf = nullptr; cap_atoms = 0;
-  if (s_d_nl) cudaFree(s_d_nl); s_d_nl = nullptr;
-  if (s_d_ptot) cudaFree(s_d_ptot); s_d_ptot = nullptr; cap_mpack = 0;
-  if (s_d_p) cudaFree(s_d_p); s_d_p = nullptr;
+  if (s_d_nf) cudaFree(s_d_nf); s_d_nf = nullptr; cap_nf = 0;
+  if (s_d_nl) cudaFree(s_d_nl); s_d_nl = nullptr; cap_nl = 0;
+  if (s_d_ptot) cudaFree(s_d_ptot); s_d_ptot = nullptr; cap_ptot = 0;
+  if (s_d_p) cudaFree(s_d_p); s_d_p = nullptr; cap_p = 0;
   if (s_d_w) cudaFree(s_d_w); s_d_w = nullptr; cap_w = 0;
-  if (s_d_f) cudaFree(s_d_f); s_d_f = nullptr;
+  if (s_d_f) cudaFree(s_d_f); s_d_f = nullptr; cap_f = 0;
   g_lastF_dev = nullptr; g_lastF_bytes = 0; g_lastF_n = 0;
   if (g_blas_local) { cublasDestroy(g_blas_local); g_blas_local = nullptr; }
   if (g_stream_local) { cudaStreamDestroy(g_stream_local); g_stream_local = nullptr; }
@@ -295,11 +296,11 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
       if (di >= 3 && dj >= 3) w_len += 100; else if (di >= 3 || dj >= 3) w_len += 10; else w_len += 1;
     }
   }
-  if (!ensure_buf_int(&s_d_nf, &cap_atoms, atoms_e)) return false;
-  if (!ensure_buf_int(&s_d_nl, &cap_atoms, atoms_e)) return false;
-  if (!ensure_buf_double(&s_d_ptot, &cap_mpack, mpack_e)) return false;
-  if (!ensure_buf_double(&s_d_p, &cap_mpack, mpack_e)) return false;
-  if (!ensure_buf_double(&s_d_f, &cap_mpack, mpack_e)) return false;
+  if (!ensure_buf_int(&s_d_nf, &cap_nf, atoms_e)) return false;
+  if (!ensure_buf_int(&s_d_nl, &cap_nl, atoms_e)) return false;
+  if (!ensure_buf_double(&s_d_ptot, &cap_ptot, mpack_e)) return false;
+  if (!ensure_buf_double(&s_d_p, &cap_p, mpack_e)) return false;
+  if (!ensure_buf_double(&s_d_f, &cap_f, mpack_e)) return false;
   if (!ensure_buf_double(&s_d_w, &cap_w, w_len)) return false;
   // Copy inputs and zero F
   cudaMemcpy(s_d_nf, nfirst, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
@@ -928,11 +929,11 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
   size_t mpack_e = (size_t)mpack;
   size_t w_e = w_len;
   cudaError_t e;
-  if (!ensure_buf_int(&s_d_nf, &cap_atoms, atoms_e)) goto FAIL;
-  if (!ensure_buf_int(&s_d_nl, &cap_atoms, atoms_e)) goto FAIL;
-  if (!ensure_buf_double(&s_d_ptot, &cap_mpack, mpack_e)) goto FAIL;
-  if (!ensure_buf_double(&s_d_p, &cap_mpack, mpack_e)) goto FAIL;
-  if (!ensure_buf_double(&s_d_f, &cap_mpack, mpack_e)) goto FAIL;
+  if (!ensure_buf_int(&s_d_nf, &cap_nf, atoms_e)) goto FAIL;
+  if (!ensure_buf_int(&s_d_nl, &cap_nl, atoms_e)) goto FAIL;
+  if (!ensure_buf_double(&s_d_ptot, &cap_ptot, mpack_e)) goto FAIL;
+  if (!ensure_buf_double(&s_d_p, &cap_p, mpack_e)) goto FAIL;
+  if (!ensure_buf_double(&s_d_f, &cap_f, mpack_e)) goto FAIL;
   if (!ensure_buf_double(&s_d_w, &cap_w, w_e)) goto FAIL;
 
   // Copy arrays

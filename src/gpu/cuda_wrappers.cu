@@ -16,6 +16,7 @@
 #include <chrono>
 #include <vector>
 #include <cctype>
+#include <mutex>
 
 #if defined(MOPAC_ENABLE_NVTX)
 #  if defined(__has_include)
@@ -390,6 +391,67 @@ static HostBuf<double> h2_syrk_A, h2_syrk_C;
 static HostBuf<double> h2_rot_V;
 
 static DevBuf<uint8_t> g_lt_workspace;
+
+struct HmtrStreamSlot {
+  int device = -1;
+  int thread_id = -1;
+  cudaStream_t stream = nullptr;
+};
+
+static std::vector<HmtrStreamSlot> g_hmtr_stream_slots;
+static std::mutex g_hmtr_stream_mutex;
+
+void mopac_cuda_hmtr_bind_thread(int device,
+                                 int thread_id,
+                                 void **stream_out,
+                                 int *device_changed) {
+  if (stream_out) *stream_out = nullptr;
+  if (device_changed) *device_changed = 0;
+  if (device < 0) return;
+  if (thread_id < 0) thread_id = 0;
+
+  std::lock_guard<std::mutex> guard(g_hmtr_stream_mutex);
+
+  int current_dev = -1;
+  cudaGetDevice(&current_dev);
+  if (current_dev != device) {
+    if (cudaSetDevice(device) == cudaSuccess) {
+      if (device_changed) *device_changed = 1;
+    }
+  }
+
+  for (auto &slot : g_hmtr_stream_slots) {
+    if (slot.device == device && slot.thread_id == thread_id) {
+      if (stream_out) *stream_out = reinterpret_cast<void*>(slot.stream);
+      return;
+    }
+  }
+
+  cudaStream_t stream = nullptr;
+  cudaError_t cerr = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+  if (cerr != cudaSuccess || !stream) {
+    return;
+  }
+
+  HmtrStreamSlot slot;
+  slot.device = device;
+  slot.thread_id = thread_id;
+  slot.stream = stream;
+  g_hmtr_stream_slots.push_back(slot);
+  if (stream_out) *stream_out = reinterpret_cast<void*>(stream);
+}
+
+void mopac_cuda_hmtr_clear_streams(void) {
+  std::lock_guard<std::mutex> guard(g_hmtr_stream_mutex);
+  int saved_device = -1;
+  cudaGetDevice(&saved_device);
+  for (auto &slot : g_hmtr_stream_slots) {
+    cudaSetDevice(slot.device);
+    if (slot.stream) cudaStreamDestroy(slot.stream);
+  }
+  g_hmtr_stream_slots.clear();
+  if (saved_device >= 0) cudaSetDevice(saved_device);
+}
 
 // Density residency cache (full matrix + packed upper triangle)
 static DevBuf<double> g_density_full;
@@ -2228,6 +2290,7 @@ void mopac_cuda_destroy_resources() {
   // Try to quiesce all pending GPU work before releasing resources
   // This helps avoid tearing down streams/handles while async copies are in-flight.
   cudaDeviceSynchronize();
+  mopac_cuda_hmtr_clear_streams();
   // BLAS handle and streams
   destroy_handle();
   // cuSOLVER handle

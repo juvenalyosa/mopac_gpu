@@ -1,7 +1,7 @@
 ! Hierarchical memetic trust-region GPU optimizer (prototype)
 
 module hmtr_optimizer_mod
-  use iso_c_binding, only : c_double, c_int, c_bool
+  use iso_c_binding, only : c_double, c_int, c_bool, c_ptr, c_null_ptr
 #ifdef GPU
   use gpu_hmtr_interfaces
 #endif
@@ -10,7 +10,6 @@ module hmtr_optimizer_mod
   use omp_lib
 #endif
 #ifdef GPU
-  use settingGPUcard, only : setGPU
   use mod_vars_cuda, only : ngpus
 #endif
   implicit none
@@ -60,6 +59,15 @@ module hmtr_optimizer_mod
   integer :: hmtr_rho_count = 0
   integer :: hmtr_rho_expand = 0
   integer :: hmtr_rho_shrink = 0
+#ifdef GPU
+  integer, allocatable :: hmtr_device_map(:)
+  integer, allocatable :: hmtr_thread_device(:)
+  integer, allocatable :: hmtr_device_total(:)
+  integer, allocatable :: hmtr_device_batch(:)
+  type(c_ptr), allocatable :: hmtr_thread_stream(:)
+  integer :: hmtr_device_cursor = 0
+  logical :: hmtr_device_map_ready = .false.
+#endif
 
   type :: hmtr_params_type
      real(dp) :: inertia = 0.7_dp
@@ -98,6 +106,220 @@ module hmtr_optimizer_mod
   end type hmtr_population
 
 contains
+
+#ifdef GPU
+  subroutine hmtr_parse_device_env(str, values)
+    character(len=*), intent(in) :: str
+    integer, allocatable, intent(out) :: values(:)
+    integer :: lenstr, i, start, count, ios, val
+    integer, allocatable :: shrunk(:)
+    character(len=:), allocatable :: buffer
+
+    lenstr = len_trim(str)
+    if (lenstr <= 0) then
+      allocate(values(0))
+      return
+    end if
+
+    allocate(character(len=lenstr) :: buffer)
+    buffer = adjustl(str(1:lenstr))
+
+    allocate(values(lenstr))
+    count = 0
+    start = 1
+
+    do i = 1, lenstr
+      select case (buffer(i:i))
+      case (',', ' ', ';', ':')
+        if (i > start) then
+          read(buffer(start:i-1), *, iostat=ios) val
+          if (ios == 0) then
+            count = count + 1
+            values(count) = val
+          end if
+        end if
+        start = i + 1
+      end select
+    end do
+
+    if (start <= lenstr) then
+      read(buffer(start:lenstr), *, iostat=ios) val
+      if (ios == 0) then
+        count = count + 1
+        values(count) = val
+      end if
+    end if
+
+    if (count <= 0) then
+      deallocate(values)
+      allocate(values(0))
+    else if (count < lenstr) then
+      allocate(shrunk(count))
+      shrunk = values(1:count)
+      call move_alloc(shrunk, values)
+    end if
+
+    if (allocated(buffer)) deallocate(buffer)
+  end subroutine hmtr_parse_device_env
+
+  subroutine hmtr_init_device_map()
+    use mod_vars_cuda, only : ngpus
+    integer :: status, i, valid_count
+    character(len=512) :: env
+    integer, allocatable :: parsed(:)
+
+    if (hmtr_device_map_ready) return
+    if (ngpus <= 0) then
+      hmtr_device_map_ready = .true.
+      return
+    end if
+
+    env = ''
+    status = 1
+    call get_environment_variable('HMTR_GPU_MAP', env, status=status)
+    if (status == 0) then
+      call hmtr_parse_device_env(env, parsed)
+    else
+      allocate(parsed(0))
+    end if
+
+    valid_count = 0
+    if (allocated(parsed)) then
+      do i = 1, size(parsed)
+        if (parsed(i) >= 0 .and. parsed(i) < ngpus) valid_count = valid_count + 1
+      end do
+    end if
+
+    if (valid_count > 0) then
+      if (allocated(hmtr_device_map)) deallocate(hmtr_device_map)
+      allocate(hmtr_device_map(valid_count))
+      valid_count = 0
+      do i = 1, size(parsed)
+        if (parsed(i) >= 0 .and. parsed(i) < ngpus) then
+          valid_count = valid_count + 1
+          hmtr_device_map(valid_count) = parsed(i)
+        end if
+      end do
+    else
+      if (allocated(hmtr_device_map)) deallocate(hmtr_device_map)
+      allocate(hmtr_device_map(ngpus))
+      do i = 1, ngpus
+        hmtr_device_map(i) = i - 1
+      end do
+    end if
+
+    if (allocated(parsed)) deallocate(parsed)
+
+    if (allocated(hmtr_device_total)) deallocate(hmtr_device_total)
+    if (allocated(hmtr_device_batch)) deallocate(hmtr_device_batch)
+    allocate(hmtr_device_total(ngpus))
+    allocate(hmtr_device_batch(ngpus))
+    hmtr_device_total = 0
+    hmtr_device_batch = 0
+    hmtr_device_cursor = 0
+    hmtr_device_map_ready = .true.
+  end subroutine hmtr_init_device_map
+
+  subroutine hmtr_ensure_thread_slots()
+    integer :: needed, old_size
+    integer, allocatable :: temp(:)
+    type(c_ptr), allocatable :: tmp_stream(:)
+#ifdef _OPENMP
+    needed = omp_get_max_threads()
+#else
+    needed = 1
+#endif
+    if (needed <= 0) needed = 1
+
+    if (.not. allocated(hmtr_thread_device)) then
+      allocate(hmtr_thread_device(needed))
+      hmtr_thread_device = -1
+    else if (size(hmtr_thread_device) < needed) then
+      old_size = size(hmtr_thread_device)
+      allocate(temp(needed))
+      temp = -1
+      temp(1:old_size) = hmtr_thread_device
+      call move_alloc(temp, hmtr_thread_device)
+    end if
+
+    if (.not. allocated(hmtr_thread_stream)) then
+      allocate(hmtr_thread_stream(needed))
+      hmtr_thread_stream = c_null_ptr
+    else if (size(hmtr_thread_stream) < needed) then
+      old_size = size(hmtr_thread_stream)
+      allocate(tmp_stream(needed))
+      tmp_stream = c_null_ptr
+      tmp_stream(1:old_size) = hmtr_thread_stream
+      call move_alloc(tmp_stream, hmtr_thread_stream)
+    end if
+  end subroutine hmtr_ensure_thread_slots
+
+  integer function hmtr_assign_device()
+    integer :: map_len, idx
+    if (.not. hmtr_device_map_ready) call hmtr_init_device_map()
+    if (.not. allocated(hmtr_device_map)) then
+      hmtr_assign_device = -1
+      return
+    end if
+    map_len = size(hmtr_device_map)
+    if (map_len <= 0) then
+      hmtr_assign_device = -1
+      return
+    end if
+#ifdef _OPENMP
+!$omp atomic capture
+    hmtr_device_cursor = hmtr_device_cursor + 1
+    idx = hmtr_device_cursor
+!$omp end atomic
+#else
+    hmtr_device_cursor = hmtr_device_cursor + 1
+    idx = hmtr_device_cursor
+#endif
+    hmtr_assign_device = hmtr_device_map(mod(idx - 1, map_len) + 1)
+  end function hmtr_assign_device
+
+  subroutine hmtr_note_device_use(device)
+    integer, intent(in) :: device
+    if (device < 0) return
+    if (.not. allocated(hmtr_device_total)) return
+    if (.not. allocated(hmtr_device_batch)) return
+#ifdef _OPENMP
+!$omp atomic
+#endif
+    hmtr_device_total(device + 1) = hmtr_device_total(device + 1) + 1
+#ifdef _OPENMP
+!$omp atomic
+#endif
+    hmtr_device_batch(device + 1) = hmtr_device_batch(device + 1) + 1
+  end subroutine hmtr_note_device_use
+
+  subroutine hmtr_prepare_batch(use_gpu)
+    logical, intent(in) :: use_gpu
+    if (.not. use_gpu) return
+    call hmtr_init_device_map()
+    call hmtr_ensure_thread_slots()
+    if (allocated(hmtr_device_batch)) hmtr_device_batch = 0
+  end subroutine hmtr_prepare_batch
+
+  subroutine hmtr_log_batch_usage(use_gpu)
+    logical, intent(in) :: use_gpu
+    integer :: i
+    logical :: any
+    if (.not. use_gpu) return
+    if (.not. allocated(hmtr_device_batch)) return
+    any = .false.
+    do i = 1, size(hmtr_device_batch)
+      if (hmtr_device_batch(i) > 0) then
+        if (.not. any) then
+          write(iw,'(1x,"HMTR GPU batch usage:")')
+          any = .true.
+        end if
+        write(iw,'(3x,"GPU",I0,":",I0)') i - 1, hmtr_device_batch(i)
+      end if
+    end do
+    hmtr_device_batch = 0
+  end subroutine hmtr_log_batch_usage
+#endif
 
   subroutine hmtr_initialize(pop, torsion_init, params, use_gpu, torsion_idx, base_coords, ierr)
     type(hmtr_population), intent(inout) :: pop
@@ -161,6 +383,8 @@ contains
     pop%micro_radius = HMTR_MICRO_RADIUS
 #ifdef GPU
     if (want_gpu) then
+       call hmtr_init_device_map()
+       call hmtr_ensure_thread_slots()
        cfg%torsion_dim = pop%dim
         cfg%population_size = pop%population
         cfg%wrap_angles = merge(1, 0, pop%params%use_wrap)
@@ -190,6 +414,9 @@ contains
 
 #ifdef GPU
     if (pop%gpu_enabled) call mopac_cuda_hmtr_release()
+    call mopac_cuda_hmtr_clear_streams()
+    if (allocated(hmtr_thread_device)) hmtr_thread_device = -1
+    if (allocated(hmtr_thread_stream)) hmtr_thread_stream = c_null_ptr
 #endif
     if (allocated(pop%torsions)) deallocate(pop%torsions)
     if (allocated(pop%velocities)) deallocate(pop%velocities)
@@ -527,7 +754,8 @@ contains
 #endif
 #ifdef GPU
     integer :: device
-    logical(c_bool) :: gpu_set_ok
+    integer(c_int) :: device_c, tid_c, changed_flag
+    type(c_ptr) :: stream_handle
 #endif
 
     if (hmtr_cache_lookup(pop, pop%torsions(member,:), energy, grad_tors, grad_full)) return
@@ -535,9 +763,28 @@ contains
     tid = omp_get_thread_num()
 #endif
 #ifdef GPU
-    if (pop%gpu_enabled .and. ngpus > 1) then
-       device = mod(tid, ngpus)
-       call setGPU(device, gpu_set_ok)
+    stream_handle = c_null_ptr
+    changed_flag = 0_c_int
+    device = -1
+    if (pop%gpu_enabled .and. ngpus > 0) then
+       if (.not. hmtr_device_map_ready) call hmtr_init_device_map()
+       if (tid + 1 > size(hmtr_thread_device)) then
+          pop%gpu_enabled = .false.
+       else
+          if (hmtr_thread_device(tid+1) < 0) then
+             hmtr_thread_device(tid+1) = hmtr_assign_device()
+          end if
+          device = hmtr_thread_device(tid+1)
+          if (device >= 0) then
+             device_c = int(device, kind=c_int)
+             tid_c = int(tid, kind=c_int)
+             call mopac_cuda_hmtr_bind_thread(device_c, tid_c, stream_handle, changed_flag)
+             hmtr_thread_stream(tid+1) = stream_handle
+             call hmtr_note_device_use(device)
+          else
+             pop%gpu_enabled = .false.
+          end if
+       end if
     end if
 #endif
     status = 0
@@ -560,6 +807,9 @@ contains
     integer :: member, ierr
     real(dp), allocatable :: scratch_loc(:)
 
+#ifdef GPU
+    call hmtr_prepare_batch(pop%gpu_enabled)
+#endif
     stat = 0
 !$omp parallel default(shared) private(member, ierr, scratch_loc)
     allocate(scratch_loc(size(pop%base_coords)))
@@ -576,6 +826,9 @@ contains
 !$omp end do nowait
     deallocate(scratch_loc)
 !$omp end parallel
+#ifdef GPU
+    call hmtr_log_batch_usage(pop%gpu_enabled)
+#endif
   end function hmtr_evaluate_batch
 
   logical function hmtr_cache_lookup(pop, tors, energy, grad_tors, grad_full)

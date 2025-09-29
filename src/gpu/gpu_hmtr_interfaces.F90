@@ -54,6 +54,18 @@ module gpu_hmtr_interfaces
 
     subroutine mopac_cuda_hmtr_release() bind(C, name='mopac_cuda_hmtr_release')
     end subroutine mopac_cuda_hmtr_release
+
+    subroutine mopac_cuda_hmtr_bind_thread(device, thread_id, stream_ptr, device_changed) &
+         bind(C, name='mopac_cuda_hmtr_bind_thread')
+      import :: c_int, c_ptr
+      integer(c_int), value :: device
+      integer(c_int), value :: thread_id
+      type(c_ptr), intent(out) :: stream_ptr
+      integer(c_int), intent(out) :: device_changed
+    end subroutine mopac_cuda_hmtr_bind_thread
+
+    subroutine mopac_cuda_hmtr_clear_streams() bind(C, name='mopac_cuda_hmtr_clear_streams')
+    end subroutine mopac_cuda_hmtr_clear_streams
   end interface
 
 end module gpu_hmtr_interfaces

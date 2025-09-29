@@ -34,6 +34,13 @@ int mopac_cuda_hmtr_download_population(double* torsions,
 
 void mopac_cuda_hmtr_release(void);
 
+void mopac_cuda_hmtr_bind_thread(int device,
+                                 int thread_id,
+                                 void **stream_out,
+                                 int *device_changed);
+
+void mopac_cuda_hmtr_clear_streams(void);
+
 #ifdef __cplusplus
 }
 #endif
