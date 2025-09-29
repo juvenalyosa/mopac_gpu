@@ -1280,8 +1280,8 @@ extern "C" int mopac_cuda_mozyme_fock2(int iab, int jba,
 
   if (cudaMemcpyAsync(h_mz_fock2_fii.ptr, g_mz_fock2_fii.ptr, bytes_pii, cudaMemcpyDeviceToHost, s) != cudaSuccess) return 2;
   if (!diagonal) {
-    if (cudaMemcpyAsync(h_mz_fock2_fjj.ptr, g_mz_fock2_fjj.ptr, bytes_pjj, s) != cudaSuccess) return 2;
-    if (cudaMemcpyAsync(h_mz_fock2_fij.ptr, g_mz_fock2_fij.ptr, bytes_pij, s) != cudaSuccess) return 2;
+    if (cudaMemcpyAsync(h_mz_fock2_fjj.ptr, g_mz_fock2_fjj.ptr, bytes_pjj, cudaMemcpyDeviceToHost, s) != cudaSuccess) return 2;
+    if (cudaMemcpyAsync(h_mz_fock2_fij.ptr, g_mz_fock2_fij.ptr, bytes_pij, cudaMemcpyDeviceToHost, s) != cudaSuccess) return 2;
   }
   if (cudaStreamSynchronize(s) != cudaSuccess) return 2;
 
