@@ -19,6 +19,11 @@
 !-----------------------------------------------
       use common_arrays_C, only : ifact, i1fact, ptot2
       use molkst_C, only : numcal, norbs, mpack
+
+#ifdef GPU
+      use mod_vars_cuda, only: lgpu, mozyme_gpu, mozyme_f2_gpu
+      use gpu_fock_interfaces, only: mopac_cuda_mozyme_dfock2
+#endif
 !***********************************************************************
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
@@ -44,10 +49,16 @@
       integer :: itype
       integer , dimension(256) :: jindex
       integer :: icalcn, i, m, j, ij, ji, k, ik, l, kl, lk, kk, ia, ib, jk, kj&
-        , ii, jj, ja, jb, i1, j1, ll, kr, ka
+        , ii, jj, ja, jb, i1, j1, ll, kr, ka, ig, jg, idx_gpu, n_ij_gpu, &
+        n_kl_gpu, n_cross_gpu, gpu_status
       double precision, dimension(81) :: pk
       double precision, dimension(16) :: pja, pjb
       double precision :: sumdia, sumoff, sum, elrep
+#ifdef GPU
+      double precision, allocatable :: pii_gpu(:), pjj_gpu(:), pij_gpu(:)
+      double precision, allocatable :: dfii_gpu(:), dfjj_gpu(:), dfij_gpu(:)
+      logical :: diag_gpu
+#endif
 
       save itype, icalcn, jindex
 !-----------------------------------------------
@@ -132,6 +143,120 @@
           ja = nfirst(jj)
           jb = nlast(jj)
           if (ib - ia < 0 .or. jb - ja < 0) cycle ! One atom is a sparkle
+#ifdef GPU
+          if (lgpu .and. mozyme_gpu .and. mozyme_f2_gpu) then
+            ig = ib - ia + 1
+            jg = jb - ja + 1
+            n_ij_gpu = ig * (ig + 1) / 2
+            n_kl_gpu = jg * (jg + 1) / 2
+            n_cross_gpu = ig * jg
+            diag_gpu = ia == ja .and. ib == jb
+            gpu_status = 0
+            if (n_ij_gpu <= 0 .or. n_kl_gpu <= 0 .or. n_cross_gpu <= 0) then
+              gpu_status = 1
+            else
+              if (.not. allocated(pii_gpu) .or. size(pii_gpu) < n_ij_gpu) then
+                if (allocated(pii_gpu)) deallocate(pii_gpu)
+                allocate(pii_gpu(n_ij_gpu), stat=gpu_status)
+              end if
+              if (gpu_status == 0) then
+                if (.not. allocated(pjj_gpu) .or. size(pjj_gpu) < n_kl_gpu) then
+                  if (allocated(pjj_gpu)) deallocate(pjj_gpu)
+                  allocate(pjj_gpu(n_kl_gpu), stat=gpu_status)
+                end if
+              end if
+              if (gpu_status == 0) then
+                if (.not. allocated(pij_gpu) .or. size(pij_gpu) < n_cross_gpu) then
+                  if (allocated(pij_gpu)) deallocate(pij_gpu)
+                  allocate(pij_gpu(n_cross_gpu), stat=gpu_status)
+                end if
+              end if
+              if (gpu_status == 0) then
+                if (.not. allocated(dfii_gpu) .or. size(dfii_gpu) < n_ij_gpu) then
+                  if (allocated(dfii_gpu)) deallocate(dfii_gpu)
+                  allocate(dfii_gpu(n_ij_gpu), stat=gpu_status)
+                end if
+              end if
+              if (gpu_status == 0) then
+                if (.not. allocated(dfjj_gpu) .or. size(dfjj_gpu) < n_kl_gpu) then
+                  if (allocated(dfjj_gpu)) deallocate(dfjj_gpu)
+                  allocate(dfjj_gpu(n_kl_gpu), stat=gpu_status)
+                end if
+              end if
+              if (gpu_status == 0) then
+                if (.not. allocated(dfij_gpu) .or. size(dfij_gpu) < n_cross_gpu) then
+                  if (allocated(dfij_gpu)) deallocate(dfij_gpu)
+                  allocate(dfij_gpu(n_cross_gpu), stat=gpu_status)
+                end if
+              end if
+              if (gpu_status == 0) then
+                idx_gpu = 0
+                do i1 = ia, ib
+                  do j1 = ia, i1
+                    idx_gpu = idx_gpu + 1
+                    pii_gpu(idx_gpu) = ptot(ifact(i1) + j1)
+                  end do
+                end do
+                idx_gpu = 0
+                do i1 = ja, jb
+                  do j1 = ja, i1
+                    idx_gpu = idx_gpu + 1
+                    pjj_gpu(idx_gpu) = ptot(ifact(i1) + j1)
+                  end do
+                end do
+                idx_gpu = 0
+                do i1 = ia, ib
+                  do j1 = ja, jb
+                    idx_gpu = idx_gpu + 1
+                    if (i1 >= j1) then
+                      pij_gpu(idx_gpu) = p(ifact(i1) + j1)
+                    else
+                      pij_gpu(idx_gpu) = p(ifact(j1) + i1)
+                    end if
+                  end do
+                end do
+                dfii_gpu(1:n_ij_gpu) = 0.0d0
+                dfjj_gpu(1:n_kl_gpu) = 0.0d0
+                dfij_gpu(1:n_cross_gpu) = 0.0d0
+                gpu_status = mopac_cuda_mozyme_dfock2(ig, jg, diag_gpu, &
+                     pii_gpu, pjj_gpu, pij_gpu, dfii_gpu, dfjj_gpu, dfij_gpu, &
+                     w(kk+1), w(kk+1))
+                if (gpu_status == 0) then
+                  idx_gpu = 0
+                  do i1 = ia, ib
+                    do j1 = ia, i1
+                      idx_gpu = idx_gpu + 1
+                      f(ifact(i1) + j1) = f(ifact(i1) + j1) + dfii_gpu(idx_gpu)
+                    end do
+                  end do
+                  idx_gpu = 0
+                  do i1 = ja, jb
+                    do j1 = ja, i1
+                      idx_gpu = idx_gpu + 1
+                      f(ifact(i1) + j1) = f(ifact(i1) + j1) + dfjj_gpu(idx_gpu)
+                    end do
+                  end do
+                  if (.not. diag_gpu) then
+                    idx_gpu = 0
+                    do i1 = ia, ib
+                      do j1 = ja, jb
+                        idx_gpu = idx_gpu + 1
+                        sum = dfij_gpu(idx_gpu)
+                        if (i1 >= j1) then
+                          f(ifact(i1) + j1) = f(ifact(i1) + j1) + sum
+                        else
+                          f(ifact(j1) + i1) = f(ifact(j1) + i1) + sum
+                        end if
+                      end do
+                    end do
+                  end if
+                  kk = kk + n_ij_gpu * n_kl_gpu
+                  cycle
+                end if
+              end if
+            end if
+          end if
+#endif
           if (ib - ia>=6 .or. jb-ja>=6) then
             call fockdorbs(ia, ib, ja, jb, f, p, ptot, w, kk, ifact)
           else if (ib - ia>=3 .and. jb-ja>=3) then

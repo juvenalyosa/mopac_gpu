@@ -1,2 +1,2 @@
-GEO_DAT="test_dense.pdb" PM6-D3H4X  1SCF  XYZ  GEO-OK  CHARGE=-9  SINGLET  SCFCRT=1.D-10 MAXIT=999
+GEO_DAT="test_dense.pdb" PM6-D3H4X  1SCF  XYZ  GEO-OK  CHARGE=1  SINGLET  SCFCRT=1.D-10 MAXIT=999
 Dense frequency job — harmonic analysis for thermochemistry
