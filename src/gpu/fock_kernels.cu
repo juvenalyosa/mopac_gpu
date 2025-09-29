@@ -285,6 +285,8 @@ bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
   if ((ib - ia) < 0) return false;
   int span_i = span_count(ia, ib);
   if (span_i <= 0) return true;
+  if (span_i > 4) return false;
+  if (span_i > 4) return false;
 
   std::vector<int> pair_i;
   std::vector<int> pair_j;
@@ -298,6 +300,8 @@ bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
     int jb = nlast[jj - 1];
     int span_j = span_count(ja, jb);
     if (span_j <= 0) continue;
+    if (span_j > 4) return false;
+    if (span_j > 4) return false;
     int pairs_j = pair_count(span_j);
     int chunk = pairs_i * pairs_j;
     if (chunk <= 0) continue;
@@ -436,12 +440,14 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
     int ib = nlast[ii - 1];
     int span_i = span_count(ia, ib);
     if (span_i <= 0) continue;
+    if (span_i > 4) return false;
     int pairs_i = pair_count(span_i);
     for (int jj = 1; jj < ii; ++jj) {
       int ja = nfirst[jj - 1];
       int jb = nlast[jj - 1];
       int span_j = span_count(ja, jb);
       if (span_j <= 0) continue;
+      if (span_j > 4) return false;
       int pairs_j = pair_count(span_j);
       int chunk = pairs_i * pairs_j;
       if (chunk <= 0) continue;
