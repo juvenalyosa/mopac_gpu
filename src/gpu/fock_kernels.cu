@@ -75,6 +75,14 @@ static long long prof_atoms = 0;
 static long long prof_ll_pairs = 0, prof_lh_pairs = 0, prof_hh_pairs = 0;
 static double prof_total_ms = 0.0, prof_ll_ms = 0.0, prof_lh_ms = 0.0, prof_hh_ms = 0.0;
 
+static inline int span_count(int first, int last) {
+  return (last >= first) ? (last - first + 1) : 0;
+}
+
+static inline int pair_count(int span) {
+  return (span > 0) ? (span * (span + 1)) / 2 : 0;
+}
+
 static inline void ensure_verbose() {
   if (!verbose_inited) {
     const char* v = std::getenv("MOPAC_GPU_VERBOSE");
@@ -185,11 +193,25 @@ bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
     int ja = nfirst[jj - 1];
     int jb = nlast[jj - 1];
     if ((jb - ja) < 0) continue;
-    int di = ib - ia;
-    int dj = jb - ja;
-    if (di >= 3 && dj >= 3) w_len += 100; else if (di >= 3 || dj >= 3) w_len += 10; else w_len += 1;
+    int span_i = span_count(ia, ib);
+    int span_j = span_count(ja, jb);
+    int pairs_i = pair_count(span_i);
+    int pairs_j = pair_count(span_j);
+    if (pairs_i == 0 || pairs_j == 0) continue;
+    w_len += (size_t)pairs_i * (size_t)pairs_j;
   }
   if (w_len == 0) return true;
+  bool unsupported_span = false;
+  int span_i = span_count(ia, ib);
+  for (int jj = 1; jj <= numat; ++jj) {
+    if (jj == nati) continue;
+    int ja = nfirst[jj - 1];
+    int jb = nlast[jj - 1];
+    if ((jb - ja) < 0) continue;
+    int span_j = span_count(ja, jb);
+    if (span_i > 4 || span_j > 4) { unsupported_span = true; break; }
+  }
+  if (unsupported_span) return false;
   // Ensure persistent buffers
   size_t atoms_e = (size_t)numat, mpack_e = (size_t)mpack, w_e = w_len;
   if (!ensure_buf_int(&s_d_nf, &cap_nf, atoms_e)) return false;
@@ -288,14 +310,20 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   size_t mpack_e = (size_t)mpack;
   // Estimate total w length: emulate Fortran kk progression (jj<ii only)
   size_t w_len = 0;
+  bool unsupported_span = false;
   for (int ii = 1; ii <= numat; ++ii) {
     int ia = nfirst[ii - 1]; int ib = nlast[ii - 1]; if ((ib - ia) < 0) continue;
+    int span_i = span_count(ia, ib);
     for (int jj = 1; jj < ii; ++jj) {
       int ja = nfirst[jj - 1]; int jb = nlast[jj - 1]; if ((jb - ja) < 0) continue;
+      int span_j = span_count(ja, jb);
+      if (span_i > 4 || span_j > 4) { unsupported_span = true; break; }
       int di = ib - ia; int dj = jb - ja;
       if (di >= 3 && dj >= 3) w_len += 100; else if (di >= 3 || dj >= 3) w_len += 10; else w_len += 1;
     }
+    if (unsupported_span) break;
   }
+  if (unsupported_span) return false;
   if (!ensure_buf_int(&s_d_nf, &cap_nf, atoms_e)) return false;
   if (!ensure_buf_int(&s_d_nl, &cap_nl, atoms_e)) return false;
   if (!ensure_buf_double(&s_d_ptot, &cap_ptot, mpack_e)) return false;
@@ -900,11 +928,14 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
   size_t w_len = 0;
   int nn_pairs = 0;
   bool all_ll = true;
+  int span_i = span_count(ia, ib);
   for (int jj = 1; jj <= numat; ++jj) {
     if (jj == nati) continue;
     int ja = nfirst[jj - 1];
     int jb = nlast[jj - 1];
     if ((jb - ja) < 0) continue; // sparkle
+    int span_j = span_count(ja, jb);
+    if (span_i > 4 || span_j > 4) return false;
     int di = ib - ia;
     int dj = jb - ja;
     if (di >= 3 && dj >= 3) { w_len += 100; all_ll = false; }
