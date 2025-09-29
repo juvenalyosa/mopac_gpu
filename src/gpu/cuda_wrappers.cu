@@ -374,6 +374,10 @@ static DevBuf<double> g_disp_sum2, g_disp_sum3, g_disp_r, g_disp_val, g_disp_der
 static HostBuf<double> h_disp_val, h_disp_der;
 static DevBuf<double> g_mz_fock_ptot, g_mz_fock_w, g_mz_fock_out;
 static HostBuf<double> h_mz_fock_out;
+static DevBuf<double> g_mz_fock2_pii, g_mz_fock2_pjj, g_mz_fock2_pij;
+static DevBuf<double> g_mz_fock2_wj, g_mz_fock2_wk;
+static DevBuf<double> g_mz_fock2_fii, g_mz_fock2_fjj, g_mz_fock2_fij;
+static HostBuf<double> h_mz_fock2_fii, h_mz_fock2_fjj, h_mz_fock2_fij;
 // 2-GPU caches
 static DevBuf<double> g2_gemm_a0, g2_gemm_b0, g2_gemm_c0;
 static DevBuf<double> g2_gemm_a1, g2_gemm_b1, g2_gemm_c1;
@@ -1081,6 +1085,22 @@ __device__ __forceinline__ int pack_pair(int a, int b) {
   return a * (a + 1) / 2 + b;
 }
 
+__device__ inline double atomicAdd_double(double* address, double val) {
+#if __CUDA_ARCH__ >= 600
+  return atomicAdd(address, val);
+#else
+  unsigned long long int* address_as_ull = (unsigned long long int*)address;
+  unsigned long long int old = *address_as_ull;
+  unsigned long long int assumed;
+  do {
+    assumed = old;
+    old = atomicCAS(address_as_ull, assumed,
+        __double_as_longlong(val + __longlong_as_double(assumed)));
+  } while (assumed != old);
+  return __longlong_as_double(old);
+#endif
+}
+
 __global__ void mozyme_fock1_kernel(int iab,
                                     int pairCount,
                                     const double *ptot,
@@ -1134,6 +1154,141 @@ extern "C" int mopac_cuda_mozyme_fock1(int iab,
 
   for (int idx = 0; idx < pairCount; ++idx) {
     f[idx] += h_mz_fock_out.ptr[idx];
+  }
+  return 0;
+}
+
+static int g_mozyme_f2_flag = -1;
+static inline bool mozyme_f2_enabled() {
+  if (g_mozyme_f2_flag < 0) {
+    const char* env = std::getenv("MOPAC_MOZYME_F2_GPU");
+    if (env && *env) {
+      if (equals_ci(env, "0") || equals_ci(env, "off") || equals_ci(env, "false")) {
+        g_mozyme_f2_flag = 0;
+      } else {
+        g_mozyme_f2_flag = 1;
+      }
+    } else {
+      g_mozyme_f2_flag = 1;
+    }
+  }
+  return g_mozyme_f2_flag != 0;
+}
+
+__global__ void mozyme_fock2_kernel(int iab, int jba,
+                                     int n_ij, int n_kl,
+                                     const double *pii,
+                                     const double *pjj,
+                                     const double *pij,
+                                     const double *wj,
+                                     const double *wk,
+                                     double *out_fii,
+                                     double *out_fjj,
+                                     double *out_fij,
+                                     int flag_diagonal) {
+  int total = n_ij * n_kl;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= total) return;
+
+  int ij_idx = idx / n_kl;
+  int kl_idx = idx % n_kl;
+
+  int i0 = 0, j0 = 0;
+  unpack_pair(ij_idx, i0, j0);
+  int k0 = 0, l0 = 0;
+  unpack_pair(kl_idx, k0, l0);
+
+  double aa = (i0 == j0) ? 1.0 : 2.0;
+  double bb = (k0 == l0) ? 1.0 : 2.0;
+  double coul = wj[idx];
+
+  atomicAdd_double(out_fii + ij_idx, bb * coul * pjj[kl_idx]);
+
+  if (!flag_diagonal) {
+    atomicAdd_double(out_fjj + kl_idx, aa * coul * pii[ij_idx]);
+
+    double exch = wk[idx] * aa * bb * 0.125;
+    int ik = i0 * jba + k0;
+    int il = i0 * jba + l0;
+    int jk = j0 * jba + k0;
+    int jl = j0 * jba + l0;
+    atomicAdd_double(out_fij + ik, -exch * pij[jl]);
+    atomicAdd_double(out_fij + il, -exch * pij[jk]);
+    atomicAdd_double(out_fij + jk, -exch * pij[il]);
+    atomicAdd_double(out_fij + jl, -exch * pij[ik]);
+  }
+}
+
+extern "C" int mopac_cuda_mozyme_fock2(int iab, int jba,
+                                        bool diagonal,
+                                        const double *pii,
+                                        const double *pjj,
+                                        const double *pij,
+                                        double *fii,
+                                        double *fjj,
+                                        double *fij,
+                                        const double *wj,
+                                        const double *wk) {
+  if (!mozyme_f2_enabled()) return 1;
+  if (iab <= 0 || jba <= 0 || !pii || !pjj || !pij || !fii || !fjj || !fij || !wj || !wk) return 1;
+  int n_ij = iab * (iab + 1) / 2;
+  int n_kl = jba * (jba + 1) / 2;
+  int total = n_ij * n_kl;
+  if (total <= 0) return 1;
+
+  cudaStream_t s = g_stream ? g_stream : 0;
+  size_t bytes_pii = sizeof(double) * (size_t)n_ij;
+  size_t bytes_pjj = sizeof(double) * (size_t)n_kl;
+  size_t bytes_pij = sizeof(double) * (size_t)iab * (size_t)jba;
+  size_t bytes_w = sizeof(double) * (size_t)total;
+
+  g_mz_fock2_pii.ensure(bytes_pii);
+  g_mz_fock2_pjj.ensure(bytes_pjj);
+  g_mz_fock2_pij.ensure(bytes_pij);
+  g_mz_fock2_wj.ensure(bytes_w);
+  g_mz_fock2_wk.ensure(bytes_w);
+  g_mz_fock2_fii.ensure(bytes_pii);
+  g_mz_fock2_fjj.ensure(bytes_pjj);
+  g_mz_fock2_fij.ensure(bytes_pij);
+  h_mz_fock2_fii.ensure(bytes_pii);
+  h_mz_fock2_fjj.ensure(bytes_pjj);
+  h_mz_fock2_fij.ensure(bytes_pij);
+
+  if (cudaMemcpyAsync(g_mz_fock2_pii.ptr, pii, bytes_pii, cudaMemcpyHostToDevice, s) != cudaSuccess) return 2;
+  if (cudaMemcpyAsync(g_mz_fock2_pjj.ptr, pjj, bytes_pjj, cudaMemcpyHostToDevice, s) != cudaSuccess) return 2;
+  if (cudaMemcpyAsync(g_mz_fock2_pij.ptr, pij, bytes_pij, cudaMemcpyHostToDevice, s) != cudaSuccess) return 2;
+  if (cudaMemcpyAsync(g_mz_fock2_wj.ptr, wj, bytes_w, cudaMemcpyHostToDevice, s) != cudaSuccess) return 2;
+  if (cudaMemcpyAsync(g_mz_fock2_wk.ptr, wk, bytes_w, cudaMemcpyHostToDevice, s) != cudaSuccess) return 2;
+
+  cudaMemsetAsync(g_mz_fock2_fii.ptr, 0, bytes_pii, s);
+  cudaMemsetAsync(g_mz_fock2_fjj.ptr, 0, bytes_pjj, s);
+  cudaMemsetAsync(g_mz_fock2_fij.ptr, 0, bytes_pij, s);
+
+  int threads = 128;
+  int blocks = (total + threads - 1) / threads;
+  mozyme_fock2_kernel<<<blocks, threads, 0, s>>>(iab, jba, n_ij, n_kl,
+                                                 g_mz_fock2_pii.ptr,
+                                                 g_mz_fock2_pjj.ptr,
+                                                 g_mz_fock2_pij.ptr,
+                                                 g_mz_fock2_wj.ptr,
+                                                 g_mz_fock2_wk.ptr,
+                                                 g_mz_fock2_fii.ptr,
+                                                 g_mz_fock2_fjj.ptr,
+                                                 g_mz_fock2_fij.ptr,
+                                                 diagonal ? 1 : 0);
+  if (cudaPeekAtLastError() != cudaSuccess) return 3;
+
+  if (cudaMemcpyAsync(h_mz_fock2_fii.ptr, g_mz_fock2_fii.ptr, bytes_pii, cudaMemcpyDeviceToHost, s) != cudaSuccess) return 2;
+  if (!diagonal) {
+    if (cudaMemcpyAsync(h_mz_fock2_fjj.ptr, g_mz_fock2_fjj.ptr, bytes_pjj, s) != cudaSuccess) return 2;
+    if (cudaMemcpyAsync(h_mz_fock2_fij.ptr, g_mz_fock2_fij.ptr, bytes_pij, s) != cudaSuccess) return 2;
+  }
+  if (cudaStreamSynchronize(s) != cudaSuccess) return 2;
+
+  for (int i = 0; i < n_ij; ++i) fii[i] += h_mz_fock2_fii.ptr[i];
+  if (!diagonal) {
+    for (int i = 0; i < n_kl; ++i) fjj[i] += h_mz_fock2_fjj.ptr[i];
+    for (int i = 0; i < iab * jba; ++i) fij[i] += h_mz_fock2_fij.ptr[i];
   }
   return 0;
 }
@@ -1987,6 +2142,10 @@ void mopac_cuda_destroy_resources() {
   h_disp_val.release(); h_disp_der.release();
   g_mz_fock_ptot.release(); g_mz_fock_w.release(); g_mz_fock_out.release();
   h_mz_fock_out.release();
+  g_mz_fock2_pii.release(); g_mz_fock2_pjj.release(); g_mz_fock2_pij.release();
+  g_mz_fock2_wj.release(); g_mz_fock2_wk.release();
+  g_mz_fock2_fii.release(); g_mz_fock2_fjj.release(); g_mz_fock2_fij.release();
+  h_mz_fock2_fii.release(); h_mz_fock2_fjj.release(); h_mz_fock2_fij.release();
   g_resident_mode = -1;
 }
 

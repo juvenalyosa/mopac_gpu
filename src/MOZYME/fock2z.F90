@@ -1,3 +1,4 @@
+use mod_vars_cuda, only: lgpu, mozyme_gpu
 ! Molecular Orbital PACkage (MOPAC)
 ! Copyright 2021 Virginia Polytechnic Institute and State University
 !
@@ -1293,6 +1294,11 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
 end subroutine fz2n
 subroutine focd2z (iab, jba, fii, fjj, fij, pii, pjj, pij, wj, wk, &
      & diagonal, kr)
+#ifdef GPU
+   use mod_vars_cuda, only: lgpu, mozyme_gpu
+   use gpu_fock_interfaces, only: mopac_cuda_mozyme_fock2
+   use iso_c_binding, only: c_bool
+#endif
    !
    !.. Implicit Declarations ..
     implicit none
@@ -1311,6 +1317,10 @@ subroutine focd2z (iab, jba, fii, fjj, fij, pii, pjj, pij, wj, wk, &
     double precision, dimension (iab*jba), intent (inout) :: fij
 !.
     integer :: i, ij, ik, il, j, jk, jl, k, ka, kc, kl, l, loop
+#ifdef GPU
+    integer :: gpu_code
+    logical(c_bool) :: diag_flag
+#endif
     double precision :: a, aa, bb
    !***********************************************************************
    !
@@ -1323,6 +1333,17 @@ subroutine focd2z (iab, jba, fii, fjj, fij, pii, pjj, pij, wj, wk, &
    !  ON OUTPUT F   = PARTIAL FOCK MATRIX
    !***********************************************************************
     loop = 0
+    if (iab <= 0 .or. jba <= 0) return
+#ifdef GPU
+    if (lgpu .and. mozyme_gpu) then
+      diag_flag = diagonal
+      gpu_code = mopac_cuda_mozyme_fock2(iab, jba, diag_flag, pii, pjj, pij, fii, fjj, fij, wj, wk)
+      if (gpu_code == 0) then
+        kr = kr + (iab*(iab+1))/2 * (jba*(jba+1))/2
+        return
+      end if
+    end if
+#endif
     do i = 1, iab
       ka = (i*(i-1)) / 2
       aa = 2.0d00

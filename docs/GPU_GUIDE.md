@@ -50,6 +50,7 @@ BLAS Acceleration and Multi‑GPU
 - `MOZYME_GPU_FORCE=1`: keep MOZYME GPU enabled even on GPUs with compute capability < 6.0 (default auto policy disables it).
 - `MOZYME_MINBLK=n`: lower the minimum MOZYME block size for GPU rank-1 GEMM/SYRK (default `n=4`).
 - `MOPAC_DISP_GPU=1`: enable GPU evaluation of the DnX halogen dispersion term (energy and gradients); set to `0`/`off` to force the CPU path.
+- `MOPAC_MOZYME_F2_GPU=0`: disable the GPU two-centre MOZYME Fock kernel (falls back to the CPU loop).
 
 Streams, Pinning, and Determinism
 - Streams: enable/disable CUDA streams for wrappers with `MOPAC_STREAMS=off` (defaults on).
@@ -65,6 +66,7 @@ Verbose/Profiling
 
 Example checks
 - `scripts/run_gpu_suite.sh ./build-gpu/mopac` now includes `disp_halogen_gpu`, which exercises the GPU dispersion path using `examples/halogen_disp.mop` (`MOPAC_DISP_GPU=1`).
+- `scripts/bench_mozyme_gpu_vs_cpu.py` benchmarks MOZYME GPU vs CPU on a chosen deck and emits a timing plot.
 
 Multi‑GPU Eigensolver (cuSOLVERMg)
 - Enable: `MOPAC_EIG_MG=1` with `ngpus>1` and set `MOPAC_EIG_MG_MIN` (e.g., `3000`).
