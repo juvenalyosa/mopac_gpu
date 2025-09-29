@@ -40,6 +40,7 @@ module hmtr_optimizer_mod
 #else
   logical, parameter :: hmtr_gpu_available = .false.
 #endif
+  logical :: hmtr_force_gpu_eval = .false.
 
   type :: hmtr_params_type
      real(dp) :: inertia = 0.7_dp
@@ -319,8 +320,11 @@ contains
        if (present(ierr)) ierr = status
        call hmtr_finalize(pop)
        deallocate(init)
+       hmtr_force_gpu_eval = .false.
        return
     end if
+
+    hmtr_force_gpu_eval = pop%gpu_enabled
 
     allocate(energies(population))
     allocate(gradients(population, nvar))
@@ -338,6 +342,7 @@ contains
        call hmtr_finalize(pop)
        deallocate(init, energies, gradients)
        if (present(ierr)) ierr = status
+       hmtr_force_gpu_eval = .false.
        return
     end if
     call hmtr_update_best(pop, energies, gradients)
@@ -358,6 +363,14 @@ contains
        if (maxval(abs(pop%gbest_grad)) < tolerance) exit
     end do
 
+    if (status /= 0) then
+       call hmtr_finalize(pop)
+        deallocate(init, energies, gradients)
+        if (present(ierr)) ierr = status
+        hmtr_force_gpu_eval = .false.
+        return
+    end if
+
     best_coords = pop%gbest
     best_energy = minval(pop%pbest_energy)
     best_grad = pop%gbest_grad
@@ -365,6 +378,7 @@ contains
 
     deallocate(init, energies, gradients)
     call hmtr_finalize(pop)
+    hmtr_force_gpu_eval = .false.
   end subroutine hmtr_optimize_torsions
 
   subroutine perturb_initial(arr, use_wrap)
@@ -386,12 +400,18 @@ contains
 
   subroutine hmtr_compfg_evaluator(coords, energy, grad, ierr)
     use molkst_C, only : nvar, moperr
+#ifdef GPU
+    use mod_vars_cuda, only : lgpu
+#endif
     real(dp), intent(in) :: coords(:)
     real(dp), intent(out) :: energy
     real(dp), intent(out) :: grad(:)
     integer, intent(out) :: ierr
     real(dp), allocatable :: grad_local(:)
     logical :: want_grad
+#ifdef GPU
+    logical :: old_lgpu
+#endif
 
     ierr = 0
     if (size(coords) /= nvar .or. size(grad) /= nvar) then
@@ -401,7 +421,18 @@ contains
 
     allocate(grad_local(nvar))
     want_grad = .true.
+#ifdef GPU
+    if (hmtr_force_gpu_eval) then
+       old_lgpu = lgpu
+       lgpu = .true.
+    else
+       old_lgpu = lgpu
+    end if
+#endif
     call compfg(coords, .true., energy, .true., grad_local, want_grad)
+#ifdef GPU
+    if (hmtr_force_gpu_eval) lgpu = old_lgpu
+#endif
     grad = grad_local
     if (allocated(grad_local)) deallocate(grad_local)
     if (moperr) ierr = 1
