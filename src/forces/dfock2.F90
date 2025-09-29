@@ -23,6 +23,7 @@
 #ifdef GPU
       use mod_vars_cuda, only: lgpu, mozyme_gpu, mozyme_f2_gpu
       use gpu_fock_interfaces, only: mopac_cuda_mozyme_dfock2
+      use iso_c_binding, only: c_bool
 #endif
 !***********************************************************************
 !-----------------------------------------------
@@ -57,7 +58,7 @@
 #ifdef GPU
       double precision, allocatable :: pii_gpu(:), pjj_gpu(:), pij_gpu(:)
       double precision, allocatable :: dfii_gpu(:), dfjj_gpu(:), dfij_gpu(:)
-      logical :: diag_gpu
+      logical(c_bool) :: diag_gpu
 #endif
 
       save itype, icalcn, jindex
@@ -150,7 +151,7 @@
             n_ij_gpu = ig * (ig + 1) / 2
             n_kl_gpu = jg * (jg + 1) / 2
             n_cross_gpu = ig * jg
-            diag_gpu = ia == ja .and. ib == jb
+            diag_gpu = merge(.true._c_bool, .false._c_bool, ia == ja .and. ib == jb)
             gpu_status = 0
             if (n_ij_gpu <= 0 .or. n_kl_gpu <= 0 .or. n_cross_gpu <= 0) then
               gpu_status = 1
