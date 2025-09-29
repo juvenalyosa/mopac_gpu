@@ -60,11 +60,11 @@ static long long prof_atoms = 0;
 static long long prof_ll_pairs = 0, prof_lh_pairs = 0, prof_hh_pairs = 0;
 static double prof_total_ms = 0.0, prof_ll_ms = 0.0, prof_lh_ms = 0.0, prof_hh_ms = 0.0;
 
-static inline int span_count(int first, int last) {
+__host__ __device__ inline int span_count(int first, int last) {
   return (last >= first) ? (last - first + 1) : 0;
 }
 
-static inline int pair_count(int span) {
+__host__ __device__ inline int pair_count(int span) {
   return (span > 0) ? (span * (span + 1)) / 2 : 0;
 }
 
