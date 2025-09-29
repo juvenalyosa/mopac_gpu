@@ -63,7 +63,7 @@
 #endif
 #ifdef GPU
       Use iso_c_binding
-      Use mod_vars_cuda, only: lgpu, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu, resident_scf
+      Use mod_vars_cuda, only: lgpu, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu, mozyme_f2_gpu, resident_scf
       Use gpu_info
       Use settingGPUcard
       use gpu_runtime_interfaces
@@ -435,6 +435,27 @@
             end if
           end if
         end if
+
+        ! Determine default policy for MOZYME pair kernel (F2)
+        mozyme_f2_gpu = mozyme_gpu
+        call get_environment_variable('MOPAC_MOZYME_F2_GPU', line, status=i)
+        if (i == 0) then
+          if (trim(adjustl(line)) /= '') then
+            select case (line(1:1))
+            case ('0','f','F','n','N','o','O')
+              mozyme_f2_gpu = .false.
+            case default
+              mozyme_f2_gpu = .true.
+            end select
+          end if
+        else if (mozyme .and. lgpu .and. mozyme_f2_gpu) then
+          if (nDevices > 0) then
+            j = gpu_id + 1
+            if (j < 1 .or. j > nDevices) j = 1
+            if (major(j) < 6) mozyme_f2_gpu = .false.
+          end if
+        end if
+
         ! Optional debug summary
         call get_environment_variable('MOPAC_GPU_DEBUG', line, status=i)
         if (i == 0) then
@@ -449,6 +470,7 @@
             end do
             write(iw,'(3x,a,1x,l1,3x,a,1x,i0)') 'mozyme_gpu=', mozyme_gpu, 'mozyme_minblk=', mozyme_gpu_min_block
             write(iw,'(3x,a,1x,l1)') 'mozyme_2gpu=', mozyme_force_2gpu
+            write(iw,'(3x,a,1x,l1)') 'mozyme_f2_gpu=', mozyme_f2_gpu
             write(iw,'(3x,a,1x,l1)') 'resident_scf=', resident_scf
 
             ! Policy: ORTHO on GPU (auto on for CC>=7.0 unless env says otherwise)

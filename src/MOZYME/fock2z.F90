@@ -1294,7 +1294,7 @@ end subroutine fz2n
 subroutine focd2z (iab, jba, fii, fjj, fij, pii, pjj, pij, wj, wk, &
      & diagonal, kr)
 #ifdef GPU
-   use mod_vars_cuda, only: lgpu, mozyme_gpu
+   use mod_vars_cuda, only: lgpu, mozyme_gpu, mozyme_f2_gpu
    use gpu_fock_interfaces, only: mopac_cuda_mozyme_fock2
    use iso_c_binding, only: c_bool
 #endif
@@ -1334,7 +1334,7 @@ subroutine focd2z (iab, jba, fii, fjj, fij, pii, pjj, pij, wj, wk, &
     loop = 0
     if (iab <= 0 .or. jba <= 0) return
 #ifdef GPU
-    if (lgpu .and. mozyme_gpu) then
+    if (lgpu .and. mozyme_gpu .and. mozyme_f2_gpu) then
       diag_flag = diagonal
       gpu_code = mopac_cuda_mozyme_fock2(iab, jba, diag_flag, pii, pjj, pij, fii, fjj, fij, wj, wk)
       if (gpu_code == 0) then

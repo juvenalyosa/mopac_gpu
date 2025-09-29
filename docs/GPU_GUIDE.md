@@ -50,7 +50,7 @@ BLAS Acceleration and Multi‑GPU
 - `MOZYME_GPU_FORCE=1`: keep MOZYME GPU enabled even on GPUs with compute capability < 6.0 (default auto policy disables it).
 - `MOZYME_MINBLK=n`: lower the minimum MOZYME block size for GPU rank-1 GEMM/SYRK (default `n=4`).
 - `MOPAC_DISP_GPU=1`: enable GPU evaluation of the DnX halogen dispersion term (energy and gradients); set to `0`/`off` to force the CPU path.
-- `MOPAC_MOZYME_F2_GPU=0`: disable the GPU two-centre MOZYME Fock kernel (falls back to the CPU loop).
+- `MOPAC_MOZYME_F2_GPU=0`: disable the GPU two-centre MOZYME Fock kernel (falls back to the CPU loop). The default is automatic: it stays on for CC ≥ 6.0 devices and off for older GPUs.
 
 Streams, Pinning, and Determinism
 - Streams: enable/disable CUDA streams for wrappers with `MOPAC_STREAMS=off` (defaults on).
