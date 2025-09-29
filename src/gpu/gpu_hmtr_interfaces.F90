@@ -13,13 +13,15 @@ module gpu_hmtr_interfaces
   end type mopac_hmtr_config
 
   interface
-    function mopac_cuda_hmtr_configure(cfg) bind(C,name='mopac_cuda_hmtr_configure') result(code)
+    function mopac_cuda_hmtr_configure(cfg) &
+         bind(C, name='mopac_cuda_hmtr_configure') result(code)
       import :: mopac_hmtr_config, c_int
       type(mopac_hmtr_config), intent(in) :: cfg
       integer(c_int) :: code
     end function mopac_cuda_hmtr_configure
 
-    function mopac_cuda_hmtr_upload_population(torsions, velocities, pbest) bind(C,name='mopac_cuda_hmtr_upload_population') result(code)
+    function mopac_cuda_hmtr_upload_population(torsions, velocities, pbest) &
+         bind(C, name='mopac_cuda_hmtr_upload_population') result(code)
       import :: c_double, c_int
       real(c_double), intent(in) :: torsions(*)
       real(c_double), intent(in) :: velocities(*)
@@ -27,28 +29,30 @@ module gpu_hmtr_interfaces
       integer(c_int) :: code
     end function mopac_cuda_hmtr_upload_population
 
-    function mopac_cuda_hmtr_set_gbest(gbest) bind(C,name='mopac_cuda_hmtr_set_gbest') result(code)
+    function mopac_cuda_hmtr_set_gbest(gbest) &
+         bind(C, name='mopac_cuda_hmtr_set_gbest') result(code)
       import :: c_double, c_int
       real(c_double), intent(in) :: gbest(*)
       integer(c_int) :: code
     end function mopac_cuda_hmtr_set_gbest
 
-    function mopac_cuda_hmtr_pso_step(rand1, rand2) bind(C,name='mopac_cuda_hmtr_pso_step') result(code)
+    function mopac_cuda_hmtr_pso_step(rand1, rand2) &
+         bind(C, name='mopac_cuda_hmtr_pso_step') result(code)
       import :: c_double, c_int
       real(c_double), intent(in) :: rand1(*)
       real(c_double), intent(in) :: rand2(*)
       integer(c_int) :: code
     end function mopac_cuda_hmtr_pso_step
 
-    function mopac_cuda_hmtr_download_population(torsions, velocities) bind(C,name='mopac_cuda_hmtr_download_population') result(code)
+    function mopac_cuda_hmtr_download_population(torsions, velocities) &
+         bind(C, name='mopac_cuda_hmtr_download_population') result(code)
       import :: c_double, c_int
       real(c_double), intent(out) :: torsions(*)
       real(c_double), intent(out) :: velocities(*)
       integer(c_int) :: code
     end function mopac_cuda_hmtr_download_population
 
-    subroutine mopac_cuda_hmtr_release() bind(C,name='mopac_cuda_hmtr_release')
-      import :: c_void
+    subroutine mopac_cuda_hmtr_release() bind(C, name='mopac_cuda_hmtr_release')
     end subroutine mopac_cuda_hmtr_release
   end interface
 
