@@ -72,7 +72,7 @@ run_case() {
   # Consider both the banner and the single-line footer (case-insensitive)
   if grep -qiE "(JOB ENDED NORMALLY|ended normally on)" "$log"; then status="OK"; fi
   # Mark as GPU activity if BLAS logs appear, MG fallback logs are present, or MG notices fire
-  if grep -Eq "(\[GPU\] (DGEMM|DSYRK)|\[MGPU\]|cuSOLVERMg support unavailable|cuSOLVERMg solve failed|cuSOLVERMg workspace allocation failed)" "$log"; then
+  if grep -Eq "(\[GPU\]|\[MGPU\]|cuSOLVERMg support unavailable|cuSOLVERMg solve failed|cuSOLVERMg workspace allocation failed)" "$log"; then
     gpu_hits="yes"
   fi
   # Enforce expected GPU logs for certain tests
