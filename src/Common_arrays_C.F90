@@ -14,6 +14,7 @@
 ! limitations under the License.
 
 module Common_arrays_C
+  use iso_c_binding, only : c_int
 
 !
 !  This module contains all the arrays relating to the system being calculated.
@@ -40,10 +41,6 @@ module Common_arrays_C
                    !  Definition    Connectivity for bonds, angles, and dihedrals
   &  na_store,   & !  Store of "na" for cases where na must be temporarily zero
                    !
-  &  nfirst,     & !  Term          Starting index of atomic orbitals for each atom
-                   !
-  &  nlast,      & !  Term          Ending index of atomic orbitals for each atom
-                   !
   &  nw,         & !
   &  ifact,      & !
   &  i1fact,     & !
@@ -57,6 +54,7 @@ module Common_arrays_C
   &  ipKa_sorted,& ! List of ionizable hydrogen atoms, sorted by pKa
   &ipKa_unsorted,& ! List of ionizable hydrogen atoms, not yet sorted by pKa
   &  dummy
+  integer(c_int), dimension (:), allocatable :: nfirst, nlast
   integer, dimension (:,:), allocatable :: &
   &  loc,        & !  Indices of atoms and coordinates marked for optimization
   &  ibonds,     & !  Atom numbers of atoms bonded to a given atom

@@ -23,7 +23,7 @@ contains
     integer, intent(in)        :: span_a, span_b
     character(*), intent(in)   :: label
     integer :: local_norbs, local_mpack
-    integer :: nfirst(2), nlast(2)
+    integer(c_int) :: nfirst(2), nlast(2)
     integer, allocatable :: ifact_local(:)
     double precision, allocatable :: ptot(:), p(:), w(:), f_cpu(:), f_gpu(:)
     integer :: i, len_w
