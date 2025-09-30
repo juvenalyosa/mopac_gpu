@@ -337,6 +337,11 @@ bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
     cudaMemcpy(s_d_w, w, sizeof(double)*w_len, cudaMemcpyHostToDevice);
   }
   if (!pair_i.empty()) {
+    printf("host debug: num_pairs=%zu w_len=%zu first_pair=%d/%d offset0=%d\n",
+           pair_i.size(), w_len,
+           pair_i.empty() ? -1 : pair_i[0],
+           pair_j.empty() ? -1 : pair_j[0],
+           pair_off.empty() ? -1 : pair_off[0]);
     cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int)*pair_i.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int)*pair_j.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(s_d_pair_off, pair_off.data(), sizeof(int)*pair_off.size(), cudaMemcpyHostToDevice);
