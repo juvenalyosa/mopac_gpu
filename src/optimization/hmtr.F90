@@ -1,7 +1,7 @@
 ! Hierarchical memetic trust-region GPU optimizer (prototype)
 
 module hmtr_optimizer_mod
-  use iso_c_binding, only : c_double, c_int, c_bool, c_ptr, c_null_ptr
+  use iso_c_binding, only : c_double, c_int, c_bool, c_ptr, c_null_ptr, c_associated
 #ifdef GPU
   use gpu_hmtr_interfaces
   use gpu_runtime_interfaces, only: mopac_cuda_set_active_stream, mopac_cuda_clear_active_stream

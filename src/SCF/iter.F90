@@ -56,14 +56,13 @@
         iemax, iredy, niter, modea, modeb, nl1, nl2, nu1, nu2
       double precision, dimension(numat) :: q
       double precision, dimension(10) :: escf0
-      double precision :: plb, scfcrt, pl, bshift, pltest, trans, w1, w2, random, &
+      double precision :: plb, scfcrt, pl, bshift, pltest, trans, w1, w2, random
+      double precision :: shift, shiftb, shfmax, ten, tenold, plchek, scorr, shfto, shftbo, titer0, jalp, ialp, jbet, ibet
+      double precision :: enrgy, sellim, sum, summ, eold_alpha, eold_beta, theta(norbs), ofract, sum1, sum2
 #ifdef GPU
       type(c_ptr) :: fock_dev
       type(c_ptr) :: density_dev
 #endif
-        shift, shiftb = 0.d0, shfmax, ten, tenold, plchek, scorr, shfto, &
-        shftbo, titer0, eold, diff, enrgy, titer, escf, &
-        sellim, sum, summ, eold_alpha, eold_beta, theta(norbs), ofract, sum1, sum2
       logical :: debug, prtfok, prteig, prtden, prt1el, minprt, newdg, prtpl, &
         prtvec, camkin, ci, okpuly, oknewd, times, force, allcon, &
         halfe, gs, capps, incitr, timitr, frst, bfrst, ready, glow,  &
@@ -104,6 +103,10 @@
       sellim = 0.d0
       opendd = .false.
       glow = .FALSE.
+#ifdef GPU
+      fock_dev = c_null_ptr
+      density_dev = c_null_ptr
+#endif
       if (icalcn /= numcal) then
         call delete_iter_arrays
         l_param = .true.
@@ -977,10 +980,6 @@
 !                                                                      *
 !***********************************************************************
         if (timitr) call timer ('BEFORE DENSIT')
-#ifdef GPU
-        density_dev = c_null_ptr
-        if (resident_scf) density_dev = mopac_cuda_get_density_device_ptr()
-#endif
         if (uhf) then
           ! Optional hard override to use CPU density even if lgpu is true
           i = 1 ; line = ''
