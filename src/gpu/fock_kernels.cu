@@ -241,9 +241,6 @@ __global__ void fock_pairs_kernel(int npairs,
   int jb = nlast[jj - 1];
   if ((ib - ia) < 0 || (jb - ja) < 0) return;
   const double *w_block = w + pair_off[tid];
-  if (tid == 0) {
-    printf("kernel debug: ia=%d ib=%d ja=%d jb=%d w0=%g ptot0=%g\n", ia, ib, ja, jb, w_block[0], ptot[0]);
-  }
   fock_pair_update(ia, ib, ja, jb, ptot, p, w_block, f);
 }
 
@@ -329,6 +326,8 @@ bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
   if (!ensure_buf_double(&s_d_w, &cap_w, w_len)) return false;
   if (!ensure_pair_buffers(pair_i.size())) return false;
 
+  if (cudaMemset(s_d_f, 0, sizeof(double)*mpack_e) != cudaSuccess) return false;
+
   cudaMemcpy(s_d_nf, nfirst, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
   cudaMemcpy(s_d_nl, nlast, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
   cudaMemcpy(s_d_ptot, ptot, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
@@ -337,11 +336,6 @@ bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
     cudaMemcpy(s_d_w, w, sizeof(double)*w_len, cudaMemcpyHostToDevice);
   }
   if (!pair_i.empty()) {
-    printf("host debug: num_pairs=%zu w_len=%zu first_pair=%d/%d offset0=%d\n",
-           pair_i.size(), w_len,
-           pair_i.empty() ? -1 : pair_i[0],
-           pair_j.empty() ? -1 : pair_j[0],
-           pair_off.empty() ? -1 : pair_off[0]);
     cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int)*pair_i.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int)*pair_j.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(s_d_pair_off, pair_off.data(), sizeof(int)*pair_off.size(), cudaMemcpyHostToDevice);
@@ -487,6 +481,8 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   if (!ensure_buf_double(&s_d_w, &cap_w, w_len)) return false;
   if (!ensure_pair_buffers(pair_i.size())) return false;
 
+  if (cudaMemset(s_d_f, 0, sizeof(double)*mpack_e) != cudaSuccess) return false;
+
   cudaMemcpy(s_d_nf, nfirst, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
   cudaMemcpy(s_d_nl, nlast, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
   if (!mopac_cuda_density_copy_cached(s_d_ptot, mpack_e, ptot)) {
@@ -495,7 +491,6 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   if (!mopac_cuda_density_copy_cached(s_d_p, mpack_e, p)) {
     cudaMemcpy(s_d_p, p, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
   }
-  cudaMemset(s_d_f, 0, sizeof(double)*mpack_e);
   if (w_len > 0) {
     cudaMemcpy(s_d_w, w, sizeof(double)*w_len, cudaMemcpyHostToDevice);
   }
@@ -608,6 +603,8 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
   if (!ensure_buf_double(&s_d_f, &cap_f, mpack_e)) return false;
   if (!ensure_buf_double(&s_d_w, &cap_w, w_len)) return false;
   if (!ensure_pair_buffers(pair_i.size())) return false;
+
+  if (cudaMemset(s_d_f, 0, sizeof(double)*mpack_e) != cudaSuccess) return false;
 
   cudaMemcpy(s_d_nf, nfirst, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
   cudaMemcpy(s_d_nl, nlast, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);

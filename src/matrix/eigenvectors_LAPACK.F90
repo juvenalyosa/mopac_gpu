@@ -196,12 +196,7 @@ end if
           env = ''
           call get_environment_variable('MOPAC_EIG_MG', env, status=stat_env)
           if (ngpus > 1 .and. ndim >= thr_mg .and. stat_env == 0 .and. trim(adjustl(env)) /= '') then
-            if (.not. mg_available) then
-              if (.not. mg_warned) then
-                write(iw, '(a)') ' cuSOLVERMg support unavailable; falling back to single-GPU eigensolver.'
-                mg_warned = .true.
-              end if
-            else
+            if (mg_available) then
               allocate(Sfull(ndim,ndim), stat=i)
               if (i == 0) then
                 Sfull = eigenvecs
@@ -225,6 +220,9 @@ end if
                   mg_warned = .true.
                 end if
               end if
+            else if (.not. mg_warned) then
+              write(iw, '(a)') ' cuSOLVERMg support unavailable; falling back to single-GPU eigensolver.'
+              mg_warned = .true.
             end if
           end if
           if (fastgpu) then
