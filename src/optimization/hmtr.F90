@@ -4,6 +4,7 @@ module hmtr_optimizer_mod
   use iso_c_binding, only : c_double, c_int, c_bool, c_ptr, c_null_ptr
 #ifdef GPU
   use gpu_hmtr_interfaces
+  use gpu_runtime_interfaces, only: mopac_cuda_set_active_stream, mopac_cuda_clear_active_stream
 #endif
   use chanel_C, only : iw
 #ifdef _OPENMP
@@ -319,6 +320,25 @@ contains
     end do
     hmtr_device_batch = 0
   end subroutine hmtr_log_batch_usage
+
+  subroutine hmtr_log_total_usage(use_gpu)
+    logical, intent(in) :: use_gpu
+    integer :: i
+    logical :: any
+    if (.not. use_gpu) return
+    if (.not. allocated(hmtr_device_total)) return
+    any = .false.
+    do i = 1, size(hmtr_device_total)
+      if (hmtr_device_total(i) > 0) then
+        if (.not. any) then
+          write(iw,'(1x,"HMTR GPU aggregate usage:")')
+          any = .true.
+        end if
+        write(iw,'(3x,"GPU",I0,":",I0)') i - 1, hmtr_device_total(i)
+      end if
+    end do
+    if (any) hmtr_device_total = 0
+  end subroutine hmtr_log_total_usage
 #endif
 
   subroutine hmtr_initialize(pop, torsion_init, params, use_gpu, torsion_idx, base_coords, ierr)
@@ -680,6 +700,9 @@ contains
 
     do iter_idx = 1, iterations
        status = hmtr_global_step(pop)
+#ifdef GPU
+       hmtr_force_gpu_eval = pop%gpu_enabled
+#endif
        if (status /= 0) exit
        status = hmtr_evaluate_batch(pop, 1, population, evaluator, energies, gradients, gradients_full)
        if (status /= 0) exit
@@ -712,6 +735,9 @@ contains
     hmtr_rho_expand = 0
     hmtr_rho_shrink = 0
 
+#ifdef GPU
+    call hmtr_log_total_usage(pop%gpu_enabled)
+#endif
     if (allocated(init)) deallocate(init)
     if (allocated(energies)) deallocate(energies)
     if (allocated(gradients)) deallocate(gradients)
@@ -756,6 +782,7 @@ contains
     integer :: device
     integer(c_int) :: device_c, tid_c, changed_flag
     type(c_ptr) :: stream_handle
+    logical :: stream_bound
 #endif
 
     if (hmtr_cache_lookup(pop, pop%torsions(member,:), energy, grad_tors, grad_full)) return
@@ -766,6 +793,7 @@ contains
     stream_handle = c_null_ptr
     changed_flag = 0_c_int
     device = -1
+    stream_bound = .false.
     if (pop%gpu_enabled .and. ngpus > 0) then
        if (.not. hmtr_device_map_ready) call hmtr_init_device_map()
        if (tid + 1 > size(hmtr_thread_device)) then
@@ -780,6 +808,10 @@ contains
              tid_c = int(tid, kind=c_int)
              call mopac_cuda_hmtr_bind_thread(device_c, tid_c, stream_handle, changed_flag)
              hmtr_thread_stream(tid+1) = stream_handle
+             if (c_associated(stream_handle)) then
+                call mopac_cuda_set_active_stream(stream_handle)
+                stream_bound = .true.
+             end if
              call hmtr_note_device_use(device)
           else
              pop%gpu_enabled = .false.
@@ -791,10 +823,14 @@ contains
     scratch = pop%base_coords
     scratch(pop%torsion_idx) = pop%torsions(member,:)
     call evaluator(scratch, energy, grad_full, status)
-    if (status /= 0) return
-    grad_tors = grad_full(pop%torsion_idx)
-    call hmtr_micro_refine(pop, member, evaluator, energy, grad_tors, grad_full, scratch, status)
-    if (status == 0) call hmtr_cache_store(pop, pop%torsions(member,:), energy, grad_tors, grad_full)
+    if (status == 0) then
+       grad_tors = grad_full(pop%torsion_idx)
+       call hmtr_micro_refine(pop, member, evaluator, energy, grad_tors, grad_full, scratch, status)
+       if (status == 0) call hmtr_cache_store(pop, pop%torsions(member,:), energy, grad_tors, grad_full)
+    end if
+#ifdef GPU
+    if (stream_bound) call mopac_cuda_clear_active_stream()
+#endif
   end subroutine hmtr_evaluate_member
 
   integer function hmtr_evaluate_batch(pop, first, last, evaluator, energies, gradients, gradients_full) result(stat)
@@ -811,7 +847,7 @@ contains
     call hmtr_prepare_batch(pop%gpu_enabled)
 #endif
     stat = 0
-!$omp parallel default(shared) private(member, ierr, scratch_loc)
+!$omp parallel default(shared) private(member, ierr, scratch_loc) if (.not. pop%gpu_enabled)
     allocate(scratch_loc(size(pop%base_coords)))
 !$omp do schedule(dynamic)
     do member = first, last

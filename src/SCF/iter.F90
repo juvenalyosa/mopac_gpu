@@ -38,10 +38,13 @@
       use purify_gpu
 #endif
 #ifdef GPU
-      Use mod_vars_cuda, only: lgpu, real_cuda, prec
+      use iso_c_binding, only: c_ptr, c_null_ptr, c_associated
+      Use mod_vars_cuda, only: lgpu, real_cuda, prec, resident_scf
       use density_cuda_i
       use gpu_diag_state, only: have_device_eigvecs
       use eigenvectors_cuda_mod, only: eigenvectors_CUDA_fetch
+      use gpu_runtime_interfaces, only: mopac_cuda_get_density_device_ptr, mopac_cuda_get_fock_device_ptr, &
+           mopac_cuda_set_resident_mode
 #endif
       implicit none
       double precision , intent(out) :: ee
@@ -54,6 +57,10 @@
       double precision, dimension(numat) :: q
       double precision, dimension(10) :: escf0
       double precision :: plb, scfcrt, pl, bshift, pltest, trans, w1, w2, random, &
+#ifdef GPU
+      type(c_ptr) :: fock_dev
+      type(c_ptr) :: density_dev
+#endif
         shift, shiftb = 0.d0, shfmax, ten, tenold, plchek, scorr, shfto, &
         shftbo, titer0, eold, diff, enrgy, titer, escf, &
         sellim, sum, summ, eold_alpha, eold_beta, theta(norbs), ofract, sum1, sum2
@@ -496,6 +503,16 @@
       if (timitr) call timer ('BEFORE FOCKS')
       if (id /= 0) then
         call fock2 (f, p, pa, w, w, wk, numat, nfirst, nlast, 2)
+#ifdef GPU
+        if (resident_scf) then
+          fock_dev = mopac_cuda_get_fock_device_ptr()
+          if (.not. c_associated(fock_dev)) then
+            resident_scf = .false.
+            fock_dev = c_null_ptr
+            call mopac_cuda_set_resident_mode(0)
+          end if
+        end if
+#endif
       else if (method_indo) then
         if (.not. allocated(dd)) then
           allocate(dd(mpack,2))
@@ -577,6 +594,16 @@
         end if
       else
         call fock2 (f, p, pa, w, w, w, numat, nfirst, nlast, 2)
+#ifdef GPU
+        if (resident_scf) then
+          fock_dev = mopac_cuda_get_fock_device_ptr()
+          if (.not. c_associated(fock_dev)) then
+            resident_scf = .false.
+            fock_dev = c_null_ptr
+            call mopac_cuda_set_resident_mode(0)
+          end if
+        end if
+#endif
       end if
       if (lxfac) then
         ee = helect(norbs,pa,h,f)*2.d0
@@ -620,8 +647,28 @@
         end if
         if (id /= 0) then
           call fock2 (fb, p, pb, w, w, wk, numat, nfirst, nlast, 2)
+#ifdef GPU
+          if (resident_scf) then
+            fock_dev = mopac_cuda_get_fock_device_ptr()
+            if (.not. c_associated(fock_dev)) then
+              resident_scf = .false.
+              fock_dev = c_null_ptr
+              call mopac_cuda_set_resident_mode(0)
+            end if
+          end if
+#endif
         else
           call fock2 (fb, p, pb, w, w, w, numat, nfirst, nlast, 2)
+#ifdef GPU
+          if (resident_scf) then
+            fock_dev = mopac_cuda_get_fock_device_ptr()
+            if (.not. c_associated(fock_dev)) then
+              resident_scf = .false.
+              fock_dev = c_null_ptr
+              call mopac_cuda_set_resident_mode(0)
+            end if
+          end if
+#endif
         end if
         if (prtfok) then
           write (iw, "('   BETA FOCK MATRIX ON ITERATION',i3)") niter
@@ -930,6 +977,10 @@
 !                                                                      *
 !***********************************************************************
         if (timitr) call timer ('BEFORE DENSIT')
+#ifdef GPU
+        density_dev = c_null_ptr
+        if (resident_scf) density_dev = mopac_cuda_get_density_device_ptr()
+#endif
         if (uhf) then
           ! Optional hard override to use CPU density even if lgpu is true
           i = 1 ; line = ''
@@ -967,8 +1018,18 @@
           end if
           if (modea/=3 .and. .not.(newdg .and. okpuly)) then
             call cnvg (p, pold, pold2,  niter, pl)
+          end if
+        end if
+#ifdef GPU
+      if (resident_scf) then
+        density_dev = mopac_cuda_get_density_device_ptr()
+        if (.not. c_associated(density_dev)) then
+          resident_scf = .false.
+          density_dev = c_null_ptr
+          call mopac_cuda_set_resident_mode(0)
         end if
       end if
+#endif
 9050  if (timitr) call timer ('AFTER  DENSIT')
 !***********************************************************************
 !                                                                      *

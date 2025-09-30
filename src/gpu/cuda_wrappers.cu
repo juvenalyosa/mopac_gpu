@@ -348,6 +348,8 @@ static cudaStream_t   g_stream0 = nullptr;    // 2-GPU device0 stream
 static cudaStream_t   g_stream1 = nullptr;    // 2-GPU device1 stream
 static bool           g_streams_enabled = true;
 static bool           g_pin_user = false;     // Pin user memory for direct H2D/D2H if requested
+static cudaStream_t   g_stream_backup = nullptr;
+static int            g_stream_override_depth = 0;
 
 static inline void ensure_pair_streams() {
   int dev_count = 0;
@@ -2265,7 +2267,29 @@ __global__ void add_diag_kernel(double *full, int ld, int n, double value) {
   }
 }
 
-void mopac_cuda_destroy_resources() {
+extern "C" void mopac_cuda_set_active_stream(void* stream_ptr) {
+  cudaStream_t new_stream = static_cast<cudaStream_t>(stream_ptr);
+  if (!new_stream) return;
+  create_handle();
+  if (g_stream_override_depth == 0) {
+    g_stream_backup = g_stream;
+  }
+  g_stream_override_depth++;
+  g_stream = new_stream;
+  if (g_blas) cublasSetStream(g_blas, g_stream);
+}
+
+extern "C" void mopac_cuda_clear_active_stream(void) {
+  if (g_stream_override_depth <= 0) return;
+  g_stream_override_depth--;
+  if (g_stream_override_depth == 0) {
+    g_stream = g_stream_backup;
+    if (g_blas) cublasSetStream(g_blas, g_stream);
+    g_stream_backup = nullptr;
+  }
+}
+
+extern "C" void mopac_cuda_destroy_resources() {
   static bool already = false;
   // Allow skipping destroy on some platforms where driver teardown is fragile
   const char* skip = std::getenv("MOPAC_SKIP_GPU_DESTROY");
@@ -2334,6 +2358,44 @@ void mopac_cuda_destroy_resources() {
   g_mz_dfock2_fii.release(); g_mz_dfock2_fjj.release(); g_mz_dfock2_fij.release();
   h_mz_dfock2_fii.release(); h_mz_dfock2_fjj.release(); h_mz_dfock2_fij.release();
   g_resident_mode = -1;
+  g_stream_backup = nullptr;
+  g_stream_override_depth = 0;
+}
+
+extern "C" void* mopac_cuda_get_fock_device_ptr(void) {
+  if (!resident_mode_enabled()) return nullptr;
+  if (!g_fock_cache.valid) return nullptr;
+  return static_cast<void*>(g_fock_cache.buf.ptr);
+}
+
+extern "C" void* mopac_cuda_get_density_device_ptr(void) {
+  if (!resident_mode_enabled()) return nullptr;
+  if (!g_density_full_valid) return nullptr;
+  return static_cast<void*>(g_density_full.ptr);
+}
+
+extern "C" bool mopac_cuda_fetch_fock(double *host_ptr, size_t linear) {
+  if (!resident_mode_enabled()) return false;
+  if (!g_fock_cache.valid) return false;
+  if (!host_ptr) return false;
+  if (g_fock_cache.len != linear) return false;
+  cudaStream_t s = g_stream ? g_stream : 0;
+  if (cudaMemcpyAsync(host_ptr, g_fock_cache.buf.ptr, sizeof(double)*linear, cudaMemcpyDeviceToHost, s) != cudaSuccess) return false;
+  cudaStreamSynchronize(s);
+  return true;
+}
+
+
+extern "C" bool mopac_cuda_fetch_density(double *host_ptr, int n, int ld) {
+  if (!resident_mode_enabled()) return false;
+  if (!g_density_full_valid) return false;
+  if (!host_ptr) return false;
+  if (n != g_density_full_n || ld != g_density_full_ld) return false;
+  size_t bytes = sizeof(double) * (size_t)ld * (size_t)n;
+  cudaStream_t s = g_stream ? g_stream : 0;
+  if (cudaMemcpyAsync(host_ptr, g_density_full.ptr, bytes, cudaMemcpyDeviceToHost, s) != cudaSuccess) return false;
+  cudaStreamSynchronize(s);
+  return true;
 }
 
 void mopac_cuda_clear_density_cache() {
