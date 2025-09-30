@@ -5,6 +5,7 @@
 #include <cstring>
 #include <vector>
 #include <algorithm>
+#include <limits>
 
 // Silence intentional placeholders to avoid noisy nvcc warnings
 #if !defined(MOPAC_UNUSED)
@@ -285,8 +286,8 @@ bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
   if ((ib - ia) < 0) return false;
   int span_i = span_count(ia, ib);
   if (span_i <= 0) return true;
-  if (span_i > 4) return false;
-  if (span_i > 4) return false;
+
+  const size_t max_index = static_cast<size_t>(std::numeric_limits<int>::max());
 
   std::vector<int> pair_i;
   std::vector<int> pair_j;
@@ -300,11 +301,11 @@ bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
     int jb = nlast[jj - 1];
     int span_j = span_count(ja, jb);
     if (span_j <= 0) continue;
-    if (span_j > 4) return false;
-    if (span_j > 4) return false;
     int pairs_j = pair_count(span_j);
     int chunk = pairs_i * pairs_j;
     if (chunk <= 0) continue;
+    if (pair_i.size() >= max_index) return false;
+    if (w_len > max_index) return false;
     pair_i.push_back(nati);
     pair_j.push_back(jj);
     pair_off.push_back(static_cast<int>(w_len));
@@ -320,6 +321,7 @@ bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
   if (!ensure_buf_double(&s_d_ptot, &cap_ptot, mpack_e)) return false;
   if (!ensure_buf_double(&s_d_p, &cap_p, mpack_e)) return false;
   if (!ensure_buf_double(&s_d_f, &cap_f, mpack_e)) return false;
+  if (pair_i.size() > max_index) return false;
   if (!ensure_buf_double(&s_d_w, &cap_w, w_len)) return false;
   if (!ensure_pair_buffers(pair_i.size())) return false;
 
@@ -434,23 +436,24 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   pair_i.reserve(std::max(1, numat));
 
   size_t w_len = 0;
+  const size_t max_index = static_cast<size_t>(std::numeric_limits<int>::max());
   long long ll_pairs = 0, lh_pairs = 0, hh_pairs = 0;
   for (int ii = 1; ii <= numat; ++ii) {
     int ia = nfirst[ii - 1];
     int ib = nlast[ii - 1];
     int span_i = span_count(ia, ib);
     if (span_i <= 0) continue;
-    if (span_i > 4) return false;
     int pairs_i = pair_count(span_i);
     for (int jj = 1; jj < ii; ++jj) {
       int ja = nfirst[jj - 1];
       int jb = nlast[jj - 1];
       int span_j = span_count(ja, jb);
       if (span_j <= 0) continue;
-      if (span_j > 4) return false;
       int pairs_j = pair_count(span_j);
       int chunk = pairs_i * pairs_j;
       if (chunk <= 0) continue;
+      if (pair_i.size() >= max_index) return false;
+      if (w_len > max_index) return false;
       pair_i.push_back(ii);
       pair_j.push_back(jj);
       pair_off.push_back(static_cast<int>(w_len));
@@ -464,6 +467,8 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
       }
     }
   }
+
+  if (pair_i.size() > max_index) return false;
 
   if (!ensure_buf_int(&s_d_nf, &cap_nf, atoms_e)) return false;
   if (!ensure_buf_int(&s_d_nl, &cap_nl, atoms_e)) return false;
@@ -563,6 +568,8 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
   std::vector<int> pair_off;
   pair_i.reserve(std::max(0, nati - 1));
 
+  const size_t max_index = static_cast<size_t>(std::numeric_limits<int>::max());
+
   size_t w_len = 0;
   int pairs_i = pair_count(span_i);
   for (int jj = 1; jj < nati; ++jj) {
@@ -573,11 +580,15 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
     int pairs_j = pair_count(span_j);
     int chunk = pairs_i * pairs_j;
     if (chunk <= 0) continue;
+    if (pair_i.size() >= max_index) return false;
+    if (w_len > max_index) return false;
     pair_i.push_back(nati);
     pair_j.push_back(jj);
     pair_off.push_back(static_cast<int>(w_len));
     w_len += static_cast<size_t>(chunk);
   }
+
+  if (pair_i.size() > max_index) return false;
 
   size_t atoms_e = (size_t)numat;
   size_t mpack_e = (size_t)mpack;

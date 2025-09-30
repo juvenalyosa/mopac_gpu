@@ -92,6 +92,12 @@ if(NOT TARGET mopac-gpu-scf-no-uhf)
 endif()
 add_test(NAME "gpu-scf-no-uhf" COMMAND mopac-gpu-scf-no-uhf)
 
+if(NOT TARGET mopac-gpu-fock-pair-compare)
+  add_executable(mopac-gpu-fock-pair-compare gpu_fock_pair_compare.F90)
+  target_link_libraries(mopac-gpu-fock-pair-compare PRIVATE mopac-core)
+endif()
+add_test(NAME "gpu-fock-pair-compare" COMMAND mopac-gpu-fock-pair-compare)
+
 add_subdirectory(INDO-dev)
 add_subdirectory(keywords)
 
