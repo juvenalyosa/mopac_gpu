@@ -150,9 +150,9 @@ static inline bool ensure_pair_buffers(size_t need_pairs) {
 
 __host__ __device__ inline int packed_index(int a, int b) {
   if (a >= b) {
-    return ifact_idx(a) + (b - 1);
+    return ifact_idx(a) + b;
   } else {
-    return ifact_idx(b) + (a - 1);
+    return ifact_idx(b) + a;
   }
 }
 
@@ -174,13 +174,13 @@ __device__ void fock_pair_update(int ia, int ib, int ja, int jb,
             int jk = packed_index(j, k);
             int jl = packed_index(j, l);
             double a = w[kr++];
-            atomicAdd_double(&f[ij], bb * a * ptot[kl]);
-            atomicAdd_double(&f[kl], aa * a * ptot[ij]);
+            atomicAdd_double(&f[ij - 1], bb * a * ptot[kl - 1]);
+            atomicAdd_double(&f[kl - 1], aa * a * ptot[ij - 1]);
             double exch = a * aa * bb * 0.25;
-            atomicAdd_double(&f[ik], -exch * p[jl]);
-            atomicAdd_double(&f[il], -exch * p[jk]);
-            atomicAdd_double(&f[jk], -exch * p[il]);
-            atomicAdd_double(&f[jl], -exch * p[ik]);
+            atomicAdd_double(&f[ik - 1], -exch * p[jl - 1]);
+            atomicAdd_double(&f[il - 1], -exch * p[jk - 1]);
+            atomicAdd_double(&f[jk - 1], -exch * p[il - 1]);
+            atomicAdd_double(&f[jl - 1], -exch * p[ik - 1]);
           }
         }
       }
@@ -206,13 +206,13 @@ __device__ void fock_pair_update(int ia, int ib, int ja, int jb,
             int jl = packed_index(j, l);
             int idx = (n2 - 1) * nn + (n1 - 1);
             double a = w[idx];
-            atomicAdd_double(&f[ij], bb * a * ptot[kl]);
-            atomicAdd_double(&f[kl], aa * a * ptot[ij]);
+            atomicAdd_double(&f[ij - 1], bb * a * ptot[kl - 1]);
+            atomicAdd_double(&f[kl - 1], aa * a * ptot[ij - 1]);
             double exch = a * aa * bb * 0.25;
-            atomicAdd_double(&f[ik], -exch * p[jl]);
-            atomicAdd_double(&f[il], -exch * p[jk]);
-            atomicAdd_double(&f[jk], -exch * p[il]);
-            atomicAdd_double(&f[jl], -exch * p[ik]);
+            atomicAdd_double(&f[ik - 1], -exch * p[jl - 1]);
+            atomicAdd_double(&f[il - 1], -exch * p[jk - 1]);
+            atomicAdd_double(&f[jk - 1], -exch * p[il - 1]);
+            atomicAdd_double(&f[jl - 1], -exch * p[ik - 1]);
           }
         }
       }

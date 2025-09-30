@@ -109,6 +109,8 @@ contains
       diff = max(diff, abs(f_cpu(i) - f_gpu(i)))
       denom = max(denom, abs(f_cpu(i)))
     end do
+    print *, 'first three CPU values for ', trim(label), ':', f_cpu(1:min(3,local_mpack))
+    print *, 'first three GPU values for ', trim(label), ':', f_gpu(1:min(3,local_mpack))
     if (diff > 1.0d-8 .and. diff/denom > 1.0d-8) then
       print *, 'GPU/CPU mismatch for ', trim(label), ': diff=', diff, ' denom=', denom
       deallocate(ptot, p, f_cpu, f_gpu, w, ifact_local)
