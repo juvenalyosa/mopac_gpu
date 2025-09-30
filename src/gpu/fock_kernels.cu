@@ -240,6 +240,9 @@ __global__ void fock_pairs_kernel(int npairs,
   int jb = nlast[jj - 1];
   if ((ib - ia) < 0 || (jb - ja) < 0) return;
   const double *w_block = w + pair_off[tid];
+  if (tid == 0) {
+    printf("kernel debug: ia=%d ib=%d ja=%d jb=%d w0=%g ptot0=%g\n", ia, ib, ja, jb, w_block[0], ptot[0]);
+  }
   fock_pair_update(ia, ib, ja, jb, ptot, p, w_block, f);
 }
 
