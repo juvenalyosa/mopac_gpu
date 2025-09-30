@@ -57,8 +57,9 @@
       double precision, dimension(numat) :: q
       double precision, dimension(10) :: escf0
       double precision :: plb, scfcrt, pl, bshift, pltest, trans, w1, w2, random
-      double precision :: shift, shiftb, shfmax, ten, tenold, plchek, scorr, shfto, shftbo, titer0, jalp, ialp, jbet, ibet
-      double precision :: enrgy, sellim, sum, summ, eold_alpha, eold_beta, theta(norbs), ofract, sum1, sum2
+      double precision :: shift, shiftb, shfmax, ten, tenold, plchek, scorr, shfto, shftbo, titer0
+      double precision :: enrgy, sellim, summ, eold_alpha, eold_beta, ofract, sum1, sum2, diff, eold, escf, titer
+      double precision, dimension(norbs) :: theta
 #ifdef GPU
       type(c_ptr) :: fock_dev
       type(c_ptr) :: density_dev
