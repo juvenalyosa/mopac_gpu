@@ -122,188 +122,7 @@
         mode = 0
       end if
       q(:numat) = tore(nat(:numat)) - q(:numat)
-      i2 = 1
-      do ii = 1, numat
-        if (mozyme) then
-          if (mode == 0 .or. jopt(i2) == ii) then
-            i2 = i2 + 1
-          else
-            cycle
-          end if
-        end if
-        iii = l123*(ii - 1)
-        im1 = ii - ione
-        if = nfirst(ii)
-        il = nlast(ii)
-        ndi(2) = nat(ii)
-        cdi(:,2) = coord(:,ii)
-        j2 = 1
-        do jj = 1, im1
-          if (mozyme) then
-            if (mode == 0 .or. jopt(j2) == jj) then
-              j2 = j2 + 1
-            else
-              cycle
-            end if
-          end if
-          if (ii == jj) then
-            half = 0.5d0
-          else
-            half = 1.d0
-          end if
-          jjj = l123*(jj - 1)
-!  FORM DIATOMIC MATRICES
-          jf = nfirst(jj)
-          jl = nlast(jj)
-!   GET FIRST ATOM
-          ndi(1) = nat(jj)
-          if (mozyme) then
-            if (ijbo(ii, jj) >= 0) then
-                  ! GET FIRST ATOM
-              k = ijbo (jj, jj)
-              ij = 0
-              do i = 1, iorbs(jj)
-                do j = 1, i
-                  ij = ij + 1
-                  k = k + 1
-                  padi(ij) = p(k) * 0.5d0
-                  pdi(ij) = p(k)
-                end do
-              end do
-                  ! GET SECOND ATOM FIRST ATOM INTERSECTION
-              if (ii == jj) then
-                 ij = iorbs(jj)
-                 do i = 1, iorbs(ii)
-                  ij = ij + 1
-                  l = (ij*(ij-1)) / 2
-                  do j = 1, iorbs(jj)
-                    l = l + 1
-                    padi(l) = 0.d0
-                    pdi(l) = 0.d0
-                  end do
-                end do
-              else
-                ij = iorbs(jj)
-                k = ijbo (ii, jj)
-                do i = 1, iorbs(ii)
-                  ij = ij + 1
-                  l = (ij*(ij-1)) / 2
-                  do j = 1, iorbs(jj)
-                    l = l + 1
-                    k = k + 1
-                    padi(l) = p(k) * 0.5d0
-                    pdi(l) = p(k)
-                  end do
-                end do
-              end if
-                  ! GET SECOND ATOM
-              k = ijbo (ii, ii)
-              ij = iorbs(jj)
-              do i = 1, iorbs(ii)
-                ij = ij + 1
-                l = (ij*(ij-1)) / 2 + iorbs(jj)
-                do j = 1, i
-                  k = k + 1
-                  l = l + 1
-                  padi(l) = p(k) * 0.5d0
-                  pdi(l) = p(k)
-                end do
-              end do
-              pbdi = padi
-              point = .false.
-            else
-              point = .true.
-            end if
-          else
-          point = .false.
-          ij = 0
-            do i = jf, jl
-              k = (i*(i - 1))/2 + jf - 1
-              if (i - jf + 1 > 0) then
-                padi(ij+1:i-jf+1+ij) = pa(k+1:i-jf+1+k)
-                pbdi(ij+1:i-jf+1+ij) = pb(k+1:i-jf+1+k)
-                pdi(ij+1:i-jf+1+ij) = p(k+1:i-jf+1+k)
-                ij = i - jf + 1 + ij
-              end if
-            end do
-! GET SECOND ATOM FIRST ATOM INTERSECTION
-            do i = if, il
-              l = (i*(i - 1))/2
-              k = l + jf - 1
-              if (jl - jf + 1 > 0) then
-                padi(ij+1:jl-jf+1+ij) = pa(k+1:jl-jf+1+k)
-                pbdi(ij+1:jl-jf+1+ij) = pb(k+1:jl-jf+1+k)
-                pdi(ij+1:jl-jf+1+ij) = p(k+1:jl-jf+1+k)
-                ij = jl - jf + 1 + ij
-              end if
-              k = l + if - 1
-              if (i - if + 1 > 0) then
-                padi(ij+1:i-if+1+ij) = pa(k+1:i-if+1+k)
-                pbdi(ij+1:i-if+1+ij) = pb(k+1:i-if+1+k)
-                pdi(ij+1:i-if+1+ij) = p(k+1:i-if+1+k)
-                ij = i - if + 1 + ij
-              end if
-            end do
-          end if
-          kkkk = 0
-          do ik = -l1u, l1u
-            do jk = -l2u, l2u
-              do kl = -l3u, l3u
-                kkkk = kkkk + 1
-                cdi(:,1) = coord(:,jj) + tvec(:,1)*ik + tvec(:,2)*jk + tvec(:,3)*kl
-                if (id /= 0) then
-                  rij = (cdi(1, 1)-cdi(1, 2)) ** 2 &
-                       & + (cdi(2, 1)-cdi(2, 2)) ** 2 &
-                       & + (cdi(3, 1)-cdi(3, 2)) ** 2
-                  if (rij > (2.d0/3.d0*cutofp)**2) then
-                        !
-                        !   Use point-charge approximation
-                        !
-                    rij = Sqrt (rij)
-                    der = derp (rij)
-                    ee = q(ii) * q(jj) * fpc_9 * ev * a0 * der
-                    do k = 1, 3
-                      deriv = half * ee * (cdi(k, 1)-cdi(k, 2)) / rij
-                      dxyz(k, iii+icuc) = dxyz(k, iii+icuc) - deriv
-                      dxyz(k, jjj+kkkk) = dxyz(k, jjj+kkkk) + deriv
-                    end do
-                    cycle
-                  end if
-                end if
-                if (point) then
-                  do l = 1, 3
-                    cdi(l, 1) = coord(l, jj) + tvec(l, 1) * ik &
-                         & + tvec(l, 2) * jk + tvec(l, 3) * kl
-                  end do
-                  call delsta (nat, iorbs, p, cdi, dstat, ii, jj)
-                  dxyz(1:3, iii+icuc) = dxyz(1:3, iii+icuc) - dstat(1:3)
-                  dxyz(1:3, jjj+kkkk) = dxyz(1:3, jjj+kkkk) + dstat(1:3)
-                else
-                  if (.not. force) then
-                   cdi(1,1) = cdi(1,1) + chnge2
-                   cdi(2,1) = cdi(2,1) + chnge2
-                   cdi(3,1) = cdi(3,1) + chnge2
-                   call dhc (pdi, padi, pbdi, cdi, ndi, jf, jl, if, il, aa, 1)
-                  end if
-                  do k = 1, 3
-                    if (force) then
-                      cdi(k,2) = cdi(k,2) - chnge2
-                      call dhc (pdi, padi, pbdi, cdi, ndi, jf, jl, if, il, aa, 1)
-                    end if
-                    cdi(k,2) = cdi(k,2) + chnge
-                    call dhc (pdi, padi, pbdi, cdi, ndi, jf, jl, if, il, ee, 2)
-                    cdi(k,2) = cdi(k,2) - chnge2
-                    if (.not. force) cdi(k,2) = cdi(k,2) - chnge2
-                    deriv = half*(aa - ee)*const/chnge
-                    dxyz(k,iii+icuc) = dxyz(k,iii+icuc) - deriv
-                    dxyz(k,jjj+kkkk) = dxyz(k,jjj+kkkk) + deriv
-                  end do
-                end if
-              end do
-            end do
-          end do
-        end do
-      end do
+      call dcart_build_scf_gradient_cpu(numat, l123, coord, dxyz, q, chnge, chnge2, const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
       if (nnhco /= 0) then
 !
 !   NOW ADD IN MOLECULAR-MECHANICS CORRECTION TO THE H-N-C=O TORSION
@@ -454,6 +273,206 @@
       end if
       return
       end subroutine dcart
+
+      subroutine dcart_build_scf_gradient_cpu(numat_in, l123_in, coord, dxyz, q, chnge, chnge2, const, numtot_in, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
+      use common_arrays_C, only : nfirst, nlast, nat, p, pa, pb, tvec
+      use molkst_C, only : mozyme, id, cutofp, l1u, l2u, l3u
+      use MOZYME_C, only : iorbs, part_dxyz, mode, jopt
+      implicit none
+      integer, intent(in) :: numat_in, l123_in, numtot_in, icuc, ione
+      double precision, intent(in) :: coord(3, numat_in)
+      double precision, intent(inout) :: dxyz(3, numat_in*l123_in)
+      double precision, intent(inout) :: q(numat_in)
+      double precision, intent(in) :: chnge, chnge2, const
+      logical, intent(in) :: force
+      double precision, intent(inout) :: pdi(171), padi(171), pbdi(171)
+      double precision, intent(inout) :: cdi(3,2)
+      integer, intent(inout) :: ndi(2)
+      double precision, intent(inout) :: dstat(3)
+      double precision, external :: derp
+      integer, external :: ijbo
+      integer :: i2, j2, ii, jj, iii, jjj, im1, jf, jl, if, il
+      integer :: ij, i, j, k, l, ik, jk, kl, kkkk
+      double precision :: half, rij, deriv, aa, ee
+      logical :: point
+
+      i2 = 1
+      do ii = 1, numat_in
+        if (mozyme) then
+          if (mode == 0 .or. jopt(i2) == ii) then
+            i2 = i2 + 1
+          else
+            cycle
+          end if
+        end if
+        iii = l123_in*(ii - 1)
+        im1 = ii - ione
+        if = nfirst(ii)
+        il = nlast(ii)
+        ndi(2) = nat(ii)
+        cdi(:,2) = coord(:,ii)
+        j2 = 1
+        do jj = 1, im1
+          if (mozyme) then
+            if (mode == 0 .or. jopt(j2) == jj) then
+              j2 = j2 + 1
+            else
+              cycle
+            end if
+          end if
+          if (ii == jj) then
+            half = 0.5d0
+          else
+            half = 1.d0
+          end if
+          jjj = l123_in*(jj - 1)
+          jf = nfirst(jj)
+          jl = nlast(jj)
+          ndi(1) = nat(jj)
+          if (mozyme) then
+            if (ijbo(ii, jj) >= 0) then
+              k = ijbo (jj, jj)
+              ij = 0
+              do i = 1, iorbs(jj)
+                do j = 1, i
+                  ij = ij + 1
+                  k = k + 1
+                  padi(ij) = p(k) * 0.5d0
+                  pdi(ij) = p(k)
+                end do
+              end do
+              if (ii == jj) then
+                ij = iorbs(jj)
+                do i = 1, iorbs(ii)
+                  ij = ij + 1
+                  l = (ij*(ij-1)) / 2
+                  do j = 1, iorbs(jj)
+                    l = l + 1
+                    padi(l) = 0.d0
+                    pdi(l) = 0.d0
+                  end do
+                end do
+              else
+                ij = iorbs(jj)
+                k = ijbo (ii, jj)
+                do i = 1, iorbs(ii)
+                  ij = ij + 1
+                  l = (ij*(ij-1)) / 2
+                  do j = 1, iorbs(jj)
+                    l = l + 1
+                    k = k + 1
+                    padi(l) = p(k) * 0.5d0
+                    pdi(l) = p(k)
+                  end do
+                end do
+              end if
+              k = ijbo (ii, ii)
+              ij = iorbs(jj)
+              do i = 1, iorbs(ii)
+                ij = ij + 1
+                l = (ij*(ij-1)) / 2 + iorbs(jj)
+                do j = 1, i
+                  k = k + 1
+                  l = l + 1
+                  padi(l) = p(k) * 0.5d0
+                  pdi(l) = p(k)
+                end do
+              end do
+              pbdi = padi
+              point = .false.
+            else
+              point = .true.
+            end if
+          else
+            point = .false.
+            ij = 0
+            do i = jf, jl
+              k = (i*(i - 1))/2 + jf - 1
+              if (i - jf + 1 > 0) then
+                padi(ij+1:i-jf+1+ij) = pa(k+1:i-jf+1+k)
+                pbdi(ij+1:i-jf+1+ij) = pb(k+1:i-jf+1+k)
+                pdi(ij+1:i-jf+1+ij) = p(k+1:i-jf+1+k)
+                ij = i - jf + 1 + ij
+              end if
+            end do
+            do i = if, il
+              l = (i*(i - 1))/2
+              k = l + jf - 1
+              if (jl - jf + 1 > 0) then
+                padi(ij+1:jl-jf+1+ij) = pa(k+1:jl-jf+1+k)
+                pbdi(ij+1:jl-jf+1+ij) = pb(k+1:jl-jf+1+k)
+                pdi(ij+1:jl-jf+1+ij) = p(k+1:jl-jf+1+k)
+                ij = jl - jf + 1 + ij
+              end if
+              k = l + if - 1
+              if (i - if + 1 > 0) then
+                padi(ij+1:i-if+1+ij) = pa(k+1:i-if+1+k)
+                pbdi(ij+1:i-if+1+ij) = pb(k+1:i-if+1+k)
+                pdi(ij+1:i-if+1+ij) = p(k+1:i-if+1+k)
+                ij = i - if + 1 + ij
+              end if
+            end do
+          end if
+          kkkk = 0
+          do ik = -l1u, l1u
+            do jk = -l2u, l2u
+              do kl = -l3u, l3u
+                kkkk = kkkk + 1
+                cdi(:,1) = coord(:,jj) + tvec(:,1)*ik + tvec(:,2)*jk + tvec(:,3)*kl
+                if (id /= 0) then
+                  rij = (cdi(1, 1)-cdi(1, 2)) ** 2 &
+                       & + (cdi(2, 1)-cdi(2, 2)) ** 2 &
+                       & + (cdi(3, 1)-cdi(3, 2)) ** 2
+                  if (rij > (2.d0/3.d0*cutofp)**2) then
+                    rij = Sqrt (rij)
+                    ee = q(ii) * q(jj) * fpc_9 * ev * a0 * derp(rij)
+                    do k = 1, 3
+                      deriv = half * ee * (cdi(k, 1)-cdi(k, 2)) / rij
+                      dxyz(k, iii+icuc) = dxyz(k, iii+icuc) - deriv
+                      dxyz(k, jjj+kkkk) = dxyz(k, jjj+kkkk) + deriv
+                    end do
+                    cycle
+                  end if
+                end if
+                if (point) then
+                  do l = 1, 3
+                    cdi(l, 1) = coord(l, jj) + tvec(l, 1) * ik &
+                         & + tvec(l, 2) * jk + tvec(l, 3) * kl
+                  end do
+                  call delsta (nat, iorbs, p, cdi, dstat, ii, jj)
+                  dxyz(1:3, iii+icuc) = dxyz(1:3, iii+icuc) - dstat(1:3)
+                  dxyz(1:3, jjj+kkkk) = dxyz(1:3, jjj+kkkk) + dstat(1:3)
+                else
+                  if (.not. force) then
+                    cdi(1,1) = cdi(1,1) + chnge2
+                    cdi(2,1) = cdi(2,1) + chnge2
+                    cdi(3,1) = cdi(3,1) + chnge2
+                    call dhc (pdi, padi, pbdi, cdi, ndi, jf, jl, if, il, aa, 1)
+                  end if
+                  do k = 1, 3
+                    if (force) then
+                      cdi(k,2) = cdi(k,2) - chnge2
+                      call dhc (pdi, padi, pbdi, cdi, ndi, jf, jl, if, il, aa, 1)
+                    end if
+                    cdi(k,2) = cdi(k,2) + chnge
+                    call dhc (pdi, padi, pbdi, cdi, ndi, jf, jl, if, il, ee, 2)
+                    cdi(k,2) = cdi(k,2) - chnge2
+                    if (.not. force) cdi(k,2) = cdi(k,2) - chnge2
+                    deriv = half*(aa - ee)*const/chnge
+                    dxyz(k,iii+icuc) = dxyz(k,iii+icuc) - deriv
+                    dxyz(k,jjj+kkkk) = dxyz(k,jjj+kkkk) + deriv
+                  end do
+                end if
+              end do
+            end do
+          end do
+        end do
+      end do
+      if (mozyme .and. mode == -1) then
+        part_dxyz(1:3, 1:numtot_in) = -dxyz(1:3, 1:numtot_in)
+      end if
+      end subroutine dcart_build_scf_gradient_cpu
+
 !
       double precision function derp (r)
       use molkst_C, only: numcal, clower, cutofp, cupper
