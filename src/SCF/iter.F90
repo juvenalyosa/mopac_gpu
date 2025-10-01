@@ -1344,12 +1344,17 @@
         double precision, intent(inout) :: target(linear)
         logical, intent(inout) :: need_flag
         logical(c_bool) :: ok
+        double precision, allocatable :: scratch(:)
         if (.not. need_flag) return
-        ok = mopac_cuda_fetch_packed_density(c_loc(target(1)), int(linear, c_size_t))
-        if (.not.(ok .eqv. .true._c_bool)) then
+        allocate(scratch(linear))
+        ok = mopac_cuda_fetch_packed_density(c_loc(scratch(1)), int(linear, c_size_t))
+        if (ok .eqv. .true._c_bool) then
+          target(:) = scratch(:)
+        else
           resident_scf = .false.
           call mopac_cuda_set_resident_mode(0)
         end if
+        deallocate(scratch)
         need_flag = .false.
       end subroutine fetch_packed_density_if_needed
 
@@ -1362,12 +1367,17 @@
         double precision, intent(inout) :: target(linear)
         logical, intent(inout) :: need_flag
         logical(c_bool) :: ok
+        double precision, allocatable :: scratch(:)
         if (.not. need_flag) return
-        ok = mopac_cuda_fetch_fock(c_loc(target(1)), int(linear, c_size_t))
-        if (.not.(ok .eqv. .true._c_bool)) then
+        allocate(scratch(linear))
+        ok = mopac_cuda_fetch_fock(c_loc(scratch(1)), int(linear, c_size_t))
+        if (ok .eqv. .true._c_bool) then
+          target(:) = scratch(:)
+        else
           resident_scf = .false.
           call mopac_cuda_set_resident_mode(0)
         end if
+        deallocate(scratch)
         need_flag = .false.
       end subroutine fetch_fock_if_needed
 #endif
