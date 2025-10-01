@@ -206,10 +206,16 @@ tol = float(sys.argv[3])
 def extract(path):
     data = []
     capture = False
+    header_tokens = (
+        'NUMBER ATOM',
+        'NO. AT.'
+    )
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as fh:
-            for line in fh:
-                if 'NUMBER ATOM' in line and 'X' in line and 'Y' in line and 'Z' in line:
+            for raw in fh:
+                line = raw.rstrip('
+')
+                if any(h in line for h in header_tokens):
                     capture = True
                     continue
                 if capture:
@@ -219,9 +225,9 @@ def extract(path):
                     if len(parts) < 5:
                         continue
                     try:
-                        gx = float(parts[2])
-                        gy = float(parts[3])
-                        gz = float(parts[4])
+                        gx = float(parts[-3])
+                        gy = float(parts[-2])
+                        gz = float(parts[-1])
                     except ValueError:
                         continue
                     data.append((gx, gy, gz))
