@@ -188,11 +188,11 @@ run_case "dense_sanity_single_gpu" "examples/water_pm7_gpu.mop" \
 
 # CPU baseline for gradient timing (Stage 0 profiling)
 run_case "gradient_cpu_baseline" "examples/h2o_gpu_force.mop" \
-  "unset MOPAC_FORCEGPU; export MOPAC_GPU_VERBOSE=0; export CUDA_VISIBLE_DEVICES=0;"
+  "unset MOPAC_FORCEGPU; unset MOPAC_GPU_GRAD; export MOPAC_GPU_VERBOSE=0; export CUDA_VISIBLE_DEVICES=0;"
 
 # 2) Gradient device F reuse
 run_case "gradient_device_reuse" "examples/h2o_gpu_force.mop" \
-  "export CUDA_VISIBLE_DEVICES=0; export MOPAC_GPU_PROFILE=1;"
+  "export CUDA_VISIBLE_DEVICES=0; export MOPAC_GPU_GRAD=1; export MOPAC_GPU_PROFILE=1;"
 
 # Resident SCF cache check
 run_case "resident_scf_density" "examples/water_pm7_gpu.mop" \
