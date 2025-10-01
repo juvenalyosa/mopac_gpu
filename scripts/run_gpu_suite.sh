@@ -53,6 +53,7 @@ gradient_cpu_log=""
 gradient_gpu_log=""
 gradient_check_cpu_log=""
 gradient_check_gpu_log=""
+LAST_OUT=""
 
 LAST_STATUS=""
 LAST_REASON=""
@@ -182,6 +183,28 @@ run_case() {
   LAST_STATUS="$status"
   LAST_REASON="$reason"
   LAST_LOG="$log"
+  archive_output "$name" "$infile"
+}
+
+archive_output() {
+  local name="$1"
+  local infile="$2"
+  local base="$(basename "$infile")"
+  local outfile="${base%.*}.out"
+  local src=""
+  if [[ -f "$outfile" ]]; then
+    src="$outfile"
+  elif [[ -f "$(dirname "$infile")/$outfile" ]]; then
+    src="$(dirname "$infile")/$outfile"
+  fi
+  if [[ -n "$src" ]]; then
+    local dest="$OUT_DIR/${name}.mopac_out"
+    cp "$src" "$dest"
+    rm -f "$src"
+    LAST_OUT="$dest"
+  else
+    LAST_OUT=""
+  fi
 }
 
 compare_gradients() {
@@ -191,8 +214,18 @@ compare_gradients() {
   local tol="${4:-1e-5}"
   echo "==> Comparing gradients ($name)"
   if [[ -z "$cpu_log" || -z "$gpu_log" ]]; then
-    echo "Gradient compare skipped: missing logs"
-    summary+=("$name;SKIP;0;no;missing logs")
+    echo "Gradient compare skipped: missing log paths"
+    summary+=("$name;SKIP;0;no;missing log paths")
+    return 0
+  fi
+  if [[ ! -f "$cpu_log" || ! -f "$gpu_log" ]]; then
+    echo "Gradient compare skipped: log files not found"
+    summary+=("$name;SKIP;0;no;logs missing")
+    return 0
+  fi
+  if [[ ! -f "$cpu_log" || ! -f "$gpu_log" ]]; then
+    echo "Gradient compare skipped: log files not found"
+    summary+=("$name;SKIP;0;no;logs missing")
     return 0
   fi
   local result
@@ -292,11 +325,11 @@ run_case "gradient_device_reuse" "examples/h2o_gpu_force.mop" \
 # Targeted gradient comparison (prints gradients via DCART)
 run_case "gradient_cpu_target" "examples/h2o_gpu_gradcheck.mop" \
   "unset MOPAC_FORCEGPU; unset MOPAC_GPU_GRAD; export MOPAC_GPU_VERBOSE=0; export CUDA_VISIBLE_DEVICES=0;"
-gradient_check_cpu_log="$LAST_LOG"
+gradient_check_cpu_log="$LAST_OUT"
 
 run_case "gradient_gpu_target" "examples/h2o_gpu_gradcheck.mop" \
   "export CUDA_VISIBLE_DEVICES=0; export MOPAC_GPU_GRAD=1; export MOPAC_RESIDENT_SCF=1; export MOPAC_GPU_VERBOSE=0;"
-gradient_check_gpu_log="$LAST_LOG"
+gradient_check_gpu_log="$LAST_OUT"
 
 compare_gradients "$gradient_check_cpu_log" "$gradient_check_gpu_log" "gradient_compare" 1e-5
 
