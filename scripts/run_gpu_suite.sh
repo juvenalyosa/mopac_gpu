@@ -243,7 +243,7 @@ def extract(path):
     started = False
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as fh:
-            for raw in fh:
+                for raw in fh:
                 line = raw.rstrip()
                 if 'CARTESIAN COORDINATE DERIVATIVES' in line:
                     capture = True
@@ -259,9 +259,10 @@ def extract(path):
                 floats = re.findall(r'[-+]?\d+\.\d+(?:[EeDd][+-]?\d+)?', line)
                 if len(floats) < 3:
                     continue
-                gx = float(floats[-3].replace('D', 'E'))
-                gy = float(floats[-2].replace('D', 'E'))
-                gz = float(floats[-1].replace('D', 'E'))
+                if len(floats) >= 4:
+                    gx, gy, gz = [float(v.replace('D', 'E')) for v in floats[-4:-1]]
+                else:
+                    gx, gy, gz = [float(v.replace('D', 'E')) for v in floats[-3:]]
                 data.append((gx, gy, gz))
                 started = True
     except FileNotFoundError:
