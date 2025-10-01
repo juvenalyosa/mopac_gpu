@@ -1344,7 +1344,7 @@
         double precision, intent(inout) :: target(linear)
         logical, intent(inout) :: need_flag
         logical(c_bool) :: ok
-        double precision, allocatable :: scratch(:)
+        double precision, allocatable, target :: scratch(:)
         if (.not. need_flag) return
         allocate(scratch(linear))
         ok = mopac_cuda_fetch_packed_density(c_loc(scratch(1)), int(linear, c_size_t))
@@ -1367,7 +1367,7 @@
         double precision, intent(inout) :: target(linear)
         logical, intent(inout) :: need_flag
         logical(c_bool) :: ok
-        double precision, allocatable :: scratch(:)
+        double precision, allocatable, target :: scratch(:)
         if (.not. need_flag) return
         allocate(scratch(linear))
         ok = mopac_cuda_fetch_fock(c_loc(scratch(1)), int(linear, c_size_t))
