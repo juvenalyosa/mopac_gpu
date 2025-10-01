@@ -278,6 +278,7 @@
 
       subroutine dcart_build_scf_gradient_cpu(numat_in, l123_in, coord, dxyz, q, chnge, chnge2, &
            const, numtot_in, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
+      use funcon_C, only : fpc_9, a0, ev
       use common_arrays_C, only : nfirst, nlast, nat, p, pa, pb, tvec
       use molkst_C, only : mozyme, id, cutofp, l1u, l2u, l3u
       use MOZYME_C, only : iorbs, part_dxyz, mode, jopt

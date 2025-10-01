@@ -10,7 +10,7 @@
                               PM7 CALCULATION RESULTS
 
  *******************************************************************************
- *  CALCULATION DONE: (MAX THREADS = 2)              Wed Oct  1 14:26:20 2025  *
+ *  CALCULATION DONE: (MAX THREADS = 2)              Wed Oct  1 16:24:34 2025  *
  *  PM7        - The PM7 Hamiltonian to be used
  *  1SCF       - DO 1 SCF AND THEN STOP 
  *  T=         - A TIME OF 172800.0 SECONDS REQUESTED
@@ -71,7 +71,7 @@ PM7 1SCF EIGS VECTORS
 
                               PM7 CALCULATION
                                                        MOPAC v23.1.2 MacOS
-                                                       Wed Oct  1 14:26:20 2025
+                                                       Wed Oct  1 16:24:34 2025
 
 
 

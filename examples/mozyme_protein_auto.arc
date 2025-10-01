@@ -3,7 +3,7 @@
                      SUMMARY OF  PM7 CALCULATION
 
                                                        MOPAC v23.1.2 MacOS
-                                                       Wed Oct  1 14:26:20 2025
+                                                       Wed Oct  1 16:24:34 2025
 
            Empirical Formula: C152 H240 N54 O44 S6  =   496 atoms
 
@@ -28,8 +28,8 @@
             H   196    H    83    25.15323
             H   129    H   495    23.58476
           SCF CALCULATIONS        =          1
-          WALL-CLOCK TIME         =      5.469 SECONDS
-          COMPUTATION TIME        =      5.418 SECONDS
+          WALL-CLOCK TIME         =      5.516 SECONDS
+          COMPUTATION TIME        =      5.455 SECONDS
 
 
           FINAL GEOMETRY OBTAINED
