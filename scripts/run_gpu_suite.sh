@@ -196,16 +196,7 @@ compare_gradients() {
     return 0
   fi
   local result
-  if ! result=$(python3 - "$cpu_log" "$gpu_log" "$tol" <<'PY' 2>&1); then
-    echo "$result"
-    summary+=("$name;FAIL;0;yes;$result")
-    fail_count=$((fail_count+1))
-    return 1
-  fi
-  echo "Gradient match: PASS ($result)"
-  summary+=("$name;OK;0;yes;$result")
-  return 0
-PY
+  if ! result=$(python3 - "$cpu_log" "$gpu_log" "$tol" <<'PY'
 import sys, math
 
 cpu_log = sys.argv[1]
@@ -262,7 +253,17 @@ if max_abs > tol:
     raise SystemExit(msg)
 print(msg)
 PY
+  ); then
+    echo "$result"
+    summary+=("$name;FAIL;0;yes;$result")
+    fail_count=$((fail_count+1))
+    return 1
+  fi
+  echo "Gradient match: PASS ($result)"
+  summary+=("$name;OK;0;yes;$result")
+  return 0
 }
+
 
 # 1) Dense sanity
 run_case "dense_sanity_single_gpu" "examples/water_pm7_gpu.mop" \
