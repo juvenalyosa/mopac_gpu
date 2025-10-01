@@ -212,11 +212,6 @@ struct GradPair {
   double weight;
 };
 
-static DevBuf<GradPair> g_grad_pairs_near;
-static DevBuf<GradPair> g_grad_pairs_far;
-static DevBuf<double>   g_grad_qbld;
-static DevBuf<double>   g_grad_vec;
-
 __global__ void cart_gradient_near_kernel(int npairs, const GradPair *pairs,
                                           const double *qbld, double *grad, int numat) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -296,6 +291,11 @@ struct HostBuf {
     ptr = nullptr; cap = 0; pinned = false;
   }
 };
+
+static DevBuf<GradPair> g_grad_pairs_near;
+static DevBuf<GradPair> g_grad_pairs_far;
+static DevBuf<double>   g_grad_qbld;
+static DevBuf<double>   g_grad_vec;
 
 // Default device pair for 2-GPU MOZYME operations
 static int g_pair_dev0 = 0;
