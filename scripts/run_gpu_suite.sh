@@ -213,8 +213,7 @@ def extract(path):
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as fh:
             for raw in fh:
-                line = raw.rstrip('
-')
+                line = raw.rstrip()
                 if any(h in line for h in header_tokens):
                     capture = True
                     continue
