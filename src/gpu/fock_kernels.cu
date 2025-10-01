@@ -542,10 +542,11 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
     }
   }
 
-  cudaMemcpy(fout, s_d_f, sizeof(double)*mpack_e, cudaMemcpyDeviceToHost);
-  if (mopac_cuda_get_resident_mode() != 0) {
+  bool resident = (mopac_cuda_get_resident_mode() != 0);
+  if (resident) {
     mopac_cuda_register_fock_device(mpack, fout, s_d_f);
   } else {
+    cudaMemcpy(fout, s_d_f, sizeof(double)*mpack_e, cudaMemcpyDeviceToHost);
     mopac_cuda_clear_fock_cache();
   }
   return true;

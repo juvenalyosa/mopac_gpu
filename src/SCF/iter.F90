@@ -38,13 +38,13 @@
       use purify_gpu
 #endif
 #ifdef GPU
-      use iso_c_binding, only: c_ptr, c_null_ptr, c_associated
+      use iso_c_binding, only: c_ptr, c_null_ptr, c_associated, c_loc, c_bool, c_size_t
       Use mod_vars_cuda, only: lgpu, real_cuda, prec, resident_scf
       use density_cuda_i
       use gpu_diag_state, only: have_device_eigvecs
       use eigenvectors_cuda_mod, only: eigenvectors_CUDA_fetch
       use gpu_runtime_interfaces, only: mopac_cuda_get_density_device_ptr, mopac_cuda_get_fock_device_ptr, &
-           mopac_cuda_set_resident_mode
+           mopac_cuda_set_resident_mode, mopac_cuda_fetch_fock, mopac_cuda_fetch_packed_density
 #endif
       implicit none
       double precision , intent(out) :: ee
@@ -63,6 +63,7 @@
 #ifdef GPU
       type(c_ptr) :: fock_dev
       type(c_ptr) :: density_dev
+      logical :: need_fetch_fock, need_fetch_pa, need_fetch_pb, need_fetch_p, need_fetch_fb
 #endif
       logical :: debug, prtfok, prteig, prtden, prt1el, minprt, newdg, prtpl, &
         prtvec, camkin, ci, okpuly, oknewd, times, force, allcon, &
@@ -107,6 +108,11 @@
 #ifdef GPU
       fock_dev = c_null_ptr
       density_dev = c_null_ptr
+      need_fetch_fock = .false.
+      need_fetch_pa = .false.
+      need_fetch_pb = .false.
+      need_fetch_p = .false.
+      need_fetch_fb = .false.
 #endif
       if (icalcn /= numcal) then
         call delete_iter_arrays
@@ -514,6 +520,8 @@
             resident_scf = .false.
             fock_dev = c_null_ptr
             call mopac_cuda_set_resident_mode(0)
+          else
+            need_fetch_fock = .true.
           end if
         end if
 #endif
@@ -605,10 +613,15 @@
             resident_scf = .false.
             fock_dev = c_null_ptr
             call mopac_cuda_set_resident_mode(0)
+          else
+            need_fetch_fock = .true.
           end if
         end if
 #endif
       end if
+#ifdef GPU
+      call fetch_fock_if_needed(f, mpack, need_fetch_fock)
+#endif
       if (lxfac) then
         ee = helect(norbs,pa,h,f)*2.d0
         if (ci .or. halfe) then
@@ -658,6 +671,8 @@
               resident_scf = .false.
               fock_dev = c_null_ptr
               call mopac_cuda_set_resident_mode(0)
+            else
+              need_fetch_fb = .true.
             end if
           end if
 #endif
@@ -670,10 +685,15 @@
               resident_scf = .false.
               fock_dev = c_null_ptr
               call mopac_cuda_set_resident_mode(0)
+            else
+              need_fetch_fb = .true.
             end if
           end if
 #endif
         end if
+#ifdef GPU
+        call fetch_fock_if_needed(fb, mpack, need_fetch_fb)
+#endif
         if (prtfok) then
           write (iw, "('   BETA FOCK MATRIX ON ITERATION',i3)") niter
           call vecprt (fb, norbs)
@@ -688,9 +708,20 @@
       if (irrr == 0) then
         do i = 1, norbs
           f((i*(i+1))/2) = f((i*(i+1))/2)*0.5D0
-        end do
-      end if
-      irrr = 2
+      end do
+    end if
+    irrr = 2
+#ifdef GPU
+    if (resident_scf) then
+#ifdef GPU
+      call fetch_packed_density_if_needed(pa, mpack, need_fetch_pa)
+      call fetch_packed_density_if_needed(pb, mpack, need_fetch_pb)
+      call fetch_packed_density_if_needed(p,  mpack, need_fetch_p)
+      call fetch_fock_if_needed(fb, mpack, need_fetch_fb)
+      call fetch_fock_if_needed(f,  mpack, need_fetch_fock)
+#endif
+    end if
+#endif
 !***********************************************************************
 !                                                                      *
 !                        CALCULATE THE ENERGY IN KCAL/MOLE             *
@@ -990,12 +1021,21 @@
               call densit (c, norbs, norbs, nalpha, 1.d0, na1el, fract, pa, 1)
             else
               call density_for_GPU (c, fract, nalpha, nalpha_open, 1.d0, mpack,norbs, 1, pa, iopc_calcp)
+#ifdef GPU
+              if (resident_scf) need_fetch_pa = .true.
+#endif
             end if
           else
             call density_for_GPU (c, fract, nalpha, nalpha_open, 1.d0, mpack,norbs, 1, pa, iopc_calcp)
+#ifdef GPU
+            if (resident_scf) need_fetch_pa = .true.
+#endif
           end if
           if (modea /= 3 .and. .not. (newdg .and. okpuly)) then
-            i = niter
+#ifdef GPU
+          call fetch_packed_density_if_needed(pa, mpack, need_fetch_pa)
+#endif
+          i = niter
             if (camkin) i = 7
             call cnvg (pa, pold, pold2,  i, pl)
           end if
@@ -1007,19 +1047,28 @@
             i = 1 ; line = ''
             call get_environment_variable('MOPAC_CPU_DENSITY', line, status=i)
             if (i == 0) then
-              if (trim(adjustl(line)) /= '') then
-                call densit (c, norbs, norbs, na2el, 2.d0, na1el, fract, p, 1)
-              else
-                call density_for_GPU (c, fract, na2el, na1el, 2.d0, mpack, norbs, 1, p, iopc_calcp)
-              end if
+            if (trim(adjustl(line)) /= '') then
+              call densit (c, norbs, norbs, na2el, 2.d0, na1el, fract, p, 1)
             else
               call density_for_GPU (c, fract, na2el, na1el, 2.d0, mpack, norbs, 1, p, iopc_calcp)
+#ifdef GPU
+              if (resident_scf) need_fetch_p = .true.
+#endif
             end if
-          end if
-          if (modea/=3 .and. .not.(newdg .and. okpuly)) then
-            call cnvg (p, pold, pold2,  niter, pl)
+          else
+            call density_for_GPU (c, fract, na2el, na1el, 2.d0, mpack, norbs, 1, p, iopc_calcp)
+#ifdef GPU
+            if (resident_scf) need_fetch_p = .true.
+#endif
           end if
         end if
+        if (modea/=3 .and. .not.(newdg .and. okpuly)) then
+#ifdef GPU
+          call fetch_packed_density_if_needed(p, mpack, need_fetch_p)
+#endif
+          call cnvg (p, pold, pold2,  niter, pl)
+        end if
+      end if
 #ifdef GPU
       if (resident_scf) then
         density_dev = mopac_cuda_get_density_device_ptr()
@@ -1145,11 +1194,20 @@
             call densit (cb, norbs, norbs, nbeta, 1.d0, nb1el, fract, pb, 1)
           else
             call density_for_GPU (cb, fract, nbeta, nbeta_open, 1.d0, mpack, norbs, 1, pb, iopc_calcp)
+#ifdef GPU
+            if (resident_scf) need_fetch_pb = .true.
+#endif
           end if
         else
           call density_for_GPU (cb, fract, nbeta, nbeta_open, 1.d0, mpack, norbs, 1, pb, iopc_calcp)
+#ifdef GPU
+          if (resident_scf) need_fetch_pb = .true.
+#endif
         end if
         if (.not.(newdg .and. okpuly)) then
+#ifdef GPU
+          call fetch_packed_density_if_needed(pb, mpack, need_fetch_pb)
+#endif
           i = niter
           if (camkin) i = 7
           call cnvg (pb, pbold, pbold2, i, plb)
@@ -1271,9 +1329,48 @@
         if (allocated(vecl_ai)) deallocate(vecl_ai)
         if (allocated(vecl_bi)) deallocate(vecl_bi)
         if (allocated(pulay_work1)) deallocate(pulay_work1)
-        if (allocated(pulay_work2)) deallocate(pulay_work2)
-        if (allocated(pulay_work3)) deallocate(pulay_work3)
+      if (allocated(pulay_work2)) deallocate(pulay_work2)
+      if (allocated(pulay_work3)) deallocate(pulay_work3)
       end subroutine delete_iter_arrays
+
+
+#ifdef GPU
+      subroutine fetch_packed_density_if_needed(target, linear, need_flag)
+        use iso_c_binding, only : c_loc, c_bool, c_size_t
+        use mod_vars_cuda, only : resident_scf
+        use gpu_runtime_interfaces, only : mopac_cuda_fetch_packed_density, mopac_cuda_set_resident_mode
+        implicit none
+        integer, intent(in) :: linear
+        double precision, intent(inout) :: target(linear)
+        logical, intent(inout) :: need_flag
+        logical(c_bool) :: ok
+        if (.not. need_flag) return
+        ok = mopac_cuda_fetch_packed_density(c_loc(target(1)), int(linear, c_size_t))
+        if (.not.(ok .eqv. .true._c_bool)) then
+          resident_scf = .false.
+          call mopac_cuda_set_resident_mode(0)
+        end if
+        need_flag = .false.
+      end subroutine fetch_packed_density_if_needed
+
+      subroutine fetch_fock_if_needed(target, linear, need_flag)
+        use iso_c_binding, only : c_loc, c_bool, c_size_t
+        use mod_vars_cuda, only : resident_scf
+        use gpu_runtime_interfaces, only : mopac_cuda_fetch_fock, mopac_cuda_set_resident_mode
+        implicit none
+        integer, intent(in) :: linear
+        double precision, intent(inout) :: target(linear)
+        logical, intent(inout) :: need_flag
+        logical(c_bool) :: ok
+        if (.not. need_flag) return
+        ok = mopac_cuda_fetch_fock(c_loc(target(1)), int(linear, c_size_t))
+        if (.not.(ok .eqv. .true._c_bool)) then
+          resident_scf = .false.
+          call mopac_cuda_set_resident_mode(0)
+        end if
+        need_flag = .false.
+      end subroutine fetch_fock_if_needed
+#endif
 
 
       subroutine den_in_out(mode)

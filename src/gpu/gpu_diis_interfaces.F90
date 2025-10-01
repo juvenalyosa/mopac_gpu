@@ -13,6 +13,15 @@ module gpu_diis_interfaces
       real(c_double)        :: r(linear)
     end subroutine mopac_cuda_diis_store
 
+    function mopac_cuda_diis_residual_resident(n, linear, col, f_host, p_host, host_out, copy_back) &
+      bind(C,name='mopac_cuda_diis_residual_resident') result(ok)
+      import :: c_int, c_ptr, c_bool
+      integer(c_int), value :: n, linear, col
+      type(c_ptr), value :: f_host, p_host, host_out
+      integer(c_int), value :: copy_back
+      logical(c_bool) :: ok
+    end function mopac_cuda_diis_residual_resident
+
     subroutine mopac_cuda_diis_bcol(linear, nfock, lfock, out) bind(C,name='mopac_cuda_diis_bcol')
       import :: c_int, c_double
       integer(c_int), value :: linear, nfock, lfock
@@ -23,4 +32,3 @@ module gpu_diis_interfaces
     end subroutine mopac_cuda_diis_release
   end interface
 end module gpu_diis_interfaces
-

@@ -1862,8 +1862,10 @@ void mopac_cuda_density_from_dev_syrk(int n, int ndubl, double alpha, double *C,
   g_density_full_n = n;
   g_density_full_ld = ldc;
   invalidate_packed_density();
-  cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
-  cudaStreamSynchronize(g_stream);
+  if (!resident_mode_enabled()) {
+    cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
+    cudaStreamSynchronize(g_stream);
+  }
 }
 
 // Build full X = 2*sign*V(:,nl2:nu2)V(:,nl2:nu2)^T + frac*sign*V(:,nl1:nu1)V(:,nl1:nu1)^T
@@ -1910,8 +1912,10 @@ void mopac_cuda_density_from_dev_gemm(int n,
   g_density_full_n = n;
   g_density_full_ld = ldc;
   invalidate_packed_density();
-  cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
-  cudaStreamSynchronize(g_stream);
+  if (!resident_mode_enabled()) {
+    cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
+    cudaStreamSynchronize(g_stream);
+  }
 }
 
 // Fetch device-resident eigenvectors into host buffer A (ld=lda)
@@ -2394,6 +2398,17 @@ extern "C" bool mopac_cuda_fetch_density(double *host_ptr, int n, int ld) {
   size_t bytes = sizeof(double) * (size_t)ld * (size_t)n;
   cudaStream_t s = g_stream ? g_stream : 0;
   if (cudaMemcpyAsync(host_ptr, g_density_full.ptr, bytes, cudaMemcpyDeviceToHost, s) != cudaSuccess) return false;
+  cudaStreamSynchronize(s);
+  return true;
+}
+
+extern "C" bool mopac_cuda_fetch_packed_density(double *host_ptr, size_t linear) {
+  if (!resident_mode_enabled()) return false;
+  if (!g_packed_density.valid) return false;
+  if (!host_ptr) return false;
+  if (g_packed_density.len != linear) return false;
+  cudaStream_t s = g_stream ? g_stream : 0;
+  if (cudaMemcpyAsync(host_ptr, g_packed_density.buf.ptr, sizeof(double)*linear, cudaMemcpyDeviceToHost, s) != cudaSuccess) return false;
   cudaStreamSynchronize(s);
   return true;
 }
@@ -2946,6 +2961,10 @@ void mopac_cuda_bcol_from_residuals(int linear, int nfock,
 extern "C" {
 
 static DevBuf<double> g_diis_R;
+static DevBuf<double> g_diis_full_f;
+static DevBuf<double> g_diis_fp;
+static DevBuf<double> g_diis_pf;
+static DevBuf<double> g_diis_residual_pack;
 static int g_diis_linear_cap = 0;
 
 void mopac_cuda_diis_init(int linear, int maxfock) {
@@ -2985,6 +3004,10 @@ void mopac_cuda_diis_bcol(int linear, int nfock, int lfock, double *out_host) {
 
 void mopac_cuda_diis_release() {
   g_diis_R.release();
+  g_diis_full_f.release();
+  g_diis_fp.release();
+  g_diis_pf.release();
+  g_diis_residual_pack.release();
   g_diis_linear_cap = 0;
 }
 
@@ -3038,6 +3061,81 @@ void mopac_cuda_bfull_from_device(int linear, int nfock, double *b_out) {
               dB.ptr, nfock);
   cudaMemcpyAsync(b_out, dB.ptr, sizeof(double) * (size_t)nfock * (size_t)nfock, cudaMemcpyDeviceToHost, g_stream);
   cudaStreamSynchronize(g_stream);
+}
+
+bool mopac_cuda_diis_residual_resident(int n, int linear, int col,
+                                       const double *f_host_ptr,
+                                       const double *p_host_ptr,
+                                       double *host_out,
+                                       int copy_back_flag) {
+  if (!resident_mode_enabled()) return false;
+  if (!g_blas) create_handle();
+  if (!g_fock_cache.valid || g_fock_cache.len != (size_t)linear) return false;
+  if (f_host_ptr && g_fock_cache.host_ptr && g_fock_cache.host_ptr != f_host_ptr) return false;
+  if (!g_packed_density.valid || g_packed_density.len != (size_t)linear) return false;
+  if (p_host_ptr && g_packed_density.host_ptr && g_packed_density.host_ptr != p_host_ptr) return false;
+  if (!g_density_full_valid || g_density_full_n != n) return false;
+  if (!g_diis_R.ptr || g_diis_linear_cap < linear) return false;
+
+  cudaStream_t s = g_stream ? g_stream : 0;
+
+  size_t nn = (size_t)n * (size_t)n;
+  g_diis_full_f.ensure(sizeof(double) * nn);
+  g_diis_fp.ensure(sizeof(double) * nn);
+  g_diis_pf.ensure(sizeof(double) * nn);
+  g_diis_residual_pack.ensure(sizeof(double) * (size_t)linear);
+
+  int block = 256;
+  int grid = static_cast<int>((nn + block - 1) / block);
+  unpack_lower_to_full_kernel<<<grid, block, 0, s>>>(g_fock_cache.buf.ptr, g_diis_full_f.ptr, n);
+  if (cudaGetLastError() != cudaSuccess) return false;
+
+  const double alpha = 1.0;
+  const double beta  = 0.0;
+  int ldP = g_density_full_ld;
+
+  cublasStatus_t st = cublasDgemm(g_blas, CUBLAS_OP_N, CUBLAS_OP_N,
+                                  n, n, n,
+                                  &alpha,
+                                  g_diis_full_f.ptr, n,
+                                  g_density_full.ptr, ldP,
+                                  &beta,
+                                  g_diis_fp.ptr, n);
+  if (st != CUBLAS_STATUS_SUCCESS) return false;
+
+  st = cublasDgemm(g_blas, CUBLAS_OP_N, CUBLAS_OP_N,
+                   n, n, n,
+                   &alpha,
+                   g_density_full.ptr, ldP,
+                   g_diis_full_f.ptr, n,
+                   &beta,
+                   g_diis_pf.ptr, n);
+  if (st != CUBLAS_STATUS_SUCCESS) return false;
+
+  const double minus_one = -1.0;
+  st = cublasDaxpy(g_blas, n * n, &minus_one, g_diis_pf.ptr, 1, g_diis_fp.ptr, 1);
+  if (st != CUBLAS_STATUS_SUCCESS) return false;
+
+  size_t total = (size_t)linear;
+  grid = static_cast<int>((total + block - 1) / block);
+  pack_upper_kernel<<<grid, block, 0, s>>>(g_diis_fp.ptr, n, n, g_diis_residual_pack.ptr);
+  if (cudaGetLastError() != cudaSuccess) return false;
+
+  size_t offset = (size_t)(col - 1) * (size_t)g_diis_linear_cap;
+  double *dst = g_diis_R.ptr + offset;
+  if (cudaMemcpyAsync(dst, g_diis_residual_pack.ptr,
+                      sizeof(double) * (size_t)linear,
+                      cudaMemcpyDeviceToDevice, s) != cudaSuccess) return false;
+  if (host_out && copy_back_flag != 0) {
+    if (cudaMemcpyAsync(host_out, g_diis_residual_pack.ptr,
+                        sizeof(double) * (size_t)linear,
+                        cudaMemcpyDeviceToHost, s) != cudaSuccess) return false;
+  }
+  cudaStreamSynchronize(s);
+  if (host_out && copy_back_flag == 0) {
+    for (int i = 0; i < linear; ++i) host_out[i] = 0.0;
+  }
+  return true;
 }
 
 } // extern "C"

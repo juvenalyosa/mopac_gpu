@@ -18,11 +18,13 @@
       use molkst_C, only : numcal, keywrd, mpack, npulay
       use iter_C, only : pulay_work1, pulay_work2, pulay_work3
 #ifdef GPU
-      use mod_vars_cuda, only : lgpu
+      use iso_c_binding, only : c_ptr, c_loc, c_null_ptr, c_int, c_bool
+      use mod_vars_cuda, only : lgpu, resident_scf
       use gpu_diis_interfaces
       use gpu_bmat_interfaces
       use gpu_small_solve_interfaces
       use overlap_build, only : build_overlap_packed
+      use gpu_runtime_interfaces, only : mopac_cuda_get_resident_mode
 #endif
       implicit none
       integer  :: n
@@ -44,10 +46,14 @@
       logical :: debug
       logical :: coeffs_ready
       logical :: use_gpu_diis, use_gpu_buffer, use_gpu_bfull, use_gpu_bcol, use_gpu_solve, use_gen_resid
+      logical :: resident_active, device_residual_ok
+      logical(c_bool) :: ok_c
       integer :: info_s
 #ifdef GPU
       character(len=32) :: env
       integer :: istat_env, iopc_sel
+      integer(c_int) :: copy_flag
+      type(c_ptr) :: host_slot
       double precision, allocatable :: spack(:), tmp1(:), tmp2(:)
       double precision, allocatable :: bfull(:,:), bcol(:), amat(:,:), rhs(:)
 #endif
@@ -87,6 +93,8 @@
       use_gen_resid = .false.
       coeffs_ready = .false.
       info_s = 0
+      resident_active = .false.
+      device_residual_ok = .false.
 #ifdef GPU
       if (lgpu) use_gpu_diis = .true.
 #endif
@@ -133,6 +141,13 @@
         call get_environment_variable('MOPAC_DIIS_GPU', env, status=istat_env)
         if (istat_env == 0) use_gpu_solve = (trim(adjustl(env)) /= '')
         if (use_gpu_bfull) use_gpu_bcol = .false.
+        resident_active = resident_scf .and. mopac_cuda_get_resident_mode() /= 0
+        if (resident_active) then
+          use_gpu_buffer = .true.
+          if (.not. use_gpu_bfull .and. .not. use_gpu_bcol) use_gpu_bcol = .true.
+        else
+          resident_active = .false.
+        end if
       end if
 #endif
 !
@@ -145,28 +160,44 @@
 !      call mamult (p, f, fppf(lbase+1), n, 0.D0)
 !      call mamult (f, p, fppf(lbase+1), n, -1.D0)
 #ifdef GPU
-      if (use_gpu_diis .and. use_gen_resid) then
-        allocate(spack(linear), tmp1(linear), tmp2(linear), stat=i)
-        if (i /= 0) then
-          call memory_error('Pulay generalized residual alloc')
-          return
+      if (use_gpu_diis .and. resident_active .and. .not. use_gen_resid) then
+        copy_flag = 0_c_int
+        if (debug) copy_flag = 1_c_int
+        host_slot = c_null_ptr
+        if (copy_flag /= 0_c_int) host_slot = c_loc(fppf(lbase+1))
+        ok_c = mopac_cuda_diis_residual_resident(n, linear, lfock, c_loc(f(1)), c_loc(p(1)), host_slot, copy_flag)
+        device_residual_ok = (ok_c .eqv. .true._c_bool)
+        if (device_residual_ok .and. copy_flag == 0_c_int) then
+          fppf(lbase+1:lbase+linear) = 0.d0
         end if
-        call build_overlap_packed(spack)
-        iopc_sel = 4
-        call mult_symm_AB(p, spack, 1.d0, n, linear, tmp1, 0.d0, iopc_sel)
-        call mult_symm_AB(f, tmp1, 1.d0, n, linear, fppf(lbase+1:lbase+linear), 0.d0, iopc_sel)
-        call mult_symm_AB(p, f, 1.d0, n, linear, tmp2, 0.d0, iopc_sel)
-        call mult_symm_AB(spack, tmp2, 1.d0, n, linear, tmp1, 0.d0, iopc_sel)
-        fppf(lbase+1:lbase+linear) = fppf(lbase+1:lbase+linear) - tmp1(:linear)
-        deallocate(spack, tmp1, tmp2, stat=i)
-      else
-#endif
+      end if
+      if (.not. device_residual_ok) then
+        if (use_gpu_diis .and. use_gen_resid) then
+          allocate(spack(linear), tmp1(linear), tmp2(linear), stat=i)
+          if (i /= 0) then
+            call memory_error('Pulay generalized residual alloc')
+            return
+          end if
+          call build_overlap_packed(spack)
+          iopc_sel = 4
+          call mult_symm_AB(p, spack, 1.d0, n, linear, tmp1, 0.d0, iopc_sel)
+          call mult_symm_AB(f, tmp1, 1.d0, n, linear, fppf(lbase+1:lbase+linear), 0.d0, iopc_sel)
+          call mult_symm_AB(p, f, 1.d0, n, linear, tmp2, 0.d0, iopc_sel)
+          call mult_symm_AB(spack, tmp2, 1.d0, n, linear, tmp1, 0.d0, iopc_sel)
+          fppf(lbase+1:lbase+linear) = fppf(lbase+1:lbase+linear) - tmp1(:linear)
+          deallocate(spack, tmp1, tmp2, stat=i)
+        else
+          call unpack_matrix(p, pulay_work1, n)
+          call unpack_matrix(f, pulay_work2, n)
+          call sym_commute(pulay_work1, pulay_work2, pulay_work3, n)
+          call pack_matrix(pulay_work3, fppf(lbase+1), n)
+        end if
+      end if
+#else
       call unpack_matrix(p, pulay_work1, n)
       call unpack_matrix(f, pulay_work2, n)
       call sym_commute(pulay_work1, pulay_work2, pulay_work3, n)
       call pack_matrix(pulay_work3, fppf(lbase+1), n)
-#ifdef GPU
-      end if
 #endif
 !
 !   FPPF NOW CONTAINS THE RESULT OF FP - PF.
@@ -174,7 +205,7 @@
       nfock1 = nfock + 1
 #ifdef GPU
       if (use_gpu_diis) then
-        if (use_gpu_buffer) call mopac_cuda_diis_store(linear, lfock, fppf(lbase+1:lbase+linear))
+        if (use_gpu_buffer .and. .not. device_residual_ok) call mopac_cuda_diis_store(linear, lfock, fppf(lbase+1:lbase+linear))
         if (use_gpu_bfull) then
           allocate(bfull(nfock, nfock), stat=i)
           if (i /= 0) then
