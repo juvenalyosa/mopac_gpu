@@ -121,8 +121,9 @@
         call chrge(p, q)
         mode = 0
       end if
-      q(:numat) = tore(nat(:numat)) - q(:numat)
-      call dcart_build_scf_gradient_cpu(numat, l123, coord, dxyz, q, chnge, chnge2, const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
+      qbld(:numat) = tore(nat(:numat)) - q(:numat)
+      call dcart_build_scf_gradient_cpu(numat, l123, coord, dxyz, qbld, chnge, chnge2, &
+           const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
       if (nnhco /= 0) then
 !
 !   NOW ADD IN MOLECULAR-MECHANICS CORRECTION TO THE H-N-C=O TORSION
