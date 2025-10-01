@@ -237,43 +237,38 @@ gpu_log = sys.argv[2]
 tol = float(sys.argv[3])
 
 def extract(path):
+    import re
     data = []
     capture = False
-    expect_rows = False
+    started = False
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as fh:
             for raw in fh:
                 line = raw.rstrip()
                 if 'CARTESIAN COORDINATE DERIVATIVES' in line:
                     capture = True
+                    started = False
                     continue
-                if capture and not expect_rows:
-                    # Look for header line that precedes numeric rows
-                    if line.strip() == "":
-                        continue
-                    if any(token in line for token in ('NUMBER', 'ATOM', 'NO.')):
-                        expect_rows = True
-                        continue
-                if capture and expect_rows:
-                    if not line.strip():
+                if not capture:
+                    continue
+                if not line.strip():
+                    if started:
                         break
-                    parts = line.split()
-                    # Expect final three columns to be Cartesian components
-                    if len(parts) < 3:
+                    else:
                         continue
-                    try:
-                        gx = float(parts[-3])
-                        gy = float(parts[-2])
-                        gz = float(parts[-1])
-                    except ValueError:
-                        continue
-                    data.append((gx, gy, gz))
+                floats = re.findall(r'[-+]?\d+\.\d+(?:[EeDd][+-]?\d+)?', line)
+                if len(floats) < 3:
+                    continue
+                gx = float(floats[-3].replace('D', 'E'))
+                gy = float(floats[-2].replace('D', 'E'))
+                gz = float(floats[-1].replace('D', 'E'))
+                data.append((gx, gy, gz))
+                started = True
     except FileNotFoundError:
         raise SystemExit(f"gradient log not found: {path}")
     if not data:
         raise SystemExit(f"no gradient block detected in {path}")
     return data
-
 
 
 cpu = extract(cpu_log)
