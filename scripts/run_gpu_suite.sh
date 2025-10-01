@@ -234,20 +234,19 @@ tol = float(sys.argv[3])
 def extract(path):
     data = []
     capture = False
-    header_pos = None
+    header_idx = None
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as fh:
             for raw in fh:
-                line = raw.rstrip('
-')
-                if 'CARTESIAN COORDINATE DERIVATIVES' in line:
+                line = raw.strip()
+                if 'CARTESIAN COORDINATE DERIVATIVES' in raw:
                     capture = True
-                    header_pos = None
+                    header_idx = None
                     continue
                 if not capture:
                     continue
-                if header_pos is None:
-                    tokens = line.split()
+                if header_idx is None:
+                    tokens = raw.split()
                     if len(tokens) < 5:
                         continue
                     try:
@@ -256,22 +255,22 @@ def extract(path):
                         iz = tokens.index('Z')
                     except ValueError:
                         continue
-                    header_pos = (ix, iy, iz)
+                    header_idx = (ix, iy, iz)
                     continue
-                if not line.strip():
+                if not line:
                     if data:
                         break
                     else:
                         continue
-                parts = line.split()
-                if len(parts) <= max(header_pos):
+                parts = raw.split()
+                if len(parts) <= max(header_idx):
                     continue
-                if not parts[0].replace('-', '').isdigit():
+                if not parts[0].lstrip('+-').isdigit():
                     continue
                 try:
-                    gx = float(parts[header_pos[0]].replace('D', 'E'))
-                    gy = float(parts[header_pos[1]].replace('D', 'E'))
-                    gz = float(parts[header_pos[2]].replace('D', 'E'))
+                    gx = float(parts[header_idx[0]].replace('D', 'E'))
+                    gy = float(parts[header_idx[1]].replace('D', 'E'))
+                    gz = float(parts[header_idx[2]].replace('D', 'E'))
                 except ValueError:
                     continue
                 data.append((gx, gy, gz))
