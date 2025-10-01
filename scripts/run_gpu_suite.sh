@@ -51,6 +51,8 @@ gradient_cpu_elapsed=""
 gradient_gpu_elapsed=""
 gradient_cpu_log=""
 gradient_gpu_log=""
+gradient_check_cpu_log=""
+gradient_check_gpu_log=""
 
 LAST_STATUS=""
 LAST_REASON=""
@@ -182,6 +184,86 @@ run_case() {
   LAST_LOG="$log"
 }
 
+compare_gradients() {
+  local cpu_log="$1"
+  local gpu_log="$2"
+  local name="$3"
+  local tol="${4:-1e-5}"
+  echo "==> Comparing gradients ($name)"
+  if [[ -z "$cpu_log" || -z "$gpu_log" ]]; then
+    echo "Gradient compare skipped: missing logs"
+    summary+=("$name;SKIP;0;no;missing logs")
+    return 0
+  fi
+  local result
+  if ! result=$(python3 - "$cpu_log" "$gpu_log" "$tol" <<'PY' 2>&1); then
+    echo "$result"
+    summary+=("$name;FAIL;0;yes;$result")
+    fail_count=$((fail_count+1))
+    return 1
+  fi
+  echo "Gradient match: PASS ($result)"
+  summary+=("$name;OK;0;yes;$result")
+  return 0
+PY
+import sys, math
+
+cpu_log = sys.argv[1]
+gpu_log = sys.argv[2]
+tol = float(sys.argv[3])
+
+def extract(path):
+    data = []
+    capture = False
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+            for line in fh:
+                if 'NUMBER ATOM' in line and 'X' in line and 'Y' in line and 'Z' in line:
+                    capture = True
+                    continue
+                if capture:
+                    if not line.strip():
+                        break
+                    parts = line.split()
+                    if len(parts) < 5:
+                        continue
+                    try:
+                        gx = float(parts[2])
+                        gy = float(parts[3])
+                        gz = float(parts[4])
+                    except ValueError:
+                        continue
+                    data.append((gx, gy, gz))
+    except FileNotFoundError:
+        raise SystemExit(f"gradient log not found: {path}")
+    if not data:
+        raise SystemExit(f"no gradient block detected in {path}")
+    return data
+
+cpu = extract(cpu_log)
+gpu = extract(gpu_log)
+if len(cpu) != len(gpu):
+    raise SystemExit(f"gradient length mismatch: CPU={len(cpu)} GPU={len(gpu)}")
+
+max_abs = 0.0
+sum_sq = 0.0
+count = 0
+for (cx, cy, cz), (gx, gy, gz) in zip(cpu, gpu):
+    dx = gx - cx
+    dy = gy - cy
+    dz = gz - cz
+    max_abs = max(max_abs, abs(dx), abs(dy), abs(dz))
+    sum_sq += dx*dx + dy*dy + dz*dz
+    count += 3
+
+rms = math.sqrt(sum_sq / count) if count else 0.0
+msg = f"max_abs={max_abs:.3e} rms={rms:.3e}"
+if max_abs > tol:
+    raise SystemExit(msg)
+print(msg)
+PY
+}
+
 # 1) Dense sanity
 run_case "dense_sanity_single_gpu" "examples/water_pm7_gpu.mop" \
   "export MOPAC_GPU_EIGEN_MIN=1; export CUDA_VISIBLE_DEVICES=0;"
@@ -193,6 +275,17 @@ run_case "gradient_cpu_baseline" "examples/h2o_gpu_force.mop" \
 # 2) Gradient device F reuse
 run_case "gradient_device_reuse" "examples/h2o_gpu_force.mop" \
   "export CUDA_VISIBLE_DEVICES=0; export MOPAC_GPU_GRAD=1; export MOPAC_GPU_PROFILE=1;"
+
+# Targeted gradient comparison (prints gradients via DCART)
+run_case "gradient_cpu_target" "examples/h2o_gpu_gradcheck.mop" \
+  "unset MOPAC_FORCEGPU; unset MOPAC_GPU_GRAD; export MOPAC_GPU_VERBOSE=0; export CUDA_VISIBLE_DEVICES=0;"
+gradient_check_cpu_log="$LAST_LOG"
+
+run_case "gradient_gpu_target" "examples/h2o_gpu_gradcheck.mop" \
+  "export CUDA_VISIBLE_DEVICES=0; export MOPAC_GPU_GRAD=1; export MOPAC_RESIDENT_SCF=1; export MOPAC_GPU_VERBOSE=0;"
+gradient_check_gpu_log="$LAST_LOG"
+
+compare_gradients "$gradient_check_cpu_log" "$gradient_check_gpu_log" "gradient_compare" 1e-5
 
 # Resident SCF cache check
 run_case "resident_scf_density" "examples/water_pm7_gpu.mop" \
