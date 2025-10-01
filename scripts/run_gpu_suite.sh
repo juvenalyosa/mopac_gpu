@@ -234,14 +234,20 @@ tol = float(sys.argv[3])
 def extract(path):
     data = []
     capture = False
+    header_found = False
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as fh:
             for raw in fh:
                 line = raw.strip()
-                if line.startswith('NUMBER ATOM') and 'X' in line and 'Y' in line and 'Z' in line:
+                if not capture and 'CARTESIAN COORDINATE DERIVATIVES' in raw:
                     capture = True
+                    header_found = False
                     continue
                 if not capture:
+                    continue
+                if not header_found:
+                    if line and all(token in line for token in ('X', 'Y', 'Z')):
+                        header_found = True
                     continue
                 if not line:
                     if data:
@@ -249,9 +255,9 @@ def extract(path):
                     else:
                         continue
                 parts = line.split()
-                if len(parts) < 6:
+                if len(parts) < 5:
                     continue
-                if not parts[0].isdigit():
+                if not parts[0].lstrip('+-').isdigit():
                     continue
                 try:
                     gx = float(parts[2].replace('D', 'E'))
