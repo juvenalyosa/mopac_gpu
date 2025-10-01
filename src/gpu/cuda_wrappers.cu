@@ -2414,12 +2414,18 @@ extern "C" bool mopac_cuda_fetch_packed_density(double *host_ptr, size_t linear)
 }
 
 bool mopac_cuda_cart_gradient(int numat, int l123, const double *coord,
-                              double *grad, const double *charges) {
+                              double *grad, const double *charges,
+                              const void *near_pairs, int near_count,
+                              const void *far_pairs, int far_count) {
   (void)numat;
   (void)l123;
   (void)coord;
   (void)grad;
   (void)charges;
+  (void)near_pairs;
+  (void)near_count;
+  (void)far_pairs;
+  (void)far_count;
   return false;
 }
 

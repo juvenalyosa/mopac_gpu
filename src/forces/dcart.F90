@@ -28,9 +28,9 @@
 !
       use parameters_C, only : tore
 #ifdef GPU
-      use iso_c_binding, only : c_loc, c_ptr, c_bool
+      use iso_c_binding, only : c_loc, c_ptr, c_bool, c_null_ptr, c_int
       use mod_vars_cuda, only : resident_scf
-      use gpu_grad_interfaces, only : mopac_cuda_cart_gradient
+      use gpu_grad_interfaces, only : mopac_cuda_cart_gradient, gpu_grad_pair
 #endif
 !
       USE molmec_C, only : nnhco, nhco, htype
@@ -74,7 +74,24 @@
       character(len=32) :: env_grad
       integer :: env_stat
       type(c_ptr) :: coord_ptr, grad_ptr, charge_ptr
+      type(c_ptr) :: near_ptr, far_ptr
       logical(c_bool) :: gpu_ok
+      type(gpu_grad_pair), allocatable :: near_pairs(:), far_pairs(:)
+      integer :: near_count, far_count
+      integer(c_int) :: near_count_c, far_count_c
+      interface
+        subroutine gpu_build_gradient_pairs(numat_in, coord_in, near_pairs, near_count, far_pairs, far_count)
+          use iso_c_binding, only : c_int, c_double
+          use gpu_grad_interfaces, only : gpu_grad_pair
+          implicit none
+          integer, intent(in) :: numat_in
+          double precision, intent(in) :: coord_in(3, numat_in)
+          type(gpu_grad_pair), allocatable, intent(out) :: near_pairs(:)
+          integer, intent(out) :: near_count
+          type(gpu_grad_pair), allocatable, intent(out) :: far_pairs(:)
+          integer, intent(out) :: far_count
+        end subroutine gpu_build_gradient_pairs
+      end interface
 #endif
       integer :: ndi(2), ione
       double precision :: chnge, chnge2, const, aa, ee, deriv, del, angle, refh, &
@@ -147,8 +164,25 @@
         coord_ptr = c_loc(coord)
         grad_ptr = c_loc(dxyz)
         charge_ptr = c_loc(qbld)
-        gpu_ok = mopac_cuda_cart_gradient(numat, l123, coord_ptr, grad_ptr, charge_ptr)
+        near_ptr = c_null_ptr
+        far_ptr = c_null_ptr
+        near_count = 0
+        far_count = 0
+        if (l123 == 1) then
+          call gpu_build_gradient_pairs(numat, coord, near_pairs, near_count, far_pairs, far_count)
+          if (near_count > 0) near_ptr = c_loc(near_pairs(1))
+          if (far_count > 0) far_ptr = c_loc(far_pairs(1))
+        else
+          if (allocated(near_pairs)) deallocate(near_pairs)
+          if (allocated(far_pairs)) deallocate(far_pairs)
+        end if
+        near_count_c = int(near_count, kind=c_int)
+        far_count_c = int(far_count, kind=c_int)
+        gpu_ok = mopac_cuda_cart_gradient(numat, l123, coord_ptr, grad_ptr, charge_ptr, &
+          near_ptr, near_count_c, far_ptr, far_count_c)
         if (gpu_ok .eqv. .true._c_bool) used_gpu = .true.
+        if (allocated(near_pairs)) deallocate(near_pairs)
+        if (allocated(far_pairs)) deallocate(far_pairs)
       end if
       if (.not. used_gpu) then
 #endif
@@ -600,3 +634,106 @@
       end do
     end if
     end subroutine print_dxyz
+
+#ifdef GPU
+      subroutine gpu_build_gradient_pairs(numat_in, coord, near_pairs, near_count, far_pairs, far_count)
+        use iso_c_binding, only : c_int, c_double
+        use gpu_grad_interfaces, only : gpu_grad_pair
+        use common_arrays_C, only : nfirst, nlast
+        implicit none
+        integer, intent(in) :: numat_in
+        double precision, intent(in) :: coord(3, numat_in)
+        type(gpu_grad_pair), allocatable, intent(out) :: near_pairs(:)
+        type(gpu_grad_pair), allocatable, intent(out) :: far_pairs(:)
+        integer, intent(out) :: near_count, far_count
+        integer :: ii, jj, start_i, end_i, start_j, end_j
+        double precision :: dx, dy, dz, r2, r
+        double precision, parameter :: near_thresh = 7.0d0, far_drop = 14.0d0
+        integer :: idx_near, idx_far
+
+        near_count = 0
+        far_count = 0
+        do ii = 1, numat_in
+          start_i = nfirst(ii)
+          end_i = nlast(ii)
+          if (end_i < start_i) cycle
+          do jj = 1, ii - 1
+            start_j = nfirst(jj)
+            end_j = nlast(jj)
+            if (end_j < start_j) cycle
+            dx = coord(1, jj) - coord(1, ii)
+            dy = coord(2, jj) - coord(2, ii)
+            dz = coord(3, jj) - coord(3, ii)
+            r2 = dx*dx + dy*dy + dz*dz
+            if (r2 <= 0.d0) cycle
+            r = sqrt(r2)
+            if (r <= near_thresh) then
+              near_count = near_count + 1
+            else if (r < far_drop) then
+              far_count = far_count + 1
+            end if
+          end do
+        end do
+
+        if (near_count > 0) then
+          allocate(near_pairs(near_count))
+        else
+          allocate(near_pairs(0))
+        end if
+        if (far_count > 0) then
+          allocate(far_pairs(far_count))
+        else
+          allocate(far_pairs(0))
+        end if
+
+        idx_near = 0
+        idx_far = 0
+        do ii = 1, numat_in
+          start_i = nfirst(ii)
+          end_i = nlast(ii)
+          if (end_i < start_i) cycle
+          do jj = 1, ii - 1
+            start_j = nfirst(jj)
+            end_j = nlast(jj)
+            if (end_j < start_j) cycle
+            dx = coord(1, jj) - coord(1, ii)
+            dy = coord(2, jj) - coord(2, ii)
+            dz = coord(3, jj) - coord(3, ii)
+            r2 = dx*dx + dy*dy + dz*dz
+            if (r2 <= 0.d0) cycle
+            r = sqrt(r2)
+            if (r <= near_thresh) then
+              idx_near = idx_near + 1
+              near_pairs(idx_near)%atom_i = int(ii, kind=c_int)
+              near_pairs(idx_near)%atom_j = int(jj, kind=c_int)
+              near_pairs(idx_near)%span_i_first = int(start_i, kind=c_int)
+              near_pairs(idx_near)%span_i_last = int(end_i, kind=c_int)
+              near_pairs(idx_near)%span_j_first = int(start_j, kind=c_int)
+              near_pairs(idx_near)%span_j_last = int(end_j, kind=c_int)
+              near_pairs(idx_near)%image_code = 0_c_int
+              near_pairs(idx_near)%flags = 0_c_int
+              near_pairs(idx_near)%displacement(1) = real(dx, kind=c_double)
+              near_pairs(idx_near)%displacement(2) = real(dy, kind=c_double)
+              near_pairs(idx_near)%displacement(3) = real(dz, kind=c_double)
+              near_pairs(idx_near)%distance2 = real(r2, kind=c_double)
+              near_pairs(idx_near)%weight = real(1.0d0, kind=c_double)
+            else if (r < far_drop) then
+              idx_far = idx_far + 1
+              far_pairs(idx_far)%atom_i = int(ii, kind=c_int)
+              far_pairs(idx_far)%atom_j = int(jj, kind=c_int)
+              far_pairs(idx_far)%span_i_first = int(start_i, kind=c_int)
+              far_pairs(idx_far)%span_i_last = int(end_i, kind=c_int)
+              far_pairs(idx_far)%span_j_first = int(start_j, kind=c_int)
+              far_pairs(idx_far)%span_j_last = int(end_j, kind=c_int)
+              far_pairs(idx_far)%image_code = 0_c_int
+              far_pairs(idx_far)%flags = 1_c_int
+              far_pairs(idx_far)%displacement(1) = real(dx, kind=c_double)
+              far_pairs(idx_far)%displacement(2) = real(dy, kind=c_double)
+              far_pairs(idx_far)%displacement(3) = real(dz, kind=c_double)
+              far_pairs(idx_far)%distance2 = real(r2, kind=c_double)
+              far_pairs(idx_far)%weight = real(1.0d0, kind=c_double)
+            end if
+          end do
+        end do
+      end subroutine gpu_build_gradient_pairs
+#endif
