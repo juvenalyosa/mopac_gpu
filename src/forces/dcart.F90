@@ -27,6 +27,11 @@
       use MOZYME_C, only : iorbs, part_dxyz, mode, jopt
 !
       use parameters_C, only : tore
+#ifdef GPU
+      use iso_c_binding, only : c_loc, c_ptr, c_bool
+      use mod_vars_cuda, only : resident_scf
+      use gpu_grad_interfaces, only : mopac_cuda_cart_gradient
+#endif
 !
       USE molmec_C, only : nnhco, nhco, htype
 !
@@ -49,8 +54,8 @@
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
 !-----------------------------------------------
-      double precision  :: coord(3,numat)
-      double precision  :: dxyz(3,numat*l123)
+      double precision, target :: coord(3,numat)
+      double precision, target :: dxyz(3,numat*l123)
 !-----------------------------------------------
 !   L o c a l   P a r a m e t e r s
 !-----------------------------------------------
@@ -63,7 +68,14 @@
       double precision, dimension(171) :: pdi, padi, pbdi
       double precision, dimension(3,2) :: cdi
       double precision, dimension(numat) :: q
-      double precision, dimension(numat) :: qbld
+      double precision, dimension(numat), target :: qbld
+#ifdef GPU
+      logical :: use_gpu_grad, used_gpu
+      character(len=32) :: env_grad
+      integer :: env_stat
+      type(c_ptr) :: coord_ptr, grad_ptr, charge_ptr
+      logical(c_bool) :: gpu_ok
+#endif
       integer :: ndi(2), ione
       double precision :: chnge, chnge2, const, aa, ee, deriv, del, angle, refh, &
         heat, sum, sumx, sumy, sumz, half, rij, der, dstat(3) = 0.d0
@@ -123,8 +135,28 @@
         mode = 0
       end if
       qbld(:numat) = tore(nat(:numat)) - q(:numat)
-      call dcart_build_scf_gradient_cpu(numat, l123, coord, dxyz, qbld, chnge, chnge2, &
-           const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
+#ifdef GPU
+      used_gpu = .false.
+      use_gpu_grad = .false.
+      env_grad = '' ; env_stat = 1
+      call get_environment_variable('MOPAC_GPU_GRAD', env_grad, status=env_stat)
+      if (env_stat == 0) then
+        if (trim(adjustl(env_grad)) /= '') use_gpu_grad = .true.
+      end if
+      if (use_gpu_grad .and. resident_scf) then
+        coord_ptr = c_loc(coord)
+        grad_ptr = c_loc(dxyz)
+        charge_ptr = c_loc(qbld)
+        gpu_ok = mopac_cuda_cart_gradient(numat, l123, coord_ptr, grad_ptr, charge_ptr)
+        if (gpu_ok .eqv. .true._c_bool) used_gpu = .true.
+      end if
+      if (.not. used_gpu) then
+#endif
+        call dcart_build_scf_gradient_cpu(numat, l123, coord, dxyz, qbld, chnge, chnge2, &
+             const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
+#ifdef GPU
+      end if
+#endif
       if (nnhco /= 0) then
 !
 !   NOW ADD IN MOLECULAR-MECHANICS CORRECTION TO THE H-N-C=O TORSION

@@ -2413,6 +2413,16 @@ extern "C" bool mopac_cuda_fetch_packed_density(double *host_ptr, size_t linear)
   return true;
 }
 
+bool mopac_cuda_cart_gradient(int numat, int l123, const double *coord,
+                              double *grad, const double *charges) {
+  (void)numat;
+  (void)l123;
+  (void)coord;
+  (void)grad;
+  (void)charges;
+  return false;
+}
+
 void mopac_cuda_clear_density_cache() {
   g_density_full_valid = false;
   g_density_full_n = 0;

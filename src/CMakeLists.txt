@@ -56,6 +56,7 @@ if(GPU)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_small_solve_interfaces.F90)
     # Fortran interfaces for GPU B-matrix column builder
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_bmat_interfaces.F90)
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_grad_interfaces.F90)
     # Fortran interfaces for persistent DIIS residual buffer
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_diis_interfaces.F90)
     # Fortran interfaces for GPU Fock build
