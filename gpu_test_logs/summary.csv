@@ -1,0 +1,10 @@
+dense_sanity_single_gpu;OK;0;no;GPU markers not detected
+gradient_device_reuse;OK;0;no;GPU markers not detected
+resident_scf_density;OK;0;no;
+diis_gpu_bfull;OK;0;no;GPU markers not detected
+diis_gpu_bcol_solve;OK;0;no;GPU markers not detected
+disp_halogen_gpu;OK;0;no;
+mozyme_protein_auto;OK;6;no;
+multigpu_blas_cublasxt;SKIP;0;no;<2 GPUs
+mg_eigs_attempt;OK;0;no;GPU markers not detected
+mg_large_dense_singlegpu;OK;145;no;

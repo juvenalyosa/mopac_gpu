@@ -1,0 +1,213 @@
+ *******************************************************************************
+ **                                                                           **
+ **                              MOPAC v23.1.2                                **
+ **                                                                           **
+ *******************************************************************************
+ **          Digital Object Identifier (DOI): 10.5281/zenodo.6511958          **
+ **    Visit the DOI location for information on how to cite this program.    **
+ *******************************************************************************
+
+                              PM7 CALCULATION RESULTS
+
+ *******************************************************************************
+ *  CALCULATION DONE: (MAX THREADS = 2)              Wed Oct  1 11:35:15 2025  *
+ *  PM7        - The PM7 Hamiltonian to be used
+ *  NOOPT      - DO NOT OPTIMIZE ANY COORDINATES
+ *  1SCF       - DO 1 SCF AND THEN STOP 
+ *  T=         - A TIME OF 172800.0 SECONDS REQUESTED
+ *  DUMP=N     - RESTART FILE WRITTEN EVERY 7200.0 SECONDS REQUESTED
+ *  DISP       - PRINT DISPERSION AND HYDROGEN BOND ENERGIES
+ *******************************************************************************
+PM7 DISP 1SCF NOOPT
+ Halogen dispersion test (Cl · · ·O contact)
+ Cl    0.0000 0   0.0000 0   0.0000 0
+   ATOM   CHEMICAL          X               Y               Z
+  NUMBER   SYMBOL      (ANGSTROMS)     (ANGSTROMS)     (ANGSTROMS)
+
+     1       C          1.78000000      0.00000000      0.00000000   
+     2       H          2.28000000      0.93500000      0.00000000   
+     3       H          2.28000000     -0.46750000      0.80990000   
+     4       H          2.28000000     -0.46750000     -0.80990000   
+     5       O         -2.40000000      0.00000000      0.00000000   
+     6       H         -2.90000000      0.76000000      0.00000000   
+     7       H         -2.90000000     -0.76000000      0.00000000   
+
+
+
+          CARTESIAN COORDINATES 
+
+    NO.       ATOM           X           Y           Z
+
+     1         C          1.7800      0.0000      0.0000
+     2         H          2.2800      0.9350      0.0000
+     3         H          2.2800     -0.4675      0.8099
+     4         H          2.2800     -0.4675     -0.8099
+     5         O         -2.4000      0.0000      0.0000
+     6         H         -2.9000      0.7600      0.0000
+     7         H         -2.9000     -0.7600      0.0000
+
+ General Reference for PM7:
+ "Optimization of Parameters for Semiempirical Methods VI: More Modifications to the 
+ NDDO Approximations and Re-optimization of Parameters", J. J. P. Stewart, J. Mol. Mod., 1:32, 19 (2013)
+ https://link.springer.com/article/10.1007/s00894-012-1667-x
+
+           Empirical Formula: C H5 O  =     7 atoms
+
+
+
+      MOLECULAR POINT GROUP   :   Cs  
+
+
+          UHF CALCULATION, NO. OF ALPHA ELECTRONS =    8
+                           NO. OF BETA  ELECTRONS =    7
+
+ -------------------------------------------------------------------------------
+ PM7 DISP 1SCF NOOPT
+ Halogen dispersion test (Cl · · ·O contact)
+ Cl    0.0000 0   0.0000 0   0.0000 0
+
+
+     1SCF WAS SPECIFIED, SO BFGS WAS NOT USED                 
+     SCF FIELD WAS ACHIEVED                                   
+
+
+                              PM7 CALCULATION
+                                                       MOPAC v23.1.2 MacOS
+                                                       Wed Oct  1 11:35:15 2025
+
+
+
+
+          FINAL HEAT OF FORMATION =          1.36259 KCAL/MOL =       5.70109 KJ/MOL
+
+          TOTAL ENERGY            =     -11142.73412 KCAL/MOL = ELECTRONIC ENERGY + CORE-CORE REPULSION
+          ENERGY OF ATOMS         =      11144.29995 KCAL/MOL
+                              SUM =          1.56583 KCAL/MOL
+          DISPERSION ENERGY       =         -0.20324 KCAL/MOL
+                              SUM =          1.36259 KCAL/MOL = FINAL HEAT OF FORMATION
+
+
+
+          TOTAL ENERGY            =       -483.19468 EV
+          ELECTRONIC ENERGY       =       -961.82427 EV 
+          CORE-CORE REPULSION     =        478.62958 EV
+          COSMO AREA              =         92.98 SQUARE ANGSTROMS
+          COSMO VOLUME            =         64.51 CUBIC ANGSTROMS
+
+          IONIZATION POTENTIAL    =         10.616677 EV
+          ALPHA SOMO LUMO (EV)    =        -10.617  4.418
+          BETA  SOMO LUMO (EV)    =        -12.304  0.623
+          NO. OF ALPHA ELECTRONS  =          8
+          NO. OF BETA  ELECTRONS  =          7
+          MOLECULAR WEIGHT        =         33.0499         POINT GROUP:  Cs  
+
+          MOLECULAR DIMENSIONS (Angstroms)
+
+            Atom       Atom       Distance
+            H     7    H     2     5.45027
+            H     6    H     4     2.89325
+            H     3    H     4     1.55504
+
+
+          SCF CALCULATIONS        =          1
+
+          WALL-CLOCK TIME         =      0.004 SECONDS
+          COMPUTATION TIME        =      0.004 SECONDS
+
+
+
+
+   ATOM   CHEMICAL          X               Y               Z
+  NUMBER   SYMBOL      (ANGSTROMS)     (ANGSTROMS)     (ANGSTROMS)
+
+     1       C          1.78000000      0.00000000      0.00000000   
+     2       H          2.28000000      0.93500000      0.00000000   
+     3       H          2.28000000     -0.46750000      0.80990000   
+     4       H          2.28000000     -0.46750000     -0.80990000   
+     5       O         -2.40000000      0.00000000      0.00000000   
+     6       H         -2.90000000      0.76000000      0.00000000   
+     7       H         -2.90000000     -0.76000000      0.00000000   
+
+                             CARTESIAN COORDINATES
+
+   1    C        1.780000000     0.000000000     0.000000000
+   2    H        2.280000000     0.935000000     0.000000000
+   3    H        2.280000000    -0.467500000     0.809900000
+   4    H        2.280000000    -0.467500000    -0.809900000
+   5    O       -2.400000000     0.000000000     0.000000000
+   6    H       -2.900000000     0.760000000     0.000000000
+   7    H       -2.900000000    -0.760000000     0.000000000
+
+
+           Empirical Formula: C H5 O  =     7 atoms
+
+
+
+      MOLECULAR POINT GROUP   :   Cs  
+
+
+          ALPHA EIGENVALUES  
+ -30.17572 -24.53974 -18.66649 -13.81528 -13.40394 -13.40354 -12.30366 -10.61668
+   4.41817   5.77051   5.77127   7.04764   7.14903
+
+
+           BETA EIGENVALUES 
+ -30.17585 -24.22779 -18.66648 -13.81525 -13.08814 -13.08776 -12.30369   0.62259
+   4.41815   6.01837   6.01917   7.04768   7.10233
+
+
+              NET ATOMIC CHARGES AND DIPOLE CONTRIBUTIONS
+
+  ATOM NO.   TYPE          CHARGE      No. of ELECS.   s-Pop       p-Pop       
+    1          C          -0.351456        4.3515     1.13321     3.21824
+    2          H           0.117089        0.8829     0.88291
+    3          H           0.117184        0.8828     0.88282
+    4          H           0.117184        0.8828     0.88282
+    5          O          -0.684159        6.6842     1.75428     4.92988
+    6          H           0.342079        0.6579     0.65792
+    7          H           0.342080        0.6579     0.65792
+ DIPOLE           X         Y         Z       TOTAL
+ POINT-CHG.    -0.799    -0.000    -0.000     0.799
+ HYBRID        -0.035     0.000     0.000     0.035
+ SUM           -0.834    -0.000    -0.000     0.834
+
+
+          ATOMIC ORBITAL ELECTRON POPULATIONS
+
+     Atom    s        px        py        pz   
+    1  C   1.13321   0.90477   1.15676   1.15671
+    2  H   0.88291
+    3  H   0.88282
+    4  H   0.88282
+    5  O   1.75428   1.58808   1.34180   2.00000
+    6  H   0.65792
+    7  H   0.65792
+
+
+                    (SZ)    =    0.500000
+                    (S**2)  =    0.752603
+
+
+          ATOMIC ORBITAL SPIN POPULATIONS
+
+    Atom   Total    s     px     py     pz   
+         Atomic
+    1  C  1.0599  0.173  0.817  0.035  0.035
+    2  H -0.0200 -0.020
+    3  H -0.0200 -0.020
+    4  H -0.0200 -0.020
+    5  O -0.0000 -0.000 -0.000 -0.000  0.000
+    6  H  0.0000  0.000
+    7  H  0.0000  0.000
+
+ **********************
+ *                    *
+ * JOB ENDED NORMALLY *
+ *                    *
+ **********************
+
+
+
+ TOTAL JOB TIME:             0.00 SECONDS
+
+ == MOPAC DONE ==

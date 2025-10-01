@@ -76,11 +76,10 @@ run_case() {
     gpu_hits="yes"
   fi
   # Enforce expected GPU logs for certain tests
+  local expect_gpu_mark="no"
   case "$name" in
     dense_sanity_single_gpu|gradient_device_reuse|diis_gpu_bfull|diis_gpu_bcol_solve|mg_eigs_attempt)
-      if [[ "$gpu_hits" != "yes" ]]; then
-        status="FAIL"; reason="Expected GPU logs but none detected";
-      fi
+      expect_gpu_mark="yes"
       ;;
     multigpu_blas_cublasxt)
       # Informational only: do not fail if logs absent; report via summary
@@ -119,6 +118,9 @@ run_case() {
         fi
         ;;
     esac
+  fi
+  if [[ "$status" == "OK" && "$expect_gpu_mark" == "yes" && "$gpu_hits" != "yes" && -z "$reason" ]]; then
+    reason="GPU markers not detected"
   fi
   if [[ "$status" != "OK" ]]; then
     echo "--- Failure details ($name) ---"

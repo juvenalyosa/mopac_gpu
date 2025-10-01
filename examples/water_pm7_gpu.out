@@ -1,0 +1,165 @@
+ *******************************************************************************
+ **                                                                           **
+ **                              MOPAC v23.1.2                                **
+ **                                                                           **
+ *******************************************************************************
+ **          Digital Object Identifier (DOI): 10.5281/zenodo.6511958          **
+ **    Visit the DOI location for information on how to cite this program.    **
+ *******************************************************************************
+
+                              PM7 CALCULATION RESULTS
+
+ *******************************************************************************
+ *  CALCULATION DONE: (MAX THREADS = 2)              Wed Oct  1 11:35:21 2025  *
+ *  PM7        - The PM7 Hamiltonian to be used
+ *  1SCF       - DO 1 SCF AND THEN STOP 
+ *  T=         - A TIME OF 172800.0 SECONDS REQUESTED
+ *  DUMP=N     - RESTART FILE WRITTEN EVERY 7200.0 SECONDS REQUESTED
+ *  VECTORS    - FINAL EIGENVECTORS TO BE PRINTED
+ *  EIGS       - PRINT ALL EIGENVALUES IN ITER
+ *******************************************************************************
+PM7 1SCF EIGS VECTORS
+ Water molecule — minimal PM7 example (prints eigenvectors)
+  O    0.000000  0  0.000000  0  0.000000  0
+  ATOM    CHEMICAL      BOND LENGTH      BOND ANGLE     TWIST ANGLE 
+ NUMBER    SYMBOL       (ANGSTROMS)      (DEGREES)       (DEGREES) 
+   (I)                     NA:I           NB:NA:I       NC:NB:NA:I       NA    NB    NC 
+     1       H          0.95800000  *    0.0000000       0.0000000        0     0     0
+     2       H          0.95800000  *  104.5000000  *    0.0000000        1     0     0
+
+
+
+          CARTESIAN COORDINATES 
+
+    NO.       ATOM           X           Y           Z
+
+     1         H          0.9580      0.0000      0.0000
+     2         H          1.9160      0.0000      0.0000
+
+ General Reference for PM7:
+ "Optimization of Parameters for Semiempirical Methods VI: More Modifications to the 
+ NDDO Approximations and Re-optimization of Parameters", J. J. P. Stewart, J. Mol. Mod., 1:32, 19 (2013)
+ https://link.springer.com/article/10.1007/s00894-012-1667-x
+
+           Empirical Formula: H2  =     2 atoms
+
+
+
+      MOLECULAR POINT GROUP   :   D*h 
+
+
+      RHF CALCULATION, NO. OF DOUBLY OCCUPIED LEVELS = 1
+
+                 EIGENVALUES ON ITERATION  1
+ -8.79379    -0.196769    
+                 EIGENVALUES ON ITERATION  2
+ -13.4460      25.4554    
+                 EIGENVALUES ON ITERATION  3
+ -13.4460      25.4554    
+                 EIGENVALUES ON ITERATION  4
+ -13.4460      25.4554    
+
+ -------------------------------------------------------------------------------
+ PM7 1SCF EIGS VECTORS
+ Water molecule — minimal PM7 example (prints eigenvectors)
+  O    0.000000  0  0.000000  0  0.000000  0
+
+
+     1SCF WAS SPECIFIED, SO BFGS WAS NOT USED                 
+     SCF FIELD WAS ACHIEVED                                   
+
+
+                              PM7 CALCULATION
+                                                       MOPAC v23.1.2 MacOS
+                                                       Wed Oct  1 11:35:21 2025
+
+
+
+
+          FINAL HEAT OF FORMATION =        -13.28784 KCAL/MOL =     -55.59632 KJ/MOL
+
+
+          COSMO AREA              =         28.88 SQUARE ANGSTROMS
+          COSMO VOLUME            =         14.06 CUBIC ANGSTROMS
+
+          IONIZATION POTENTIAL    =         13.445961 EV
+          HOMO LUMO ENERGIES (EV) =        -13.446  5.455
+          NO. OF FILLED LEVELS    =          1
+          MOLECULAR WEIGHT        =          2.0158         POINT GROUP:  D*h 
+
+          MOLECULAR DIMENSIONS (Angstroms)
+
+            Atom       Atom       Distance
+            H     2    H     1     0.95800
+            H     2    H     1     0.00000
+            H     1    H     2     0.00000
+
+
+          SCF CALCULATIONS        =          1
+
+          WALL-CLOCK TIME         =      0.000 SECONDS
+          COMPUTATION TIME        =      0.003 SECONDS
+
+
+
+
+  ATOM    CHEMICAL      BOND LENGTH      BOND ANGLE     TWIST ANGLE 
+ NUMBER    SYMBOL       (ANGSTROMS)      (DEGREES)       (DEGREES) 
+   (I)                     NA:I           NB:NA:I       NC:NB:NA:I       NA    NB    NC 
+     1       H          0.95800000  *    0.0000000       0.0000000        0     0     0
+     2       H          0.95800000  *  104.5000000  *    0.0000000        1     0     0
+
+                             CARTESIAN COORDINATES
+
+   1    H        0.958000000     0.000000000     0.000000000
+   2    H        1.916000000     0.000000000     0.000000000
+
+
+           Empirical Formula: H2  =     2 atoms
+
+
+
+      MOLECULAR POINT GROUP   :   D*h 
+
+
+                EIGENVECTORS  
+
+
+   Root No.       1         2
+
+                 1 sig     1 siu 
+
+               -13.446     5.455
+  
+  S   H    1    0.7071   -0.7071
+  S   H    2    0.7071    0.7071
+
+
+              NET ATOMIC CHARGES AND DIPOLE CONTRIBUTIONS
+
+  ATOM NO.   TYPE          CHARGE      No. of ELECS.   s-Pop       
+    1          H          -0.000000        1.0000     1.00000
+    2          H           0.000000        1.0000     1.00000
+ DIPOLE           X         Y         Z       TOTAL
+ POINT-CHG.     0.000     0.000     0.000     0.000
+ HYBRID         0.000     0.000     0.000     0.000
+ SUM            0.000     0.000     0.000     0.000
+
+
+          ATOMIC ORBITAL ELECTRON POPULATIONS
+
+     Atom    s   
+    1  H   1.00000
+    2  H   1.00000
+
+ **********************
+ *                    *
+ * JOB ENDED NORMALLY *
+ *                    *
+ **********************
+
+
+
+ TOTAL JOB TIME:             0.00 SECONDS
+
+ == MOPAC DONE ==
