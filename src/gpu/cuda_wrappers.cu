@@ -2427,6 +2427,8 @@ bool mopac_cuda_cart_gradient(int numat, int l123, const double *coord,
   return mopac_gpu_cart_gradient_cpu(numat, l123, coord, grad, charges);
 }
 
+
+
 void mopac_cuda_clear_density_cache() {
   g_density_full_valid = false;
   g_density_full_n = 0;
