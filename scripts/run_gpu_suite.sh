@@ -290,6 +290,8 @@ for (cx, cy, cz), (gx, gy, gz) in zip(cpu, gpu):
 rms = math.sqrt(sum_sq / count) if count else 0.0
 msg = f"max_abs={max_abs:.3e} rms={rms:.3e}"
 if max_abs > tol:
+    print('CPU sample:', cpu[:3])
+    print('GPU sample:', gpu[:3])
     raise SystemExit(msg)
 print(msg)
 PY
