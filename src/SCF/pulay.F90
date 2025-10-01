@@ -33,9 +33,9 @@
       integer , intent(in) :: msize
       double precision , intent(out) :: pl
       logical , intent(inout) :: start
-      double precision  :: f(mpack)
-      double precision  :: p(mpack)
-      double precision  :: fppf(*)
+      double precision, target :: f(mpack)
+      double precision, target :: p(mpack)
+      double precision, target :: fppf(*)
       double precision , intent(inout) :: fock(*)
       double precision , intent(inout) :: emat(npulay+1,npulay+1)
 !
