@@ -197,6 +197,7 @@ static inline bool resident_mode_enabled() {
 }
 
 extern "C" __global__ void unpack_lower_to_full_kernel(const double *packed, double *full, int n);
+extern "C" bool mopac_gpu_cart_gradient_cpu(int numat, int l123, const double *coord, double *grad, const double *qbld);
 
 // Simple grow-only device buffer cache helper (C++ only; placed outside C linkage)
 template <typename T>
