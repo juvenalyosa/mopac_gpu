@@ -206,22 +206,27 @@ tol = float(sys.argv[3])
 def extract(path):
     data = []
     capture = False
-    header_tokens = (
-        'NUMBER ATOM',
-        'NO. AT.'
-    )
+    expect_rows = False
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as fh:
             for raw in fh:
                 line = raw.rstrip()
-                if any(h in line for h in header_tokens):
+                if 'CARTESIAN COORDINATE DERIVATIVES' in line:
                     capture = True
                     continue
-                if capture:
+                if capture and not expect_rows:
+                    # Look for header line that precedes numeric rows
+                    if line.strip() == "":
+                        continue
+                    if any(token in line for token in ('NUMBER', 'ATOM', 'NO.')):
+                        expect_rows = True
+                        continue
+                if capture and expect_rows:
                     if not line.strip():
                         break
                     parts = line.split()
-                    if len(parts) < 5:
+                    # Expect final three columns to be Cartesian components
+                    if len(parts) < 3:
                         continue
                     try:
                         gx = float(parts[-3])
@@ -235,6 +240,8 @@ def extract(path):
     if not data:
         raise SystemExit(f"no gradient block detected in {path}")
     return data
+
+
 
 cpu = extract(cpu_log)
 gpu = extract(gpu_log)
