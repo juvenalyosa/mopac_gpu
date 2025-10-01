@@ -237,34 +237,32 @@ gpu_log = sys.argv[2]
 tol = float(sys.argv[3])
 
 def extract(path):
-    import re
     data = []
     capture = False
-    started = False
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as fh:
             for raw in fh:
                 line = raw.rstrip()
                 if 'CARTESIAN COORDINATE DERIVATIVES' in line:
                     capture = True
-                    started = False
                     continue
                 if not capture:
                     continue
                 if not line.strip():
-                    if started:
+                    if data:
                         break
                     else:
                         continue
-                floats = [float(v.replace('D', 'E')) for v in re.findall(r'[-+]?\d+\.\d+(?:[EeDd][+-]?\d+)?', line)]
-                if len(floats) < 3:
+                parts = line.split()
+                if len(parts) < 5:
                     continue
-                if len(floats) >= 4:
-                    gx, gy, gz = floats[:3]
-                else:
-                    gx, gy, gz = floats[-3:]
+                try:
+                    gx = float(parts[2].replace('D', 'E'))
+                    gy = float(parts[3].replace('D', 'E'))
+                    gz = float(parts[4].replace('D', 'E'))
+                except ValueError:
+                    continue
                 data.append((gx, gy, gz))
-                started = True
     except FileNotFoundError:
         raise SystemExit(f"gradient log not found: {path}")
     if not data:
