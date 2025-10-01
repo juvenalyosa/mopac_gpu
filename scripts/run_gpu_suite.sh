@@ -256,14 +256,13 @@ def extract(path):
                         break
                     else:
                         continue
-                floats = re.findall(r'[-+]?\d+\.\d+(?:[EeDd][+-]?\d+)?', line)
+                floats = [float(v.replace('D', 'E')) for v in re.findall(r'[-+]?\d+\.\d+(?:[EeDd][+-]?\d+)?', line)]
                 if len(floats) < 3:
                     continue
-                values = [float(v.replace('D', 'E')) for v in floats]
-                if len(values) >= 4:
-                    gx, gy, gz = values[-4:-1]
+                if len(floats) >= 4:
+                    gx, gy, gz = floats[:3]
                 else:
-                    gx, gy, gz = values[-3:]
+                    gx, gy, gz = floats[-3:]
                 data.append((gx, gy, gz))
                 started = True
     except FileNotFoundError:
@@ -271,6 +270,7 @@ def extract(path):
     if not data:
         raise SystemExit(f"no gradient block detected in {path}")
     return data
+
 
 
 cpu = extract(cpu_log)
