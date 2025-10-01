@@ -2486,6 +2486,16 @@ bool mopac_cuda_cart_gradient(int numat, int l123, const double *coord,
   if (cudaMemcpy(g_grad_pairs_near.ptr, near_pairs, sizeof(GradPair) * (size_t)near_count,
                  cudaMemcpyHostToDevice) != cudaSuccess) return false;
 
+  if (far_count > 0 && far_pairs) {
+    g_grad_pairs_far.ensure(sizeof(GradPair) * (size_t)far_count);
+    if (cudaMemcpy(g_grad_pairs_far.ptr, far_pairs, sizeof(GradPair) * (size_t)far_count,
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+      return false;
+    }
+  } else if (g_grad_pairs_far.ptr) {
+    g_grad_pairs_far.release();
+  }
+
   int block = 128;
   int grid = (near_count + block - 1) / block;
   cart_gradient_near_kernel<<<grid, block>>>(near_count, g_grad_pairs_near.ptr,
