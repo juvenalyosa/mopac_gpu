@@ -234,43 +234,29 @@ tol = float(sys.argv[3])
 def extract(path):
     data = []
     capture = False
-    header_idx = None
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as fh:
             for raw in fh:
                 line = raw.strip()
-                if 'CARTESIAN COORDINATE DERIVATIVES' in raw:
+                if line.startswith('NUMBER ATOM') and 'X' in line and 'Y' in line and 'Z' in line:
                     capture = True
-                    header_idx = None
                     continue
                 if not capture:
-                    continue
-                if header_idx is None:
-                    tokens = raw.split()
-                    if len(tokens) < 5:
-                        continue
-                    try:
-                        ix = tokens.index('X')
-                        iy = tokens.index('Y')
-                        iz = tokens.index('Z')
-                    except ValueError:
-                        continue
-                    header_idx = (ix, iy, iz)
                     continue
                 if not line:
                     if data:
                         break
                     else:
                         continue
-                parts = raw.split()
-                if len(parts) <= max(header_idx):
+                parts = line.split()
+                if len(parts) < 6:
                     continue
-                if not parts[0].lstrip('+-').isdigit():
+                if not parts[0].isdigit():
                     continue
                 try:
-                    gx = float(parts[header_idx[0]].replace('D', 'E'))
-                    gy = float(parts[header_idx[1]].replace('D', 'E'))
-                    gz = float(parts[header_idx[2]].replace('D', 'E'))
+                    gx = float(parts[2].replace('D', 'E'))
+                    gy = float(parts[3].replace('D', 'E'))
+                    gz = float(parts[4].replace('D', 'E'))
                 except ValueError:
                     continue
                 data.append((gx, gy, gz))
