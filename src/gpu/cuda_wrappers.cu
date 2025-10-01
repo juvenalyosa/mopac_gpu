@@ -198,49 +198,6 @@ static inline bool resident_mode_enabled() {
 
 extern "C" __global__ void unpack_lower_to_full_kernel(const double *packed, double *full, int n);
 
-struct GradPair {
-  int atom_i;
-  int atom_j;
-  int span_i_first;
-  int span_i_last;
-  int span_j_first;
-  int span_j_last;
-  int image_code;
-  int flags;
-  double displacement[3];
-  double distance2;
-  double weight;
-};
-
-__global__ void cart_gradient_near_kernel(int npairs, const GradPair *pairs,
-                                          const double *qbld, double *grad, int numat) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid >= npairs) return;
-  GradPair pair = pairs[tid];
-  if (pair.atom_i <= 0 || pair.atom_i > numat) return;
-  if (pair.atom_j <= 0 || pair.atom_j > numat) return;
-  double qi = qbld[pair.atom_i - 1];
-  double qj = qbld[pair.atom_j - 1];
-  double dx = pair.displacement[0];
-  double dy = pair.displacement[1];
-  double dz = pair.displacement[2];
-  double r2 = dx*dx + dy*dy + dz*dz;
-  if (r2 <= 0.0) return;
-  double r = sqrt(r2);
-  if (r <= 0.0) return;
-  double invr3 = 1.0 / (r2 * r);
-  double factor = qi * qj * pair.weight * invr3;
-  double gx = factor * dx;
-  double gy = factor * dy;
-  double gz = factor * dz;
-  atomicAdd(&grad[(pair.atom_i - 1) * 3 + 0], -gx);
-  atomicAdd(&grad[(pair.atom_i - 1) * 3 + 1], -gy);
-  atomicAdd(&grad[(pair.atom_i - 1) * 3 + 2], -gz);
-  atomicAdd(&grad[(pair.atom_j - 1) * 3 + 0], gx);
-  atomicAdd(&grad[(pair.atom_j - 1) * 3 + 1], gy);
-  atomicAdd(&grad[(pair.atom_j - 1) * 3 + 2], gz);
-}
-
 // Simple grow-only device buffer cache helper (C++ only; placed outside C linkage)
 template <typename T>
 struct DevBuf {
@@ -292,10 +249,6 @@ struct HostBuf {
   }
 };
 
-static DevBuf<GradPair> g_grad_pairs_near;
-static DevBuf<GradPair> g_grad_pairs_far;
-static DevBuf<double>   g_grad_qbld;
-static DevBuf<double>   g_grad_vec;
 
 // Default device pair for 2-GPU MOZYME operations
 static int g_pair_dev0 = 0;
@@ -2465,47 +2418,12 @@ bool mopac_cuda_cart_gradient(int numat, int l123, const double *coord,
                               double *grad, const double *charges,
                               const void *near_pairs, int near_count,
                               const void *far_pairs, int far_count) {
-  (void)coord;
+  (void)near_pairs;
+  (void)near_count;
   (void)far_pairs;
   (void)far_count;
-  if (!grad || !charges) return false;
-  if (numat <= 0) return false;
-  if (!resident_mode_enabled()) return false;
-  if (near_count <= 0 || !near_pairs) return false;
-  if (l123 != 1) return false;
-
-  size_t atoms = (size_t)numat;
-  size_t grad_bytes = sizeof(double) * atoms * 3;
-  g_grad_vec.ensure(grad_bytes);
-  if (cudaMemset(g_grad_vec.ptr, 0, grad_bytes) != cudaSuccess) return false;
-
-  g_grad_qbld.ensure(sizeof(double) * atoms);
-  if (cudaMemcpy(g_grad_qbld.ptr, charges, sizeof(double) * atoms, cudaMemcpyHostToDevice) != cudaSuccess) return false;
-
-  g_grad_pairs_near.ensure(sizeof(GradPair) * (size_t)near_count);
-  if (cudaMemcpy(g_grad_pairs_near.ptr, near_pairs, sizeof(GradPair) * (size_t)near_count,
-                 cudaMemcpyHostToDevice) != cudaSuccess) return false;
-
-  if (far_count > 0 && far_pairs) {
-    g_grad_pairs_far.ensure(sizeof(GradPair) * (size_t)far_count);
-    if (cudaMemcpy(g_grad_pairs_far.ptr, far_pairs, sizeof(GradPair) * (size_t)far_count,
-                   cudaMemcpyHostToDevice) != cudaSuccess) {
-      return false;
-    }
-  } else if (g_grad_pairs_far.ptr) {
-    g_grad_pairs_far.release();
-  }
-
-  int block = 128;
-  int grid = (near_count + block - 1) / block;
-  cart_gradient_near_kernel<<<grid, block>>>(near_count, g_grad_pairs_near.ptr,
-                                             g_grad_qbld.ptr, g_grad_vec.ptr, numat);
-  if (cudaDeviceSynchronize() != cudaSuccess) return false;
-
-  if (cudaMemcpy(grad, g_grad_vec.ptr, grad_bytes, cudaMemcpyDeviceToHost) != cudaSuccess) return false;
-
-  // Kernel currently accumulates only point-charge contributions; fall back to CPU for full accuracy.
-  return false;
+  if (!coord || !grad || !charges) return false;
+  return mopac_gpu_cart_gradient_cpu(numat, l123, coord, grad, charges);
 }
 
 void mopac_cuda_clear_density_cache() {

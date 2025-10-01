@@ -223,11 +223,6 @@ compare_gradients() {
     summary+=("$name;SKIP;0;no;logs missing")
     return 0
   fi
-  if [[ ! -f "$cpu_log" || ! -f "$gpu_log" ]]; then
-    echo "Gradient compare skipped: log files not found"
-    summary+=("$name;SKIP;0;no;logs missing")
-    return 0
-  fi
   local result
   if ! result=$(python3 - "$cpu_log" "$gpu_log" "$tol" <<'PY'
 import sys, math
@@ -239,14 +234,21 @@ tol = float(sys.argv[3])
 def extract(path):
     data = []
     capture = False
+    header_seen = False
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as fh:
             for raw in fh:
-                line = raw.rstrip()
+                line = raw.rstrip('
+')
                 if 'CARTESIAN COORDINATE DERIVATIVES' in line:
                     capture = True
+                    header_seen = False
                     continue
                 if not capture:
+                    continue
+                if not header_seen:
+                    if any(token in line for token in ('NUMBER ATOM', 'NO.', 'ATOM')):
+                        header_seen = True
                     continue
                 if not line.strip():
                     if data:
@@ -254,7 +256,9 @@ def extract(path):
                     else:
                         continue
                 parts = line.split()
-                if len(parts) < 5:
+                if len(parts) < 6:
+                    continue
+                if not parts[0].strip('0123456789').replace('.', '').replace('-', '').replace('+','') == '' and not parts[0].isdigit():
                     continue
                 try:
                     gx = float(parts[2].replace('D', 'E'))
