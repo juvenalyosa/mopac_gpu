@@ -63,6 +63,7 @@
       double precision, dimension(171) :: pdi, padi, pbdi
       double precision, dimension(3,2) :: cdi
       double precision, dimension(numat) :: q
+      double precision, dimension(numat) :: qbld
       integer :: ndi(2), ione
       double precision :: chnge, chnge2, const, aa, ee, deriv, del, angle, refh, &
         heat, sum, sumx, sumy, sumz, half, rij, der, dstat(3) = 0.d0
@@ -275,15 +276,16 @@
       return
       end subroutine dcart
 
-      subroutine dcart_build_scf_gradient_cpu(numat_in, l123_in, coord, dxyz, q, chnge, chnge2, const, numtot_in, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
+      subroutine dcart_build_scf_gradient_cpu(numat_in, l123_in, coord, dxyz, q, chnge, chnge2, &
+           const, numtot_in, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
       use common_arrays_C, only : nfirst, nlast, nat, p, pa, pb, tvec
       use molkst_C, only : mozyme, id, cutofp, l1u, l2u, l3u
       use MOZYME_C, only : iorbs, part_dxyz, mode, jopt
       implicit none
       integer, intent(in) :: numat_in, l123_in, numtot_in, icuc, ione
-      double precision, intent(in) :: coord(3, numat_in)
-      double precision, intent(inout) :: dxyz(3, numat_in*l123_in)
-      double precision, intent(inout) :: q(numat_in)
+      double precision, intent(in) :: coord(3, *)
+      double precision, intent(inout) :: dxyz(3, *)
+      double precision, intent(inout) :: q(*)
       double precision, intent(in) :: chnge, chnge2, const
       logical, intent(in) :: force
       double precision, intent(inout) :: pdi(171), padi(171), pbdi(171)
