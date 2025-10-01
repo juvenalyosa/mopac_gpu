@@ -3,7 +3,7 @@
                      SUMMARY OF  PM7 CALCULATION
 
                                                        MOPAC v23.1.2 MacOS
-                                                       Wed Oct  1 11:35:21 2025
+                                                       Wed Oct  1 13:12:30 2025
 
            Empirical Formula: H2  =     2 atoms
 
@@ -31,7 +31,7 @@
             H     2    H     1     0.00000
             H     1    H     2     0.00000
           SCF CALCULATIONS        =          1
-          WALL-CLOCK TIME         =      0.000 SECONDS
+          WALL-CLOCK TIME         =      0.004 SECONDS
           COMPUTATION TIME        =      0.003 SECONDS
 
 

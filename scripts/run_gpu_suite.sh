@@ -47,6 +47,11 @@ fi
 summary=()
 fail_count=0
 
+gradient_cpu_elapsed=""
+gradient_gpu_elapsed=""
+gradient_cpu_log=""
+gradient_gpu_log=""
+
 LAST_STATUS=""
 LAST_REASON=""
 LAST_LOG=""
@@ -117,6 +122,12 @@ run_case() {
           reason="resident"
         fi
         ;;
+      gradient_device_reuse)
+        reason="GPU profile"
+        ;;
+      gradient_cpu_baseline)
+        reason="CPU baseline"
+        ;;
     esac
   fi
   if [[ "$status" == "OK" && "$expect_gpu_mark" == "yes" && "$gpu_hits" != "yes" && -z "$reason" ]]; then
@@ -158,6 +169,13 @@ run_case() {
     echo "------------------------------"
     fail_count=$((fail_count+1))
   fi
+  if [[ "$name" == "gradient_cpu_baseline" ]]; then
+    gradient_cpu_elapsed="$elapsed"
+    gradient_cpu_log="$log"
+  elif [[ "$name" == "gradient_device_reuse" ]]; then
+    gradient_gpu_elapsed="$elapsed"
+    gradient_gpu_log="$log"
+  fi
   summary+=("$name;$status;$elapsed;$gpu_hits;$reason")
   LAST_STATUS="$status"
   LAST_REASON="$reason"
@@ -167,6 +185,10 @@ run_case() {
 # 1) Dense sanity
 run_case "dense_sanity_single_gpu" "examples/water_pm7_gpu.mop" \
   "export MOPAC_GPU_EIGEN_MIN=1; export CUDA_VISIBLE_DEVICES=0;"
+
+# CPU baseline for gradient timing (Stage 0 profiling)
+run_case "gradient_cpu_baseline" "examples/h2o_gpu_force.mop" \
+  "unset MOPAC_FORCEGPU; export MOPAC_GPU_VERBOSE=0; export CUDA_VISIBLE_DEVICES=0;"
 
 # 2) Gradient device F reuse
 run_case "gradient_device_reuse" "examples/h2o_gpu_force.mop" \
@@ -272,6 +294,14 @@ fi
 echo ""
 echo "GPU Test Summary (name;status;seconds;gpu_logs;reason)"
 for line in "${summary[@]}"; do echo "$line"; done | tee "$OUT_DIR/summary.csv"
+
+if [[ -n "$gradient_cpu_elapsed" && -n "$gradient_gpu_elapsed" ]]; then
+  echo ""
+  echo "Gradient timing snapshot (Stage 0 baseline)"
+  echo "  CPU baseline : ${gradient_cpu_elapsed}s (log: ${gradient_cpu_log})"
+  echo "  GPU profile  : ${gradient_gpu_elapsed}s (log: ${gradient_gpu_log})"
+  echo "  Tip: rerun with \"MOPAC_GPU_PROFILE=2\" for detailed kernel timing."
+fi
 
 # Restore original verbose setting if it was empty
 if [[ -z "$GPU_VERBOSE_DEFAULT" ]]; then unset MOPAC_GPU_VERBOSE; fi

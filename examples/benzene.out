@@ -10,7 +10,7 @@
                               PM7 CALCULATION RESULTS
 
  *******************************************************************************
- *  CALCULATION DONE: (MAX THREADS = 2)              Wed Oct  1 11:35:15 2025  *
+ *  CALCULATION DONE: (MAX THREADS = 2)              Wed Oct  1 13:12:25 2025  *
  *  PM7        - The PM7 Hamiltonian to be used
  *  PULAY      - PULAY'S METHOD TO BE USED IN SCF
  *  XYZ        - CARTESIAN COORDINATE SYSTEM TO BE USED
@@ -84,7 +84,7 @@ PM7 XYZ 1SCF PULAY BONDS
 
                               PM7 CALCULATION
                                                        MOPAC v23.1.2 MacOS
-                                                       Wed Oct  1 11:35:15 2025
+                                                       Wed Oct  1 13:12:25 2025
 
 
 

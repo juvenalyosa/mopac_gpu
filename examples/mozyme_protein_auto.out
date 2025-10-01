@@ -10,7 +10,7 @@
                               PM7 CALCULATION RESULTS
 
  *******************************************************************************
- *  CALCULATION DONE: (MAX THREADS = 2)              Wed Oct  1 11:35:15 2025  *
+ *  CALCULATION DONE: (MAX THREADS = 2)              Wed Oct  1 13:12:25 2025  *
  *  PM7        - The PM7 Hamiltonian to be used
  *  START_RES  - STARTING RESIDUE NUMBERS DEFINED
  *  Keyword:     START_RES=(1A) 
@@ -1089,7 +1089,7 @@
 
                               PM7 CALCULATION
                                                        MOPAC v23.1.2 MacOS
-                                                       Wed Oct  1 11:35:21 2025
+                                                       Wed Oct  1 13:12:30 2025
 
 
 
@@ -1111,8 +1111,8 @@
 
           SCF CALCULATIONS        =          1
 
-          WALL-CLOCK TIME         =      5.527 SECONDS
-          COMPUTATION TIME        =      5.491 SECONDS
+          WALL-CLOCK TIME         =      5.488 SECONDS
+          COMPUTATION TIME        =      5.386 SECONDS
 
 
 
@@ -3183,6 +3183,6 @@
 
 
 
- TOTAL JOB TIME:             5.54 SECONDS
+ TOTAL JOB TIME:             5.50 SECONDS
 
  == MOPAC DONE ==
