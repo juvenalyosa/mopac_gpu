@@ -76,7 +76,7 @@
       type(c_ptr) :: coord_ptr, grad_ptr, charge_ptr
       type(c_ptr) :: near_ptr, far_ptr
       logical(c_bool) :: gpu_ok
-      type(gpu_grad_pair), allocatable :: near_pairs(:), far_pairs(:)
+      type(gpu_grad_pair), allocatable, target :: near_pairs(:), far_pairs(:)
       integer :: near_count, far_count
       integer(c_int) :: near_count_c, far_count_c
       interface
@@ -86,9 +86,9 @@
           implicit none
           integer, intent(in) :: numat_in
           double precision, intent(in) :: coord_in(3, numat_in)
-          type(gpu_grad_pair), allocatable, intent(out) :: near_pairs(:)
+          type(gpu_grad_pair), allocatable, target, intent(out) :: near_pairs(:)
           integer, intent(out) :: near_count
-          type(gpu_grad_pair), allocatable, intent(out) :: far_pairs(:)
+          type(gpu_grad_pair), allocatable, target, intent(out) :: far_pairs(:)
           integer, intent(out) :: far_count
         end subroutine gpu_build_gradient_pairs
       end interface
@@ -643,8 +643,8 @@
         implicit none
         integer, intent(in) :: numat_in
         double precision, intent(in) :: coord(3, numat_in)
-        type(gpu_grad_pair), allocatable, intent(out) :: near_pairs(:)
-        type(gpu_grad_pair), allocatable, intent(out) :: far_pairs(:)
+        type(gpu_grad_pair), allocatable, target, intent(out) :: near_pairs(:)
+        type(gpu_grad_pair), allocatable, target, intent(out) :: far_pairs(:)
         integer, intent(out) :: near_count, far_count
         integer :: ii, jj, start_i, end_i, start_j, end_j
         double precision :: dx, dy, dz, r2, r
