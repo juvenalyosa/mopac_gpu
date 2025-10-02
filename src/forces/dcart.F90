@@ -361,10 +361,10 @@
           ok_density = mopac_cuda_fetch_packed_density(p, int(linear, kind=c_size_t))
           if (ok_density .eqv. .true._c_bool) then
             if (allocated(pa)) then
-              call mopac_cuda_fetch_packed_density(pa, int(linear, kind=c_size_t))
+              ok_density = mopac_cuda_fetch_packed_density(pa, int(linear, kind=c_size_t))
             end if
             if (allocated(pb)) then
-              call mopac_cuda_fetch_packed_density(pb, int(linear, kind=c_size_t))
+              ok_density = mopac_cuda_fetch_packed_density(pb, int(linear, kind=c_size_t))
             end if
           end if
           ! If fetch fails, proceed without synchronisation; CPU path will still execute.
@@ -629,8 +629,8 @@
           if (.not. mopac_cuda_fetch_packed_density(p, linear_p)) then
             ! Resident density unavailable; proceed with existing host copy.
           end if
-          if (allocated(pa)) call mopac_cuda_fetch_packed_density(pa, linear_p)
-          if (allocated(pb)) call mopac_cuda_fetch_packed_density(pb, linear_p)
+          if (allocated(pa)) ok = mopac_cuda_fetch_packed_density(pa, linear_p)
+          if (allocated(pb)) ok = mopac_cuda_fetch_packed_density(pb, linear_p)
         end if
 
         grad(:, :) = 0.0d0
