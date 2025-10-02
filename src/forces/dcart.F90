@@ -392,7 +392,7 @@
                 deallocate(scratch_full)
               end if
             end if
-            if (ok_density .ne. .true._c_bool) then
+            if (ok_density .neqv. .true._c_bool) then
               resident_scf = .false.
             end if
           end if
@@ -690,7 +690,7 @@
                 deallocate(scratch_full)
               end if
             end if
-            if (ok_fetch .ne. .true._c_bool) resident_scf = .false.
+            if (ok_fetch .neqv. .true._c_bool) resident_scf = .false.
           end if
         end if
 
