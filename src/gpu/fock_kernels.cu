@@ -60,6 +60,23 @@ static long long prof_atoms = 0;
 static long long prof_ll_pairs = 0, prof_lh_pairs = 0, prof_hh_pairs = 0;
 static double prof_total_ms = 0.0, prof_ll_ms = 0.0, prof_lh_ms = 0.0, prof_hh_ms = 0.0;
 
+static bool resident_debug_enabled_local() {
+  static int inited = 0;
+  static bool enabled = false;
+  if (!inited) {
+    const char *s = std::getenv("MOPAC_GPU_RESIDENT_DEBUG");
+    if (s && *s) {
+      if (!(std::strcmp(s, "0") == 0 || std::strcmp(s, "off") == 0 ||
+            std::strcmp(s, "false") == 0 || std::strcmp(s, "n") == 0 ||
+            std::strcmp(s, "N") == 0)) {
+        enabled = true;
+      }
+    }
+    inited = 1;
+  }
+  return enabled;
+}
+
 __host__ __device__ inline int span_count(int first, int last) {
   return (last >= first) ? (last - first + 1) : 0;
 }
@@ -501,6 +518,10 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
     cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int)*pair_i.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int)*pair_j.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(s_d_pair_off, pair_off.data(), sizeof(int)*pair_off.size(), cudaMemcpyHostToDevice);
+  }
+  if (resident_debug_enabled_local()) {
+    std::printf("[GPU resident debug] fock2_scf pairs=%zu w_len=%zu\n", pair_i.size(), w_len);
+    std::fflush(stdout);
   }
 
   bool want_timing = (verbose != 0) || (csv_enabled != 0) || (prof_collect != 0);
