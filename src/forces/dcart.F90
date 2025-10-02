@@ -21,8 +21,9 @@
       use common_arrays_C, only : nfirst, nlast, nat, p, pa, pb, tvec, &
       nbonds, ibonds, geoa, geo
 !
-      USE molkst_C, only : numat, numcal, keywrd, id, l1u, l2u, l3u, l123, use_ref_geo, &
-      cutofp, method_pm6, method_PM7, mozyme, density, N_3_present, Si_O_H_present
+      USE molkst_C, only : numat, numcal, keywrd, id, l1u, l2u, l3u, l123, mpack, &
+      use_ref_geo, cutofp, method_pm6, method_PM7, mozyme, density, N_3_present, &
+      Si_O_H_present
 !
       use MOZYME_C, only : iorbs, part_dxyz, mode, jopt
 !
@@ -134,6 +135,9 @@
       numtot = numat*l123
       refeps = useps
       useps = .false.
+#ifdef GPU
+      if (resident_scf) call sync_resident_density()
+#endif
       if (mozyme) then
    !
    !   MODE = 1:   ADD NEW DERIVATIVES ON TO OLD DERIVATIVES
@@ -345,11 +349,13 @@
       contains
 #ifdef GPU
         subroutine sync_resident_density()
+          use molkst_C, only : mpack
           implicit none
           integer :: linear
           logical(c_bool) :: ok_density
           if (.not. resident_scf) return
-          linear = l123*(l123 + 1)/2
+          linear = mpack
+          if (linear <= 0) return
           ok_density = mopac_cuda_fetch_packed_density(p, int(linear, kind=c_size_t))
           ! If fetch fails, proceed without synchronisation; CPU path will still execute.
         end subroutine sync_resident_density
@@ -566,7 +572,7 @@
       function mopac_gpu_cart_gradient_cpu(numat_in, l123_in, coord_ptr, grad_ptr, qbld_ptr) result(ok) &
            bind(C, name='mopac_gpu_cart_gradient_cpu')
         use iso_c_binding, only : c_ptr, c_f_pointer, c_bool, c_size_t
-        use molkst_C, only : id, keywrd, mozyme
+        use molkst_C, only : id, keywrd, mozyme, mpack
         use common_arrays_C, only : nfirst, nlast, p, pa, pb, tvec
         use MOZYME_C, only : mode, part_dxyz
         use funcon_C, only : fpc_9
@@ -608,8 +614,8 @@
         icuc = (l123_in + 1) / 2
         force = index(keywrd,'PREC') /= 0 .or. index(keywrd,'FORCE') /= 0
 
-        linear_p = int(l123_in * (l123_in + 1) / 2, kind=c_size_t)
-        if (resident_scf) then
+        linear_p = int(max(0, mpack), kind=c_size_t)
+        if (resident_scf .and. linear_p > int(0, kind=c_size_t)) then
           if (.not. mopac_cuda_fetch_packed_density(p, linear_p)) then
             ! Resident density unavailable; proceed with existing host copy.
           end if
