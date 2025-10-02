@@ -139,8 +139,6 @@ void resident_grad_release_impl() {
   detail::experimental_mode = -1;
 }
 
-}  // namespace
-
 #if defined(__NVCC__)
 #pragma diag_default 177
 #endif
