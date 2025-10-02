@@ -602,6 +602,7 @@
         use funcon_C, only : fpc_9
         use mod_vars_cuda, only : resident_scf
         use gpu_density_interfaces, only : mopac_cuda_fetch_packed_density
+        use gpu_runtime_interfaces, only : mopac_cuda_fetch_density
         implicit none
         integer, value :: numat_in
         integer, value :: l123_in
