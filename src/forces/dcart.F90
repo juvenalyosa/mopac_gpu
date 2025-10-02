@@ -369,10 +369,10 @@
             if (ok_density .eqv. .true._c_bool) then
               p(1:linear) = scratch_pack(1:linear)
               if (allocated(pa)) then
-                call mopac_cuda_fetch_packed_density(pa, int(linear, kind=c_size_t))
+                pa(1:linear) = scratch_pack(1:linear)
               end if
               if (allocated(pb)) then
-                call mopac_cuda_fetch_packed_density(pb, int(linear, kind=c_size_t))
+                pb(1:linear) = scratch_pack(1:linear)
               end if
             else
               n = norbs
@@ -659,12 +659,8 @@
             ok_fetch = mopac_cuda_fetch_packed_density(scratch_pack, linear_p)
             if (ok_fetch .eqv. .true._c_bool) then
               p(1:mpack) = scratch_pack(1:mpack)
-              if (allocated(pa)) then
-                call mopac_cuda_fetch_packed_density(pa, linear_p)
-              end if
-              if (allocated(pb)) then
-                call mopac_cuda_fetch_packed_density(pb, linear_p)
-              end if
+              if (allocated(pa)) pa(1:mpack) = scratch_pack(1:mpack)
+              if (allocated(pb)) pb(1:mpack) = scratch_pack(1:mpack)
             else
               n_local = norbs
               if (n_local > 0) then
