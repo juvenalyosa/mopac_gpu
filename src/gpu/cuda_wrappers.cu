@@ -493,16 +493,11 @@ static inline void invalidate_packed_density() {
 
 static PackedDensitySlot* find_packed_slot(const double *host_ptr, size_t len) {
   PackedDensitySlot *fallback = nullptr;
-  int matches = 0;
   for (auto &slot : g_packed_density) {
     if (!slot.valid) continue;
     if (slot.len != len) continue;
-    ++matches;
     if (host_ptr && slot.host_ptr == host_ptr) return &slot;
     if (!fallback || slot.stamp > fallback->stamp) fallback = &slot;
-  }
-  if (host_ptr) {
-    return (matches == 1) ? fallback : nullptr;
   }
   return fallback;
 }
