@@ -101,6 +101,10 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       if (istat_env == 0) then
         if (trim(adjustl(env_debug)) /= '') debug_density = .true.
       end if
+      if (debug_density) then
+        write(6,'(1x,"[GPU density debug] enabled: iopc=",i0)') iopc_eff
+        call flush(6)
+      end if
       Select case (iopc_eff)
 #else
       Select case (iopc)
@@ -151,7 +155,8 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
                 rms_acc = rms_acc + diff*diff
               end do
               if (mpack > 0) rms_acc = sqrt(rms_acc / mpack)
-              write(*,'(1x,"[GPU density debug] max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
+              write(6,'(1x,"[GPU density debug] case=2 max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
+              call flush(6)
               deallocate(pp_ref, xmat_ref, stat=istat_loc)
             end if
 #ifdef GPU
@@ -231,7 +236,8 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
                 rms_acc = rms_acc + diff*diff
               end do
               if (mpack > 0) rms_acc = sqrt(rms_acc / mpack)
-              write(*,'(1x,"[GPU density debug] max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
+              write(6,'(1x,"[GPU density debug] case=2b max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
+              call flush(6)
               deallocate(pp_ref, xmat_ref, stat=istat_loc)
             end if
 #ifdef GPU
