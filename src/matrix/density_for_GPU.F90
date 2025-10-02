@@ -146,6 +146,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
               end do
               allocate(pp_ref(mpack), stat=istat_loc)
               info_ref = 0
+              allocate(pp_ref(mpack), stat=istat_loc)
               call dtrttp('u', norbs, xmat_ref, norbs, pp_ref, info_ref)
               max_diff = 0.d0
               rms_acc = 0.d0
@@ -345,7 +346,12 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             allocate(xmat(norbs,norbs),stat = i)
             forall (j = 1:norbs, i=1:norbs) xmat(i, j) = 0.d0
             gpu_density_used = .false.
-            call dsyrk('U','N', norbs, ndubl, occ, c(1:norbs,1:ndubl), norbs, 0.d0, xmat, norbs)
+            call dgemm('N','T', norbs, norbs, ndubl, 2.0d0*sign, &
+                 c(1:norbs,1:ndubl), norbs, c(1:norbs,1:ndubl), norbs, 0.0d0, xmat, norbs)
+            if (nsingl > ndubl) then
+              call dgemm('N','T', norbs, norbs, nsingl-ndubl, frac*sign, &
+                   c(1:norbs,ndubl+1:nsingl), norbs, c(1:norbs,ndubl+1:nsingl), norbs, 1.0d0, xmat, norbs)
+            end if
             if (need_host_density) then
               forall (i=1:norbs)
                  xmat(i,i) = xmat(i,i) + cst
@@ -366,7 +372,6 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
                   xmat_ref(idx,idx) = xmat_ref(idx,idx) + cst
                 end do
                 allocate(pp_ref(mpack), stat=istat_loc)
-                info_ref = 0
                 call dtrttp('u', norbs, xmat_ref, norbs, pp_ref, info_ref)
                 max_diff = 0.d0
                 rms_acc = 0.d0
