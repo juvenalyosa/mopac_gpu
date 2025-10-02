@@ -560,6 +560,17 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   }
   if (resident_debug_enabled_local()) {
     std::printf("[GPU resident debug] fock2_scf pairs=%zu w_len=%zu\n", pair_i.size(), w_len);
+    size_t limit = std::min(pair_i.size(), (size_t)3);
+    for (size_t t = 0; t < limit; ++t) {
+      int ii = pair_i[t];
+      int jj = pair_j[t];
+      int ia = nfirst[ii - 1];
+      int ib = nlast[ii - 1];
+      int ja = nfirst[jj - 1];
+      int jb = nlast[jj - 1];
+      std::printf("  pair[%zu]: ii=%d (%d-%d) jj=%d (%d-%d) off=%d\n",
+                  t, ii, ia, ib, jj, ja, jb, pair_off[t]);
+    }
     std::fflush(stdout);
   }
 
