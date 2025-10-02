@@ -38,9 +38,11 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       logical :: debug_density
       character(len=32) :: env_debug
       double precision, allocatable :: pp_ref(:)
+      double precision, allocatable :: pp_dev(:)
       double precision, allocatable :: xmat_ref(:,:)
-      double precision :: diff, max_diff, rms_acc
+      double precision :: diff, max_diff, rms_acc, max_dev, rms_dev
       integer :: idx, info_ref
+      logical(c_bool) :: ok_dev
 #endif
       if (ndubl /= 0 .and. nsingl > (norbs/2) .and. mode /= 2) then
         !
@@ -146,7 +148,6 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
               end do
               allocate(pp_ref(mpack), stat=istat_loc)
               info_ref = 0
-              allocate(pp_ref(mpack), stat=istat_loc)
               call dtrttp('u', norbs, xmat_ref, norbs, pp_ref, info_ref)
               max_diff = 0.d0
               rms_acc = 0.d0
@@ -162,15 +163,36 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
                      pp(1),pp_ref(1),pp(2),pp_ref(2),pp(3)
               end if
               call flush(6)
-              deallocate(pp_ref, xmat_ref, stat=istat_loc)
             end if
 #ifdef GPU
             if (use_resident) then
-              call mopac_cuda_clear_density_cache()
+              call mopac_cuda_register_packed_density(mpack, pp)
+              if (debug_density) then
+                allocate(pp_dev(mpack), stat=istat_loc)
+                ok_dev = mopac_cuda_fetch_packed_density(pp_dev, int(mpack, kind=c_size_t))
+                if (ok_dev .eqv. .true._c_bool) then
+                  max_dev = 0.d0
+                  rms_dev = 0.d0
+                  do idx = 1, mpack
+                    diff = pp_dev(idx) - pp_ref(idx)
+                    if (abs(diff) > max_dev) max_dev = abs(diff)
+                    rms_dev = rms_dev + diff*diff
+                  end do
+                  if (mpack > 0) rms_dev = sqrt(rms_dev / mpack)
+                  write(*,'(1x,"[GPU density debug] case=2 device max=",1pe12.5," rms=",1pe12.5)') max_dev, rms_dev
+                else
+                  write(*,'(1x,"[GPU density debug] case=2 device fetch FAILED")')
+                end if
+                call flush(6)
+                deallocate(pp_dev, stat=istat_loc)
+              end if
             else
               call mopac_cuda_clear_density_cache()
             end if
 #endif
+            if (debug_density) then
+              deallocate(pp_ref, xmat_ref, stat=istat_loc)
+            end if
             deallocate (xmat,stat=i)
             ! Default: keep device eigvecs to reduce transfers; clear only when explicitly requested
             env_cpu = '' ; istat_env = 1
@@ -308,7 +330,6 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
                 xmat_ref(idx,idx) = xmat_ref(idx,idx) + cst
               end do
               allocate(pp_ref(mpack), stat=istat_loc)
-              info_ref = 0
               call dtrttp('u', norbs, xmat_ref, norbs, pp_ref, info_ref)
               max_diff = 0.d0
               rms_acc = 0.d0
@@ -319,21 +340,41 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
               end do
               if (mpack > 0) rms_acc = sqrt(rms_acc / mpack)
               write(*,'(1x,"[GPU density debug] case=4 max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
-              call flush(6)
               if (max_diff > 1.d-6 .and. mpack >= 5) then
                 write(*,'(1x,"[GPU density debug] case=4 sample ",5(1x,1pe12.5))') &
                      pp(1), pp_ref(1), pp(2), pp_ref(2), pp(3)
-                call flush(6)
               end if
-              deallocate(pp_ref, xmat_ref, stat=istat_loc)
+              call flush(6)
             end if
 #ifdef GPU
             if (use_resident) then
               call mopac_cuda_register_packed_density(mpack, pp)
+              if (debug_density) then
+                allocate(pp_dev(mpack), stat=istat_loc)
+                ok_dev = mopac_cuda_fetch_packed_density(pp_dev, int(mpack, kind=c_size_t))
+                if (ok_dev .eqv. .true._c_bool) then
+                  max_dev = 0.d0
+                  rms_dev = 0.d0
+                  do idx = 1, mpack
+                    diff = pp_dev(idx) - pp_ref(idx)
+                    if (abs(diff) > max_dev) max_dev = abs(diff)
+                    rms_dev = rms_dev + diff*diff
+                  end do
+                  if (mpack > 0) rms_dev = sqrt(rms_dev / mpack)
+                  write(*,'(1x,"[GPU density debug] case=4 device max=",1pe12.5," rms=",1pe12.5)') max_dev, rms_dev
+                else
+                  write(*,'(1x,"[GPU density debug] case=4 device fetch FAILED")')
+                end if
+                call flush(6)
+                deallocate(pp_dev, stat=istat_loc)
+              end if
             else
               call mopac_cuda_clear_density_cache()
             end if
 #endif
+            if (debug_density) then
+              deallocate(pp_ref, xmat_ref, stat=istat_loc)
+            end if
             deallocate(xmat,stat=i)
             env_cpu = '' ; istat_env = 1
             call get_environment_variable('MOPAC_EIG2HOST', env_cpu, status=istat_env)
