@@ -596,6 +596,56 @@
       end function mopac_gpu_cart_gradient_cpu
 #endif
 
+#ifdef GPU
+      function mopac_gpu_cart_gradient_cpu(numat_in, l123_in, coord_ptr, grad_ptr, qbld_ptr) result(ok) &
+           bind(C, name='mopac_gpu_cart_gradient_cpu')
+        use iso_c_binding, only : c_ptr, c_f_pointer, c_bool
+        use molkst_C, only : id, keywrd, mozyme
+        implicit none
+        integer, value :: numat_in
+        integer, value :: l123_in
+        type(c_ptr), value :: coord_ptr, grad_ptr, qbld_ptr
+        logical(c_bool) :: ok
+        double precision, pointer :: coord(:,:)
+        double precision, pointer :: grad(:,:)
+        double precision, pointer :: qbld(:)
+        double precision :: chnge, chnge2, const
+        integer :: numtot, icuc, ione
+        double precision :: pdi(171), padi(171), pbdi(171)
+        double precision :: cdi(3,2), dstat(3)
+        integer :: ndi(2)
+        logical :: force
+
+        ok = .false._c_bool
+        if (l123_in /= 1) return
+        if (mozyme) return
+
+        call c_f_pointer(coord_ptr, coord, [3, numat_in])
+        call c_f_pointer(grad_ptr, grad, [3, numat_in*l123_in])
+        call c_f_pointer(qbld_ptr, qbld, [numat_in])
+
+        chnge = 1.0d-4
+        chnge2 = chnge * 0.5d0
+        const = fpc_9
+        if (id == 0) then
+          ione = 1
+        else
+          ione = 0
+        end if
+        numtot = numat_in * l123_in
+        icuc = (l123_in + 1) / 2
+        force = index(keywrd,'PREC') /= 0 .or. index(keywrd,'FORCE') /= 0
+
+        grad(:, :) = 0.0d0
+        dstat(:) = 0.0d0
+
+        call dcart_build_scf_gradient_cpu(numat_in, l123_in, coord, grad, qbld, chnge, chnge2, &
+             const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
+        ok = .true._c_bool
+      end function mopac_gpu_cart_gradient_cpu
+#endif
+
+
       double precision function derp (r)
       use molkst_C, only: numcal, clower, cutofp, cupper
       implicit none

@@ -65,6 +65,8 @@ if(GPU)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_hmtr_interfaces.F90)
     # CUDA Fock kernels (scaffold)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/fock_kernels.cu)
+    # CUDA SCF gradient kernels (experimental scaffold)
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/grad_kernels.cu)
     # CUDA HMTR optimizer kernels
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hmtr_optimizer.cu)
 endif()
@@ -84,6 +86,7 @@ if(GPU)
     set_source_files_properties(
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/cuda_wrappers.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/fock_kernels.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/gpu/grad_kernels.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hmtr_optimizer.cu
         PROPERTIES LANGUAGE CUDA
     )

@@ -3,7 +3,7 @@
                      SUMMARY OF  PM7 CALCULATION
 
                                                        MOPAC v23.1.2 MacOS
-                                                       Wed Oct  1 16:24:29 2025
+                                                       Wed Oct  1 23:34:01 2025
 
            Empirical Formula: C H5 O  =     7 atoms
 
@@ -45,7 +45,7 @@
             H     6    H     4     2.89325
             H     3    H     4     1.55504
           SCF CALCULATIONS        =          1
-          WALL-CLOCK TIME         =      0.004 SECONDS
+          WALL-CLOCK TIME         =      0.008 SECONDS
           COMPUTATION TIME        =      0.004 SECONDS
 
 

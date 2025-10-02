@@ -198,6 +198,11 @@ static inline bool resident_mode_enabled() {
 
 extern "C" __global__ void unpack_lower_to_full_kernel(const double *packed, double *full, int n);
 extern "C" bool mopac_gpu_cart_gradient_cpu(int numat, int l123, const double *coord, double *grad, const double *qbld);
+extern "C" bool mopac_cuda_cart_gradient_launch(int numat, int l123,
+                                                const double *coord, double *grad,
+                                                const double *charges,
+                                                const void *near_pairs, int near_count,
+                                                const void *far_pairs, int far_count);
 
 // Simple grow-only device buffer cache helper (C++ only; placed outside C linkage)
 template <typename T>
@@ -2419,11 +2424,13 @@ bool mopac_cuda_cart_gradient(int numat, int l123, const double *coord,
                               double *grad, const double *charges,
                               const void *near_pairs, int near_count,
                               const void *far_pairs, int far_count) {
-  (void)near_pairs;
-  (void)near_count;
-  (void)far_pairs;
-  (void)far_count;
   if (!coord || !grad || !charges) return false;
+  if (l123 == 1) {
+    if (mopac_cuda_cart_gradient_launch(numat, l123, coord, grad, charges,
+                                        near_pairs, near_count, far_pairs, far_count)) {
+      return true;
+    }
+  }
   return mopac_gpu_cart_gradient_cpu(numat, l123, coord, grad, charges);
 }
 

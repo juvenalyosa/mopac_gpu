@@ -246,8 +246,11 @@ def extract(path):
                 if not capture:
                     continue
                 if idx is None:
-                    if line and all(token in line for token in ('ATOM', 'X', 'Y', 'Z')):
-                        header = line.split()
+                    if not line:
+                        continue
+                    parts = line.split()
+                    if all(token in parts for token in ('ATOM', 'X', 'Y', 'Z')):
+                        header = parts
                         try:
                             idx = [header.index(col) for col in ('X', 'Y', 'Z')]
                         except ValueError:

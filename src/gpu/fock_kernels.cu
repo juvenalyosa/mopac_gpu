@@ -247,6 +247,8 @@ __global__ void fock_pairs_kernel(int npairs,
 // ================= Device-resident gradient buffers and ops =================
 extern "C" {
 
+void mopac_cuda_cart_gradient_release(void);
+
 static double *g_lastF_dev = nullptr;
 static size_t g_lastF_bytes MOPAC_UNUSED = 0;
 static int g_lastF_n = 0;
@@ -418,6 +420,7 @@ void mopac_cuda_grad_buffers_release() {
   g_lastF_dev = nullptr; g_lastF_bytes = 0; g_lastF_n = 0;
   if (g_blas_local) { cublasDestroy(g_blas_local); g_blas_local = nullptr; }
   if (g_stream_local) { cudaStreamDestroy(g_stream_local); g_stream_local = nullptr; }
+  mopac_cuda_cart_gradient_release();
 }
 
 } // extern "C"
