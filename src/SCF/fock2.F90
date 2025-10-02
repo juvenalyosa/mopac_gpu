@@ -89,7 +89,7 @@
       ! Allow users to opt-out via MOPAC_NOFOCKGPU (any non-empty value disables),
       ! or explicitly opt-in via legacy MOPAC_FOCK_GPU (kept for backward compatibility).
       if (.not. deriv) then
-        want_gpu = lgpu .and. id == 0
+        want_gpu = .false.
         envs = 1 ; line8 = ''
         call get_environment_variable('MOPAC_NOFOCKGPU', line8, status=envs)
         if (envs == 0) then
