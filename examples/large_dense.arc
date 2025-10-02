@@ -3,7 +3,7 @@
                      SUMMARY OF  PM6-D3H4X CALCULATION
 
                                                        MOPAC v23.1.2 MacOS
-                                                       Thu Oct  2 10:13:15 2025
+                                                       Thu Oct  2 10:13:47 2025
 
            Empirical Formula: C152 H240 N54 O44 S6  =   496 atoms
 
@@ -32,8 +32,8 @@
             H   196    H    83    25.15323
             H   129    H   495    23.58476
           SCF CALCULATIONS        =          1
-          WALL-CLOCK TIME         =          4 MINUTES AND 0.535 SECONDS
-          COMPUTATION TIME        =          5 MINUTES AND 48.113 SECONDS
+          WALL-CLOCK TIME         =          4 MINUTES AND 11.457 SECONDS
+          COMPUTATION TIME        =          5 MINUTES AND 57.646 SECONDS
 
 
           FINAL GEOMETRY OBTAINED

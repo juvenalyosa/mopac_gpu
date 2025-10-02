@@ -119,50 +119,25 @@ extern "C" bool mopac_cuda_cart_gradient_launch(int numat,
                                                  const void *far_pairs,
                                                  int far_count)
 {
+  (void)numat;
+  (void)l123;
+  (void)coord_host;
+  (void)grad_host;
+  (void)charges_host;
+  (void)near_pairs;
+  (void)near_count;
   (void)far_pairs;
   (void)far_count;
-  if (numat <= 0 || !coord_host || !grad_host || !charges_host || !near_pairs) {
-    return false;
-  }
-  if (l123 != 1) return false;
-  if (!experimental_enabled()) return false;
-  if (!ensure_stream()) return false;
-  size_t grad_elems = static_cast<size_t>(numat) * 3;
-  if (!ensure_capacity(d_charges, charge_capacity, static_cast<size_t>(numat))) return false;
-  if (!ensure_capacity(d_grad, grad_capacity, grad_elems)) return false;
-  if (!ensure_capacity(d_near_pairs, near_capacity, static_cast<size_t>(near_count))) return false;
-
-  size_t charge_bytes = static_cast<size_t>(numat) * sizeof(double);
-  size_t grad_bytes = grad_elems * sizeof(double);
-  size_t pair_bytes = static_cast<size_t>(near_count) * sizeof(GradPairPod);
-
-  if (cudaMemsetAsync(d_grad, 0, grad_bytes, grad_stream) != cudaSuccess) return false;
-  if (cudaMemcpyAsync(d_charges, charges_host, charge_bytes, cudaMemcpyHostToDevice, grad_stream) != cudaSuccess) return false;
-  if (cudaMemcpyAsync(d_near_pairs, near_pairs, pair_bytes, cudaMemcpyHostToDevice, grad_stream) != cudaSuccess) return false;
-
-  int threads = 128;
-  int blocks = (near_count + threads - 1) / threads;
-  if (blocks > 0) {
-    coulomb_gradient_kernel<<<blocks, threads, 0, grad_stream>>>(near_count, d_near_pairs, d_charges, d_grad);
-    if (cudaGetLastError() != cudaSuccess) return false;
-  }
-
-  if (cudaMemcpyAsync(grad_host, d_grad, grad_bytes, cudaMemcpyDeviceToHost, grad_stream) != cudaSuccess) return false;
-  if (cudaStreamSynchronize(grad_stream) != cudaSuccess) return false;
-  return true;
+  return false;
 }
 
 extern "C" void mopac_cuda_cart_gradient_release(void) {
-  if (d_near_pairs) cudaFree(d_near_pairs);
-  if (d_charges) cudaFree(d_charges);
-  if (d_grad) cudaFree(d_grad);
-  d_near_pairs = nullptr;
-  d_charges = nullptr;
-  d_grad = nullptr;
-  near_capacity = 0;
-  charge_capacity = 0;
-  grad_capacity = 0;
-  if (grad_stream) cudaStreamDestroy(grad_stream);
-  grad_stream = nullptr;
+  (void)d_near_pairs;
+  (void)d_charges;
+  (void)d_grad;
+  (void)near_capacity;
+  (void)charge_capacity;
+  (void)grad_capacity;
+  (void)grad_stream;
   experimental_mode = -1;
 }
