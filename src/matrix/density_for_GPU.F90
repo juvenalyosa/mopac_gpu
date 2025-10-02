@@ -344,17 +344,8 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
           else
             allocate(xmat(norbs,norbs),stat = i)
             forall (j = 1:norbs, i=1:norbs) xmat(i, j) = 0.d0
-            if (ngpus > 1) then
-              gpu_density_used = .true.
-              call syrk_cublas_multi ('U','N',norbs,ndubl, &
-                   & occ,c(1:norbs,1:ndubl),norbs, &
-                   & 0.d0,xmat,norbs)
-            else
-              gpu_density_used = .true.
-              call syrk_cublas ('U','N',norbs,ndubl, &
-                   & occ,c(1:norbs,1:ndubl),norbs, &
-                   & 0.d0,xmat,norbs)
-            end if
+            gpu_density_used = .false.
+            call dsyrk('U','N', norbs, ndubl, occ, c(1:norbs,1:ndubl), norbs, 0.d0, xmat, norbs)
             if (need_host_density) then
               forall (i=1:norbs)
                  xmat(i,i) = xmat(i,i) + cst
@@ -398,8 +389,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             end if
 #ifdef GPU
             if (use_resident) then
-              call mopac_cuda_density_add_diag(norbs, cst)
-              call mopac_cuda_register_packed_density(mpack, pp)
+              call mopac_cuda_clear_density_cache()
             else
               call mopac_cuda_clear_density_cache()
             end if
