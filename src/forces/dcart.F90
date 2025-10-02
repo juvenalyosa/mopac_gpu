@@ -348,11 +348,9 @@
           implicit none
           integer :: linear
           logical(c_bool) :: ok_density
-          double precision, pointer :: p_target(:)
           if (.not. resident_scf) return
           linear = l123*(l123 + 1)/2
-          p_target => p
-          ok_density = mopac_cuda_fetch_packed_density(c_loc(p_target(1)), int(linear, kind=c_size_t))
+          ok_density = mopac_cuda_fetch_packed_density(p, int(linear, kind=c_size_t))
           ! If fetch fails, proceed without synchronisation; CPU path will still execute.
         end subroutine sync_resident_density
 #else

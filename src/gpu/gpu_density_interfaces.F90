@@ -32,8 +32,8 @@ module gpu_density_interfaces
     end subroutine mopac_cuda_register_packed_density
 
     function mopac_cuda_fetch_packed_density(host_ptr, linear) bind(C,name='mopac_cuda_fetch_packed_density') result(ok)
-      import :: c_ptr, c_size_t, c_bool
-      type(c_ptr), value     :: host_ptr
+      import :: c_double, c_size_t, c_bool
+      real(c_double)        :: host_ptr(*)
       integer(c_size_t), value :: linear
       logical(c_bool)        :: ok
     end function mopac_cuda_fetch_packed_density
