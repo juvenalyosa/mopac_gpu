@@ -247,7 +247,8 @@ __global__ void fock_pairs_kernel(int npairs,
                                   const double *ptot,
                                   const double *p,
                                   const double *w,
-                                  double *f) {
+                                  double *f,
+                                  int debug_flag) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   if (tid >= npairs) return;
   int ii = pair_i[tid];
@@ -258,6 +259,10 @@ __global__ void fock_pairs_kernel(int npairs,
   int jb = nlast[jj - 1];
   if ((ib - ia) < 0 || (jb - ja) < 0) return;
   const double *w_block = w + pair_off[tid];
+  if (debug_flag && tid < 5) {
+    printf("[GPU resident debug] kernel tid=%d ii=%d jj=%d ia=%d ib=%d ja=%d jb=%d w0=% .5e\n",
+           tid, ii, jj, ia, ib, ja, jb, w_block ? w_block[0] : 0.0);
+  }
   fock_pair_update(ia, ib, ja, jb, ptot, p, w_block, f);
 }
 
@@ -371,11 +376,12 @@ bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
     cudaMemcpy(s_d_pair_off, pair_off.data(), sizeof(int)*pair_off.size(), cudaMemcpyHostToDevice);
     int threads = 64;
     int blocks = static_cast<int>((pair_i.size() + threads - 1) / threads);
+    int debug_flag = resident_debug_enabled_local() ? 1 : 0;
     fock_pairs_kernel<<<blocks, threads>>>(static_cast<int>(pair_i.size()),
                                            s_d_pair_i, s_d_pair_j, s_d_pair_off,
                                            s_d_nf, s_d_nl,
                                            s_d_ptot, s_d_p,
-                                           s_d_w, s_d_f);
+                                           s_d_w, s_d_f, debug_flag);
     cudaError_t e = cudaDeviceSynchronize(); if (e != cudaSuccess) return false;
   }
 
@@ -568,11 +574,12 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   if (!pair_i.empty()) {
     int threads = 128;
     int blocks = static_cast<int>((pair_i.size() + threads - 1) / threads);
+    int debug_flag = resident_debug_enabled_local() ? 1 : 0;
     fock_pairs_kernel<<<blocks, threads>>>(static_cast<int>(pair_i.size()),
                                            s_d_pair_i, s_d_pair_j, s_d_pair_off,
                                            s_d_nf, s_d_nl,
                                            s_d_ptot, s_d_p,
-                                           s_d_w, s_d_f);
+                                           s_d_w, s_d_f, debug_flag);
     cudaError_t err = cudaDeviceSynchronize(); if (err != cudaSuccess) return false;
   }
 
@@ -601,6 +608,17 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
 
   bool resident = (mopac_cuda_get_resident_mode() != 0);
   if (resident) {
+    if (resident_debug_enabled_local()) {
+      size_t limit = std::min(mpack_e, (size_t)5);
+      std::vector<double> host_f(limit);
+      cudaMemcpy(host_f.data(), s_d_f, sizeof(double)*limit, cudaMemcpyDeviceToHost);
+      std::printf("[GPU resident debug] f device sample:");
+      for (size_t idx = 0; idx < limit; ++idx) {
+        std::printf(" % .5e", host_f[idx]);
+      }
+      std::printf("\n");
+      std::fflush(stdout);
+    }
     mopac_cuda_register_fock_device(mpack, fout, s_d_f);
   } else {
     cudaMemcpy(fout, s_d_f, sizeof(double)*mpack_e, cudaMemcpyDeviceToHost);
@@ -684,7 +702,7 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
                                            s_d_pair_i, s_d_pair_j, s_d_pair_off,
                                            s_d_nf, s_d_nl,
                                            s_d_ptot, s_d_p,
-                                           s_d_w, s_d_f);
+                                           s_d_w, s_d_f, 0);
     cudaError_t err = cudaDeviceSynchronize(); if (err != cudaSuccess) return false;
   }
 
