@@ -11,6 +11,10 @@
 
 #include "grad_launch.h"
 
+#if defined(__NVCC__)
+#pragma diag_suppress 177
+#endif
+
 namespace {
 
 static GradPairPod *d_near_pairs = nullptr;
@@ -95,8 +99,6 @@ __global__ void coulomb_gradient_kernel(int pair_count,
   atomicAdd(&grad[offset_j + 2], -gz);
 }
 
-}  // namespace
-
 bool resident_grad_launch_impl(int numat,
                                int l123,
                                const double *coord_host,
@@ -133,4 +135,14 @@ void resident_grad_release_impl() {
   if (grad_stream) cudaStreamDestroy(grad_stream);
   grad_stream = nullptr;
   experimental_mode = -1;
+}
+
+}  // namespace
+
+#if defined(__NVCC__)
+#pragma diag_default 177
+#endif
+
+extern "C" void mopac_cuda_cart_gradient_release(void) {
+  resident_grad_release_impl();
 }
