@@ -673,7 +673,7 @@
 #endif
       end if
 #ifdef GPU
-      call fetch_fock_if_needed(f, mpack, need_fetch_fock)
+      call fetch_fock_if_needed(f, mpack, need_fetch_fock, 'f-pre', niter)
 #endif
       if (lxfac) then
         ee = helect(norbs,pa,h,f)*2.d0
@@ -745,7 +745,7 @@
 #endif
         end if
 #ifdef GPU
-        call fetch_fock_if_needed(fb, mpack, need_fetch_fb)
+        call fetch_fock_if_needed(fb, mpack, need_fetch_fb, 'fb-pre', niter)
 #endif
         if (prtfok) then
           write (iw, "('   BETA FOCK MATRIX ON ITERATION',i3)") niter
@@ -767,11 +767,11 @@
 #ifdef GPU
     if (resident_scf) then
 #ifdef GPU
-      call fetch_packed_density_if_needed(pa, mpack, need_fetch_pa)
-      call fetch_packed_density_if_needed(pb, mpack, need_fetch_pb)
-      call fetch_packed_density_if_needed(p,  mpack, need_fetch_p)
-      call fetch_fock_if_needed(fb, mpack, need_fetch_fb)
-      call fetch_fock_if_needed(f,  mpack, need_fetch_fock)
+      call fetch_packed_density_if_needed(pa, mpack, need_fetch_pa, 'pa', niter)
+      call fetch_packed_density_if_needed(pb, mpack, need_fetch_pb, 'pb', niter)
+      call fetch_packed_density_if_needed(p,  mpack, need_fetch_p,  'p',  niter)
+      call fetch_fock_if_needed(fb, mpack, need_fetch_fb, 'fb', niter)
+      call fetch_fock_if_needed(f,  mpack, need_fetch_fock, 'f',  niter)
 #endif
     end if
 #endif
@@ -1086,7 +1086,7 @@
           end if
           if (modea /= 3 .and. .not. (newdg .and. okpuly)) then
 #ifdef GPU
-          call fetch_packed_density_if_needed(pa, mpack, need_fetch_pa)
+          call fetch_packed_density_if_needed(pa, mpack, need_fetch_pa, 'pa', niter)
 #endif
           i = niter
             if (camkin) i = 7
@@ -1117,7 +1117,7 @@
         end if
         if (modea/=3 .and. .not.(newdg .and. okpuly)) then
 #ifdef GPU
-          call fetch_packed_density_if_needed(p, mpack, need_fetch_p)
+          call fetch_packed_density_if_needed(p, mpack, need_fetch_p, 'p', niter)
 #endif
           call cnvg (p, pold, pold2,  niter, pl)
         end if
@@ -1259,7 +1259,7 @@
         end if
         if (.not.(newdg .and. okpuly)) then
 #ifdef GPU
-          call fetch_packed_density_if_needed(pb, mpack, need_fetch_pb)
+          call fetch_packed_density_if_needed(pb, mpack, need_fetch_pb, 'pb', niter)
 #endif
           i = niter
           if (camkin) i = 7
@@ -1388,7 +1388,7 @@
 
 
 #ifdef GPU
-      subroutine fetch_packed_density_if_needed(target, linear, need_flag)
+      subroutine fetch_packed_density_if_needed(target, linear, need_flag, label, iter_count)
         use iso_c_binding, only : c_loc, c_bool, c_size_t
         use mod_vars_cuda, only : resident_scf
         use gpu_runtime_interfaces, only : mopac_cuda_fetch_packed_density, mopac_cuda_set_resident_mode
@@ -1396,11 +1396,15 @@
         integer, intent(in) :: linear
         double precision, intent(inout) :: target(linear)
         logical, intent(inout) :: need_flag
+        character(len=*), intent(in), optional :: label
+        integer, intent(in), optional :: iter_count
         logical(c_bool) :: ok
         double precision, allocatable, target :: scratch(:)
         double precision, allocatable :: reference(:)
         double precision :: diff, max_diff, rms_diff
         integer :: idx
+        character(len=16) :: label_local
+        integer :: iter_local
         logical, save :: debug_resident = .false.
         logical, save :: debug_init = .false.
         if (.not. need_flag) return
@@ -1408,6 +1412,10 @@
           call initialize_resident_debug(debug_resident)
           debug_init = .true.
         end if
+        label_local = 'density'
+        if (present(label)) label_local = label
+        iter_local = -1
+        if (present(iter_count)) iter_local = iter_count
         if (debug_resident) then
           allocate(reference(linear))
           reference(:) = target(:)
@@ -1424,7 +1432,13 @@
               rms_diff = rms_diff + diff*diff
             end do
             if (linear > 0) rms_diff = sqrt(rms_diff/linear)
-            write(6,'(1x,"[GPU resident debug] density fetch max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_diff
+            if (iter_local >= 0) then
+              write(6,'(1x,"[GPU resident debug] ",a," iter=",i3," fetch max=",1pe12.5," rms=",1pe12.5)') &
+                   trim(label_local), iter_local, max_diff, rms_diff
+            else
+              write(6,'(1x,"[GPU resident debug] ",a," fetch max=",1pe12.5," rms=",1pe12.5)') &
+                   trim(label_local), max_diff, rms_diff
+            end if
             call flush(6)
           end if
           target(:) = scratch(:)
@@ -1439,7 +1453,7 @@
         need_flag = .false.
       end subroutine fetch_packed_density_if_needed
 
-      subroutine fetch_fock_if_needed(target, linear, need_flag)
+      subroutine fetch_fock_if_needed(target, linear, need_flag, label, iter_count)
         use iso_c_binding, only : c_loc, c_bool, c_size_t
         use mod_vars_cuda, only : resident_scf
         use gpu_runtime_interfaces, only : mopac_cuda_fetch_fock, mopac_cuda_set_resident_mode
@@ -1447,11 +1461,15 @@
         integer, intent(in) :: linear
         double precision, intent(inout) :: target(linear)
         logical, intent(inout) :: need_flag
+        character(len=*), intent(in), optional :: label
+        integer, intent(in), optional :: iter_count
         logical(c_bool) :: ok
         double precision, allocatable, target :: scratch(:)
         double precision, allocatable :: reference(:)
         double precision :: diff, max_diff, rms_diff
         integer :: idx
+        character(len=16) :: label_local
+        integer :: iter_local
         logical, save :: debug_resident = .false.
         logical, save :: debug_init = .false.
         if (.not. need_flag) return
@@ -1459,6 +1477,10 @@
           call initialize_resident_debug(debug_resident)
           debug_init = .true.
         end if
+        label_local = 'fock'
+        if (present(label)) label_local = label
+        iter_local = -1
+        if (present(iter_count)) iter_local = iter_count
         if (debug_resident) then
           allocate(reference(linear))
           reference(:) = target(:)
@@ -1475,7 +1497,13 @@
               rms_diff = rms_diff + diff*diff
             end do
             if (linear > 0) rms_diff = sqrt(rms_diff/linear)
-            write(6,'(1x,"[GPU resident debug] fock fetch max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_diff
+            if (iter_local >= 0) then
+              write(6,'(1x,"[GPU resident debug] ",a," iter=",i3," fetch max=",1pe12.5," rms=",1pe12.5)') &
+                   trim(label_local), iter_local, max_diff, rms_diff
+            else
+              write(6,'(1x,"[GPU resident debug] ",a," fetch max=",1pe12.5," rms=",1pe12.5)') &
+                   trim(label_local), max_diff, rms_diff
+            end if
             call flush(6)
           end if
           target(:) = scratch(:)
