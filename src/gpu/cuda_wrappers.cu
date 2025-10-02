@@ -572,6 +572,27 @@ static void register_fock_cache(int linear, const double *host_ptr, const double
   g_fock_cache.host_ptr = host_ptr;
   g_fock_cache.valid = true;
   if (resident_debug_enabled() && host_ptr) {
+    std::vector<double> src_copy(linear);
+    if (cudaMemcpy(src_copy.data(), src_dev, bytes, cudaMemcpyDeviceToHost) == cudaSuccess) {
+      double max_src = 0.0;
+      double rms_src = 0.0;
+      for (int i = 0; i < linear; ++i) {
+        double diff = src_copy[i] - host_ptr[i];
+        if (std::abs(diff) > max_src) max_src = std::abs(diff);
+        rms_src += diff * diff;
+      }
+      if (linear > 0) rms_src = std::sqrt(rms_src / (double)linear);
+      std::printf("[GPU resident debug] fock src compare max=% .5e rms=% .5e\n", max_src, rms_src);
+      if (max_src > 1e-6) {
+        int limit = std::min(linear, 5);
+        std::printf("  src host vs device:");
+        for (int i = 0; i < limit; ++i) {
+          std::printf(" (% .5e,% .5e)", host_ptr[i], src_copy[i]);
+        }
+        std::printf("\n");
+      }
+      std::fflush(stdout);
+    }
     std::vector<double> host_copy(linear);
     if (cudaMemcpy(host_copy.data(), g_fock_cache.buf.ptr, bytes, cudaMemcpyDeviceToHost) == cudaSuccess) {
       double max_diff = 0.0;
