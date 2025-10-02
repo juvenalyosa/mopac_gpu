@@ -166,7 +166,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             end if
 #ifdef GPU
             if (use_resident) then
-              call mopac_cuda_register_packed_density(mpack, pp)
+              call mopac_cuda_clear_density_cache()
             else
               call mopac_cuda_clear_density_cache()
             end if
