@@ -1398,14 +1398,42 @@
         logical, intent(inout) :: need_flag
         logical(c_bool) :: ok
         double precision, allocatable, target :: scratch(:)
+        double precision, allocatable :: reference(:)
+        double precision :: diff, max_diff, rms_diff
+        integer :: idx
+        logical, save :: debug_resident = .false.
+        logical, save :: debug_init = .false.
         if (.not. need_flag) return
+        if (.not. debug_init) then
+          call initialize_resident_debug(debug_resident)
+          debug_init = .true.
+        end if
+        if (debug_resident) then
+          allocate(reference(linear))
+          reference(:) = target(:)
+        end if
         allocate(scratch(linear))
         ok = mopac_cuda_fetch_packed_density(c_loc(scratch(1)), int(linear, c_size_t))
         if (ok .eqv. .true._c_bool) then
+          if (debug_resident) then
+            max_diff = 0.d0
+            rms_diff = 0.d0
+            do idx = 1, linear
+              diff = scratch(idx) - reference(idx)
+              if (abs(diff) > max_diff) max_diff = abs(diff)
+              rms_diff = rms_diff + diff*diff
+            end do
+            if (linear > 0) rms_diff = sqrt(rms_diff/linear)
+            write(6,'(1x,"[GPU resident debug] density fetch max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_diff
+            call flush(6)
+          end if
           target(:) = scratch(:)
         else
           resident_scf = .false.
           call mopac_cuda_set_resident_mode(0)
+        end if
+        if (debug_resident) then
+          deallocate(reference)
         end if
         deallocate(scratch)
         need_flag = .false.
@@ -1421,18 +1449,69 @@
         logical, intent(inout) :: need_flag
         logical(c_bool) :: ok
         double precision, allocatable, target :: scratch(:)
+        double precision, allocatable :: reference(:)
+        double precision :: diff, max_diff, rms_diff
+        integer :: idx
+        logical, save :: debug_resident = .false.
+        logical, save :: debug_init = .false.
         if (.not. need_flag) return
+        if (.not. debug_init) then
+          call initialize_resident_debug(debug_resident)
+          debug_init = .true.
+        end if
+        if (debug_resident) then
+          allocate(reference(linear))
+          reference(:) = target(:)
+        end if
         allocate(scratch(linear))
         ok = mopac_cuda_fetch_fock(c_loc(scratch(1)), int(linear, c_size_t))
         if (ok .eqv. .true._c_bool) then
+          if (debug_resident) then
+            max_diff = 0.d0
+            rms_diff = 0.d0
+            do idx = 1, linear
+              diff = scratch(idx) - reference(idx)
+              if (abs(diff) > max_diff) max_diff = abs(diff)
+              rms_diff = rms_diff + diff*diff
+            end do
+            if (linear > 0) rms_diff = sqrt(rms_diff/linear)
+            write(6,'(1x,"[GPU resident debug] fock fetch max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_diff
+            call flush(6)
+          end if
           target(:) = scratch(:)
         else
           resident_scf = .false.
           call mopac_cuda_set_resident_mode(0)
         end if
+        if (debug_resident) then
+          deallocate(reference)
+        end if
         deallocate(scratch)
         need_flag = .false.
       end subroutine fetch_fock_if_needed
+#endif
+
+#ifdef GPU
+      subroutine initialize_resident_debug(flag)
+        implicit none
+        logical, intent(out) :: flag
+        character(len=32) :: env
+        integer :: istat
+        flag = .false.
+        env = '' ; istat = 1
+        call get_environment_variable('MOPAC_GPU_RESIDENT_DEBUG', env, status=istat)
+        if (istat == 0) then
+          env = adjustl(env)
+          if (len_trim(env) > 0) then
+            select case (env(1:1))
+            case('0','n','N','f','F')
+              flag = .false.
+            case default
+              flag = .true.
+            end select
+          end if
+        end if
+      end subroutine initialize_resident_debug
 #endif
 
 
