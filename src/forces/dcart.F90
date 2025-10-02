@@ -28,9 +28,10 @@
 !
       use parameters_C, only : tore
 #ifdef GPU
-      use iso_c_binding, only : c_loc, c_ptr, c_bool, c_null_ptr, c_int
+      use iso_c_binding, only : c_loc, c_ptr, c_bool, c_null_ptr, c_int, c_size_t
       use mod_vars_cuda, only : resident_scf
       use gpu_grad_interfaces, only : mopac_cuda_cart_gradient, gpu_grad_pair
+      use gpu_density_interfaces, only : mopac_cuda_fetch_packed_density
 #endif
 !
       USE molmec_C, only : nnhco, nhco, htype
@@ -185,6 +186,7 @@
         if (allocated(far_pairs)) deallocate(far_pairs)
       end if
       if (.not. used_gpu) then
+        if (use_gpu_grad) call sync_resident_density()
 #endif
         call dcart_build_scf_gradient_cpu(numat, l123, coord, dxyz, qbld, chnge, chnge2, &
              const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
@@ -340,6 +342,22 @@
         (dxyz(j,i) + dxyz(j,i+1) + dxyz(j,i+2),j=1,3),i = 1, numtot - 2, 3)
       end if
       return
+      contains
+#ifdef GPU
+        subroutine sync_resident_density()
+          implicit none
+          integer :: linear
+          logical(c_bool) :: ok_density
+          if (.not. resident_scf) return
+          linear = l123*(l123 + 1)/2
+          ok_density = mopac_cuda_fetch_packed_density(c_loc(p(1)), int(linear, kind=c_size_t))
+          ! If fetch fails, proceed without synchronisation; CPU path will still execute.
+        end subroutine sync_resident_density
+#else
+        subroutine sync_resident_density()
+        end subroutine sync_resident_density
+#endif
+
       end subroutine dcart
 
       subroutine dcart_build_scf_gradient_cpu(numat_in, l123_in, coord, dxyz, q, chnge, chnge2, &

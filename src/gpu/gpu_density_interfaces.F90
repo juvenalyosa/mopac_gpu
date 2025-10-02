@@ -1,6 +1,6 @@
 ! Fortran interfaces to GPU density builders that consume device-resident eigenvectors
 module gpu_density_interfaces
-  use iso_c_binding
+  use iso_c_binding, only : c_int, c_double, c_size_t, c_bool, c_ptr
   implicit none
   interface
     subroutine mopac_cuda_density_from_dev_syrk(n, ndubl, alpha, c_full, ldc) &
@@ -30,6 +30,13 @@ module gpu_density_interfaces
       integer(c_int), value :: linear
       real(c_double)        :: packed(*)
     end subroutine mopac_cuda_register_packed_density
+
+    function mopac_cuda_fetch_packed_density(host_ptr, linear) bind(C,name='mopac_cuda_fetch_packed_density') result(ok)
+      import :: c_ptr, c_size_t, c_bool
+      type(c_ptr), value     :: host_ptr
+      integer(c_size_t), value :: linear
+      logical(c_bool)        :: ok
+    end function mopac_cuda_fetch_packed_density
 
     subroutine mopac_cuda_clear_density_cache() bind(C,name='mopac_cuda_clear_density_cache')
     end subroutine mopac_cuda_clear_density_cache
