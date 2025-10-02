@@ -353,6 +353,17 @@ bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
   cudaMemcpy(s_d_p, p, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
   if (w_len > 0) {
     cudaMemcpy(s_d_w, w, sizeof(double)*w_len, cudaMemcpyHostToDevice);
+    if (resident_debug_enabled_local()) {
+      size_t limit = std::min(w_len, (size_t)5);
+      std::vector<double> host_w(limit);
+      cudaMemcpy(host_w.data(), s_d_w, sizeof(double)*limit, cudaMemcpyDeviceToHost);
+      std::printf("[GPU resident debug] w sample:");
+      for (size_t idx = 0; idx < limit; ++idx) {
+        std::printf(" % .5e", host_w[idx]);
+      }
+      std::printf("\n");
+      std::fflush(stdout);
+    }
   }
   if (!pair_i.empty()) {
     cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int)*pair_i.size(), cudaMemcpyHostToDevice);
