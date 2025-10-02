@@ -31,10 +31,16 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       double precision :: cst, sign, fract, frac, occ, sum1, sum2
 #ifdef GPU
       double precision, allocatable :: pdens(:)
-      integer :: iopc_eff, istat_env
+      integer :: iopc_eff, istat_env, istat_loc
       character(len=32) :: env_cpu
       logical :: use_resident, gpu_density_used, need_host_density
       character(len=32) :: env_resident
+      logical :: debug_density
+      character(len=32) :: env_debug
+      double precision, allocatable :: pp_ref(:)
+      double precision, allocatable :: xmat_ref(:,:)
+      double precision :: diff, max_diff, rms_acc
+      integer :: idx, info_ref
 #endif
       if (ndubl /= 0 .and. nsingl > (norbs/2) .and. mode /= 2) then
         !
@@ -89,6 +95,12 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       resident_scf = use_resident
       need_host_density = .not. use_resident
       call mopac_cuda_set_resident_mode(merge(1,0,use_resident))
+      debug_density = .false.
+      env_debug = '' ; istat_env = 1
+      call get_environment_variable('MOPAC_GPU_DENSITY_DEBUG', env_debug, status=istat_env)
+      if (istat_env == 0) then
+        if (trim(adjustl(env_debug)) /= '') debug_density = .true.
+      end if
       Select case (iopc_eff)
 #else
       Select case (iopc)
@@ -112,6 +124,36 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             end if
 #endif
             call dtrttp('u', norbs, xmat, norbs, pp, i )
+            if (debug_density) then
+              allocate(xmat_ref(norbs,norbs), stat=istat_loc)
+              xmat_ref = 0.d0
+              nl21 = Min (norbs, nl2)
+              nl11 = Min (norbs, nl1)
+              if (nu2 >= nl2) then
+                call dgemm('N','T', norbs, norbs, nu2-nl2+1, 2.0d0*sign, &
+                     c(1:norbs,nl21:norbs), norbs, c(1:norbs,nl21:norbs), norbs, 0.0d0, xmat_ref, norbs)
+              end if
+              if (nu1 >= nl1) then
+                call dgemm('N','T', norbs, norbs, nu1-nl1+1, frac*sign, &
+                     c(1:norbs,nl11:norbs), norbs, c(1:norbs,nl11:norbs), norbs, 1.0d0, xmat_ref, norbs)
+              end if
+              do idx = 1, norbs
+                xmat_ref(idx,idx) = xmat_ref(idx,idx) + cst
+              end do
+              allocate(pp_ref(mpack), stat=istat_loc)
+              info_ref = 0
+              call dtrttp('u', norbs, xmat_ref, norbs, pp_ref, info_ref)
+              max_diff = 0.d0
+              rms_acc = 0.d0
+              do idx = 1, mpack
+                diff = pp(idx) - pp_ref(idx)
+                if (abs(diff) > max_diff) max_diff = abs(diff)
+                rms_acc = rms_acc + diff*diff
+              end do
+              if (mpack > 0) rms_acc = sqrt(rms_acc / mpack)
+              write(*,'(1x,"[GPU density debug] max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
+              deallocate(pp_ref, xmat_ref, stat=istat_loc)
+            end if
 #ifdef GPU
             if (use_resident) then
               call mopac_cuda_register_packed_density(mpack, pp)
@@ -162,6 +204,36 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             end if
 #endif
             call dtrttp('u', norbs, xmat, norbs, pp, i )
+            if (debug_density) then
+              nl21 = Min (norbs, nl2)
+              nl11 = Min (norbs, nl1)
+              allocate(xmat_ref(norbs,norbs), stat=istat_loc)
+              xmat_ref = 0.d0
+              if (nu2 >= nl2) then
+                call dgemm('N','T', norbs, norbs, nu2-nl2+1, 2.0d0*sign, &
+                     c(1:norbs,nl21:norbs), norbs, c(1:norbs,nl21:norbs), norbs, 0.0d0, xmat_ref, norbs)
+              end if
+              if (nu1 >= nl1) then
+                call dgemm('N','T', norbs, norbs, nu1-nl1+1, frac*sign, &
+                     c(1:norbs,nl11:norbs), norbs, c(1:norbs,nl11:norbs), norbs, 1.0d0, xmat_ref, norbs)
+              end if
+              do idx = 1, norbs
+                xmat_ref(idx,idx) = xmat_ref(idx,idx) + cst
+              end do
+              allocate(pp_ref(mpack), stat=istat_loc)
+              info_ref = 0
+              call dtrttp('u', norbs, xmat_ref, norbs, pp_ref, info_ref)
+              max_diff = 0.d0
+              rms_acc = 0.d0
+              do idx = 1, mpack
+                diff = pp(idx) - pp_ref(idx)
+                if (abs(diff) > max_diff) max_diff = abs(diff)
+                rms_acc = rms_acc + diff*diff
+              end do
+              if (mpack > 0) rms_acc = sqrt(rms_acc / mpack)
+              write(*,'(1x,"[GPU density debug] max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
+              deallocate(pp_ref, xmat_ref, stat=istat_loc)
+            end if
 #ifdef GPU
             if (use_resident) then
               call mopac_cuda_register_packed_density(mpack, pp)
@@ -202,6 +274,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             allocate(xmat(norbs,norbs),stat = i)
             call mopac_cuda_density_from_dev_syrk(norbs, ndubl, occ, xmat, norbs)
             call dtrttp('u', norbs, xmat, norbs, pp, i )
+            ! Debug comparison not available for SYRK shortcut (no CPU analogue)
 #ifdef GPU
             if (use_resident) then
               call mopac_cuda_register_packed_density(mpack, pp)
