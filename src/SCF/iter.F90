@@ -45,6 +45,9 @@
       use eigenvectors_cuda_mod, only: eigenvectors_CUDA_fetch
       use gpu_runtime_interfaces, only: mopac_cuda_get_density_device_ptr, mopac_cuda_get_fock_device_ptr, &
            mopac_cuda_set_resident_mode, mopac_cuda_fetch_fock, mopac_cuda_fetch_packed_density
+      use gpu_scf_types, only: gpu_scf_context, gpu_scf_context_clear, &
+           GPU_SCF_FLAG_USE_DIIS, GPU_SCF_FLAG_RHF, GPU_SCF_FLAG_UHF, GPU_SCF_FLAG_DEBUG
+      use gpu_scf_interfaces, only: gpu_scf_run, gpu_scf_last_error
 #endif
       implicit none
       double precision , intent(out) :: ee
@@ -64,6 +67,11 @@
       type(c_ptr) :: fock_dev
       type(c_ptr) :: density_dev
       logical :: need_fetch_fock, need_fetch_pa, need_fetch_pb, need_fetch_p, need_fetch_fb
+      type(gpu_scf_context) :: gpu_scf_ctx
+      logical :: gpu_scf_enabled
+      character(len=256) :: gpu_scf_message
+      character(len=32) :: env_gpu_scf
+      integer :: gpu_scf_env_stat
 #endif
       logical :: debug, prtfok, prteig, prtden, prt1el, minprt, newdg, prtpl, &
         prtvec, camkin, ci, okpuly, oknewd, times, force, allcon, &
@@ -113,6 +121,21 @@
       need_fetch_pb = .false.
       need_fetch_p = .false.
       need_fetch_fb = .false.
+      gpu_scf_enabled = .false.
+      env_gpu_scf = ''
+      gpu_scf_env_stat = 1
+      call get_environment_variable('MOPAC_GPU_SCF_EXPERIMENTAL', env_gpu_scf, status=gpu_scf_env_stat)
+      if (gpu_scf_env_stat == 0) then
+        env_gpu_scf = adjustl(env_gpu_scf)
+        if (len_trim(env_gpu_scf) > 0) then
+          select case (env_gpu_scf(1:1))
+          case('0','n','N','f','F')
+            gpu_scf_enabled = .false.
+          case default
+            gpu_scf_enabled = .true.
+          end select
+        end if
+      end if
 #endif
       if (icalcn /= numcal) then
         call delete_iter_arrays
@@ -312,6 +335,36 @@
 !
 !   INITIALIZATION OPERATIONS DONE EVERY TIME ITER IS CALLED
 !
+#ifdef GPU
+      if (gpu_scf_enabled) then
+        call gpu_scf_context_clear(gpu_scf_ctx)
+        gpu_scf_ctx%norbs = norbs
+        gpu_scf_ctx%nalpha = nalpha
+        gpu_scf_ctx%nbeta = nbeta
+        gpu_scf_ctx%mpack = mpack
+        gpu_scf_ctx%max_iter = itrmax
+        gpu_scf_ctx%energy_tol = scfcrt
+        gpu_scf_ctx%density_tol = scorr
+        gpu_scf_ctx%flags = GPU_SCF_FLAG_USE_DIIS
+        if (uhf) then
+          gpu_scf_ctx%flags = ior(gpu_scf_ctx%flags, GPU_SCF_FLAG_UHF)
+        else
+          gpu_scf_ctx%flags = ior(gpu_scf_ctx%flags, GPU_SCF_FLAG_RHF)
+        end if
+        if (debug) gpu_scf_ctx%flags = ior(gpu_scf_ctx%flags, GPU_SCF_FLAG_DEBUG)
+        if (gpu_scf_run(gpu_scf_ctx)) then
+          call gpu_scf_last_error(gpu_scf_message)
+          if (len_trim(gpu_scf_message) == 0) gpu_scf_message = 'GPU SCF stub reported success'
+          write (iw,'(1x,a)') '[GPU SCF] Experimental GPU path completed: ' // trim(gpu_scf_message)
+        else
+          call gpu_scf_last_error(gpu_scf_message)
+          if (len_trim(gpu_scf_message) == 0) gpu_scf_message = 'GPU SCF driver unavailable'
+          write (iw,'(1x,a)') '[GPU SCF] Experimental GPU path not used: ' // trim(gpu_scf_message)
+        end if
+        call flush(iw)
+      end if
+#endif
+
       makea = .TRUE.
       makeb = .TRUE.
       iemin = 0
