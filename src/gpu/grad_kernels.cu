@@ -13,12 +13,6 @@
 
 namespace {
 
-#if defined(__GNUC__) || defined(__clang__)
-#define MOPAC_CUDA_UNUSED __attribute__((unused))
-#else
-#define MOPAC_CUDA_UNUSED
-#endif
-
 static GradPairPod *d_near_pairs = nullptr;
 static size_t near_capacity = 0;
 static double *d_charges = nullptr;
@@ -30,7 +24,7 @@ static int experimental_mode = -1;  // -1 unset, 0 disabled, 1 enabled
 
 constexpr double kCoulombKcalPerAng = 332.063712949;  // kcal/mol * Å / e^2
 
-inline bool experimental_enabled() MOPAC_CUDA_UNUSED {
+static bool experimental_enabled() {
   if (experimental_mode >= 0) return experimental_mode == 1;
   const char *env = std::getenv("MOPAC_GPU_GRAD_EXPERIMENTAL");
   if (env && env[0] != '\0' && env[0] != '0') {
@@ -57,7 +51,7 @@ bool ensure_capacity(T *&ptr, size_t &capacity, size_t need) {
   return true;
 }
 
-inline bool ensure_stream() MOPAC_CUDA_UNUSED {
+static bool ensure_stream() {
   if (grad_stream) return true;
   if (cudaStreamCreateWithFlags(&grad_stream, cudaStreamNonBlocking) != cudaSuccess) {
     grad_stream = nullptr;
@@ -69,7 +63,7 @@ inline bool ensure_stream() MOPAC_CUDA_UNUSED {
 __global__ void coulomb_gradient_kernel(int pair_count,
                                         const GradPairPod *pairs,
                                         const double *charges,
-                                        double *grad) MOPAC_CUDA_UNUSED
+                                        double *grad)
 {
   int tid = blockDim.x * blockIdx.x + threadIdx.x;
   if (tid >= pair_count) return;
@@ -102,7 +96,6 @@ __global__ void coulomb_gradient_kernel(int pair_count,
 }
 
 }  // namespace
-#undef MOPAC_CUDA_UNUSED
 
 bool resident_grad_launch_impl(int numat,
                                int l123,
@@ -122,6 +115,8 @@ bool resident_grad_launch_impl(int numat,
   (void)near_count;
   (void)far_pairs;
   (void)far_count;
+  if (!experimental_enabled()) return false;
+  if (!ensure_stream()) return false;
   return false;
 }
 
