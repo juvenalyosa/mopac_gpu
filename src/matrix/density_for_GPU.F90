@@ -111,11 +111,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
               call mopac_cuda_clear_density_cache()
             end if
 #endif
-            if (need_host_density) then
-              call dtrttp('u', norbs, xmat, norbs, pp, i )
-            else
-              pp(:) = 0.d0
-            end if
+            call dtrttp('u', norbs, xmat, norbs, pp, i )
 #ifdef GPU
             if (use_resident) then
               call mopac_cuda_register_packed_density(mpack, pp)
@@ -165,11 +161,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
               call mopac_cuda_clear_density_cache()
             end if
 #endif
-            if (need_host_density) then
-              call dtrttp('u', norbs, xmat, norbs, pp, i )
-            else
-              pp(:) = 0.d0
-            end if
+            call dtrttp('u', norbs, xmat, norbs, pp, i )
 #ifdef GPU
             if (use_resident) then
               call mopac_cuda_register_packed_density(mpack, pp)
@@ -209,11 +201,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             gpu_density_used = .true.
             allocate(xmat(norbs,norbs),stat = i)
             call mopac_cuda_density_from_dev_syrk(norbs, ndubl, occ, xmat, norbs)
-            if (need_host_density) then
-              call dtrttp('u', norbs, xmat, norbs, pp, i )
-            else
-              pp(:) = 0.d0
-            end if
+            call dtrttp('u', norbs, xmat, norbs, pp, i )
 #ifdef GPU
             if (use_resident) then
               call mopac_cuda_register_packed_density(mpack, pp)

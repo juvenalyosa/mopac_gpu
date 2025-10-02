@@ -351,12 +351,11 @@
 #ifdef GPU
         subroutine sync_resident_density()
           use iso_c_binding, only : c_bool, c_size_t, c_loc
-          use molkst_C, only : mpack, norbs
+          use molkst_C, only : mpack, norbs, uhf
           use mod_vars_cuda, only : resident_scf
           implicit none
           integer :: linear, n, info
           logical(c_bool) :: ok_density
-          double precision, allocatable, target :: scratch_pack(:)
           double precision, allocatable, target :: scratch_full(:,:)
           external :: dtrttp
           if (.not. resident_scf) return
@@ -364,16 +363,10 @@
           linear = mpack
           if (linear <= 0) return
           if (linear > 0) then
-            allocate(scratch_pack(linear))
-            ok_density = mopac_cuda_fetch_packed_density(scratch_pack, int(linear, kind=c_size_t))
+            ok_density = mopac_cuda_fetch_packed_density(p, int(linear, kind=c_size_t))
             if (ok_density .eqv. .true._c_bool) then
-              p(1:linear) = scratch_pack(1:linear)
-              if (allocated(pa)) then
-                pa(1:linear) = scratch_pack(1:linear)
-              end if
-              if (allocated(pb)) then
-                pb(1:linear) = scratch_pack(1:linear)
-              end if
+              if (allocated(pa)) ok_density = mopac_cuda_fetch_packed_density(pa, int(linear, kind=c_size_t))
+              if (allocated(pb)) ok_density = mopac_cuda_fetch_packed_density(pb, int(linear, kind=c_size_t))
             else
               n = norbs
               if (n > 0) then
@@ -381,13 +374,27 @@
                 ok_density = mopac_cuda_fetch_density(c_loc(scratch_full(1,1)), n, n)
                 if (ok_density .eqv. .true._c_bool) then
                   call dtrttp('U', n, scratch_full, n, p, info)
-                  if (allocated(pa)) pa(1:linear) = 0.5d0 * p(1:linear)
-                  if (allocated(pb)) pb(1:linear) = 0.5d0 * p(1:linear)
+                  if (allocated(pa)) then
+                    if (uhf) then
+                      pa(1:linear) = p(1:linear)
+                    else
+                      pa(1:linear) = 0.5d0 * p(1:linear)
+                    end if
+                  end if
+                  if (allocated(pb)) then
+                    if (uhf) then
+                      pb(1:linear) = p(1:linear)
+                    else
+                      pb(1:linear) = 0.5d0 * p(1:linear)
+                    end if
+                  end if
                 end if
                 deallocate(scratch_full)
               end if
             end if
-            deallocate(scratch_pack)
+            if (ok_density .ne. .true._c_bool) then
+              resident_scf = .false.
+            end if
           end if
           ! If fetch fails, proceed without synchronisation; CPU path will still execute.
         end subroutine sync_resident_density
@@ -604,7 +611,7 @@
       function mopac_gpu_cart_gradient_cpu(numat_in, l123_in, coord_ptr, grad_ptr, qbld_ptr) result(ok) &
            bind(C, name='mopac_gpu_cart_gradient_cpu')
         use iso_c_binding, only : c_ptr, c_f_pointer, c_bool, c_size_t, c_loc
-        use molkst_C, only : id, keywrd, mozyme, mpack, norbs
+        use molkst_C, only : id, keywrd, mozyme, mpack, norbs, uhf
         use common_arrays_C, only : nfirst, nlast, p, pa, pb, tvec
         use MOZYME_C, only : mode, part_dxyz
         use funcon_C, only : fpc_9
@@ -625,7 +632,6 @@
         double precision :: cdi(3,2), dstat(3)
         integer :: ndi(2)
         logical :: force
-        double precision, allocatable, target :: scratch_pack(:)
         double precision, allocatable, target :: scratch_full(:,:)
         logical(c_bool) :: ok_fetch
         integer :: info, n_local
@@ -655,12 +661,10 @@
         linear_p = int(max(0, mpack), kind=c_size_t)
         if (resident_scf .and. linear_p > int(0, kind=c_size_t)) then
           if (mpack > 0) then
-            allocate(scratch_pack(mpack))
-            ok_fetch = mopac_cuda_fetch_packed_density(scratch_pack, linear_p)
+            ok_fetch = mopac_cuda_fetch_packed_density(p, linear_p)
             if (ok_fetch .eqv. .true._c_bool) then
-              p(1:mpack) = scratch_pack(1:mpack)
-              if (allocated(pa)) pa(1:mpack) = scratch_pack(1:mpack)
-              if (allocated(pb)) pb(1:mpack) = scratch_pack(1:mpack)
+              if (allocated(pa)) ok_fetch = mopac_cuda_fetch_packed_density(pa, linear_p)
+              if (allocated(pb)) ok_fetch = mopac_cuda_fetch_packed_density(pb, linear_p)
             else
               n_local = norbs
               if (n_local > 0) then
@@ -668,13 +672,25 @@
                 ok_fetch = mopac_cuda_fetch_density(c_loc(scratch_full(1,1)), n_local, n_local)
                 if (ok_fetch .eqv. .true._c_bool) then
                   call dtrttp('U', n_local, scratch_full, n_local, p, info)
-                  if (allocated(pa)) pa(1:mpack) = 0.5d0 * p(1:mpack)
-                  if (allocated(pb)) pb(1:mpack) = 0.5d0 * p(1:mpack)
+                  if (allocated(pa)) then
+                    if (uhf) then
+                      pa(1:mpack) = p(1:mpack)
+                    else
+                      pa(1:mpack) = 0.5d0 * p(1:mpack)
+                    end if
+                  end if
+                  if (allocated(pb)) then
+                    if (uhf) then
+                      pb(1:mpack) = p(1:mpack)
+                    else
+                      pb(1:mpack) = 0.5d0 * p(1:mpack)
+                    end if
+                  end if
                 end if
                 deallocate(scratch_full)
               end if
             end if
-            deallocate(scratch_pack)
+            if (ok_fetch .ne. .true._c_bool) resident_scf = .false.
           end if
         end if
 
