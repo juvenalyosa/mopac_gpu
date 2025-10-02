@@ -15,7 +15,7 @@
 #pragma diag_suppress 177
 #endif
 
-namespace {
+namespace detail {
 
 static GradPairPod *d_near_pairs = nullptr;
 static size_t near_capacity = 0;
@@ -99,6 +99,8 @@ __global__ void coulomb_gradient_kernel(int pair_count,
   atomicAdd(&grad[offset_j + 2], -gz);
 }
 
+}  // namespace detail
+
 bool resident_grad_launch_impl(int numat,
                                int l123,
                                const double *coord_host,
@@ -117,24 +119,24 @@ bool resident_grad_launch_impl(int numat,
   (void)near_count;
   (void)far_pairs;
   (void)far_count;
-  if (!experimental_enabled()) return false;
-  if (!ensure_stream()) return false;
+  if (!detail::experimental_enabled()) return false;
+  if (!detail::ensure_stream()) return false;
   return false;
 }
 
 void resident_grad_release_impl() {
-  if (d_near_pairs) cudaFree(d_near_pairs);
-  if (d_charges) cudaFree(d_charges);
-  if (d_grad) cudaFree(d_grad);
-  d_near_pairs = nullptr;
-  d_charges = nullptr;
-  d_grad = nullptr;
-  near_capacity = 0;
-  charge_capacity = 0;
-  grad_capacity = 0;
-  if (grad_stream) cudaStreamDestroy(grad_stream);
-  grad_stream = nullptr;
-  experimental_mode = -1;
+  if (detail::d_near_pairs) cudaFree(detail::d_near_pairs);
+  if (detail::d_charges) cudaFree(detail::d_charges);
+  if (detail::d_grad) cudaFree(detail::d_grad);
+  detail::d_near_pairs = nullptr;
+  detail::d_charges = nullptr;
+  detail::d_grad = nullptr;
+  detail::near_capacity = 0;
+  detail::charge_capacity = 0;
+  detail::grad_capacity = 0;
+  if (detail::grad_stream) cudaStreamDestroy(detail::grad_stream);
+  detail::grad_stream = nullptr;
+  detail::experimental_mode = -1;
 }
 
 }  // namespace
