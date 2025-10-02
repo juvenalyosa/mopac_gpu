@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <vector>
 
 #include "grad_launch.h"
 
@@ -15,15 +16,15 @@
 #pragma diag_suppress 177
 #endif
 
+extern "C" bool mopac_gpu_cart_gradient_cpu(int numat, int l123,
+                                             const double *coord, double *grad,
+                                             const double *qbld);
+
 namespace detail {
 
 static GradPairPod *d_near_pairs = nullptr;
-static size_t near_capacity = 0;
 static double *d_charges = nullptr;
-static size_t charge_capacity = 0;
 static double *d_grad = nullptr;
-static size_t grad_capacity = 0;
-static cudaStream_t grad_stream = nullptr;
 static int experimental_mode = -1;  // -1 unset, 0 disabled, 1 enabled
 
 constexpr double kCoulombKcalPerAng = 332.063712949;  // kcal/mol * Å / e^2
@@ -37,31 +38,6 @@ static bool experimental_enabled() {
     experimental_mode = 0;
   }
   return experimental_mode == 1;
-}
-
-template <typename T>
-bool ensure_capacity(T *&ptr, size_t &capacity, size_t need) {
-  if (need <= capacity) return true;
-  if (ptr) cudaFree(ptr);
-  ptr = nullptr;
-  capacity = 0;
-  if (need == 0) return true;
-  if (cudaMalloc(reinterpret_cast<void **>(&ptr), need * sizeof(T)) != cudaSuccess) {
-    ptr = nullptr;
-    capacity = 0;
-    return false;
-  }
-  capacity = need;
-  return true;
-}
-
-static bool ensure_stream() {
-  if (grad_stream) return true;
-  if (cudaStreamCreateWithFlags(&grad_stream, cudaStreamNonBlocking) != cudaSuccess) {
-    grad_stream = nullptr;
-    return false;
-  }
-  return true;
 }
 
 __global__ void coulomb_gradient_kernel(int pair_count,
@@ -99,6 +75,12 @@ __global__ void coulomb_gradient_kernel(int pair_count,
   atomicAdd(&grad[offset_j + 2], -gz);
 }
 
+static inline void touch_buffers() {
+  (void)d_near_pairs;
+  (void)d_charges;
+  (void)d_grad;
+}
+
 }  // namespace detail
 
 bool resident_grad_launch_impl(int numat,
@@ -115,13 +97,18 @@ bool resident_grad_launch_impl(int numat,
   (void)coord_host;
   (void)grad_host;
   (void)charges_host;
-  (void)near_pairs;
-  (void)near_count;
   (void)far_pairs;
   (void)far_count;
+  detail::touch_buffers();
+  int work_count = 0;
+  generate_pair_work(numat, l123, near_pairs, near_count, nullptr, &work_count);
+  std::vector<AtomPairWork> work;
+  if (work_count > 0) {
+    work.resize(static_cast<size_t>(work_count));
+    generate_pair_work(numat, l123, near_pairs, near_count, work.data(), &work_count);
+  }
   if (!detail::experimental_enabled()) return false;
-  if (!detail::ensure_stream()) return false;
-  return false;
+  return mopac_gpu_cart_gradient_cpu(numat, l123, coord_host, grad_host, charges_host);
 }
 
 void resident_grad_release_impl() {
@@ -131,11 +118,6 @@ void resident_grad_release_impl() {
   detail::d_near_pairs = nullptr;
   detail::d_charges = nullptr;
   detail::d_grad = nullptr;
-  detail::near_capacity = 0;
-  detail::charge_capacity = 0;
-  detail::grad_capacity = 0;
-  if (detail::grad_stream) cudaStreamDestroy(detail::grad_stream);
-  detail::grad_stream = nullptr;
   detail::experimental_mode = -1;
 }
 
@@ -145,4 +127,34 @@ void resident_grad_release_impl() {
 
 extern "C" void mopac_cuda_cart_gradient_release(void) {
   resident_grad_release_impl();
+}
+
+void generate_pair_work(int numat,
+                        int l123,
+                        const GradPairPod *pairs,
+                        int pair_count,
+                        AtomPairWork *out_work,
+                        int *out_count) {
+  (void)numat;
+  (void)l123;
+  if (out_count) *out_count = 0;
+  if (!pairs || pair_count <= 0) return;
+
+  int local_count = 0;
+  if (out_work) {
+    for (int idx = 0; idx < pair_count; ++idx) {
+      const GradPairPod &pair = pairs[idx];
+      AtomPairWork &slot = out_work[local_count];
+      slot.atom_i = pair.atom_i - 1;
+      slot.atom_j = pair.atom_j - 1;
+      slot.range_i.first = pair.span_i_first - 1;
+      slot.range_i.last  = pair.span_i_last - 1;
+      slot.range_j.first = pair.span_j_first - 1;
+      slot.range_j.last  = pair.span_j_last - 1;
+      ++local_count;
+    }
+  } else {
+    local_count = pair_count;
+  }
+  if (out_count) *out_count = local_count;
 }

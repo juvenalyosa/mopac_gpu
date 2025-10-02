@@ -2,6 +2,18 @@
 
 #include <cuda_runtime.h>
 
+struct AtomRange {
+  int first;
+  int last;
+};
+
+struct AtomPairWork {
+  int atom_i;
+  int atom_j;
+  AtomRange range_i;
+  AtomRange range_j;
+};
+
 struct GradPairPod {
   int atom_i;
   int atom_j;
@@ -27,3 +39,10 @@ bool resident_grad_launch_impl(int numat,
                                int far_count);
 
 void resident_grad_release_impl();
+
+void generate_pair_work(int numat,
+                        int l123,
+                        const GradPairPod *pairs,
+                        int pair_count,
+                        AtomPairWork *out_work,
+                        int *out_count);

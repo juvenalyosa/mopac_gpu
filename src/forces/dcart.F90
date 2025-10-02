@@ -565,11 +565,13 @@
 #ifdef GPU
       function mopac_gpu_cart_gradient_cpu(numat_in, l123_in, coord_ptr, grad_ptr, qbld_ptr) result(ok) &
            bind(C, name='mopac_gpu_cart_gradient_cpu')
-        use iso_c_binding, only : c_ptr, c_f_pointer, c_bool
+        use iso_c_binding, only : c_ptr, c_f_pointer, c_bool, c_size_t
         use molkst_C, only : id, keywrd, mozyme
         use common_arrays_C, only : nfirst, nlast, p, pa, pb, tvec
         use MOZYME_C, only : mode, part_dxyz
         use funcon_C, only : fpc_9
+        use mod_vars_cuda, only : resident_scf
+        use gpu_density_interfaces, only : mopac_cuda_fetch_packed_density
         implicit none
         integer, value :: numat_in
         integer, value :: l123_in
@@ -584,6 +586,7 @@
         double precision :: cdi(3,2), dstat(3)
         integer :: ndi(2)
         logical :: force
+        integer(c_size_t) :: linear_p
 
         ok = .false._c_bool
         if (l123_in /= 1) return
@@ -604,6 +607,13 @@
         numtot = numat_in * l123_in
         icuc = (l123_in + 1) / 2
         force = index(keywrd,'PREC') /= 0 .or. index(keywrd,'FORCE') /= 0
+
+        linear_p = int(l123_in * (l123_in + 1) / 2, kind=c_size_t)
+        if (resident_scf) then
+          if (.not. mopac_cuda_fetch_packed_density(p, linear_p)) then
+            ! Resident density unavailable; proceed with existing host copy.
+          end if
+        end if
 
         grad(:, :) = 0.0d0
         dstat(:) = 0.0d0
