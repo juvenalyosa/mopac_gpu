@@ -511,6 +511,17 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   if (!mopac_cuda_density_copy_cached(s_d_p, mpack_e, p)) {
     cudaMemcpy(s_d_p, p, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
   }
+  if (resident_debug_enabled_local()) {
+    std::vector<double> host_ptot(mpack);
+    std::vector<double> host_p(mpack);
+    cudaMemcpy(host_ptot.data(), s_d_ptot, sizeof(double)*mpack, cudaMemcpyDeviceToHost);
+    cudaMemcpy(host_p.data(), s_d_p, sizeof(double)*mpack, cudaMemcpyDeviceToHost);
+    std::printf("[GPU resident debug] density sample ptot:% .5e % .5e % .5e\n",
+                host_ptot[0], host_ptot[1], host_ptot[2]);
+    std::printf("[GPU resident debug] density sample p:% .5e % .5e % .5e\n",
+                host_p[0], host_p[1], host_p[2]);
+    std::fflush(stdout);
+  }
   if (w_len > 0) {
     cudaMemcpy(s_d_w, w, sizeof(double)*w_len, cudaMemcpyHostToDevice);
   }
