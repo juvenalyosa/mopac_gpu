@@ -9,21 +9,15 @@
 #include <cstddef>
 #include <cstdlib>
 
+#include "grad_launch.h"
+
 namespace {
 
-struct GradPairPod {
-  int atom_i;
-  int atom_j;
-  int span_i_first;
-  int span_i_last;
-  int span_j_first;
-  int span_j_last;
-  int image_code;
-  int flags;
-  double displacement[3];
-  double distance2;
-  double weight;
-};
+#if defined(__GNUC__) || defined(__clang__)
+#define MOPAC_CUDA_UNUSED __attribute__((unused))
+#else
+#define MOPAC_CUDA_UNUSED
+#endif
 
 static GradPairPod *d_near_pairs = nullptr;
 static size_t near_capacity = 0;
@@ -36,7 +30,7 @@ static int experimental_mode = -1;  // -1 unset, 0 disabled, 1 enabled
 
 constexpr double kCoulombKcalPerAng = 332.063712949;  // kcal/mol * Å / e^2
 
-inline bool experimental_enabled() {
+inline bool experimental_enabled() MOPAC_CUDA_UNUSED {
   if (experimental_mode >= 0) return experimental_mode == 1;
   const char *env = std::getenv("MOPAC_GPU_GRAD_EXPERIMENTAL");
   if (env && env[0] != '\0' && env[0] != '0') {
@@ -63,7 +57,7 @@ bool ensure_capacity(T *&ptr, size_t &capacity, size_t need) {
   return true;
 }
 
-inline bool ensure_stream() {
+inline bool ensure_stream() MOPAC_CUDA_UNUSED {
   if (grad_stream) return true;
   if (cudaStreamCreateWithFlags(&grad_stream, cudaStreamNonBlocking) != cudaSuccess) {
     grad_stream = nullptr;
@@ -75,7 +69,7 @@ inline bool ensure_stream() {
 __global__ void coulomb_gradient_kernel(int pair_count,
                                         const GradPairPod *pairs,
                                         const double *charges,
-                                        double *grad)
+                                        double *grad) MOPAC_CUDA_UNUSED
 {
   int tid = blockDim.x * blockIdx.x + threadIdx.x;
   if (tid >= pair_count) return;
@@ -108,17 +102,17 @@ __global__ void coulomb_gradient_kernel(int pair_count,
 }
 
 }  // namespace
+#undef MOPAC_CUDA_UNUSED
 
-extern "C" bool mopac_cuda_cart_gradient_launch(int numat,
-                                                 int l123,
-                                                 const double *coord_host,
-                                                 double *grad_host,
-                                                 const double *charges_host,
-                                                 const void *near_pairs,
-                                                 int near_count,
-                                                 const void *far_pairs,
-                                                 int far_count)
-{
+bool resident_grad_launch_impl(int numat,
+                               int l123,
+                               const double *coord_host,
+                               double *grad_host,
+                               const double *charges_host,
+                               const GradPairPod *near_pairs,
+                               int near_count,
+                               const GradPairPod *far_pairs,
+                               int far_count) {
   (void)numat;
   (void)l123;
   (void)coord_host;
@@ -131,13 +125,17 @@ extern "C" bool mopac_cuda_cart_gradient_launch(int numat,
   return false;
 }
 
-extern "C" void mopac_cuda_cart_gradient_release(void) {
-  (void)d_near_pairs;
-  (void)d_charges;
-  (void)d_grad;
-  (void)near_capacity;
-  (void)charge_capacity;
-  (void)grad_capacity;
-  (void)grad_stream;
+void resident_grad_release_impl() {
+  if (d_near_pairs) cudaFree(d_near_pairs);
+  if (d_charges) cudaFree(d_charges);
+  if (d_grad) cudaFree(d_grad);
+  d_near_pairs = nullptr;
+  d_charges = nullptr;
+  d_grad = nullptr;
+  near_capacity = 0;
+  charge_capacity = 0;
+  grad_capacity = 0;
+  if (grad_stream) cudaStreamDestroy(grad_stream);
+  grad_stream = nullptr;
   experimental_mode = -1;
 }

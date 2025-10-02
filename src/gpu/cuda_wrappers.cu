@@ -18,6 +18,8 @@
 #include <cctype>
 #include <mutex>
 
+#include "grad_launch.h"
+
 #if defined(MOPAC_ENABLE_NVTX)
 #  if defined(__has_include)
 #    if __has_include(<nvToolsExt.h>)
@@ -2371,6 +2373,7 @@ extern "C" void mopac_cuda_destroy_resources() {
   g_resident_mode = -1;
   g_stream_backup = nullptr;
   g_stream_override_depth = 0;
+  resident_grad_release_impl();
 }
 
 extern "C" void* mopac_cuda_get_fock_device_ptr(void) {
@@ -2425,10 +2428,14 @@ bool mopac_cuda_cart_gradient(int numat, int l123, const double *coord,
                               const void *near_pairs, int near_count,
                               const void *far_pairs, int far_count) {
   if (!coord || !grad || !charges) return false;
-  (void)near_pairs;
-  (void)near_count;
-  (void)far_pairs;
-  (void)far_count;
+  if (l123 == 1) {
+    const auto *near = static_cast<const GradPairPod*>(near_pairs);
+    const auto *far  = static_cast<const GradPairPod*>(far_pairs);
+    if (resident_grad_launch_impl(numat, l123, coord, grad, charges,
+                                  near, near_count, far, far_count)) {
+      return true;
+    }
+  }
   return mopac_gpu_cart_gradient_cpu(numat, l123, coord, grad, charges);
 }
 
