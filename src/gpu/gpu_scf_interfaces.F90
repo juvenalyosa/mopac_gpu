@@ -1,6 +1,7 @@
 module gpu_scf_interfaces
   use iso_c_binding
-  use gpu_scf_types, only: gpu_scf_context
+  use gpu_scf_types, only: gpu_scf_context, GPU_SCF_FLAG_USE_DIIS, &
+       GPU_SCF_FLAG_RHF, GPU_SCF_FLAG_UHF, GPU_SCF_FLAG_DEBUG
   implicit none
   private
   public :: gpu_scf_context, gpu_scf_run, gpu_scf_last_error, &
