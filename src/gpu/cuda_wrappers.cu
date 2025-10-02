@@ -64,15 +64,6 @@ static inline bool equals_ci(const char* a, const char* b) {
   return *a == '\0' && *b == '\0';
 }
 
-static int g_density_debug_mode = -1;
-static inline bool density_debug_enabled() {
-  if (g_density_debug_mode < 0) {
-    const char* env = std::getenv("MOPAC_GPU_DENSITY_DEBUG");
-    g_density_debug_mode = (env && *env) ? 1 : 0;
-  }
-  return g_density_debug_mode == 1;
-}
-
 static int g_gpu_profile_level = 0;
 static int g_gpu_profile_inited = 0;
 static int g_gpu_profile_env_requested MOPAC_UNUSED = 0;
@@ -479,7 +470,6 @@ static DevBuf<double> g_density_full;
 static int g_density_full_n = 0;
 static int g_density_full_ld = 0;
 static bool g_density_full_valid = false;
-static bool g_density_full_dirty = false;
 
 struct PackedDensitySlot {
   DevBuf<double> buf;
@@ -1920,12 +1910,10 @@ void mopac_cuda_density_from_dev_syrk(int n, int ndubl, double alpha, double *C,
   g_density_full_valid = true;
   g_density_full_n = n;
   g_density_full_ld = ldc;
-  g_density_full_dirty = true;
   invalidate_packed_density();
   if (!resident_mode_enabled()) {
     cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
     cudaStreamSynchronize(g_stream);
-    g_density_full_dirty = false;
   }
 }
 
@@ -1972,12 +1960,10 @@ void mopac_cuda_density_from_dev_gemm(int n,
   g_density_full_valid = true;
   g_density_full_n = n;
   g_density_full_ld = ldc;
-  g_density_full_dirty = true;
   invalidate_packed_density();
   if (!resident_mode_enabled()) {
     cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
     cudaStreamSynchronize(g_stream);
-    g_density_full_dirty = false;
   }
 }
 
@@ -2465,7 +2451,6 @@ extern "C" bool mopac_cuda_fetch_density(double *host_ptr, int n, int ld) {
   cudaStream_t s = g_stream ? g_stream : 0;
   if (cudaMemcpyAsync(host_ptr, g_density_full.ptr, bytes, cudaMemcpyDeviceToHost, s) != cudaSuccess) return false;
   cudaStreamSynchronize(s);
-  g_density_full_dirty = false;
   return true;
 }
 
@@ -2500,7 +2485,6 @@ bool mopac_cuda_cart_gradient(int numat, int l123, const double *coord,
 
 void mopac_cuda_clear_density_cache() {
   g_density_full_valid = false;
-  g_density_full_dirty = false;
   g_density_full_n = 0;
   g_density_full_ld = 0;
   for (auto &slot : g_packed_density) {
@@ -2523,7 +2507,6 @@ void mopac_cuda_density_add_diag(int n, double value) {
   int grid = (n + block - 1) / block;
   add_diag_kernel<<<grid, block, 0, s>>>(g_density_full.ptr, g_density_full_ld, n, value);
   invalidate_packed_density();
-  g_density_full_dirty = true;
 }
 
 void mopac_cuda_register_packed_density(int linear, double *packed_host) {
@@ -2556,7 +2539,6 @@ void mopac_cuda_register_packed_density(int linear, double *packed_host) {
   slot->host_ptr = packed_host;
   slot->valid = true;
   slot->stamp = ++g_packed_density_tick;
-  g_density_full_dirty = false;
 }
 
 bool mopac_cuda_density_copy_cached(double *dest, size_t len, const double *host_ptr) {
