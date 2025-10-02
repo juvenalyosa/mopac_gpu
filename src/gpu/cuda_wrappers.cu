@@ -502,6 +502,23 @@ static PackedDensitySlot* find_packed_slot(const double *host_ptr, size_t len) {
   return fallback;
 }
 
+static bool resident_debug_enabled() {
+  static int inited = 0;
+  static bool enabled = false;
+  if (!inited) {
+    const char *s = std::getenv("MOPAC_GPU_RESIDENT_DEBUG");
+    if (s && *s) {
+      if (!(std::strcmp(s, "0") == 0 || std::strcmp(s, "off") == 0 ||
+            std::strcmp(s, "false") == 0 || std::strcmp(s, "n") == 0 ||
+            std::strcmp(s, "N") == 0)) {
+        enabled = true;
+      }
+    }
+    inited = 1;
+  }
+  return enabled;
+}
+
 static PackedDensitySlot* acquire_packed_slot(const double *host_ptr) {
   if (host_ptr) {
     for (auto &slot : g_packed_density) {
@@ -554,6 +571,21 @@ static void register_fock_cache(int linear, const double *host_ptr, const double
   g_fock_cache.len = (size_t)linear;
   g_fock_cache.host_ptr = host_ptr;
   g_fock_cache.valid = true;
+  if (resident_debug_enabled() && host_ptr) {
+    std::vector<double> host_copy(linear);
+    if (cudaMemcpy(host_copy.data(), g_fock_cache.buf.ptr, bytes, cudaMemcpyDeviceToHost) == cudaSuccess) {
+      double max_diff = 0.0;
+      double rms = 0.0;
+      for (int i = 0; i < linear; ++i) {
+        double diff = host_copy[i] - host_ptr[i];
+        if (std::abs(diff) > max_diff) max_diff = std::abs(diff);
+        rms += diff * diff;
+      }
+      if (linear > 0) rms = std::sqrt(rms / (double)linear);
+      std::printf("[GPU resident debug] fock register max=% .5e rms=% .5e\n", max_diff, rms);
+      std::fflush(stdout);
+    }
+  }
 }
 
 // cuSOLVERMg profiling accumulators (populated when requested)
@@ -2539,6 +2571,21 @@ void mopac_cuda_register_packed_density(int linear, double *packed_host) {
   slot->host_ptr = packed_host;
   slot->valid = true;
   slot->stamp = ++g_packed_density_tick;
+  if (resident_debug_enabled() && packed_host) {
+    std::vector<double> host_copy(linear);
+    if (cudaMemcpy(host_copy.data(), slot->buf.ptr, bytes, cudaMemcpyDeviceToHost) == cudaSuccess) {
+      double max_diff = 0.0;
+      double rms = 0.0;
+      for (int i = 0; i < linear; ++i) {
+        double diff = host_copy[i] - packed_host[i];
+        if (std::abs(diff) > max_diff) max_diff = std::abs(diff);
+        rms += diff * diff;
+      }
+      if (linear > 0) rms = std::sqrt(rms / (double)linear);
+      std::printf("[GPU resident debug] density register max=% .5e rms=% .5e\n", max_diff, rms);
+      std::fflush(stdout);
+    }
+  }
 }
 
 bool mopac_cuda_density_copy_cached(double *dest, size_t len, const double *host_ptr) {
