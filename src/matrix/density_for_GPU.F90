@@ -356,6 +356,9 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
                    & 0.d0,xmat,norbs)
             end if
             if (need_host_density) then
+              forall (i=1:norbs)
+                 xmat(i,i) = xmat(i,i) + cst
+              endforall
               call dtrttp('u', norbs, xmat, norbs, pp, i )
               if (debug_density) then
                 allocate(xmat_ref(norbs,norbs), stat=istat_loc)
@@ -395,6 +398,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             end if
 #ifdef GPU
             if (use_resident) then
+              call mopac_cuda_density_add_diag(norbs, cst)
               call mopac_cuda_register_packed_density(mpack, pp)
             else
               call mopac_cuda_clear_density_cache()
