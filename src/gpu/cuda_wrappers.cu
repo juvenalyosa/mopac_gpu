@@ -2425,12 +2425,10 @@ bool mopac_cuda_cart_gradient(int numat, int l123, const double *coord,
                               const void *near_pairs, int near_count,
                               const void *far_pairs, int far_count) {
   if (!coord || !grad || !charges) return false;
-  if (l123 == 1) {
-    if (mopac_cuda_cart_gradient_launch(numat, l123, coord, grad, charges,
-                                        near_pairs, near_count, far_pairs, far_count)) {
-      return true;
-    }
-  }
+  (void)near_pairs;
+  (void)near_count;
+  (void)far_pairs;
+  (void)far_count;
   return mopac_gpu_cart_gradient_cpu(numat, l123, coord, grad, charges);
 }
 
