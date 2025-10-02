@@ -156,7 +156,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
               end do
               if (mpack > 0) rms_acc = sqrt(rms_acc / mpack)
               write(6,'(1x,"[GPU density debug] case=2 max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
-              call flush(6)
+              write(0,'(1x,"[GPU density debug] case=2 max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
               deallocate(pp_ref, xmat_ref, stat=istat_loc)
             end if
 #ifdef GPU
@@ -237,7 +237,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
               end do
               if (mpack > 0) rms_acc = sqrt(rms_acc / mpack)
               write(6,'(1x,"[GPU density debug] case=2b max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
-              call flush(6)
+              write(0,'(1x,"[GPU density debug] case=2b max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
               deallocate(pp_ref, xmat_ref, stat=istat_loc)
             end if
 #ifdef GPU
@@ -306,11 +306,12 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
               end do
               if (mpack > 0) rms_acc = sqrt(rms_acc / mpack)
               write(6,'(1x,"[GPU density debug] case=4 max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
-              call flush(6)
+              write(0,'(1x,"[GPU density debug] case=4 max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
               if (max_diff > 1.d-6 .and. mpack >= 5) then
                 write(6,'(1x,"[GPU density debug] case=4 sample ",5(1x,1pe12.5))') &
                      pp(1), pp_ref(1), pp(2), pp_ref(2), pp(3)
-                call flush(6)
+                write(0,'(1x,"[GPU density debug] case=4 sample ",5(1x,1pe12.5))') &
+                     pp(1), pp_ref(1), pp(2), pp_ref(2), pp(3)
               end if
               deallocate(pp_ref, xmat_ref, stat=istat_loc)
             end if
