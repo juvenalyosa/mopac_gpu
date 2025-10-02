@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <chrono>
 #include <vector>
+#include <array>
 #include <cctype>
 #include <mutex>
 
@@ -470,19 +471,63 @@ static int g_density_full_n = 0;
 static int g_density_full_ld = 0;
 static bool g_density_full_valid = false;
 
-struct PackedDensityCache {
+struct PackedDensitySlot {
   DevBuf<double> buf;
   size_t len = 0;
   const double* host_ptr = nullptr;
   bool valid = false;
+  unsigned long long stamp = 0;
 };
 
-static PackedDensityCache g_packed_density;
+static constexpr int kPackedDensitySlots = 4;
+static std::array<PackedDensitySlot, kPackedDensitySlots> g_packed_density{};
+static unsigned long long g_packed_density_tick = 0;
 
 static inline void invalidate_packed_density() {
-  g_packed_density.valid = false;
-  g_packed_density.host_ptr = nullptr;
-  g_packed_density.len = 0;
+  for (auto &slot : g_packed_density) {
+    slot.valid = false;
+    slot.len = 0;
+    slot.stamp = 0;
+  }
+}
+
+static PackedDensitySlot* find_packed_slot(const double *host_ptr, size_t len) {
+  PackedDensitySlot *fallback = nullptr;
+  int matches = 0;
+  for (auto &slot : g_packed_density) {
+    if (!slot.valid) continue;
+    if (slot.len != len) continue;
+    ++matches;
+    if (host_ptr && slot.host_ptr == host_ptr) return &slot;
+    if (!fallback || slot.stamp > fallback->stamp) fallback = &slot;
+  }
+  if (host_ptr) {
+    return (matches == 1) ? fallback : nullptr;
+  }
+  return fallback;
+}
+
+static PackedDensitySlot* acquire_packed_slot(const double *host_ptr) {
+  if (host_ptr) {
+    for (auto &slot : g_packed_density) {
+      if (slot.host_ptr == host_ptr) return &slot;
+    }
+  }
+  for (auto &slot : g_packed_density) {
+    if (!slot.valid && slot.host_ptr == nullptr) {
+      slot.host_ptr = host_ptr;
+      return &slot;
+    }
+  }
+  PackedDensitySlot *victim = &g_packed_density[0];
+  for (auto &slot : g_packed_density) {
+    if (slot.stamp < victim->stamp) victim = &slot;
+  }
+  victim->host_ptr = host_ptr;
+  victim->valid = false;
+  victim->len = 0;
+  victim->stamp = 0;
+  return victim;
 }
 
 struct PackedCache {
@@ -2342,7 +2387,9 @@ extern "C" void mopac_cuda_destroy_resources() {
   g_rot_V.release(); g_rot_i.release(); g_rot_j.release(); g_rot_a.release(); g_rot_b.release();
   g_density_full.release();
   g_density_full_valid = false; g_density_full_n = 0; g_density_full_ld = 0;
-  g_packed_density.buf.release();
+  for (auto &slot : g_packed_density) {
+    slot.buf.release();
+  }
   invalidate_packed_density();
   g_fock_cache.buf.release();
   invalidate_fock_cache();
@@ -2414,11 +2461,11 @@ extern "C" bool mopac_cuda_fetch_density(double *host_ptr, int n, int ld) {
 
 extern "C" bool mopac_cuda_fetch_packed_density(double *host_ptr, size_t linear) {
   if (!resident_mode_enabled()) return false;
-  if (!g_packed_density.valid) return false;
   if (!host_ptr) return false;
-  if (g_packed_density.len != linear) return false;
+  PackedDensitySlot *slot = find_packed_slot(host_ptr, linear);
+  if (!slot) return false;
   cudaStream_t s = g_stream ? g_stream : 0;
-  if (cudaMemcpyAsync(host_ptr, g_packed_density.buf.ptr, sizeof(double)*linear, cudaMemcpyDeviceToHost, s) != cudaSuccess) return false;
+  if (cudaMemcpyAsync(host_ptr, slot->buf.ptr, sizeof(double)*linear, cudaMemcpyDeviceToHost, s) != cudaSuccess) return false;
   cudaStreamSynchronize(s);
   return true;
 }
@@ -2445,6 +2492,13 @@ void mopac_cuda_clear_density_cache() {
   g_density_full_valid = false;
   g_density_full_n = 0;
   g_density_full_ld = 0;
+  for (auto &slot : g_packed_density) {
+    slot.buf.release();
+    slot.valid = false;
+    slot.len = 0;
+    slot.stamp = 0;
+    slot.host_ptr = nullptr;
+  }
   invalidate_packed_density();
 }
 
@@ -2479,23 +2533,26 @@ void mopac_cuda_register_packed_density(int linear, double *packed_host) {
     return;
   }
   size_t bytes = (size_t)linear * sizeof(double);
-  g_packed_density.buf.ensure(bytes);
+  PackedDensitySlot *slot = acquire_packed_slot(packed_host);
+  slot->buf.ensure(bytes);
   cudaStream_t s = g_stream ? g_stream : 0;
   int block = 256;
   int grid = ((size_t)linear + block - 1) / block;
-  pack_upper_kernel<<<grid, block, 0, s>>>(g_density_full.ptr, g_density_full_ld, g_density_full_n, g_packed_density.buf.ptr);
-  g_packed_density.len = (size_t)linear;
-  g_packed_density.host_ptr = packed_host;
-  g_packed_density.valid = true;
+  pack_upper_kernel<<<grid, block, 0, s>>>(g_density_full.ptr, g_density_full_ld, g_density_full_n, slot->buf.ptr);
+  cudaStreamSynchronize(s);
+  slot->len = (size_t)linear;
+  slot->host_ptr = packed_host;
+  slot->valid = true;
+  slot->stamp = ++g_packed_density_tick;
 }
 
 bool mopac_cuda_density_copy_cached(double *dest, size_t len, const double *host_ptr) {
   if (!dest || !host_ptr) return false;
   if (!resident_mode_enabled()) return false;
-  if (!g_packed_density.valid) return false;
-  if (g_packed_density.host_ptr != host_ptr) return false;
-  if (g_packed_density.len != len) return false;
-  if (cudaMemcpy(dest, g_packed_density.buf.ptr, len * sizeof(double), cudaMemcpyDeviceToDevice) != cudaSuccess) return false;
+  PackedDensitySlot *slot = find_packed_slot(host_ptr, len);
+  if (!slot) return false;
+  if (slot->host_ptr != host_ptr) return false;
+  if (cudaMemcpy(dest, slot->buf.ptr, len * sizeof(double), cudaMemcpyDeviceToDevice) != cudaSuccess) return false;
   return true;
 }
 
@@ -3100,8 +3157,9 @@ bool mopac_cuda_diis_residual_resident(int n, int linear, int col,
   if (!g_blas) create_handle();
   if (!g_fock_cache.valid || g_fock_cache.len != (size_t)linear) return false;
   if (f_host_ptr && g_fock_cache.host_ptr && g_fock_cache.host_ptr != f_host_ptr) return false;
-  if (!g_packed_density.valid || g_packed_density.len != (size_t)linear) return false;
-  if (p_host_ptr && g_packed_density.host_ptr && g_packed_density.host_ptr != p_host_ptr) return false;
+  PackedDensitySlot *density_slot = find_packed_slot(p_host_ptr, (size_t)linear);
+  if (!density_slot) return false;
+  if (p_host_ptr && density_slot->host_ptr && density_slot->host_ptr != p_host_ptr) return false;
   if (!g_density_full_valid || g_density_full_n != n) return false;
   if (!g_diis_R.ptr || g_diis_linear_cap < linear) return false;
 

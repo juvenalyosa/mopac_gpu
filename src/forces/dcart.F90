@@ -349,14 +349,24 @@
       contains
 #ifdef GPU
         subroutine sync_resident_density()
+          use iso_c_binding, only : c_bool, c_size_t
           use molkst_C, only : mpack
           implicit none
           integer :: linear
           logical(c_bool) :: ok_density
           if (.not. resident_scf) return
+          if (.not. allocated(p)) return
           linear = mpack
           if (linear <= 0) return
           ok_density = mopac_cuda_fetch_packed_density(p, int(linear, kind=c_size_t))
+          if (ok_density .eqv. .true._c_bool) then
+            if (allocated(pa)) then
+              call mopac_cuda_fetch_packed_density(pa, int(linear, kind=c_size_t))
+            end if
+            if (allocated(pb)) then
+              call mopac_cuda_fetch_packed_density(pb, int(linear, kind=c_size_t))
+            end if
+          end if
           ! If fetch fails, proceed without synchronisation; CPU path will still execute.
         end subroutine sync_resident_density
 #else
@@ -619,6 +629,8 @@
           if (.not. mopac_cuda_fetch_packed_density(p, linear_p)) then
             ! Resident density unavailable; proceed with existing host copy.
           end if
+          if (allocated(pa)) call mopac_cuda_fetch_packed_density(pa, linear_p)
+          if (allocated(pb)) call mopac_cuda_fetch_packed_density(pb, linear_p)
         end if
 
         grad(:, :) = 0.0d0
