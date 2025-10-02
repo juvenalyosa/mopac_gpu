@@ -357,6 +357,39 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             end if
             if (need_host_density) then
               call dtrttp('u', norbs, xmat, norbs, pp, i )
+              if (debug_density) then
+                allocate(xmat_ref(norbs,norbs), stat=istat_loc)
+                xmat_ref = 0.d0
+                if (ndubl > 0) then
+                  call dgemm('N','T', norbs, norbs, ndubl, 2.0d0*sign, &
+                       c(1:norbs,1:ndubl), norbs, c(1:norbs,1:ndubl), norbs, 0.0d0, xmat_ref, norbs)
+                end if
+                if (nsingl > ndubl) then
+                  call dgemm('N','T', norbs, norbs, nsingl-ndubl, frac*sign, &
+                       c(1:norbs,ndubl+1:nsingl), norbs, c(1:norbs,ndubl+1:nsingl), norbs, 1.0d0, xmat_ref, norbs)
+                end if
+                do idx = 1, norbs
+                  xmat_ref(idx,idx) = xmat_ref(idx,idx) + cst
+                end do
+                allocate(pp_ref(mpack), stat=istat_loc)
+                info_ref = 0
+                call dtrttp('u', norbs, xmat_ref, norbs, pp_ref, info_ref)
+                max_diff = 0.d0
+                rms_acc = 0.d0
+                do idx = 1, mpack
+                  diff = pp(idx) - pp_ref(idx)
+                  if (abs(diff) > max_diff) max_diff = abs(diff)
+                  rms_acc = rms_acc + diff*diff
+                end do
+                if (mpack > 0) rms_acc = sqrt(rms_acc / mpack)
+                write(*,'(1x,"[GPU density debug] case=4-fallback max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
+                if (max_diff > 1.d-6 .and. mpack >= 5) then
+                  write(*,'(1x,"[GPU density debug] case=4-fallback sample ",5(1x,1pe12.5))') &
+                       pp(1), pp_ref(1), pp(2), pp_ref(2), pp(3)
+                end if
+                call flush(6)
+                deallocate(pp_ref, xmat_ref, stat=istat_loc)
+              end if
             else
               pp(:) = 0.d0
             end if
