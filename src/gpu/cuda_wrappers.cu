@@ -583,6 +583,14 @@ static void register_fock_cache(int linear, const double *host_ptr, const double
       }
       if (linear > 0) rms = std::sqrt(rms / (double)linear);
       std::printf("[GPU resident debug] fock register max=% .5e rms=% .5e\n", max_diff, rms);
+      if (max_diff > 1e-6) {
+        int limit = std::min(linear, 5);
+        std::printf("  sample host vs device:");
+        for (int i = 0; i < limit; ++i) {
+          std::printf(" (% .5e,% .5e)", host_ptr[i], host_copy[i]);
+        }
+        std::printf("\n");
+      }
       std::fflush(stdout);
     }
   }
@@ -2583,6 +2591,14 @@ void mopac_cuda_register_packed_density(int linear, double *packed_host) {
       }
       if (linear > 0) rms = std::sqrt(rms / (double)linear);
       std::printf("[GPU resident debug] density register max=% .5e rms=% .5e\n", max_diff, rms);
+      if (max_diff > 1e-6) {
+        int limit = std::min(linear, 5);
+        std::printf("  sample host vs device:");
+        for (int i = 0; i < limit; ++i) {
+          std::printf(" (% .5e,% .5e)", packed_host[i], host_copy[i]);
+        }
+        std::printf("\n");
+      }
       std::fflush(stdout);
     }
   }
