@@ -1396,8 +1396,8 @@
         integer, intent(in) :: linear
         double precision, intent(inout) :: target(linear)
         logical, intent(inout) :: need_flag
-        character(len=*), intent(in), optional :: label
-        integer, intent(in), optional :: iter_count
+        character(len=*), intent(in) :: label
+        integer, intent(in) :: iter_count
         logical(c_bool) :: ok
         double precision, allocatable, target :: scratch(:)
         double precision, allocatable :: reference(:)
@@ -1412,10 +1412,8 @@
           call initialize_resident_debug(debug_resident)
           debug_init = .true.
         end if
-        label_local = 'density'
-        if (present(label)) label_local = label
-        iter_local = -1
-        if (present(iter_count)) iter_local = iter_count
+        label_local = label
+        iter_local = iter_count
         if (debug_resident) then
           allocate(reference(linear))
           reference(:) = target(:)
@@ -1461,8 +1459,8 @@
         integer, intent(in) :: linear
         double precision, intent(inout) :: target(linear)
         logical, intent(inout) :: need_flag
-        character(len=*), intent(in), optional :: label
-        integer, intent(in), optional :: iter_count
+        character(len=*), intent(in) :: label
+        integer, intent(in) :: iter_count
         logical(c_bool) :: ok
         double precision, allocatable, target :: scratch(:)
         double precision, allocatable :: reference(:)
@@ -1477,10 +1475,8 @@
           call initialize_resident_debug(debug_resident)
           debug_init = .true.
         end if
-        label_local = 'fock'
-        if (present(label)) label_local = label
-        iter_local = -1
-        if (present(iter_count)) iter_local = iter_count
+        label_local = label
+        iter_local = iter_count
         if (debug_resident) then
           allocate(reference(linear))
           reference(:) = target(:)
