@@ -63,6 +63,10 @@ if(GPU)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_fock_interfaces.F90)
     # Fortran interfaces for HMTR optimizer
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_hmtr_interfaces.F90)
+    # GPU SCF scaffolding (interfaces + driver stub)
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_scf_types.F90)
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_scf_interfaces.F90)
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/scf_driver.cu)
     # CUDA Fock kernels (scaffold)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/fock_kernels.cu)
     # CUDA SCF gradient kernels (experimental scaffold)
@@ -85,6 +89,7 @@ if(GPU)
     # and compile the CUDA .cu wrapper via CUDA language
     set_source_files_properties(
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/cuda_wrappers.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/gpu/scf_driver.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/fock_kernels.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/grad_kernels.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hmtr_optimizer.cu
