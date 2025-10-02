@@ -3,11 +3,11 @@
                      SUMMARY OF  PM7 CALCULATION
 
                                                        MOPAC v23.1.2 MacOS
-                                                       Wed Oct  1 23:34:01 2025
+                                                       Thu Oct  2 10:09:28 2025
 
            Empirical Formula: H2 O  =     3 atoms
 
- PM7 XYZ 1SCF PULAY BONDS
+ PM7 XYZ 1SCF PULAY BONDS DCART
  Water single point (force GPU via env MOPAC_FORCEGPU=1)
 
 
@@ -31,12 +31,12 @@
             H     2    O     1     0.58626
             O     1    H     2     0.00000
           SCF CALCULATIONS        =          1
-          WALL-CLOCK TIME         =      0.000 SECONDS
-          COMPUTATION TIME        =      0.004 SECONDS
+          WALL-CLOCK TIME         =      0.008 SECONDS
+          COMPUTATION TIME        =      0.005 SECONDS
 
 
           FINAL GEOMETRY OBTAINED
- PM7 XYZ 1SCF PULAY BONDS
+ PM7 XYZ 1SCF PULAY BONDS DCART
  Water single point (force GPU via env MOPAC_FORCEGPU=1)
 
   O     0.00000000 +1   0.00000000 +1   0.00000000 +1

@@ -10,16 +10,17 @@
                               PM7 CALCULATION RESULTS
 
  *******************************************************************************
- *  CALCULATION DONE: (MAX THREADS = 2)              Wed Oct  1 23:34:01 2025  *
+ *  CALCULATION DONE: (MAX THREADS = 2)              Thu Oct  2 10:09:28 2025  *
  *  PM7        - The PM7 Hamiltonian to be used
  *  PULAY      - PULAY'S METHOD TO BE USED IN SCF
  *  XYZ        - CARTESIAN COORDINATE SYSTEM TO BE USED
  *  1SCF       - DO 1 SCF AND THEN STOP 
  *  T=         - A TIME OF 172800.0 SECONDS REQUESTED
  *  DUMP=N     - RESTART FILE WRITTEN EVERY 7200.0 SECONDS REQUESTED
+ *  DCART      - PRINT DETAILS OF SUBROUTINE DCART
  *  BONDS      - FINAL BOND-ORDER MATRIX TO BE PRINTED
  *******************************************************************************
-PM7 XYZ 1SCF PULAY BONDS
+PM7 XYZ 1SCF PULAY BONDS DCART
  Water single point (force GPU via env MOPAC_FORCEGPU=1)
 
    ATOM   CHEMICAL          X               Y               Z
@@ -55,7 +56,7 @@ PM7 XYZ 1SCF PULAY BONDS
 
 
  -------------------------------------------------------------------------------
- PM7 XYZ 1SCF PULAY BONDS
+ PM7 XYZ 1SCF PULAY BONDS DCART
  Water single point (force GPU via env MOPAC_FORCEGPU=1)
 
 
@@ -66,7 +67,7 @@ PM7 XYZ 1SCF PULAY BONDS
 
                               PM7 CALCULATION
                                                        MOPAC v23.1.2 MacOS
-                                                       Wed Oct  1 23:34:01 2025
+                                                       Thu Oct  2 10:09:28 2025
 
 
 
@@ -92,7 +93,7 @@ PM7 XYZ 1SCF PULAY BONDS
 
           SCF CALCULATIONS        =          1
 
-          WALL-CLOCK TIME         =      0.000 SECONDS
+          WALL-CLOCK TIME         =      0.004 SECONDS
           COMPUTATION TIME        =      0.004 SECONDS
 
 

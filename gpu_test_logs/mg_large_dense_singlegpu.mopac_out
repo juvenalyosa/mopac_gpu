@@ -10,7 +10,7 @@
                               PM6-D3H4X CALCULATION RESULTS
 
  *******************************************************************************
- *  CALCULATION DONE: (MAX THREADS = 2)              Wed Oct  1 23:34:07 2025  *
+ *  CALCULATION DONE: (MAX THREADS = 2)              Thu Oct  2 10:09:35 2025  *
  *  GEO-OK     - OVERRIDE INTERATOMIC DISTANCE AND OTHER SAFETY CHECKS
  *  PM6-D3H4   - CORRECT DISPERSION AND HYDROGEN BOND TERMS USING THE D3H4 METHOD
  *  SINGLET    - SPIN STATE DEFINED AS A SINGLET
@@ -568,7 +568,7 @@
 
                               PM6-D3H4X CALCULATION
                                                        MOPAC v23.1.2 MacOS
-                                                       Wed Oct  1 23:36:22 2025
+                                                       Thu Oct  2 10:13:15 2025
 
 
 
@@ -594,8 +594,8 @@
 
           SCF CALCULATIONS        =          1
 
-          WALL-CLOCK TIME         =          2 MINUTES AND 15.500 SECONDS
-          COMPUTATION TIME        =          3 MINUTES AND 41.572 SECONDS
+          WALL-CLOCK TIME         =          4 MINUTES AND 0.531 SECONDS
+          COMPUTATION TIME        =          5 MINUTES AND 48.110 SECONDS
 
 
 
@@ -2834,6 +2834,6 @@
 
 
 
- TOTAL JOB TIME:           135.52 SECONDS
+ TOTAL JOB TIME:           240.57 SECONDS
 
  == MOPAC DONE ==
