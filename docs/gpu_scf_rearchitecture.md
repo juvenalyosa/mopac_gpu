@@ -99,5 +99,6 @@
   assert the bridge works before the full GPU solver is ready.
 - Developers can run `ctest -R gpu-scf-stub-smoke` (which sets `MOPAC_GPU_SCF_STUB_LOG=1`) to verify the
   binding and error plumbing until the real driver is implemented.
-- In a full MOPAC run, export `MOPAC_GPU_SCF_EXPERIMENTAL=on` and launch `examples/test_dense_gpu_stub.mop`
-  (which loads `examples/test_dense.pdb` via `GEO_DAT=`) to see the stub invoked from the Fortran SCF driver.
+- In a full MOPAC run, export `MOPAC_GPU_SCF_EXPERIMENTAL=on` and launch `examples/gpu_scf_stub_water.mop`
+  (three-atom water geometry) to see the stub invoked from the Fortran SCF driver without producing
+  unwieldy protein dumps.
