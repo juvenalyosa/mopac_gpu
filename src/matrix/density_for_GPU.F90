@@ -280,7 +280,11 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
 
           deallocate (xmat,stat=i)
 #ifdef GPU
-          call mopac_cuda_clear_density_cache()
+          if (use_resident) then
+            call mopac_cuda_register_packed_density(mpack, pp)
+          else
+            call mopac_cuda_clear_density_cache()
+          end if
 #endif
         case(4)   ! Option to use dsyrk from CUBLAS
 #ifdef GPU
