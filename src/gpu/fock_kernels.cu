@@ -311,56 +311,45 @@ __device__ inline void fock_pair_heavy_with_light(int heavy_start, int heavy_end
   if (!w_block) return;
   int span = heavy_end - heavy_start + 1;
   if (span <= 0) return;
+  constexpr int MAX_SPAN = 4;
+  double w_table[MAX_SPAN][MAX_SPAN] = {0.0};
   double sumdia = 0.0;
   double sumoff = 0.0;
   int ll = packed_index_zero(light_atom, light_atom);
   double ptot_ll = ptot[ll];
   int wpos = 0;
   int w_bound = span * (span + 1) / 2;
-  for (int offset = 0; offset < span; ++offset) {
-    int iorb = heavy_start + offset;
-    int j1 = ifact_val(iorb) + light_atom - 1; // 1-based index
-    if (offset > 0) {
-      for (int j = 1; j <= offset; ++j) {
-        double wij = (wpos < w_bound) ? w_block[wpos] : 0.0;
-        ++wpos;
-        int idx = (j1 + j) - 1;
-        if (idx >= 0) {
-          atomicAdd_double(&f[idx], ptot_ll * wij);
-          sumoff += ptot[idx] * wij;
-        }
+
+  for (int i = 0; i < span; ++i) {
+    int orb_i = heavy_start + i;
+    for (int j = 0; j <= i; ++j) {
+      int orb_j = heavy_start + j;
+      double wij = (wpos < w_bound) ? w_block[wpos] : 0.0;
+      ++wpos;
+      w_table[i][j] = wij;
+      w_table[j][i] = wij;
+      int idx = packed_index_zero(orb_i, orb_j);
+      atomicAdd_double(&f[idx], ptot_ll * wij);
+      if (i == j) {
+        sumdia += ptot[idx] * wij;
+      } else {
+        sumoff += ptot[idx] * wij;
       }
-    }
-    j1 += offset;
-    j1 += 1;
-    double wdiag = (wpos < w_bound) ? w_block[wpos] : 0.0;
-    ++wpos;
-    int diag_idx = j1 - 1;
-    if (diag_idx >= 0) {
-      atomicAdd_double(&f[diag_idx], ptot_ll * wdiag);
-      sumdia += ptot[diag_idx] * wdiag;
     }
   }
+
   atomicAdd_double(&f[ll], sumoff * 2.0 + sumdia);
 
-  int spanHL = span;
-  int k = 0;
-  for (int iorb = heavy_start; iorb <= heavy_end; ++iorb) {
-    int idx_il = packed_index_zero(iorb, light_atom);
+  for (int i = 0; i < span; ++i) {
+    int orb_i = heavy_start + i;
+    int idx_il = packed_index_zero(orb_i, light_atom);
     double acc = 0.0;
-    for (int j = 1; j <= spanHL; ++j) {
-      int orb = heavy_start + j - 1;
-      int idx_pl = packed_index_zero(orb, light_atom);
-      int jidx = j + k;
-      int lookup = jidx - 1;
-      if (lookup < 0 || lookup >= 256) continue;
-      int w_idx = c_jindex[lookup] - 1;
-      if (w_idx >= 0 && w_idx < w_bound) {
-        double wij = w_block[w_idx];
-        acc += p[idx_pl] * wij;
-      }
+    for (int j = 0; j < span; ++j) {
+      int orb_j = heavy_start + j;
+      int idx_pl = packed_index_zero(orb_j, light_atom);
+      double wij = w_table[i][j];
+      acc += p[idx_pl] * wij;
     }
-    k += spanHL;
     atomicAdd_double(&f[idx_il], -acc);
   }
 }
