@@ -268,7 +268,8 @@
                     f(j+j1) = f(j+j1) + ptot(ll)*w(j+kk+k)
                     sumoff = sumoff + ptot(j+j1)*w(j+kk+k)
                     if (dump_fock_map) then
-                      write(dump_unit,'("HL_C",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') ii, jj, ia+i, ia+j-1, ja, ja, j+kk+k
+                      write(dump_unit,'("HL_C",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') &
+                        ii, jj, ia+i, ia+j-1, ja, ja, j+kk+k
                     end if
                   end do
                   k = i + k
@@ -279,7 +280,8 @@
                 f(j1) = f(j1) + ptot(ll)*w(kk+k)
                 sumdia = sumdia + ptot(j1)*w(kk+k)
                 if (dump_fock_map) then
-                  write(dump_unit,'("HL_C",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') ii, jj, ia+i, ia+i, ja, ja, kk+k
+                  write(dump_unit,'("HL_C",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') &
+                    ii, jj, ia+i, ia+i, ja, ja, kk+k
                 end if
               end do
               f(ll) = f(ll) + sumoff*2.D0 + sumdia
@@ -296,7 +298,8 @@
                 do j = 1, ib - ia + 1
                   sum = sum + p(ifact(j-1+ia)+ja)*w(kk+jindex(j+k))
                   if (dump_fock_map) then
-                    write(dump_unit,'("HL_X",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') ii, jj, i, ia+j-1, ja, ia+j-1, kk+jindex(j+k)
+                    write(dump_unit,'("HL_X",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') &
+                      ii, jj, i, ia+j-1, ja, ia+j-1, kk+jindex(j+k)
                   end if
                 end do
                 k = ib - ia + 1 + k
@@ -321,7 +324,8 @@
                     f(j+j1) = f(j+j1) + ptot(ll)*w(j+kk+k)
                     sumoff = sumoff + ptot(j+j1)*w(j+kk+k)
                     if (dump_fock_map) then
-                      write(dump_unit,'("HLR_C",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') ii, jj, ja+i, ja+j-1, ia, ia, j+kk+k
+                      write(dump_unit,'("HLR_C",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') &
+                        ii, jj, ja+i, ja+j-1, ia, ia, j+kk+k
                     end if
                   end do
                   k = i + k
@@ -332,7 +336,8 @@
                 f(j1) = f(j1) + ptot(ll)*w(kk+k)
                 sumdia = sumdia + ptot(j1)*w(kk+k)
                 if (dump_fock_map) then
-                  write(dump_unit,'("HLR_C",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') ii, jj, ja+i, ja+i, ia, ia, kk+k
+                  write(dump_unit,'("HLR_C",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') &
+                    ii, jj, ja+i, ja+i, ia, ia, kk+k
                 end if
               end do
               f(ll) = f(ll) + sumoff*2.D0 + sumdia
@@ -349,7 +354,8 @@
                 do l = 1, 4
                   sum = sum + p(l-1+k)*w(kk+jindex(l+j))
                   if (dump_fock_map) then
-                    write(dump_unit,'("HLR_X",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') ii, jj, ia, ja+l-1, ia, ja+l-1, kk+jindex(l+j)
+                    write(dump_unit,'("HLR_X",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') &
+                      ii, jj, ia, ja+l-1, ia, ja+l-1, kk+jindex(l+j)
                   end if
                 end do
                 j = 4 + j
@@ -367,7 +373,8 @@
               f(j1) = f(j1) + ptot(i1)*w(kk+1)
               f(ij) = f(ij) - p(ij)*w(kk+1)
               if (dump_fock_map) then
-                write(dump_unit,'("LL",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') ii, jj, ia, ja, ia, ja, kk+1
+                write(dump_unit,'("LL",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') &
+                  ii, jj, ia, ja, ia, ja, kk+1
               end if
               kk = kk + 1
             end if
