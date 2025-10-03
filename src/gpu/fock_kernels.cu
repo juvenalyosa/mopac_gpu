@@ -60,6 +60,8 @@ enum PairTypeCodes {
   PAIR_GENERAL = 4,
   PAIR_PERIODIC = 5
 };
+__device__ __constant__ int c_jindex[256];
+static int jindex_ready = 0;
 static int verbose = 0; static int verbose_inited = 0;
 static int csv_enabled = 0; static int csv_inited = 0;
 static int prof_collect = 0; static int prof_inited = 0;
@@ -96,6 +98,10 @@ __host__ __device__ inline int span_count(int first, int last) {
 
 __host__ __device__ inline int pair_count(int span) {
   return (span > 0) ? (span * (span + 1)) / 2 : 0;
+}
+
+__host__ __device__ inline int ifact_val(int n) {
+  return (n * (n - 1)) / 2;
 }
 
 static inline void ensure_verbose() {
@@ -158,6 +164,33 @@ static inline bool ensure_buf_double(double **ptr, size_t *cap_elems, size_t nee
     }
   }
   return true;
+}
+
+static inline int ifact_host(int n) {
+  return (n * (n - 1)) / 2;
+}
+
+static void ensure_jindex_device() {
+  if (jindex_ready) return;
+  int host_idx[256];
+  int m = 0;
+  for (int i = 1; i <= 4; ++i) {
+    for (int j = 1; j <= 4; ++j) {
+      int ij = std::min(i, j);
+      int ji = i + j - ij;
+      for (int k = 1; k <= 4; ++k) {
+        int ik = std::min(i, k);
+        for (int l = 1; l <= 4; ++l) {
+          int kl = std::min(k, l);
+          int lk = k + l - kl;
+          ++m;
+          host_idx[m - 1] = (ifact_host(ji) + ij) * 10 + ifact_host(lk) + kl - 10;
+        }
+      }
+    }
+  }
+  cudaMemcpyToSymbol(c_jindex, host_idx, sizeof(host_idx));
+  jindex_ready = 1;
 }
 
 static inline bool ensure_pair_buffers(size_t need_pairs) {
@@ -258,6 +291,80 @@ __device__ void fock_pair_update(int ia, int ib, int ja, int jb,
   }
 }
 
+__device__ inline void fock_pair_light_light(int ia, int ja,
+                                             const double *ptot, const double *p,
+                                             const double *w, double *f) {
+  if (!w) return;
+  double val = w[0];
+  int ii = packed_index_zero(ia, ia);
+  int jj = packed_index_zero(ja, ja);
+  int ij = packed_index_zero((ia >= ja) ? ia : ja, (ia >= ja) ? ja : ia);
+  atomicAdd_double(&f[ii], val * ptot[jj]);
+  atomicAdd_double(&f[jj], val * ptot[ii]);
+  atomicAdd_double(&f[ij], -val * p[ij]);
+}
+
+__device__ inline void fock_pair_heavy_with_light(int heavy_start, int heavy_end, int light_atom,
+                                                  const double *ptot, const double *p,
+                                                  const double *w_block,
+                                                  double *f) {
+  if (!w_block) return;
+  int span = heavy_end - heavy_start + 1;
+  if (span <= 0) return;
+  double sumdia = 0.0;
+  double sumoff = 0.0;
+  int ll = packed_index_zero(light_atom, light_atom);
+  double ptot_ll = ptot[ll];
+  int wpos = 0;
+  int w_bound = span * (span + 1) / 2;
+  for (int offset = 0; offset < span; ++offset) {
+    int iorb = heavy_start + offset;
+    int j1 = ifact_val(iorb) + light_atom - 1; // 1-based index
+    if (offset > 0) {
+      for (int j = 1; j <= offset; ++j) {
+        double wij = (wpos < w_bound) ? w_block[wpos] : 0.0;
+        ++wpos;
+        int idx = (j1 + j) - 1;
+        if (idx >= 0) {
+          atomicAdd_double(&f[idx], ptot_ll * wij);
+          sumoff += ptot[idx] * wij;
+        }
+      }
+    }
+    j1 += offset;
+    j1 += 1;
+    double wdiag = (wpos < w_bound) ? w_block[wpos] : 0.0;
+    ++wpos;
+    int diag_idx = j1 - 1;
+    if (diag_idx >= 0) {
+      atomicAdd_double(&f[diag_idx], ptot_ll * wdiag);
+      sumdia += ptot[diag_idx] * wdiag;
+    }
+  }
+  atomicAdd_double(&f[ll], sumoff * 2.0 + sumdia);
+
+  int spanHL = span;
+  int k = 0;
+  for (int iorb = heavy_start; iorb <= heavy_end; ++iorb) {
+    int idx_il = packed_index_zero(iorb, light_atom);
+    double acc = 0.0;
+    for (int j = 1; j <= spanHL; ++j) {
+      int orb = heavy_start + j - 1;
+      int idx_pl = packed_index_zero(orb, light_atom);
+      int jidx = j + k;
+      int lookup = jidx - 1;
+      if (lookup < 0 || lookup >= 256) continue;
+      int w_idx = c_jindex[lookup] - 1;
+      if (w_idx >= 0 && w_idx < w_bound) {
+        double wij = w_block[w_idx];
+        acc += p[idx_pl] * wij;
+      }
+    }
+    k += spanHL;
+    atomicAdd_double(&f[idx_il], -acc);
+  }
+}
+
 __device__ void fock_pair_periodic(int ia, int ib, int ja, int jb,
                                    const double *ptot, const double *p,
                                    const double *wj_block, const double *wk_block,
@@ -336,10 +443,22 @@ __global__ void fock_pairs_kernel(int npairs,
            tid, ii, jj, type, ia, ib, ja, jb);
   }
 
-  if (type == PAIR_PERIODIC) {
-    fock_pair_periodic(ia, ib, ja, jb, ptot, p, wj_block, wk_block, f);
-  } else {
-    fock_pair_update(ia, ib, ja, jb, ptot, p, w_block, f);
+  switch (type) {
+    case PAIR_LIGHT_LIGHT:
+      fock_pair_light_light(ia, ja, ptot, p, w_block, f);
+      break;
+    case PAIR_HEAVY_LIGHT:
+      fock_pair_heavy_with_light(ia, ib, ja, ptot, p, w_block, f);
+      break;
+    case PAIR_LIGHT_HEAVY:
+      fock_pair_heavy_with_light(ja, jb, ia, ptot, p, w_block, f);
+      break;
+    case PAIR_PERIODIC:
+      fock_pair_periodic(ia, ib, ja, jb, ptot, p, wj_block, wk_block, f);
+      break;
+    default:
+      fock_pair_update(ia, ib, ja, jb, ptot, p, w_block, f);
+      break;
   }
 }
 
@@ -558,6 +677,7 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
                           int periodic_flag,
                           double *fout) {
   ensure_verbose(); ensure_thresholds(); ensure_csv(); ensure_profile_collect();
+  ensure_jindex_device();
 
   const bool periodic = (periodic_flag != 0);
   size_t atoms_e = static_cast<size_t>(numat);
@@ -815,6 +935,7 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
                       const double *w, int nati,
                       double *f) {
   (void)norbs; (void)mpack;
+  ensure_jindex_device();
   int ia = nfirst[nati - 1];
   int ib = nlast[nati - 1];
   if ((ib - ia) < 0) return false;
