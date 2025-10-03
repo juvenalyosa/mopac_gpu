@@ -21,7 +21,7 @@
 #ifdef GPU
       use mod_vars_cuda, only: lgpu
       use gpu_fock_interfaces
-      use iso_c_binding, only: c_bool
+      use iso_c_binding, only: c_bool, c_int
 #endif
       use cosmo_C, only : useps
 
@@ -66,6 +66,7 @@
       character(len=8) :: line8
       logical :: want_gpu
       logical(c_bool) :: ok
+      integer(c_int) :: periodic_flag
 #endif
 
       save ifact, i1fact, ione, lid, icalcn, jindex, ptot2
@@ -101,7 +102,9 @@
           if (trim(adjustl(line8)) /= '') want_gpu = .true.
         end if
         if (want_gpu) then
-          ok = mopac_cuda_fock2_scf(norbs, mpack, numat, nfirst, nlast, ptot, p, w, f)
+          periodic_flag = 0
+          if (.not. lid) periodic_flag = 1
+          ok = mopac_cuda_fock2_scf(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic_flag, f)
           if (ok) then
             return
           end if

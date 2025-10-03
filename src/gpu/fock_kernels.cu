@@ -43,10 +43,23 @@ __device__ inline double atomicAdd_double(double* address, double val) {
 
 // Persistent buffer helpers and verbose/tuning controls
 static int    *s_d_nf = nullptr, *s_d_nl = nullptr;
-static double *s_d_ptot = nullptr, *s_d_p = nullptr, *s_d_w = nullptr, *s_d_f = nullptr;
-static int    *s_d_pair_i = nullptr, *s_d_pair_j = nullptr, *s_d_pair_off = nullptr;
+static double *s_d_ptot = nullptr, *s_d_p = nullptr, *s_d_w = nullptr, *s_d_wj = nullptr,
+              *s_d_wk = nullptr, *s_d_f = nullptr;
+static int    *s_d_pair_i = nullptr, *s_d_pair_j = nullptr, *s_d_pair_off = nullptr,
+              *s_d_pair_type = nullptr, *s_d_pair_wj_off = nullptr,
+              *s_d_pair_wk_off = nullptr;
 static size_t cap_nf = 0, cap_nl = 0;
-static size_t cap_ptot = 0, cap_p = 0, cap_f = 0, cap_w = 0, cap_pairs = 0;
+static size_t cap_ptot = 0, cap_p = 0, cap_f = 0, cap_w = 0, cap_wj = 0, cap_wk = 0;
+static size_t cap_pairs = 0;
+
+enum PairTypeCodes {
+  PAIR_LIGHT_LIGHT = 0,
+  PAIR_HEAVY_LIGHT = 1,
+  PAIR_LIGHT_HEAVY = 2,
+  PAIR_HEAVY_HEAVY = 3,
+  PAIR_GENERAL = 4,
+  PAIR_PERIODIC = 5
+};
 static int verbose = 0; static int verbose_inited = 0;
 static int csv_enabled = 0; static int csv_inited = 0;
 static int prof_collect = 0; static int prof_inited = 0;
@@ -152,12 +165,19 @@ static inline bool ensure_pair_buffers(size_t need_pairs) {
     if (s_d_pair_i) cudaFree(s_d_pair_i);
     if (s_d_pair_j) cudaFree(s_d_pair_j);
     if (s_d_pair_off) cudaFree(s_d_pair_off);
+    if (s_d_pair_type) cudaFree(s_d_pair_type);
+    if (s_d_pair_wj_off) cudaFree(s_d_pair_wj_off);
+    if (s_d_pair_wk_off) cudaFree(s_d_pair_wk_off);
     s_d_pair_i = s_d_pair_j = s_d_pair_off = nullptr;
+    s_d_pair_type = s_d_pair_wj_off = s_d_pair_wk_off = nullptr;
     cap_pairs = 0;
     if (need_pairs > 0) {
       if (cudaMalloc((void**)&s_d_pair_i, sizeof(int) * need_pairs) != cudaSuccess) return false;
       if (cudaMalloc((void**)&s_d_pair_j, sizeof(int) * need_pairs) != cudaSuccess) return false;
       if (cudaMalloc((void**)&s_d_pair_off, sizeof(int) * need_pairs) != cudaSuccess) return false;
+      if (cudaMalloc((void**)&s_d_pair_type, sizeof(int) * need_pairs) != cudaSuccess) return false;
+      if (cudaMalloc((void**)&s_d_pair_wj_off, sizeof(int) * need_pairs) != cudaSuccess) return false;
+      if (cudaMalloc((void**)&s_d_pair_wk_off, sizeof(int) * need_pairs) != cudaSuccess) return false;
       cap_pairs = need_pairs;
     }
   }
@@ -238,15 +258,62 @@ __device__ void fock_pair_update(int ia, int ib, int ja, int jb,
   }
 }
 
+__device__ void fock_pair_periodic(int ia, int ib, int ja, int jb,
+                                   const double *ptot, const double *p,
+                                   const double *wj_block, const double *wk_block,
+                                   double *f) {
+  if (!wj_block || !wk_block) return;
+  int span_i = span_count(ia, ib);
+  int span_j = span_count(ja, jb);
+  if (span_i <= 0 || span_j <= 0) return;
+  size_t idx = 0;
+  for (int i = ia; i <= ib; ++i) {
+    for (int j = ia; j <= i; ++j) {
+      double aa = (i == j) ? 1.0 : 2.0;
+      int ij = packed_index_zero(i, j);
+      for (int k = ja; k <= jb; ++k) {
+        for (int l = ja; l <= k; ++l) {
+          double bb = (k == l) ? 1.0 : 2.0;
+          int kl = packed_index_zero(k, l);
+          double aj = wj_block[idx];
+          double ak = wk_block[idx];
+          idx++;
+          if (kl > ij) continue;
+          int ik = (i >= k) ? packed_index_zero(i, k) : -1;
+          int il = (i >= l) ? packed_index_zero(i, l) : -1;
+          int jk = (j >= k) ? packed_index_zero(j, k) : -1;
+          int jl = (j >= l) ? packed_index_zero(j, l) : -1;
+          if (i == k && (aa + bb) < 2.1) {
+            atomicAdd_double(&f[ij], aj * ptot[kl]);
+          } else {
+            atomicAdd_double(&f[ij], bb * aj * ptot[kl]);
+            atomicAdd_double(&f[kl], aa * aj * ptot[ij]);
+            double exch = ak * aa * bb * 0.25;
+            if (jl >= 0 && ik >= 0) atomicAdd_double(&f[ik], -exch * p[jl]);
+            if (jk >= 0 && il >= 0) atomicAdd_double(&f[il], -exch * p[jk]);
+            if (jk >= 0 && il >= 0) atomicAdd_double(&f[jk], -exch * p[il]);
+            if (jl >= 0 && ik >= 0) atomicAdd_double(&f[jl], -exch * p[ik]);
+          }
+        }
+      }
+    }
+  }
+}
+
 __global__ void fock_pairs_kernel(int npairs,
                                   const int *pair_i,
                                   const int *pair_j,
-                                  const int *pair_off,
+                                  const int *pair_type,
+                                  const int *pair_w_off,
+                                  const int *pair_wj_off,
+                                  const int *pair_wk_off,
                                   const int *nfirst,
                                   const int *nlast,
                                   const double *ptot,
                                   const double *p,
                                   const double *w,
+                                  const double *wj,
+                                  const double *wk,
                                   double *f,
                                   int debug_flag) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -258,12 +325,22 @@ __global__ void fock_pairs_kernel(int npairs,
   int ja = nfirst[jj - 1];
   int jb = nlast[jj - 1];
   if ((ib - ia) < 0 || (jb - ja) < 0) return;
-  const double *w_block = w + pair_off[tid];
+
+  int type = pair_type[tid];
+  const double *w_block = (w && pair_w_off) ? (w + pair_w_off[tid]) : nullptr;
+  const double *wj_block = (wj && pair_wj_off) ? (wj + pair_wj_off[tid]) : nullptr;
+  const double *wk_block = (wk && pair_wk_off) ? (wk + pair_wk_off[tid]) : nullptr;
+
   if (debug_flag && tid < 5) {
-    printf("[GPU resident debug] kernel tid=%d ii=%d jj=%d ia=%d ib=%d ja=%d jb=%d w0=% .5e\n",
-           tid, ii, jj, ia, ib, ja, jb, w_block ? w_block[0] : 0.0);
+    printf("[GPU resident debug] kernel tid=%d ii=%d jj=%d type=%d ia=%d ib=%d ja=%d jb=%d\n",
+           tid, ii, jj, type, ia, ib, ja, jb);
   }
-  fock_pair_update(ia, ib, ja, jb, ptot, p, w_block, f);
+
+  if (type == PAIR_PERIODIC) {
+    fock_pair_periodic(ia, ib, ja, jb, ptot, p, wj_block, wk_block, f);
+  } else {
+    fock_pair_update(ia, ib, ja, jb, ptot, p, w_block, f);
+  }
 }
 
 // ================= Device-resident gradient buffers and ops =================
@@ -371,17 +448,24 @@ bool mopac_cuda_fock2_keep(int norbs, int mpack, int numat,
     }
   }
   if (!pair_i.empty()) {
+    std::vector<int> pair_type(pair_i.size(), PAIR_GENERAL);
+    std::vector<int> zeros(pair_i.size(), 0);
     cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int)*pair_i.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int)*pair_j.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(s_d_pair_off, pair_off.data(), sizeof(int)*pair_off.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_type, pair_type.data(), sizeof(int)*pair_type.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_wj_off, zeros.data(), sizeof(int)*zeros.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_wk_off, zeros.data(), sizeof(int)*zeros.size(), cudaMemcpyHostToDevice);
     int threads = 64;
     int blocks = static_cast<int>((pair_i.size() + threads - 1) / threads);
     int debug_flag = resident_debug_enabled_local() ? 1 : 0;
     fock_pairs_kernel<<<blocks, threads>>>(static_cast<int>(pair_i.size()),
-                                           s_d_pair_i, s_d_pair_j, s_d_pair_off,
+                                           s_d_pair_i, s_d_pair_j, s_d_pair_type,
+                                           s_d_pair_off, s_d_pair_wj_off, s_d_pair_wk_off,
                                            s_d_nf, s_d_nl,
                                            s_d_ptot, s_d_p,
-                                           s_d_w, s_d_f, debug_flag);
+                                           s_d_w, nullptr, nullptr,
+                                           s_d_f, debug_flag);
     cudaError_t e = cudaDeviceSynchronize(); if (e != cudaSuccess) return false;
   }
 
@@ -446,10 +530,15 @@ void mopac_cuda_grad_buffers_release() {
   if (s_d_ptot) cudaFree(s_d_ptot); s_d_ptot = nullptr; cap_ptot = 0;
   if (s_d_p) cudaFree(s_d_p); s_d_p = nullptr; cap_p = 0;
   if (s_d_w) cudaFree(s_d_w); s_d_w = nullptr; cap_w = 0;
+  if (s_d_wj) cudaFree(s_d_wj); s_d_wj = nullptr; cap_wj = 0;
+  if (s_d_wk) cudaFree(s_d_wk); s_d_wk = nullptr; cap_wk = 0;
   if (s_d_f) cudaFree(s_d_f); s_d_f = nullptr; cap_f = 0;
   if (s_d_pair_i) cudaFree(s_d_pair_i); s_d_pair_i = nullptr;
   if (s_d_pair_j) cudaFree(s_d_pair_j); s_d_pair_j = nullptr;
   if (s_d_pair_off) cudaFree(s_d_pair_off); s_d_pair_off = nullptr;
+  if (s_d_pair_type) cudaFree(s_d_pair_type); s_d_pair_type = nullptr;
+  if (s_d_pair_wj_off) cudaFree(s_d_pair_wj_off); s_d_pair_wj_off = nullptr;
+  if (s_d_pair_wk_off) cudaFree(s_d_pair_wk_off); s_d_pair_wk_off = nullptr;
   cap_pairs = 0;
   g_lastF_dev = nullptr; g_lastF_bytes = 0; g_lastF_n = 0;
   if (g_blas_local) { cublasDestroy(g_blas_local); g_blas_local = nullptr; }
@@ -465,19 +554,34 @@ extern "C" {
 bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
                           const int *nfirst, const int *nlast,
                           const double *ptot, const double *p,
-                          const double *w, double *fout) {
+                          const double *w, const double *wj, const double *wk,
+                          int periodic_flag,
+                          double *fout) {
   ensure_verbose(); ensure_thresholds(); ensure_csv(); ensure_profile_collect();
-  size_t atoms_e = (size_t)numat;
-  size_t mpack_e = (size_t)mpack;
+
+  const bool periodic = (periodic_flag != 0);
+  size_t atoms_e = static_cast<size_t>(numat);
+  size_t mpack_e = static_cast<size_t>(mpack);
 
   std::vector<int> pair_i;
   std::vector<int> pair_j;
-  std::vector<int> pair_off;
+  std::vector<int> pair_type;
+  std::vector<int> pair_w_off;
+  std::vector<int> pair_wj_off;
+  std::vector<int> pair_wk_off;
   pair_i.reserve(std::max(1, numat));
+  pair_j.reserve(std::max(1, numat));
+  pair_type.reserve(std::max(1, numat));
+  pair_w_off.reserve(std::max(1, numat));
+  pair_wj_off.reserve(std::max(1, numat));
+  pair_wk_off.reserve(std::max(1, numat));
 
   size_t w_len = 0;
+  size_t wj_len = 0;
+  size_t wk_len = 0;
   const size_t max_index = static_cast<size_t>(std::numeric_limits<int>::max());
   long long ll_pairs = 0, lh_pairs = 0, hh_pairs = 0;
+
   for (int ii = 1; ii <= numat; ++ii) {
     int ia = nfirst[ii - 1];
     int ib = nlast[ii - 1];
@@ -490,14 +594,60 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
       int span_j = span_count(ja, jb);
       if (span_j <= 0) continue;
       int pairs_j = pair_count(span_j);
-      int chunk = pairs_i * pairs_j;
-      if (chunk <= 0) continue;
+      if (pairs_i <= 0 || pairs_j <= 0) continue;
+
+      int type = PAIR_GENERAL;
+      int chunk_w = 0;
+      int chunk_wj = 0;
+      int chunk_wk = 0;
+
+      if (periodic) {
+        type = PAIR_PERIODIC;
+        chunk_w = pairs_i * pairs_j;
+        chunk_wj = chunk_w;
+        chunk_wk = chunk_w;
+      } else {
+        bool has_d = (span_i >= 7) || (span_j >= 7);
+        if (has_d) {
+          type = PAIR_GENERAL;
+          chunk_w = pairs_i * pairs_j;
+        } else if (span_i >= 4 && span_j >= 4) {
+          type = PAIR_HEAVY_HEAVY;
+          chunk_w = 100;
+        } else if (span_i >= 4 && span_j == 1) {
+          type = PAIR_HEAVY_LIGHT;
+          chunk_w = 10;
+        } else if (span_j >= 4 && span_i == 1) {
+          type = PAIR_LIGHT_HEAVY;
+          chunk_w = 10;
+        } else if (span_i == 1 && span_j == 1) {
+          type = PAIR_LIGHT_LIGHT;
+          chunk_w = 1;
+        } else {
+          type = PAIR_GENERAL;
+          chunk_w = pairs_i * pairs_j;
+        }
+      }
+
+      if (chunk_w < 0 || chunk_wj < 0 || chunk_wk < 0) return false;
+      if (chunk_w == 0 && chunk_wj == 0 && chunk_wk == 0) continue;
+
       if (pair_i.size() >= max_index) return false;
-      if (w_len > max_index) return false;
+      if (w_len >= max_index || w_len + static_cast<size_t>(chunk_w) > max_index) return false;
+      if (wj_len >= max_index || wj_len + static_cast<size_t>(chunk_wj) > max_index) return false;
+      if (wk_len >= max_index || wk_len + static_cast<size_t>(chunk_wk) > max_index) return false;
+
       pair_i.push_back(ii);
       pair_j.push_back(jj);
-      pair_off.push_back(static_cast<int>(w_len));
-      w_len += static_cast<size_t>(chunk);
+      pair_type.push_back(type);
+      pair_w_off.push_back(static_cast<int>(w_len));
+      pair_wj_off.push_back(static_cast<int>(wj_len));
+      pair_wk_off.push_back(static_cast<int>(wk_len));
+
+      w_len += static_cast<size_t>(chunk_w);
+      wj_len += static_cast<size_t>(chunk_wj);
+      wk_len += static_cast<size_t>(chunk_wk);
+
       if (span_i == 1 && span_j == 1) {
         ll_pairs++;
       } else if (span_i == 1 || span_j == 1) {
@@ -516,51 +666,67 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   if (!ensure_buf_double(&s_d_p, &cap_p, mpack_e)) return false;
   if (!ensure_buf_double(&s_d_f, &cap_f, mpack_e)) return false;
   if (!ensure_buf_double(&s_d_w, &cap_w, w_len)) return false;
+  if (!ensure_buf_double(&s_d_wj, &cap_wj, wj_len)) return false;
+  if (!ensure_buf_double(&s_d_wk, &cap_wk, wk_len)) return false;
   if (!ensure_pair_buffers(pair_i.size())) return false;
 
-  if (cudaMemset(s_d_f, 0, sizeof(double)*mpack_e) != cudaSuccess) return false;
+  if (cudaMemset(s_d_f, 0, sizeof(double) * mpack_e) != cudaSuccess) return false;
 
-  cudaMemcpy(s_d_nf, nfirst, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
-  cudaMemcpy(s_d_nl, nlast, sizeof(int)*atoms_e, cudaMemcpyHostToDevice);
+  cudaMemcpy(s_d_nf, nfirst, sizeof(int) * atoms_e, cudaMemcpyHostToDevice);
+  cudaMemcpy(s_d_nl, nlast, sizeof(int) * atoms_e, cudaMemcpyHostToDevice);
   if (!mopac_cuda_density_copy_cached(s_d_ptot, mpack_e, ptot)) {
-    cudaMemcpy(s_d_ptot, ptot, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_ptot, ptot, sizeof(double) * mpack_e, cudaMemcpyHostToDevice);
   }
   if (!mopac_cuda_density_copy_cached(s_d_p, mpack_e, p)) {
-    cudaMemcpy(s_d_p, p, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_p, p, sizeof(double) * mpack_e, cudaMemcpyHostToDevice);
   }
+
   if (resident_debug_enabled_local()) {
     std::vector<double> host_ptot(mpack);
     std::vector<double> host_p(mpack);
-    cudaMemcpy(host_ptot.data(), s_d_ptot, sizeof(double)*mpack, cudaMemcpyDeviceToHost);
-    cudaMemcpy(host_p.data(), s_d_p, sizeof(double)*mpack, cudaMemcpyDeviceToHost);
+    cudaMemcpy(host_ptot.data(), s_d_ptot, sizeof(double) * mpack, cudaMemcpyDeviceToHost);
+    cudaMemcpy(host_p.data(), s_d_p, sizeof(double) * mpack, cudaMemcpyDeviceToHost);
     std::printf("[GPU resident debug] density sample ptot:% .5e % .5e % .5e\n",
                 host_ptot[0], host_ptot[1], host_ptot[2]);
     std::printf("[GPU resident debug] density sample p:% .5e % .5e % .5e\n",
                 host_p[0], host_p[1], host_p[2]);
     std::fflush(stdout);
   }
+
   if (w_len > 0) {
-    cudaMemcpy(s_d_w, w, sizeof(double)*w_len, cudaMemcpyHostToDevice);
-    if (resident_debug_enabled_local()) {
-      size_t limit = std::min(w_len, (size_t)5);
-      std::vector<double> host_w(limit);
-      cudaMemcpy(host_w.data(), s_d_w, sizeof(double)*limit, cudaMemcpyDeviceToHost);
-      std::printf("[GPU resident debug] w sample:");
-      for (size_t idx = 0; idx < limit; ++idx) {
-        std::printf(" % .5e", host_w[idx]);
-      }
-      std::printf("\n");
-      std::fflush(stdout);
-    }
+    cudaMemcpy(s_d_w, w, sizeof(double) * w_len, cudaMemcpyHostToDevice);
   }
-  if (!pair_i.empty()) {
-    cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int)*pair_i.size(), cudaMemcpyHostToDevice);
-    cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int)*pair_j.size(), cudaMemcpyHostToDevice);
-    cudaMemcpy(s_d_pair_off, pair_off.data(), sizeof(int)*pair_off.size(), cudaMemcpyHostToDevice);
+  if (wj_len > 0) {
+    cudaMemcpy(s_d_wj, wj, sizeof(double) * wj_len, cudaMemcpyHostToDevice);
   }
+  if (wk_len > 0) {
+    cudaMemcpy(s_d_wk, wk, sizeof(double) * wk_len, cudaMemcpyHostToDevice);
+  }
+
   if (resident_debug_enabled_local()) {
-    std::printf("[GPU resident debug] fock2_scf pairs=%zu w_len=%zu\n", pair_i.size(), w_len);
-    size_t limit = std::min(pair_i.size(), (size_t)3);
+    if (w_len > 0) {
+      size_t limit = std::min(w_len, static_cast<size_t>(5));
+      std::vector<double> host_w(limit);
+      cudaMemcpy(host_w.data(), s_d_w, sizeof(double) * limit, cudaMemcpyDeviceToHost);
+      std::printf("[GPU resident debug] w sample:");
+      for (size_t idx = 0; idx < limit; ++idx) std::printf(" % .5e", host_w[idx]);
+      std::printf("\n");
+    }
+    std::printf("[GPU resident debug] fock2_scf pairs=%zu w_len=%zu\n",
+                pair_i.size(), w_len);
+  }
+
+  if (!pair_i.empty()) {
+    cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int) * pair_i.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int) * pair_j.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_off, pair_w_off.data(), sizeof(int) * pair_w_off.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_type, pair_type.data(), sizeof(int) * pair_type.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_wj_off, pair_wj_off.data(), sizeof(int) * pair_wj_off.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_wk_off, pair_wk_off.data(), sizeof(int) * pair_wk_off.size(), cudaMemcpyHostToDevice);
+  }
+
+  if (resident_debug_enabled_local() && !pair_i.empty()) {
+    size_t limit = std::min(pair_i.size(), static_cast<size_t>(3));
     for (size_t t = 0; t < limit; ++t) {
       int ii = pair_i[t];
       int jj = pair_j[t];
@@ -568,8 +734,8 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
       int ib = nlast[ii - 1];
       int ja = nfirst[jj - 1];
       int jb = nlast[jj - 1];
-      std::printf("  pair[%zu]: ii=%d (%d-%d) jj=%d (%d-%d) off=%d\n",
-                  t, ii, ia, ib, jj, ja, jb, pair_off[t]);
+      std::printf("  pair[%zu]: ii=%d (%d-%d) jj=%d (%d-%d) type=%d w_off=%d wj_off=%d wk_off=%d\n",
+                  t, ii, ia, ib, jj, ja, jb, pair_type[t], pair_w_off[t], pair_wj_off[t], pair_wk_off[t]);
     }
     std::fflush(stdout);
   }
@@ -587,11 +753,14 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
     int blocks = static_cast<int>((pair_i.size() + threads - 1) / threads);
     int debug_flag = resident_debug_enabled_local() ? 1 : 0;
     fock_pairs_kernel<<<blocks, threads>>>(static_cast<int>(pair_i.size()),
-                                           s_d_pair_i, s_d_pair_j, s_d_pair_off,
+                                           s_d_pair_i, s_d_pair_j, s_d_pair_type,
+                                           s_d_pair_off, s_d_pair_wj_off, s_d_pair_wk_off,
                                            s_d_nf, s_d_nl,
                                            s_d_ptot, s_d_p,
-                                           s_d_w, s_d_f, debug_flag);
-    cudaError_t err = cudaDeviceSynchronize(); if (err != cudaSuccess) return false;
+                                           s_d_w, s_d_wj, s_d_wk,
+                                           s_d_f, debug_flag);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) return false;
   }
 
   if (want_timing && t_start && t_stop) {
@@ -609,10 +778,10 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
       prof_hh_pairs += hh_pairs;
       long long total_pairs = ll_pairs + lh_pairs + hh_pairs;
       if (total_pairs > 0) {
-        double share = ms_total / (double)total_pairs;
-        prof_ll_ms += share * (double)ll_pairs;
-        prof_lh_ms += share * (double)lh_pairs;
-        prof_hh_ms += share * (double)hh_pairs;
+        double share = ms_total / static_cast<double>(total_pairs);
+        prof_ll_ms += share * static_cast<double>(ll_pairs);
+        prof_lh_ms += share * static_cast<double>(lh_pairs);
+        prof_hh_ms += share * static_cast<double>(hh_pairs);
       }
     }
   }
@@ -620,21 +789,20 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   bool resident = (mopac_cuda_get_resident_mode() != 0);
   if (resident) {
     if (resident_debug_enabled_local()) {
-      size_t limit = std::min(mpack_e, (size_t)5);
+      size_t limit = std::min(mpack_e, static_cast<size_t>(5));
       std::vector<double> host_f(limit);
-      cudaMemcpy(host_f.data(), s_d_f, sizeof(double)*limit, cudaMemcpyDeviceToHost);
+      cudaMemcpy(host_f.data(), s_d_f, sizeof(double) * limit, cudaMemcpyDeviceToHost);
       std::printf("[GPU resident debug] f device sample:");
-      for (size_t idx = 0; idx < limit; ++idx) {
-        std::printf(" % .5e", host_f[idx]);
-      }
+      for (size_t idx = 0; idx < limit; ++idx) std::printf(" % .5e", host_f[idx]);
       std::printf("\n");
       std::fflush(stdout);
     }
     mopac_cuda_register_fock_device(mpack, fout, s_d_f);
   } else {
-    cudaMemcpy(fout, s_d_f, sizeof(double)*mpack_e, cudaMemcpyDeviceToHost);
+    cudaMemcpy(fout, s_d_f, sizeof(double) * mpack_e, cudaMemcpyDeviceToHost);
     mopac_cuda_clear_fock_cache();
   }
+
   return true;
 }
 
@@ -704,16 +872,23 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
   cudaMemcpy(s_d_w, w, sizeof(double)*w_len, cudaMemcpyHostToDevice);
   cudaMemcpy(s_d_f, f, sizeof(double)*mpack_e, cudaMemcpyHostToDevice);
   if (!pair_i.empty()) {
+    std::vector<int> pair_type(pair_i.size(), PAIR_GENERAL);
+    std::vector<int> zeros(pair_i.size(), 0);
     cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int)*pair_i.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int)*pair_j.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(s_d_pair_off, pair_off.data(), sizeof(int)*pair_off.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_type, pair_type.data(), sizeof(int)*pair_type.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_wj_off, zeros.data(), sizeof(int)*zeros.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_pair_wk_off, zeros.data(), sizeof(int)*zeros.size(), cudaMemcpyHostToDevice);
     int threads = 64;
     int blocks = static_cast<int>((pair_i.size() + threads - 1) / threads);
     fock_pairs_kernel<<<blocks, threads>>>(static_cast<int>(pair_i.size()),
-                                           s_d_pair_i, s_d_pair_j, s_d_pair_off,
+                                           s_d_pair_i, s_d_pair_j, s_d_pair_type,
+                                           s_d_pair_off, s_d_pair_wj_off, s_d_pair_wk_off,
                                            s_d_nf, s_d_nl,
                                            s_d_ptot, s_d_p,
-                                           s_d_w, s_d_f, 0);
+                                           s_d_w, nullptr, nullptr,
+                                           s_d_f, 0);
     cudaError_t err = cudaDeviceSynchronize(); if (err != cudaSuccess) return false;
   }
 
