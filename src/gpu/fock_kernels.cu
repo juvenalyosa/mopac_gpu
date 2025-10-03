@@ -707,6 +707,8 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   pair_wj_off.reserve(std::max(1, numat));
   pair_wk_off.reserve(std::max(1, numat));
 
+  bool unsupported_heavy_light = false;
+
   size_t w_len = 0;
   size_t wj_len = 0;
   size_t wk_len = 0;
@@ -763,6 +765,10 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
       if (chunk_w < 0 || chunk_wj < 0 || chunk_wk < 0) return false;
       if (chunk_w == 0 && chunk_wj == 0 && chunk_wk == 0) continue;
 
+      if (type == PAIR_HEAVY_LIGHT || type == PAIR_LIGHT_HEAVY) {
+        unsupported_heavy_light = true;
+      }
+
       if (pair_i.size() >= max_index) return false;
       if (w_len >= max_index || w_len + static_cast<size_t>(chunk_w) > max_index) return false;
       if (wj_len >= max_index || wj_len + static_cast<size_t>(chunk_wj) > max_index) return false;
@@ -787,6 +793,10 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
         hh_pairs++;
       }
     }
+  }
+
+  if (unsupported_heavy_light) {
+    return false;
   }
 
   if (pair_i.size() > max_index) return false;
