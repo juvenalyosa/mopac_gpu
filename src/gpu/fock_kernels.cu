@@ -320,57 +320,58 @@ __device__ inline void fock_pair_light_light(int ia, int ja,
   }
 }
 
-__device__ inline void fock_pair_heavy_with_light(int heavy_start, int heavy_end, int light_atom,
-                                                  const double *ptot, const double *p,
-                                                  const double *w_block,
-                                                  double *f,
-                                                  int dbg_tid) {
+__device__ inline void fock_pair_heavy_light(int heavy_start, int heavy_end, int light_atom,
+                                             const double *ptot, const double *p,
+                                             const double *w_block,
+                                             double *f,
+                                             int dbg_tid) {
   if (!w_block) return;
   int span = heavy_end - heavy_start + 1;
   if (span <= 0) return;
-  constexpr int MAX_SPAN = 4;
-  double w_table[MAX_SPAN][MAX_SPAN] = {0.0};
-  double sumdia = 0.0;
-  double sumoff = 0.0;
   int ll = packed_index_zero(light_atom, light_atom);
   double ptot_ll = ptot[ll];
-  int wpos = 0;
-  int w_bound = span * (span + 1) / 2;
+  double sumdia = 0.0;
+  double sumoff = 0.0;
 
+  int coulomb_len = span * (span + 1) / 2;
+  int wpos = 0;
   for (int i = 0; i < span; ++i) {
     int orb_i = heavy_start + i;
-    for (int j = 0; j <= i; ++j) {
+    for (int j = 0; j < i; ++j) {
       int orb_j = heavy_start + j;
-      double wij = (wpos < w_bound) ? w_block[wpos] : 0.0;
+      double wij = (wpos < coulomb_len) ? w_block[wpos] : 0.0;
       ++wpos;
-      w_table[i][j] = wij;
-      w_table[j][i] = wij;
       int idx = packed_index_zero(orb_i, orb_j);
       atomicAdd_double(&f[idx], ptot_ll * wij);
-      if (i == j) {
-        sumdia += ptot[idx] * wij;
-      } else {
-        sumoff += ptot[idx] * wij;
-      }
+      sumoff += ptot[idx] * wij;
     }
+    double wdiag = (wpos < coulomb_len) ? w_block[wpos] : 0.0;
+    ++wpos;
+    int idx_ii = packed_index_zero(orb_i, orb_i);
+    atomicAdd_double(&f[idx_ii], ptot_ll * wdiag);
+    sumdia += ptot[idx_ii] * wdiag;
   }
 
   atomicAdd_double(&f[ll], sumoff * 2.0 + sumdia);
 
+  int table_index = 0;
   for (int i = 0; i < span; ++i) {
     int orb_i = heavy_start + i;
     int idx_il = packed_index_zero(orb_i, light_atom);
     double acc = 0.0;
     for (int j = 0; j < span; ++j) {
+      int map = c_jindex[table_index + j];
+      if (map <= 0) continue;
+      if (map > coulomb_len) continue;
+      double wij = w_block[map - 1];
       int orb_j = heavy_start + j;
       int idx_pl = packed_index_zero(orb_j, light_atom);
-      double wij = w_table[i][j];
       acc += p[idx_pl] * wij;
     }
+    table_index += span;
     atomicAdd_double(&f[idx_il], -acc);
     if (dbg_tid >= 0 && dbg_tid < 2) {
-      printf("[GPU resident debug] pair HL tid=%d orb=%d acc=% .5e\n",
-             dbg_tid, orb_i, acc);
+      printf("[GPU resident debug] HL tid=%d orb=%d acc=% .5e\n", dbg_tid, orb_i, acc);
     }
   }
 }
@@ -458,10 +459,10 @@ __global__ void fock_pairs_kernel(int npairs,
       fock_pair_light_light(ia, ja, ptot, p, w_block, f, debug_flag ? tid : -1);
       break;
     case PAIR_HEAVY_LIGHT:
-      fock_pair_heavy_with_light(ia, ib, ja, ptot, p, w_block, f, debug_flag ? tid : -1);
+      fock_pair_heavy_light(ia, ib, ja, ptot, p, w_block, f, debug_flag ? tid : -1);
       break;
     case PAIR_LIGHT_HEAVY:
-      fock_pair_heavy_with_light(ja, jb, ia, ptot, p, w_block, f, debug_flag ? tid : -1);
+      fock_pair_heavy_light(ja, jb, ia, ptot, p, w_block, f, debug_flag ? tid : -1);
       break;
     case PAIR_PERIODIC:
       fock_pair_periodic(ia, ib, ja, jb, ptot, p, wj_block, wk_block, f);
