@@ -84,6 +84,7 @@
       data icalcn/ 0/
       deriv = (numat < 0)
       numat = abs(numat)
+      lid = (id == 0)
 ! Optional experimental GPU Fock build (scaffold)
 #ifdef GPU
       ! Default to GPU Fock build when GPU is enabled and this is not a derivative build.
@@ -103,7 +104,7 @@
         end if
         if (want_gpu) then
           periodic_flag = 0
-          if (.not. lid) periodic_flag = 1
+          if (id /= 0) periodic_flag = 1
           ok = mopac_cuda_fock2_scf(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic_flag, f)
           if (ok) then
             return
