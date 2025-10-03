@@ -56,6 +56,7 @@ module hmtr_optimizer_mod
   logical, parameter :: hmtr_gpu_available = .false.
 #endif
   logical :: hmtr_force_gpu_eval = .false.
+  logical :: hmtr_allow_gpu_eval = .false.
   real(dp) :: hmtr_rho_sum = 0.0_dp
   integer :: hmtr_rho_count = 0
   integer :: hmtr_rho_expand = 0
@@ -575,6 +576,9 @@ contains
   subroutine hmtr_optimize_torsions(xseed, evaluator, best_coords, best_energy, best_grad, &
        max_iters, pop_size, use_gpu, grad_tol, wrap_angles, ierr)
     use common_arrays_C, only : loc, lopt
+#ifdef GPU
+    use mod_vars_cuda, only : lgpu
+#endif
     real(dp), intent(in) :: xseed(:)
     procedure(hmtr_evaluator) :: evaluator
     real(dp), intent(out) :: best_coords(:)
@@ -594,9 +598,11 @@ contains
     real(dp), allocatable :: candidate(:), base_grad(:)
     integer, allocatable :: torsion_idx(:)
     integer :: ntors, i
+    logical :: initial_lgpu
 
     nvar = size(xseed)
     hmtr_force_gpu_eval = .false.
+    hmtr_allow_gpu_eval = .false.
     status = 0
     population = HMTR_DEFAULT_POPULATION
     if (present(pop_size)) population = max(1, pop_size)
@@ -622,6 +628,12 @@ contains
     hmtr_rho_shrink = 0
 
     allocate(base_grad(nvar))
+#ifdef GPU
+    initial_lgpu = lgpu
+#else
+    initial_lgpu = .false.
+#endif
+    hmtr_allow_gpu_eval = initial_lgpu
     call evaluator(xseed, base_energy, base_grad, status)
     if (status /= 0) then
        best_coords = xseed
@@ -629,6 +641,7 @@ contains
        best_grad = base_grad
        if (present(ierr)) ierr = status
        deallocate(base_grad)
+       hmtr_allow_gpu_eval = .false.
        return
     end if
 
@@ -648,6 +661,7 @@ contains
        best_grad = base_grad
        if (present(ierr)) ierr = 0
        deallocate(base_grad, torsion_idx)
+       hmtr_allow_gpu_eval = .false.
        return
     end if
     torsion_idx = torsion_idx(:ntors)
@@ -672,10 +686,11 @@ contains
        if (allocated(init)) deallocate(init)
        if (allocated(torsion_idx)) deallocate(torsion_idx)
        if (allocated(base_grad)) deallocate(base_grad)
+       hmtr_allow_gpu_eval = .false.
        return
     end if
 
-    hmtr_force_gpu_eval = pop%gpu_enabled
+    hmtr_force_gpu_eval = pop%gpu_enabled .and. hmtr_allow_gpu_eval
 
     allocate(energies(population))
     allocate(gradients(population, ntors))
@@ -694,6 +709,7 @@ contains
        if (allocated(base_grad)) deallocate(base_grad)
        if (present(ierr)) ierr = status
        hmtr_force_gpu_eval = .false.
+       hmtr_allow_gpu_eval = .false.
        return
     end if
     call hmtr_update_best(pop, energies, gradients, gradients_full)
@@ -701,7 +717,7 @@ contains
     do iter_idx = 1, iterations
        status = hmtr_global_step(pop)
 #ifdef GPU
-       hmtr_force_gpu_eval = pop%gpu_enabled
+       hmtr_force_gpu_eval = pop%gpu_enabled .and. hmtr_allow_gpu_eval
 #endif
        if (status /= 0) exit
        status = hmtr_evaluate_batch(pop, 1, population, evaluator, energies, gradients, gradients_full)
@@ -724,6 +740,7 @@ contains
 
     call hmtr_finalize(pop)
     hmtr_force_gpu_eval = .false.
+    hmtr_allow_gpu_eval = .false.
 
     if (hmtr_rho_count > 0) then
        write(iw,'(1x,"HMTR micro-step avg rho=",F8.4," shrink=",I4," expand=",I4)') &
@@ -1005,7 +1022,7 @@ contains
     real(dp), allocatable :: grad_local(:)
     logical :: want_grad
 #ifdef GPU
-    logical :: old_lgpu
+    logical :: old_lgpu, applied_gpu
 #endif
 
     ierr = 0
@@ -1017,16 +1034,16 @@ contains
     allocate(grad_local(nvar))
     want_grad = .true.
 #ifdef GPU
-    if (hmtr_force_gpu_eval) then
-       old_lgpu = lgpu
+    old_lgpu = lgpu
+    applied_gpu = .false.
+    if (hmtr_force_gpu_eval .and. old_lgpu) then
        lgpu = .true.
-    else
-       old_lgpu = lgpu
+       applied_gpu = .true.
     end if
 #endif
     call compfg(coords, .true., energy, .true., grad_local, want_grad)
 #ifdef GPU
-    if (hmtr_force_gpu_eval) lgpu = old_lgpu
+    if (applied_gpu) lgpu = old_lgpu
 #endif
     grad = grad_local
     if (allocated(grad_local)) deallocate(grad_local)
