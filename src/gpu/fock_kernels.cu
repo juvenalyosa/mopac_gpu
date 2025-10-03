@@ -240,18 +240,24 @@ __device__ void fock_pair_update(int ia, int ib, int ja, int jb,
           for (int l = ja; l <= k; ++l) {
             double bb = (k == l) ? 1.0 : 2.0;
             int kl = packed_index_zero(k, l);
-            int ik = packed_index_zero(i, k);
-            int il = packed_index_zero(i, l);
-            int jk = packed_index_zero(j, k);
-            int jl = packed_index_zero(j, l);
+            // The packed layout stores only lower-triangular entries. Mirror the
+            // CPU guard logic so we do not double count terms when (i < k) etc.
+            bool have_ik = (i >= k);
+            bool have_il = (i >= l);
+            bool have_jk = (j >= k);
+            bool have_jl = (j >= l);
+            int ik = have_ik ? packed_index_zero(i, k) : -1;
+            int il = have_il ? packed_index_zero(i, l) : -1;
+            int jk = have_jk ? packed_index_zero(j, k) : -1;
+            int jl = have_jl ? packed_index_zero(j, l) : -1;
             double a = w[kr++];
             atomicAdd_double(&f[ij], bb * a * ptot[kl]);
             atomicAdd_double(&f[kl], aa * a * ptot[ij]);
             double exch = a * aa * bb * 0.25;
-            atomicAdd_double(&f[ik], -exch * p[jl]);
-            atomicAdd_double(&f[il], -exch * p[jk]);
-            atomicAdd_double(&f[jk], -exch * p[il]);
-            atomicAdd_double(&f[jl], -exch * p[ik]);
+            if (have_ik && have_jl) atomicAdd_double(&f[ik], -exch * p[jl]);
+            if (have_il && have_jk) atomicAdd_double(&f[il], -exch * p[jk]);
+            if (have_jk && have_il) atomicAdd_double(&f[jk], -exch * p[il]);
+            if (have_jl && have_ik) atomicAdd_double(&f[jl], -exch * p[ik]);
           }
         }
       }
@@ -271,19 +277,24 @@ __device__ void fock_pair_update(int ia, int ib, int ja, int jb,
             n2 += 1;
             double bb = (k == l) ? 1.0 : 2.0;
             int kl = packed_index_zero(k, l);
-            int ik = packed_index_zero(i, k);
-            int il = packed_index_zero(i, l);
-            int jk = packed_index_zero(j, k);
-            int jl = packed_index_zero(j, l);
+            // Mirror the CPU storage guards for the lower-triangular packed form.
+            bool have_ik = (i >= k);
+            bool have_il = (i >= l);
+            bool have_jk = (j >= k);
+            bool have_jl = (j >= l);
+            int ik = have_ik ? packed_index_zero(i, k) : -1;
+            int il = have_il ? packed_index_zero(i, l) : -1;
+            int jk = have_jk ? packed_index_zero(j, k) : -1;
+            int jl = have_jl ? packed_index_zero(j, l) : -1;
             int idx = (n2 - 1) * nn + (n1 - 1);
             double a = w[idx];
             atomicAdd_double(&f[ij], bb * a * ptot[kl]);
             atomicAdd_double(&f[kl], aa * a * ptot[ij]);
             double exch = a * aa * bb * 0.25;
-            atomicAdd_double(&f[ik], -exch * p[jl]);
-            atomicAdd_double(&f[il], -exch * p[jk]);
-            atomicAdd_double(&f[jk], -exch * p[il]);
-            atomicAdd_double(&f[jl], -exch * p[ik]);
+            if (have_ik && have_jl) atomicAdd_double(&f[ik], -exch * p[jl]);
+            if (have_il && have_jk) atomicAdd_double(&f[il], -exch * p[jk]);
+            if (have_jk && have_il) atomicAdd_double(&f[jk], -exch * p[il]);
+            if (have_jl && have_ik) atomicAdd_double(&f[jl], -exch * p[ik]);
           }
         }
       }
