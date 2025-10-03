@@ -293,7 +293,8 @@ __device__ void fock_pair_update(int ia, int ib, int ja, int jb,
 
 __device__ inline void fock_pair_light_light(int ia, int ja,
                                              const double *ptot, const double *p,
-                                             const double *w, double *f) {
+                                             const double *w, double *f,
+                                             int dbg_tid) {
   if (!w) return;
   double val = w[0];
   int ii = packed_index_zero(ia, ia);
@@ -302,12 +303,17 @@ __device__ inline void fock_pair_light_light(int ia, int ja,
   atomicAdd_double(&f[ii], val * ptot[jj]);
   atomicAdd_double(&f[jj], val * ptot[ii]);
   atomicAdd_double(&f[ij], -val * p[ij]);
+  if (dbg_tid >= 0 && dbg_tid < 2) {
+    printf("[GPU resident debug] pair LL tid=%d val=% .5e ii=%d jj=%d ij=%d\n",
+           dbg_tid, val, ii, jj, ij);
+  }
 }
 
 __device__ inline void fock_pair_heavy_with_light(int heavy_start, int heavy_end, int light_atom,
                                                   const double *ptot, const double *p,
                                                   const double *w_block,
-                                                  double *f) {
+                                                  double *f,
+                                                  int dbg_tid) {
   if (!w_block) return;
   int span = heavy_end - heavy_start + 1;
   if (span <= 0) return;
@@ -351,6 +357,10 @@ __device__ inline void fock_pair_heavy_with_light(int heavy_start, int heavy_end
       acc += p[idx_pl] * wij;
     }
     atomicAdd_double(&f[idx_il], -acc);
+    if (dbg_tid >= 0 && dbg_tid < 2) {
+      printf("[GPU resident debug] pair HL tid=%d orb=%d acc=% .5e\n",
+             dbg_tid, orb_i, acc);
+    }
   }
 }
 
@@ -434,13 +444,13 @@ __global__ void fock_pairs_kernel(int npairs,
 
   switch (type) {
     case PAIR_LIGHT_LIGHT:
-      fock_pair_light_light(ia, ja, ptot, p, w_block, f);
+      fock_pair_light_light(ia, ja, ptot, p, w_block, f, debug_flag ? tid : -1);
       break;
     case PAIR_HEAVY_LIGHT:
-      fock_pair_heavy_with_light(ia, ib, ja, ptot, p, w_block, f);
+      fock_pair_heavy_with_light(ia, ib, ja, ptot, p, w_block, f, debug_flag ? tid : -1);
       break;
     case PAIR_LIGHT_HEAVY:
-      fock_pair_heavy_with_light(ja, jb, ia, ptot, p, w_block, f);
+      fock_pair_heavy_with_light(ja, jb, ia, ptot, p, w_block, f, debug_flag ? tid : -1);
       break;
     case PAIR_PERIODIC:
       fock_pair_periodic(ia, ib, ja, jb, ptot, p, wj_block, wk_block, f);
