@@ -16,14 +16,14 @@ module hmtr_optimizer_mod
   implicit none
 
   integer, parameter :: dp = c_double
-  real(dp), parameter :: PI = 3.14159265358979323846264338327950288_dp
-  real(dp), parameter :: TWO_PI = 2.0_dp * PI
+  real(dp), parameter :: HMTR_FULL_CYCLE = 360.0_dp
+  real(dp), parameter :: HMTR_HALF_CYCLE = 0.5_dp * HMTR_FULL_CYCLE
   integer, parameter :: HMTR_DEFAULT_POPULATION = 32
   integer, parameter :: HMTR_DEFAULT_GLOBAL_ITERS = 100
-  real(dp), parameter :: HMTR_MICRO_RADIUS = 0.05_dp
+  real(dp), parameter :: HMTR_MICRO_RADIUS = 3.0_dp
   real(dp), parameter :: HMTR_MICRO_TOL = 1.0e-8_dp
-  real(dp), parameter :: HMTR_MICRO_RADIUS_MIN = 1.0e-4_dp
-  real(dp), parameter :: HMTR_MICRO_RADIUS_MAX = 0.5_dp
+  real(dp), parameter :: HMTR_MICRO_RADIUS_MIN = 0.01_dp
+  real(dp), parameter :: HMTR_MICRO_RADIUS_MAX = 30.0_dp
   real(dp), parameter :: HMTR_MICRO_ETA1 = 0.25_dp
   real(dp), parameter :: HMTR_MICRO_ETA2 = 0.75_dp
   real(dp), parameter :: HMTR_CACHE_TOL = 1.0e-8_dp
@@ -74,7 +74,7 @@ module hmtr_optimizer_mod
      real(dp) :: inertia = 0.7_dp
      real(dp) :: cognitive = 1.6_dp
      real(dp) :: social = 1.6_dp
-     real(dp) :: max_velocity = 0.35_dp
+     real(dp) :: max_velocity = 20.0_dp
      logical :: use_wrap = .true.
   end type hmtr_params_type
 
@@ -549,15 +549,15 @@ contains
 
   pure real(dp) function wrap_angle(x) result(val)
     real(dp), intent(in) :: x
-    val = modulo(x, TWO_PI)
-    if (val < 0.0_dp) val = val + TWO_PI
+    val = modulo(x, HMTR_FULL_CYCLE)
+    if (val < 0.0_dp) val = val + HMTR_FULL_CYCLE
   end function wrap_angle
 
   pure real(dp) function wrap_delta(x) result(val)
     real(dp), intent(in) :: x
-    val = modulo(x + PI, TWO_PI)
-    if (val < 0.0_dp) val = val + TWO_PI
-    val = val - PI
+    val = modulo(x + HMTR_HALF_CYCLE, HMTR_FULL_CYCLE)
+    if (val < 0.0_dp) val = val + HMTR_FULL_CYCLE
+    val = val - HMTR_HALF_CYCLE
   end function wrap_delta
 
   subroutine enforce_bounds(tors, use_wrap)
@@ -756,9 +756,9 @@ contains
        do j = 1, size(arr, dim=2)
           call random_number(noise)
           if (use_wrap) then
-             arr(i,j) = wrap_angle(arr(i,j) + 0.1_dp * (noise - 0.5_dp))
+             arr(i,j) = wrap_angle(arr(i,j) + 5.0_dp * (noise - 0.5_dp))
           else
-             arr(i,j) = arr(i,j) + 0.1_dp * (noise - 0.5_dp)
+             arr(i,j) = arr(i,j) + 5.0_dp * (noise - 0.5_dp)
           end if
        end do
     end do

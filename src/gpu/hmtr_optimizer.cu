@@ -8,8 +8,8 @@
 
 namespace {
 
-constexpr double PI = 3.14159265358979323846264338327950288;
-constexpr double TWO_PI = 6.28318530717958647692528676655900577;
+constexpr double DEG_FULL = 360.0;
+constexpr double DEG_HALF = 180.0;
 
 struct DevicePopulation {
   double* torsions = nullptr;
@@ -55,14 +55,14 @@ cudaError_t ensure_capacity(size_t need) {
 }
 
 __device__ inline double wrap_delta(double x) {
-  x = fmod(x + PI, TWO_PI);
-  if (x < 0.0) x += TWO_PI;
-  return x - PI;
+  x = fmod(x + DEG_HALF, DEG_FULL);
+  if (x < 0.0) x += DEG_FULL;
+  return x - DEG_HALF;
 }
 
 __device__ inline double wrap_angle(double x) {
-  x = fmod(x, TWO_PI);
-  if (x < 0.0) x += TWO_PI;
+  x = fmod(x, DEG_FULL);
+  if (x < 0.0) x += DEG_FULL;
   return x;
 }
 
