@@ -60,6 +60,8 @@
       double precision, dimension(16) :: pja, pjb
       double precision :: sumdia, sumoff, sum, aa, bb, aj, ak, a
       logical :: lid, deriv
+      logical :: dump_fock_map
+      integer :: dump_unit
 #ifdef GPU
       ! GPU Fock path controls
       integer :: envs
@@ -103,8 +105,7 @@
           if (trim(adjustl(line8)) /= '') want_gpu = .true.
         end if
         if (want_gpu) then
-          periodic_flag = 0
-          if (id /= 0) periodic_flag = 1
+          periodic_flag = merge(1_c_int, 0_c_int, id /= 0)
           ok = mopac_cuda_fock2_scf(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic_flag, f)
           if (ok) then
             return
@@ -118,6 +119,8 @@
         if (allocated(i1fact)) deallocate(i1fact)
          return
       end if
+      dump_fock_map = .false.
+      dump_unit = -1
       if (icalcn /= numcal) then
         if (allocated(ptot2))  deallocate(ptot2)
         if (allocated(ifact))  deallocate(ifact)
@@ -164,6 +167,16 @@
         lid = id == 0
         ione = 1
         if (id /= 0) ione = 0
+        envs = 1 ; line8 = ''
+        call get_environment_variable('MOPAC_DEBUG_FOCK_INDEX', line8, status=envs)
+        if (envs == 0) then
+          if (trim(adjustl(line8)) /= '') then
+            dump_fock_map = .true.
+            dump_unit = 97
+            open(unit=dump_unit, file='gpu_fock_cpu_map.csv', status='replace', action='write')
+            write(dump_unit,'(A)') 'pair_kind,ii,jj,i,j,k,l,pos'
+          end if
+        end if
 !
 !      END OF INITIALIZATION
 !
@@ -254,6 +267,9 @@
                   do j = 1, i
                     f(j+j1) = f(j+j1) + ptot(ll)*w(j+kk+k)
                     sumoff = sumoff + ptot(j+j1)*w(j+kk+k)
+                    if (dump_fock_map) then
+                      write(dump_unit,'("HL_C",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') ii, jj, ia+i, ia+j-1, ja, ja, j+kk+k
+                    end if
                   end do
                   k = i + k
                   j1 = i + j1
@@ -262,6 +278,9 @@
                 k = k + 1
                 f(j1) = f(j1) + ptot(ll)*w(kk+k)
                 sumdia = sumdia + ptot(j1)*w(kk+k)
+                if (dump_fock_map) then
+                  write(dump_unit,'("HL_C",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') ii, jj, ia+i, ia+i, ja, ja, kk+k
+                end if
               end do
               f(ll) = f(ll) + sumoff*2.D0 + sumdia
 !
@@ -276,6 +295,9 @@
                 sum = 0.D0
                 do j = 1, ib - ia + 1
                   sum = sum + p(ifact(j-1+ia)+ja)*w(kk+jindex(j+k))
+                  if (dump_fock_map) then
+                    write(dump_unit,'("HL_X",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') ii, jj, i, ia+j-1, ja, ia+j-1, kk+jindex(j+k)
+                  end if
                 end do
                 k = ib - ia + 1 + k
                 f(i1) = f(i1) - sum
@@ -298,6 +320,9 @@
                   do j = 1, i
                     f(j+j1) = f(j+j1) + ptot(ll)*w(j+kk+k)
                     sumoff = sumoff + ptot(j+j1)*w(j+kk+k)
+                    if (dump_fock_map) then
+                      write(dump_unit,'("HLR_C",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') ii, jj, ja+i, ja+j-1, ia, ia, j+kk+k
+                    end if
                   end do
                   k = i + k
                   j1 = i + j1
@@ -306,6 +331,9 @@
                 k = k + 1
                 f(j1) = f(j1) + ptot(ll)*w(kk+k)
                 sumdia = sumdia + ptot(j1)*w(kk+k)
+                if (dump_fock_map) then
+                  write(dump_unit,'("HLR_C",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') ii, jj, ja+i, ja+i, ia, ia, kk+k
+                end if
               end do
               f(ll) = f(ll) + sumoff*2.D0 + sumdia
 !
@@ -320,6 +348,9 @@
                 sum = 0.D0
                 do l = 1, 4
                   sum = sum + p(l-1+k)*w(kk+jindex(l+j))
+                  if (dump_fock_map) then
+                    write(dump_unit,'("HLR_X",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') ii, jj, ia, ja+l-1, ia, ja+l-1, kk+jindex(l+j)
+                  end if
                 end do
                 j = 4 + j
                 f(i) = f(i) - sum
@@ -335,6 +366,9 @@
               f(i1) = f(i1) + ptot(j1)*w(kk+1)
               f(j1) = f(j1) + ptot(i1)*w(kk+1)
               f(ij) = f(ij) - p(ij)*w(kk+1)
+              if (dump_fock_map) then
+                write(dump_unit,'("LL",",",I0,",",I0,",",I0,",",I0,",",I0,",",I0,",",I0)') ii, jj, ia, ja, ia, ja, kk+1
+              end if
               kk = kk + 1
             end if
           else
@@ -410,6 +444,9 @@
       end do
       if (useps) then
         call addfck (f,ptot)
+      end if
+      if (dump_fock_map .and. dump_unit > 0) then
+        close(dump_unit)
       end if
       return
     end subroutine fock2
