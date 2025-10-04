@@ -127,10 +127,10 @@ contains
     call set_dimensions(3)
 
     allocate(ptot(mpack), p(mpack), f_cpu(mpack), f_gpu(mpack))
-    allocate(w(3))  ! span=2 -> 3 Coulomb terms
+    allocate(w(10))
     ptot = (/1.05d0, 0.02d0, 0.01d0, 0.98d0, 0.03d0, 0.90d0/)
     p    = (/1.00d0, 0.01d0, 0.01d0, 0.95d0, 0.02d0, 0.88d0/)
-    w    = (/0.10d0, 0.12d0, 0.14d0/)
+    w    = (/0.10d0, 0.12d0, 0.14d0, 0.16d0, 0.18d0, 0.20d0, 0.22d0, 0.24d0, 0.26d0, 0.28d0/)
 
     nfirst = [1_c_int, 3_c_int]
     nlast  = [2_c_int, 3_c_int]
