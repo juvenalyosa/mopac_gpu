@@ -47,7 +47,9 @@
       logical :: coeffs_ready
       logical :: use_gpu_diis, use_gpu_buffer, use_gpu_bfull, use_gpu_bcol, use_gpu_solve, use_gen_resid
       logical :: resident_active, device_residual_ok
+#ifdef GPU
       logical(c_bool) :: ok_c
+#endif
       integer :: info_s
 #ifdef GPU
       character(len=32) :: env

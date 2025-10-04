@@ -62,10 +62,10 @@
       logical :: lid, deriv
       logical :: dump_fock_map
       integer :: dump_unit
-#ifdef GPU
-      ! GPU Fock path controls
       integer :: envs
       character(len=8) :: line8
+#ifdef GPU
+      ! GPU Fock path controls
       logical :: want_gpu
       logical(c_bool) :: ok
       integer(c_int) :: periodic_flag

@@ -354,11 +354,28 @@ contains
     logical :: want_gpu
 #ifdef GPU
     type(mopac_hmtr_config) :: cfg
+    character(len=32) :: env
+    integer :: istat_env
 #endif
 
     stat = 0
-    want_gpu = hmtr_gpu_available
+    want_gpu = .false.
+#ifdef GPU
+    env = '' ; istat_env = 1
+    call get_environment_variable('MOPAC_HMTR_GPU', env, status=istat_env)
+    if (istat_env == 0) then
+      env = adjustl(env)
+      if (len_trim(env) > 0) then
+        select case (env(1:1))
+        case ('1','y','Y','t','T')
+          if (hmtr_gpu_available) want_gpu = .true.
+        end select
+      end if
+    end if
     if (present(use_gpu)) want_gpu = use_gpu .and. hmtr_gpu_available
+#else
+    if (present(use_gpu)) want_gpu = .false.
+#endif
 
     pop%population = size(torsion_init, dim=1)
     pop%dim = size(torsion_init, dim=2)
@@ -598,7 +615,7 @@ contains
     real(dp), allocatable :: candidate(:), base_grad(:)
     integer, allocatable :: torsion_idx(:)
     integer :: ntors, i
-    logical :: initial_lgpu
+    logical :: initial_lgpu, hmtr_enable_gpu
 
     nvar = size(xseed)
     hmtr_force_gpu_eval = .false.
@@ -633,7 +650,17 @@ contains
 #else
     initial_lgpu = .false.
 #endif
-    hmtr_allow_gpu_eval = initial_lgpu
+#ifdef GPU
+    if (present(use_gpu)) then
+       hmtr_enable_gpu = use_gpu
+    else
+       hmtr_enable_gpu = .false.
+    end if
+#else
+    hmtr_enable_gpu = .false.
+    if (present(use_gpu)) hmtr_enable_gpu = .false.
+#endif
+    hmtr_allow_gpu_eval = initial_lgpu .and. hmtr_enable_gpu
     call evaluator(xseed, base_energy, base_grad, status)
     if (status /= 0) then
        best_coords = xseed
@@ -675,11 +702,7 @@ contains
     end do
     if (population > 1) call perturb_initial(init, params%use_wrap)
 
-    if (present(use_gpu)) then
-       call hmtr_initialize(pop, init, params, use_gpu=use_gpu, torsion_idx=torsion_idx, base_coords=xseed, ierr=status)
-    else
-       call hmtr_initialize(pop, init, params, torsion_idx=torsion_idx, base_coords=xseed, ierr=status)
-    end if
+    call hmtr_initialize(pop, init, params, use_gpu=hmtr_enable_gpu, torsion_idx=torsion_idx, base_coords=xseed, ierr=status)
     if (status /= 0) then
        if (present(ierr)) ierr = status
        call hmtr_finalize(pop)

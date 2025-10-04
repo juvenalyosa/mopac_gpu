@@ -272,7 +272,7 @@
             call hmtr_optimize_torsions(xseed=xparam, evaluator=hmtr_compfg_evaluator, &
                  best_coords=hmtr_best_coords, best_energy=hmtr_energy, best_grad=hmtr_best_grad, &
                  max_iters=50, pop_size=HMTR_DEFAULT_POPULATION, use_gpu=hmtr_use_gpu, &
-                 grad_tol=1.0d-3, wrap_angles=.false., ierr=hmtr_status)
+                 grad_tol=1.0d-3, wrap_angles=.true., ierr=hmtr_status)
             if (hmtr_status == 0) then
               xparam = hmtr_best_coords
               call compfg(xparam, .TRUE., funct1, .TRUE., grad, .TRUE.)
