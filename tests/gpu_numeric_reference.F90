@@ -124,20 +124,26 @@ contains
     integer :: i
 
     test_heavy_light = .false.
-    call set_dimensions(3)
+    call set_dimensions(5)
 
     allocate(ptot(mpack), p(mpack), f_cpu(mpack), f_gpu(mpack))
     allocate(w(10))
-    ptot = (/1.05d0, 0.02d0, 0.01d0, 0.98d0, 0.03d0, 0.90d0/)
-    p    = (/1.00d0, 0.01d0, 0.01d0, 0.95d0, 0.02d0, 0.88d0/)
-    w    = (/0.10d0, 0.12d0, 0.14d0, 0.16d0, 0.18d0, 0.20d0, 0.22d0, 0.24d0, 0.26d0, 0.28d0/)
 
-    nfirst = [1_c_int, 3_c_int]
-    nlast  = [2_c_int, 3_c_int]
+    do i = 1, mpack
+      ptot(i) = 0.01d0 * dble(i)
+      p(i)    = 0.008d0 * dble(i)
+    end do
 
-    call cpu_heavy_light_reference(1, 2, 3, ptot, p, w, f_cpu)
+    do i = 1, 10
+      w(i) = 0.10d0 + 0.01d0 * dble(i - 1)
+    end do
 
-    ok = mopac_cuda_fock2_scf(3, mpack, numat, nfirst, nlast, ptot, p, w, w, w, 0_c_int, f_gpu)
+    nfirst = [1_c_int, 5_c_int]
+    nlast  = [4_c_int, 5_c_int]
+
+    call cpu_heavy_light_reference(1, 4, 5, ptot, p, w, f_cpu)
+
+    ok = mopac_cuda_fock2_scf(5, mpack, numat, nfirst, nlast, ptot, p, w, w, w, 0_c_int, f_gpu)
     if (.not. ok) then
       print *, '[HEAVY-LIGHT] GPU path unavailable; skipping'
       test_heavy_light = .true.
