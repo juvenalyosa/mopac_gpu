@@ -65,8 +65,10 @@
       integer :: envs
       character(len=8) :: line8
 #ifdef GPU
-      ! GPU Fock path controls
+      ! GPU Fock path controls (new rewrite is gated behind an opt-in flag)
       logical :: want_gpu
+      logical :: allow_gpu
+      logical :: legacy_env
       logical(c_bool) :: ok
       integer(c_int) :: periodic_flag
 #endif
@@ -94,21 +96,34 @@
       ! or explicitly opt-in via legacy MOPAC_FOCK_GPU (kept for backward compatibility).
       if (.not. deriv) then
         want_gpu = .false.
+        allow_gpu = .false.
+        legacy_env = .false.
+
         envs = 1 ; line8 = ''
-        call get_environment_variable('MOPAC_NOFOCKGPU', line8, status=envs)
+        call get_environment_variable('MOPAC_GPU_EXACT_SC', line8, status=envs)
         if (envs == 0) then
-          if (trim(adjustl(line8)) /= '') want_gpu = .false.
+          if (trim(adjustl(line8)) /= '') allow_gpu = .true.
         end if
+
         envs = 1 ; line8 = ''
         call get_environment_variable('MOPAC_FOCK_GPU', line8, status=envs)
         if (envs == 0) then
-          if (trim(adjustl(line8)) /= '') want_gpu = .true.
+          if (trim(adjustl(line8)) /= '') legacy_env = .true.
         end if
+
+        if (legacy_env .and. .not. allow_gpu) then
+          write(iw,'(1x,a)') '[GPU FOCK] ignoring legacy MOPAC_FOCK_GPU – enable MOPAC_GPU_EXACT_SC for the new path'
+        end if
+
+        want_gpu = allow_gpu
+
         if (want_gpu) then
           periodic_flag = merge(1_c_int, 0_c_int, id /= 0)
           ok = mopac_cuda_fock2_scf(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic_flag, f)
           if (ok) then
             return
+          else
+            write(iw,'(1x,a)') '[GPU FOCK] experimental path unavailable – reverting to CPU reference implementation'
           end if
         end if
       end if

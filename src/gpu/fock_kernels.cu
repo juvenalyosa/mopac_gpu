@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <limits>
 
+#include "packed_utils.h"
+
 // Silence intentional placeholders to avoid noisy nvcc warnings
 #if !defined(MOPAC_UNUSED)
 #  if defined(__GNUC__) || defined(__clang__)
@@ -93,11 +95,11 @@ static bool resident_debug_enabled_local() {
 }
 
 __host__ __device__ inline int span_count(int first, int last) {
-  return (last >= first) ? (last - first + 1) : 0;
+  return mopac_gpu::span_count(first, last);
 }
 
 __host__ __device__ inline int pair_count(int span) {
-  return (span > 0) ? (span * (span + 1)) / 2 : 0;
+  return mopac_gpu::pair_count(span);
 }
 
 __host__ __device__ inline int ifact_val(int n) {
@@ -218,13 +220,7 @@ static inline bool ensure_pair_buffers(size_t need_pairs) {
 }
 
 __host__ __device__ inline int packed_index_zero(int a, int b) {
-  int aa = a - 1;
-  int bb = b - 1;
-  if (aa >= bb) {
-    return (aa * (aa + 1)) / 2 + bb;
-  } else {
-    return (bb * (bb + 1)) / 2 + aa;
-  }
+  return static_cast<int>(mopac_gpu::packed_index(a, b));
 }
 
 __device__ void fock_pair_update(int ia, int ib, int ja, int jb,
@@ -707,8 +703,6 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   pair_wj_off.reserve(std::max(1, numat));
   pair_wk_off.reserve(std::max(1, numat));
 
-  bool unsupported_heavy_light = false;
-
   size_t w_len = 0;
   size_t wj_len = 0;
   size_t wk_len = 0;
@@ -765,10 +759,6 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
       if (chunk_w < 0 || chunk_wj < 0 || chunk_wk < 0) return false;
       if (chunk_w == 0 && chunk_wj == 0 && chunk_wk == 0) continue;
 
-      if (type == PAIR_HEAVY_LIGHT || type == PAIR_LIGHT_HEAVY) {
-        unsupported_heavy_light = true;
-      }
-
       if (pair_i.size() >= max_index) return false;
       if (w_len >= max_index || w_len + static_cast<size_t>(chunk_w) > max_index) return false;
       if (wj_len >= max_index || wj_len + static_cast<size_t>(chunk_wj) > max_index) return false;
@@ -793,10 +783,6 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
         hh_pairs++;
       }
     }
-  }
-
-  if (unsupported_heavy_light) {
-    return false;
   }
 
   if (pair_i.size() > max_index) return false;

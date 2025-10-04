@@ -105,6 +105,17 @@ if(NOT TARGET mopac-gpu-fock-pair-compare)
 endif()
 add_test(NAME "gpu-fock-pair-compare" COMMAND mopac-gpu-fock-pair-compare)
 
+if(GPU)
+  if(NOT TARGET mopac-gpu-numeric-reference)
+    add_executable(mopac-gpu-numeric-reference gpu_numeric_reference.F90)
+    target_link_libraries(mopac-gpu-numeric-reference PRIVATE mopac-core)
+  endif()
+  add_test(NAME "gpu-numeric-reference" COMMAND mopac-gpu-numeric-reference)
+  set_tests_properties(gpu-numeric-reference PROPERTIES
+    DISABLED TRUE
+    ENVIRONMENT "MOPAC_GPU_EXACT_SC=1")
+endif()
+
 add_subdirectory(INDO-dev)
 add_subdirectory(keywords)
 

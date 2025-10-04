@@ -21,7 +21,7 @@ module mod_vars_cuda
   logical :: mozyme_force_2gpu = .false.
   logical :: mozyme_f2_gpu = .true.
   integer :: mozyme_gpu_min_block = 4
-  logical :: resident_scf = .true.
+  logical :: resident_scf = .false.
   real, parameter :: real_cuda = selected_real_kind(8)
   integer, parameter :: prec = 8
   integer :: ngpus,gpu_id

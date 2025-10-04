@@ -34,6 +34,8 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       integer :: iopc_eff, istat_env, istat_loc
       character(len=32) :: env_cpu
       logical :: use_resident, gpu_density_used, need_host_density
+      logical :: allow_gpu
+      logical :: legacy_env
       character(len=32) :: env_resident
       logical :: debug_density
       character(len=32) :: env_debug
@@ -70,6 +72,8 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       ! Allow runtime override to force CPU density even when lgpu is true
 #ifdef GPU
       iopc_eff = iopc
+      allow_gpu = .false.
+      legacy_env = .false.
       env_cpu = '' ; istat_env = 1
       call get_environment_variable('MOPAC_CPU_DENSITY', env_cpu, status=istat_env)
       if (istat_env == 0) then
@@ -78,7 +82,23 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
           if (iopc == 2) iopc_eff = 3   ! GPU DGEMM -> CPU DGEMM
         end if
       end if
-      use_resident = .true.
+      call get_environment_variable('MOPAC_GPU_EXACT_SC', env_cpu, status=istat_env)
+      if (istat_env == 0) then
+        if (trim(adjustl(env_cpu)) /= '') allow_gpu = .true.
+      end if
+
+      env_cpu = '' ; istat_env = 1
+      call get_environment_variable('MOPAC_FOCK_GPU', env_cpu, status=istat_env)
+      if (istat_env == 0) then
+        if (trim(adjustl(env_cpu)) /= '') legacy_env = .true.
+      end if
+
+      if (legacy_env .and. .not. allow_gpu) then
+        write(6,'(1x,a)') '[GPU DENSITY] MOPAC_FOCK_GPU ignored – enable MOPAC_GPU_EXACT_SC to opt into the rewrite'
+        call flush(6)
+      end if
+
+      use_resident = .false.
       env_resident = '' ; istat_env = 1
       call get_environment_variable('MOPAC_RESIDENT_SCF', env_resident, status=istat_env)
       if (istat_env == 0) then
@@ -93,6 +113,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
           end if
         end if
       end if
+      if (.not. allow_gpu) use_resident = .false.
       gpu_density_used = .false.
       resident_scf = use_resident
       need_host_density = .not. use_resident
@@ -113,7 +134,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
 #endif
         case(2)   ! Option to use dgemm from CUBLAS
 #ifdef GPU
-          if (have_device_eigvecs .and. device_eigvecs_n == norbs) then
+          if (allow_gpu .and. have_device_eigvecs .and. device_eigvecs_n == norbs) then
             gpu_density_used = .true.
             allocate(xmat(norbs,norbs),stat = i)
             call mopac_cuda_density_from_dev_gemm(norbs, nl2, nu2, nl1, nu1, sign, frac, xmat, norbs)
@@ -310,7 +331,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
 #endif
         case(4)   ! Option to use dsyrk from CUBLAS
 #ifdef GPU
-          if (have_device_eigvecs .and. device_eigvecs_n == norbs .and. fract < 1.d-2) then
+          if (allow_gpu .and. have_device_eigvecs .and. device_eigvecs_n == norbs .and. fract < 1.d-2) then
             gpu_density_used = .true.
             allocate(xmat(norbs,norbs),stat = i)
             call mopac_cuda_density_from_dev_syrk(norbs, ndubl, occ, xmat, norbs)
