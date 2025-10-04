@@ -6,6 +6,7 @@
 #include <vector>
 #include <algorithm>
 #include <limits>
+#include <array>
 
 #include "packed_utils.h"
 
@@ -64,6 +65,8 @@ enum PairTypeCodes {
 };
 __device__ __constant__ int c_jindex[256];
 static int jindex_ready = 0;
+static std::array<int,256> host_jindex;
+static bool host_jindex_ready = false;
 static int verbose = 0; static int verbose_inited = 0;
 static int csv_enabled = 0; static int csv_inited = 0;
 static int prof_collect = 0; static int prof_inited = 0;
@@ -269,6 +272,105 @@ static inline void host_pair_general(int ia, int ib, int ja, int jb,
     }
   }
 }
+
+static inline void host_pair_heavy_light(int heavy_start, int heavy_end, int light_atom,
+                                         const double *ptot, const double *p,
+                                         const double *w_block,
+                                         double *f_host) {
+  if (!w_block || !ptot || !p || !f_host) return;
+  if (!host_jindex_ready) ensure_jindex_device();
+  int span = heavy_end - heavy_start + 1;
+  if (span <= 0) return;
+  int coulomb_len = span * (span + 1) / 2;
+  size_t ll = packed_index_host(light_atom, light_atom);
+  double ptot_ll = ptot[ll];
+  double sumoff = 0.0;
+  double sumdia = 0.0;
+  int offset = 0;
+  for (int rel = 0; rel < span; ++rel) {
+    int orb_i = heavy_start + rel;
+    if (rel > 0) {
+      for (int relj = 0; relj < rel; ++relj) {
+        int orb_j = heavy_start + relj;
+        size_t idx = packed_index_host(orb_i, orb_j);
+        double val = (offset < coulomb_len) ? w_block[offset] : 0.0;
+        offset++;
+        f_host[idx] += ptot_ll * val;
+        sumoff += ptot[idx] * val;
+      }
+    }
+    double val = (offset < coulomb_len) ? w_block[offset] : 0.0;
+    offset++;
+    size_t idx_ii = packed_index_host(orb_i, orb_i);
+    f_host[idx_ii] += ptot_ll * val;
+    sumdia += ptot[idx_ii] * val;
+  }
+  f_host[ll] += sumoff * 2.0 + sumdia;
+
+  int table_index = 0;
+  for (int rel = 0; rel < span; ++rel) {
+    int orb_i = heavy_start + rel;
+    size_t idx_il = packed_index_host(orb_i, light_atom);
+    double acc = 0.0;
+    for (int relj = 0; relj < span; ++relj) {
+      int map = host_jindex[table_index + relj];
+      if (map <= 0 || map > coulomb_len) continue;
+      double wij = w_block[map - 1];
+      int orb_j = heavy_start + relj;
+      size_t idx_pl = packed_index_host(orb_j, light_atom);
+      acc += p[idx_pl] * wij;
+    }
+    table_index += span;
+    f_host[idx_il] -= acc;
+  }
+}
+
+static inline void host_pair_periodic(int ia, int ib, int ja, int jb,
+                                      const double *ptot, const double *p,
+                                      const double *wj_block, const double *wk_block,
+                                      double *f_host) {
+  if (!wj_block || !wk_block || !ptot || !p || !f_host) return;
+  size_t idx = 0;
+  for (int i = ia; i <= ib; ++i) {
+    for (int j = ia; j <= i; ++j) {
+      double aa = (i == j) ? 1.0 : 2.0;
+      size_t ij = packed_index_host(i, j);
+      for (int k = ja; k <= jb; ++k) {
+        for (int l = ja; l <= k; ++l) {
+          double bb = (k == l) ? 1.0 : 2.0;
+          size_t kl = packed_index_host(k, l);
+          double aj = wj_block[idx];
+          double ak = wk_block[idx];
+          idx++;
+          if (kl > ij) continue;
+          if (i == k && (aa + bb) < 2.1) {
+            f_host[ij] += aj * ptot[kl];
+          } else {
+            f_host[ij] += bb * aj * ptot[kl];
+            f_host[kl] += aa * aj * ptot[ij];
+            double exch = ak * aa * bb * 0.25;
+            if (i >= k && j >= l) {
+              size_t ik = packed_index_host(i, k);
+              size_t jl = packed_index_host(j, l);
+              f_host[ik] -= exch * p[jl];
+            }
+            if (i >= l && j >= k) {
+              size_t il = packed_index_host(i, l);
+              size_t jk = packed_index_host(j, k);
+              f_host[il] -= exch * p[jk];
+              f_host[jk] -= exch * p[il];
+            }
+            if (j >= l && i >= k) {
+              size_t jl = packed_index_host(j, l);
+              size_t ik = packed_index_host(i, k);
+              f_host[jl] -= exch * p[ik];
+            }
+          }
+        }
+      }
+    }
+  }
+}
 static inline int ifact_host(int n) {
   return (n * (n - 1)) / 2;
 }
@@ -292,6 +394,8 @@ static void ensure_jindex_device() {
       }
     }
   }
+  for (int t = 0; t < 256; ++t) host_jindex[t] = host_idx[t];
+  host_jindex_ready = true;
   cudaMemcpyToSymbol(c_jindex, host_idx, sizeof(host_idx));
   jindex_ready = 1;
 }
@@ -894,8 +998,8 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   }
 
   // CPU-side mirror for basic pair types (light-light and general two-centre)
-  bool host_supported = true;
   std::vector<double> f_host(mpack_e, 0.0);
+  bool fallback_required = false;
   for (size_t idx = 0; idx < pair_i.size(); ++idx) {
     int type = pair_type[idx];
     int ii = pair_i[idx];
@@ -905,6 +1009,8 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
     int ja = nfirst[jj - 1];
     int jb = nlast[jj - 1];
     const double *w_host = (w && pair_w_off.size() > idx) ? (w + pair_w_off[idx]) : nullptr;
+    const double *wj_host = (wj && pair_wj_off.size() > idx) ? (wj + pair_wj_off[idx]) : nullptr;
+    const double *wk_host = (wk && pair_wk_off.size() > idx) ? (wk + pair_wk_off[idx]) : nullptr;
     switch (type) {
       case PAIR_LIGHT_LIGHT:
         host_pair_light_light(ia, ja, ptot, p, w_host, f_host.data());
@@ -912,17 +1018,28 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
       case PAIR_GENERAL:
         host_pair_general(ia, ib, ja, jb, ptot, p, w_host, f_host.data());
         break;
+      case PAIR_HEAVY_LIGHT:
+        host_pair_heavy_light(ia, ib, ja, ptot, p, w_host, f_host.data());
+        break;
+      case PAIR_LIGHT_HEAVY:
+        host_pair_heavy_light(ja, jb, ia, ptot, p, w_host, f_host.data());
+        break;
+      case PAIR_PERIODIC:
+        host_pair_periodic(ia, ib, ja, jb, ptot, p, wj_host, wk_host, f_host.data());
+        break;
       default:
-        host_supported = false;
+        fallback_required = true;
         break;
     }
-    if (!host_supported) break;
+    if (fallback_required) break;
   }
 
-  if (host_supported) {
+  if (!fallback_required) {
     std::copy(f_host.begin(), f_host.end(), fout);
     return true;
   }
+
+  return false;
 
   if (pair_i.size() > max_index) return false;
 
