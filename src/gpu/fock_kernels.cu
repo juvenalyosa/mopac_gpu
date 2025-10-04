@@ -804,16 +804,16 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   if (!ensure_buf_double(&s_d_wk, &cap_wk, wk_len)) return false;
   if (!ensure_pair_buffers(pair_i.size())) return false;
 
-  if (cudaMemset(s_d_f, 0, sizeof(double) * mpack_e) != cudaSuccess) return false;
+  cudaMemset(s_d_f, 0, sizeof(double) * mpack_e);
 
-  cudaMemcpy(s_d_nf, nfirst, sizeof(int) * atoms_e, cudaMemcpyHostToDevice);
-  cudaMemcpy(s_d_nl, nlast, sizeof(int) * atoms_e, cudaMemcpyHostToDevice);
-  if (!mopac_cuda_density_copy_cached(s_d_ptot, mpack_e, ptot)) {
-    cudaMemcpy(s_d_ptot, ptot, sizeof(double) * mpack_e, cudaMemcpyHostToDevice);
-  }
-  if (!mopac_cuda_density_copy_cached(s_d_p, mpack_e, p)) {
-    cudaMemcpy(s_d_p, p, sizeof(double) * mpack_e, cudaMemcpyHostToDevice);
-  }
+    cudaMemcpy(s_d_nf, nfirst, sizeof(int) * atoms_e, cudaMemcpyHostToDevice);
+    cudaMemcpy(s_d_nl, nlast, sizeof(int) * atoms_e, cudaMemcpyHostToDevice);
+    if (!mopac_cuda_density_copy_cached(s_d_ptot, mpack_e, ptot)) {
+      cudaMemcpy(s_d_ptot, ptot, sizeof(double) * mpack_e, cudaMemcpyHostToDevice);
+    }
+    if (!mopac_cuda_density_copy_cached(s_d_p, mpack_e, p)) {
+      cudaMemcpy(s_d_p, p, sizeof(double) * mpack_e, cudaMemcpyHostToDevice);
+    }
 
   if (resident_debug_enabled_local()) {
     std::vector<double> host_ptot(mpack);
@@ -850,14 +850,14 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
                 pair_i.size(), w_len);
   }
 
-  if (!pair_i.empty()) {
-    cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int) * pair_i.size(), cudaMemcpyHostToDevice);
-    cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int) * pair_j.size(), cudaMemcpyHostToDevice);
-    cudaMemcpy(s_d_pair_off, pair_w_off.data(), sizeof(int) * pair_w_off.size(), cudaMemcpyHostToDevice);
-    cudaMemcpy(s_d_pair_type, pair_type.data(), sizeof(int) * pair_type.size(), cudaMemcpyHostToDevice);
-    cudaMemcpy(s_d_pair_wj_off, pair_wj_off.data(), sizeof(int) * pair_wj_off.size(), cudaMemcpyHostToDevice);
-    cudaMemcpy(s_d_pair_wk_off, pair_wk_off.data(), sizeof(int) * pair_wk_off.size(), cudaMemcpyHostToDevice);
-  }
+    if (!pair_i.empty()) {
+      if (cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int) * pair_i.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+      if (cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int) * pair_j.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+      if (cudaMemcpy(s_d_pair_off, pair_w_off.data(), sizeof(int) * pair_w_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+      if (cudaMemcpy(s_d_pair_type, pair_type.data(), sizeof(int) * pair_type.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+      if (cudaMemcpy(s_d_pair_wj_off, pair_wj_off.data(), sizeof(int) * pair_wj_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+      if (cudaMemcpy(s_d_pair_wk_off, pair_wk_off.data(), sizeof(int) * pair_wk_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    }
 
   if (resident_debug_enabled_local() && !pair_i.empty()) {
     size_t limit = std::min(pair_i.size(), static_cast<size_t>(3));
