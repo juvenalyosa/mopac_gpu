@@ -535,53 +535,53 @@ __device__ inline void fock_pair_heavy_light(int heavy_start, int heavy_end, int
                                              const double *w_block,
                                              double *f,
                                              int dbg_tid) {
-  if (!w_block) return;
+  if (!w_block || !ptot || !p || !f) return;
   int span = heavy_end - heavy_start + 1;
   if (span <= 0) return;
-  int ll = packed_index_zero(light_atom, light_atom);
-  double ptot_ll = ptot[ll];
-  double sumdia = 0.0;
-  double sumoff = 0.0;
 
   int coulomb_len = span * (span + 1) / 2;
+  int ll = packed_index_zero(light_atom, light_atom);
+  double ptot_ll = ptot[ll];
+  // Coulomb contribution: mirror CPU order
   int wpos = 0;
-  for (int i = 0; i < span; ++i) {
-    int orb_i = heavy_start + i;
-    for (int j = 0; j < i; ++j) {
-      int orb_j = heavy_start + j;
-      double wij = (wpos < coulomb_len) ? w_block[wpos] : 0.0;
-      ++wpos;
+  double sumoff = 0.0;
+  double sumdia = 0.0;
+  for (int rel = 0; rel < span; ++rel) {
+    int orb_i = heavy_start + rel;
+    for (int relj = 0; relj < rel; ++relj) {
+      int orb_j = heavy_start + relj;
+      double val = (wpos < coulomb_len) ? w_block[wpos] : 0.0;
+      wpos++;
       int idx = packed_index_zero(orb_i, orb_j);
-      atomicAdd_double(&f[idx], ptot_ll * wij);
-      sumoff += ptot[idx] * wij;
+      atomicAdd_double(&f[idx], ptot_ll * val);
+      sumoff += ptot[idx] * val;
     }
-    double wdiag = (wpos < coulomb_len) ? w_block[wpos] : 0.0;
-    ++wpos;
+    double diag = (wpos < coulomb_len) ? w_block[wpos] : 0.0;
+    wpos++;
     int idx_ii = packed_index_zero(orb_i, orb_i);
-    atomicAdd_double(&f[idx_ii], ptot_ll * wdiag);
-    sumdia += ptot[idx_ii] * wdiag;
+    atomicAdd_double(&f[idx_ii], ptot_ll * diag);
+    sumdia += ptot[idx_ii] * diag;
   }
+  atomicAdd_double(&f[ll], 2.0 * sumoff + sumdia);
 
-  atomicAdd_double(&f[ll], sumoff * 2.0 + sumdia);
-
+  // Exchange contraction using jindex table
   int table_index = 0;
-  for (int i = 0; i < span; ++i) {
-    int orb_i = heavy_start + i;
+  for (int rel = 0; rel < span; ++rel) {
+    int orb_i = heavy_start + rel;
     int idx_il = packed_index_zero(orb_i, light_atom);
     double acc = 0.0;
-    for (int j = 0; j < span; ++j) {
-      int map = c_jindex[table_index + j];
-      if (map <= 0) continue;
-      if (map > coulomb_len) continue;
-      double wij = w_block[map - 1];
-      int orb_j = heavy_start + j;
+    for (int relj = 0; relj < span; ++relj) {
+      int map = c_jindex[table_index + relj];
+      if (map <= 0 || map > coulomb_len) continue;
+      double val = w_block[map - 1];
+      int orb_j = heavy_start + relj;
       int idx_pl = packed_index_zero(orb_j, light_atom);
-      acc += p[idx_pl] * wij;
+      acc += p[idx_pl] * val;
     }
     table_index += span;
     atomicAdd_double(&f[idx_il], -acc);
     if (dbg_tid >= 0 && dbg_tid < 2) {
-      printf("[GPU resident debug] HL tid=%d orb=%d acc=% .5e\n", dbg_tid, orb_i, acc);
+      printf("[GPU heavy-light] rel=%d acc=% .5e\n", rel, acc);
     }
   }
 }
