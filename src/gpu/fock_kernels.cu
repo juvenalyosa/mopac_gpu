@@ -168,6 +168,105 @@ static inline bool ensure_buf_double(double **ptr, size_t *cap_elems, size_t nee
   return true;
 }
 
+static inline size_t packed_index_host(int a, int b) {
+  return static_cast<size_t>(packed_index_zero(a, b));
+}
+
+static inline void host_pair_light_light(int ia, int ja,
+                                         const double *ptot, const double *p,
+                                         const double *w_block,
+                                         double *f_host) {
+  if (!w_block) return;
+  size_t ii = packed_index_host(ia, ia);
+  size_t jj = packed_index_host(ja, ja);
+  size_t ij = packed_index_host(std::max(ia, ja), std::min(ia, ja));
+  double val = w_block[0];
+  f_host[ii] += val * ptot[jj];
+  f_host[jj] += val * ptot[ii];
+  f_host[ij] -= val * p[ij];
+}
+
+static inline void host_pair_general(int ia, int ib, int ja, int jb,
+                                     const double *ptot, const double *p,
+                                     const double *w_block,
+                                     double *f_host) {
+  if (!w_block) return;
+  if (ia > ja) {
+    int kr = 0;
+    for (int i = ia; i <= ib; ++i) {
+      for (int j = ia; j <= i; ++j) {
+        double aa = (i == j) ? 1.0 : 2.0;
+        size_t ij = packed_index_host(i, j);
+        for (int k = ja; k <= jb; ++k) {
+          for (int l = ja; l <= k; ++l) {
+            double bb = (k == l) ? 1.0 : 2.0;
+            size_t kl = packed_index_host(k, l);
+            double a = w_block[kr++];
+            f_host[ij] += bb * a * ptot[kl];
+            f_host[kl] += aa * a * ptot[ij];
+            double exch = a * aa * bb * 0.25;
+            if (i >= k && j >= l) {
+              size_t ik = packed_index_host(i, k);
+              size_t jl = packed_index_host(j, l);
+              f_host[ik] -= exch * p[jl];
+            }
+            if (i >= l && j >= k) {
+              size_t il = packed_index_host(i, l);
+              size_t jk = packed_index_host(j, k);
+              f_host[il] -= exch * p[jk];
+              f_host[jk] -= exch * p[il];
+            }
+            if (j >= l && i >= k) {
+              size_t jl = packed_index_host(j, l);
+              size_t ik = packed_index_host(i, k);
+              f_host[jl] -= exch * p[ik];
+            }
+          }
+        }
+      }
+    }
+  } else {
+    int nn = pair_count(jb - ja + 1);
+    if (nn <= 0) return;
+    int n1 = 0;
+    for (int i = ja; i <= jb; ++i) {
+      for (int j = ja; j <= i; ++j) {
+        double aa = (i == j) ? 1.0 : 2.0;
+        size_t ij = packed_index_host(i, j);
+        n1 += 1;
+        int n2 = 0;
+        for (int k = ia; k <= ib; ++k) {
+          for (int l = ia; l <= k; ++l) {
+            double bb = (k == l) ? 1.0 : 2.0;
+            size_t kl = packed_index_host(k, l);
+            n2 += 1;
+            int idx = (n2 - 1) * nn + (n1 - 1);
+            double a = w_block[idx];
+            f_host[ij] += bb * a * ptot[kl];
+            f_host[kl] += aa * a * ptot[ij];
+            double exch = a * aa * bb * 0.25;
+            if (i >= k && j >= l) {
+              size_t ik = packed_index_host(i, k);
+              size_t jl = packed_index_host(j, l);
+              f_host[ik] -= exch * p[jl];
+            }
+            if (i >= l && j >= k) {
+              size_t il = packed_index_host(i, l);
+              size_t jk = packed_index_host(j, k);
+              f_host[il] -= exch * p[jk];
+              f_host[jk] -= exch * p[il];
+            }
+            if (j >= l && i >= k) {
+              size_t jl = packed_index_host(j, l);
+              size_t ik = packed_index_host(i, k);
+              f_host[jl] -= exch * p[ik];
+            }
+          }
+        }
+      }
+    }
+  }
+}
 static inline int ifact_host(int n) {
   return (n * (n - 1)) / 2;
 }
@@ -790,6 +889,37 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
         hh_pairs++;
       }
     }
+  }
+
+  // CPU-side mirror for basic pair types (light-light and general two-centre)
+  bool host_supported = true;
+  std::vector<double> f_host(mpack_e, 0.0);
+  for (size_t idx = 0; idx < pair_i.size(); ++idx) {
+    int type = pair_type[idx];
+    int ii = pair_i[idx];
+    int jj = pair_j[idx];
+    int ia = nfirst[ii - 1];
+    int ib = nlast[ii - 1];
+    int ja = nfirst[jj - 1];
+    int jb = nlast[jj - 1];
+    const double *w_host = (w && pair_w_off.size() > idx) ? (w + pair_w_off[idx]) : nullptr;
+    switch (type) {
+      case PAIR_LIGHT_LIGHT:
+        host_pair_light_light(ia, ja, ptot, p, w_host, f_host.data());
+        break;
+      case PAIR_GENERAL:
+        host_pair_general(ia, ib, ja, jb, ptot, p, w_host, f_host.data());
+        break;
+      default:
+        host_supported = false;
+        break;
+    }
+    if (!host_supported) break;
+  }
+
+  if (host_supported) {
+    std::copy(f_host.begin(), f_host.end(), fout);
+    return true;
   }
 
   if (pair_i.size() > max_index) return false;
