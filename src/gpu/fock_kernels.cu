@@ -309,6 +309,8 @@ static inline void host_pair_heavy_light(int heavy_start, int heavy_end, int lig
   }
   f_host[ll] += sumoff * 2.0 + sumdia;
 
+  // Heavy-light integrals are stored in fixed 10-entry blocks (Fortran legacy layout).
+  const int heavy_light_block_len = 10;
   int table_index = 0;
   for (int rel = 0; rel < span; ++rel) {
     int orb_i = heavy_start + rel;
@@ -316,7 +318,7 @@ static inline void host_pair_heavy_light(int heavy_start, int heavy_end, int lig
     double acc = 0.0;
     for (int relj = 0; relj < span; ++relj) {
       int map = host_jindex[table_index + relj];
-      if (map <= 0 || map > coulomb_len) continue;
+      if (map <= 0 || map > heavy_light_block_len) continue;
       double wij = w_block[map - 1];
       int orb_j = heavy_start + relj;
       size_t idx_pl = packed_index_host(orb_j, light_atom);
@@ -565,6 +567,8 @@ __device__ inline void fock_pair_heavy_light(int heavy_start, int heavy_end, int
   atomicAdd_double(&f[ll], 2.0 * sumoff + sumdia);
 
   // Exchange contraction using jindex table
+  // Heavy-light integrals are stored in fixed 10-entry blocks (Fortran legacy layout).
+  constexpr int heavy_light_block_len = 10;
   int table_index = 0;
   for (int rel = 0; rel < span; ++rel) {
     int orb_i = heavy_start + rel;
@@ -572,7 +576,7 @@ __device__ inline void fock_pair_heavy_light(int heavy_start, int heavy_end, int
     double acc = 0.0;
     for (int relj = 0; relj < span; ++relj) {
       int map = c_jindex[table_index + relj];
-      if (map <= 0 || map > coulomb_len) continue;
+      if (map <= 0 || map > heavy_light_block_len) continue;
       double val = w_block[map - 1];
       int orb_j = heavy_start + relj;
       int idx_pl = packed_index_zero(orb_j, light_atom);
