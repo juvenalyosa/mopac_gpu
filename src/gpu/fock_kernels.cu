@@ -678,6 +678,9 @@ __global__ void fock_pairs_kernel(int npairs,
     case PAIR_LIGHT_HEAVY:
       fock_pair_heavy_light(ja, jb, ia, ptot, p, w_block, f, debug_flag ? tid : -1);
       break;
+    case PAIR_HEAVY_HEAVY:
+      fock_pair_update(ia, ib, ja, jb, ptot, p, w_block, f);
+      break;
     case PAIR_PERIODIC:
       fock_pair_periodic(ia, ib, ja, jb, ptot, p, wj_block, wk_block, f);
       break;
@@ -1022,6 +1025,9 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
         host_pair_light_light(ia, ja, ptot, p, w_host, f_host.data());
         break;
       case PAIR_GENERAL:
+        host_pair_general(ia, ib, ja, jb, ptot, p, w_host, f_host.data());
+        break;
+      case PAIR_HEAVY_HEAVY:
         host_pair_general(ia, ib, ja, jb, ptot, p, w_host, f_host.data());
         break;
       case PAIR_HEAVY_LIGHT:
