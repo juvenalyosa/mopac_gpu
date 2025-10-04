@@ -168,6 +168,8 @@ static inline bool ensure_buf_double(double **ptr, size_t *cap_elems, size_t nee
   return true;
 }
 
+__host__ __device__ inline int packed_index_zero(int a, int b);
+
 static inline size_t packed_index_host(int a, int b) {
   return static_cast<size_t>(packed_index_zero(a, b));
 }
