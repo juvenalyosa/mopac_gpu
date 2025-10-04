@@ -226,6 +226,7 @@ __host__ __device__ inline int packed_index_zero(int a, int b) {
 __device__ void fock_pair_update(int ia, int ib, int ja, int jb,
                                  const double *ptot, const double *p,
                                  const double *w, double *f) {
+  if (!w || !ptot || !p || !f) return;
   if (ia > ja) {
     int kr = 0;
     for (int i = ia; i <= ib; ++i) {
@@ -236,24 +237,26 @@ __device__ void fock_pair_update(int ia, int ib, int ja, int jb,
           for (int l = ja; l <= k; ++l) {
             double bb = (k == l) ? 1.0 : 2.0;
             int kl = packed_index_zero(k, l);
-            // The packed layout stores only lower-triangular entries. Mirror the
-            // CPU guard logic so we do not double count terms when (i < k) etc.
-            bool have_ik = (i >= k);
-            bool have_il = (i >= l);
-            bool have_jk = (j >= k);
-            bool have_jl = (j >= l);
-            int ik = have_ik ? packed_index_zero(i, k) : -1;
-            int il = have_il ? packed_index_zero(i, l) : -1;
-            int jk = have_jk ? packed_index_zero(j, k) : -1;
-            int jl = have_jl ? packed_index_zero(j, l) : -1;
             double a = w[kr++];
             atomicAdd_double(&f[ij], bb * a * ptot[kl]);
             atomicAdd_double(&f[kl], aa * a * ptot[ij]);
             double exch = a * aa * bb * 0.25;
-            if (have_ik && have_jl) atomicAdd_double(&f[ik], -exch * p[jl]);
-            if (have_il && have_jk) atomicAdd_double(&f[il], -exch * p[jk]);
-            if (have_jk && have_il) atomicAdd_double(&f[jk], -exch * p[il]);
-            if (have_jl && have_ik) atomicAdd_double(&f[jl], -exch * p[ik]);
+            if (i >= k && j >= l) {
+              int ik = packed_index_zero(i, k);
+              int jl = packed_index_zero(j, l);
+              atomicAdd_double(&f[ik], -exch * p[jl]);
+            }
+            if (i >= l && j >= k) {
+              int il = packed_index_zero(i, l);
+              int jk = packed_index_zero(j, k);
+              atomicAdd_double(&f[il], -exch * p[jk]);
+              atomicAdd_double(&f[jk], -exch * p[il]);
+            }
+            if (j >= l && i >= k) {
+              int jl = packed_index_zero(j, l);
+              int ik = packed_index_zero(i, k);
+              atomicAdd_double(&f[jl], -exch * p[ik]);
+            }
           }
         }
       }
@@ -264,35 +267,36 @@ __device__ void fock_pair_update(int ia, int ib, int ja, int jb,
     int n1 = 0;
     for (int i = ja; i <= jb; ++i) {
       for (int j = ja; j <= i; ++j) {
-        n1 += 1;
         double aa = (i == j) ? 1.0 : 2.0;
         int ij = packed_index_zero(i, j);
         int n2 = 0;
         for (int k = ia; k <= ib; ++k) {
           for (int l = ia; l <= k; ++l) {
-            n2 += 1;
             double bb = (k == l) ? 1.0 : 2.0;
             int kl = packed_index_zero(k, l);
-            // Mirror the CPU storage guards for the lower-triangular packed form.
-            bool have_ik = (i >= k);
-            bool have_il = (i >= l);
-            bool have_jk = (j >= k);
-            bool have_jl = (j >= l);
-            int ik = have_ik ? packed_index_zero(i, k) : -1;
-            int il = have_il ? packed_index_zero(i, l) : -1;
-            int jk = have_jk ? packed_index_zero(j, k) : -1;
-            int jl = have_jl ? packed_index_zero(j, l) : -1;
-            int idx = (n2 - 1) * nn + (n1 - 1);
-            double a = w[idx];
+            double a = w[(n2++) * nn + n1];
             atomicAdd_double(&f[ij], bb * a * ptot[kl]);
             atomicAdd_double(&f[kl], aa * a * ptot[ij]);
             double exch = a * aa * bb * 0.25;
-            if (have_ik && have_jl) atomicAdd_double(&f[ik], -exch * p[jl]);
-            if (have_il && have_jk) atomicAdd_double(&f[il], -exch * p[jk]);
-            if (have_jk && have_il) atomicAdd_double(&f[jk], -exch * p[il]);
-            if (have_jl && have_ik) atomicAdd_double(&f[jl], -exch * p[ik]);
+            if (i >= k && j >= l) {
+              int ik = packed_index_zero(i, k);
+              int jl = packed_index_zero(j, l);
+              atomicAdd_double(&f[ik], -exch * p[jl]);
+            }
+            if (i >= l && j >= k) {
+              int il = packed_index_zero(i, l);
+              int jk = packed_index_zero(j, k);
+              atomicAdd_double(&f[il], -exch * p[jk]);
+              atomicAdd_double(&f[jk], -exch * p[il]);
+            }
+            if (j >= l && i >= k) {
+              int jl = packed_index_zero(j, l);
+              int ik = packed_index_zero(i, k);
+              atomicAdd_double(&f[jl], -exch * p[ik]);
+            }
           }
         }
+        n1 += 1;
       }
     }
   }
@@ -302,17 +306,18 @@ __device__ inline void fock_pair_light_light(int ia, int ja,
                                              const double *ptot, const double *p,
                                              const double *w, double *f,
                                              int dbg_tid) {
-  if (!w) return;
+  if (!w || !ptot || !p || !f) return;
   double val = w[0];
   int ii = packed_index_zero(ia, ia);
   int jj = packed_index_zero(ja, ja);
-  int ij = packed_index_zero((ia >= ja) ? ia : ja, (ia >= ja) ? ja : ia);
+  int ij = (ia >= ja) ? packed_index_zero(ia, ja)
+                      : packed_index_zero(ja, ia);
   atomicAdd_double(&f[ii], val * ptot[jj]);
   atomicAdd_double(&f[jj], val * ptot[ii]);
   atomicAdd_double(&f[ij], -val * p[ij]);
   if (dbg_tid >= 0 && dbg_tid < 2) {
-    printf("[GPU resident debug] pair LL tid=%d val=% .5e ii=%d jj=%d ij=%d\n",
-           dbg_tid, val, ii, jj, ij);
+    printf("[GPU] LL tid=%d val=% .5e f[ii]=% .5e f[jj]=% .5e f[ij]=% .5e\n",
+           dbg_tid, val, f[ii], f[jj], f[ij]);
   }
 }
 

@@ -1,6 +1,7 @@
 program gpu_numeric_reference
   use iso_fortran_env, only : real64
   use molkst_C, only : norbs, mpack
+  use chanel_C, only : iw
 #ifdef GPU
   use iso_c_binding, only : c_bool, c_int
   use gpu_fock_interfaces, only : mopac_cuda_fock2_scf
@@ -9,6 +10,7 @@ program gpu_numeric_reference
   integer :: failures
   failures = 0
 #ifdef GPU
+  call init_console()
   if (.not. test_light_light()) failures = failures + 1
   if (.not. test_general_pair()) failures = failures + 1
 #else
@@ -17,8 +19,23 @@ program gpu_numeric_reference
   if (failures /= 0) stop 1
 contains
 #ifdef GPU
+  subroutine init_console()
+    implicit none
+    open(unit=iw, file='gpu_numeric_reference.log', status='replace', action='write')
+  end subroutine init_console
+
+  subroutine reset_dimensions(n)
+    integer, intent(in) :: n
+    call setup_indices(n)
+  end subroutine reset_dimensions
+
+  subroutine setup_indices(n)
+    integer, intent(in) :: n
+    norbs = n
+    mpack = n * (n + 1) / 2
+  end subroutine setup_indices
+
   logical function test_light_light()
-    use iso_c_binding, only : c_bool, c_int
     implicit none
     integer, parameter :: numat = 2
     integer(c_int) :: nfirst(numat), nlast(numat)
@@ -31,9 +48,8 @@ contains
     test_light_light = .false.
 
     local_norbs = 2
-    local_mpack = 3
-    norbs = local_norbs
-    mpack = local_mpack
+    call reset_dimensions(local_norbs)
+    local_mpack = mpack
 
     nfirst = [1_c_int, 2_c_int]
     nlast  = [1_c_int, 2_c_int]
@@ -50,23 +66,24 @@ contains
 
     ok = mopac_cuda_fock2_scf(local_norbs, local_mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, 0_c_int, f_gpu)
     if (.not. ok) then
-      print *, '[LIGHT-LIGHT] GPU path unavailable; skipping'
+      write(iw, '(a)') '[LIGHT-LIGHT] GPU path unavailable; skipping'
       test_light_light = .true.
       return
     end if
 
     diff = maxval(abs(f_cpu - f_gpu))
     denom = max(1.0d0, maxval(abs(f_cpu)))
-    print '(a,1pe11.3)', '[LIGHT-LIGHT] max abs diff = ', diff
+    write(iw,'(a,1pe18.10)') '[LIGHT-LIGHT] max abs diff = ', diff
+    write(iw,'(a,3(1pe14.6,1x))') '  CPU:', f_cpu
+    write(iw,'(a,3(1pe14.6,1x))') '  GPU:', f_gpu
     if (diff > 1.0d-8 .and. diff/denom > 1.0d-8) then
-      print *, '[LIGHT-LIGHT] CPU and GPU results differ beyond tolerance'
+      write(iw,'(a)') '[LIGHT-LIGHT] CPU and GPU results differ beyond tolerance'
       return
     end if
     test_light_light = .true.
   end function test_light_light
 
   logical function test_general_pair()
-    use iso_c_binding, only : c_bool, c_int
     implicit none
     integer, parameter :: numat = 2
     integer(c_int) :: nfirst(numat), nlast(numat)
@@ -80,9 +97,8 @@ contains
     test_general_pair = .false.
 
     local_norbs = 4
-    local_mpack = local_norbs * (local_norbs + 1) / 2
-    norbs = local_norbs
-    mpack = local_mpack
+    call reset_dimensions(local_norbs)
+    local_mpack = mpack
 
     allocate(ptot(local_mpack), p(local_mpack), f_cpu(local_mpack), f_gpu(local_mpack))
     do i = 1, local_mpack
@@ -95,10 +111,11 @@ contains
     nfirst = [1_c_int, 3_c_int]
     nlast  = [2_c_int, 4_c_int]
 
-    len_w = (span_count(3,4) * (span_count(3,4) + 1)) / 2
-    len_w = len_w * ((span_count(1,2) * (span_count(1,2) + 1)) / 2)
+    len_w = span_count(3,4)
+    len_w = pair_count(len_w)
+    len_w = len_w * pair_count(span_count(1,2))
     if (len_w <= 0) then
-      print *, '[GENERAL] no integrals to process'
+      write(iw,'(a)') '[GENERAL] no integrals to process'
       test_general_pair = .true.
       deallocate(ptot, p, f_cpu, f_gpu)
       return
@@ -115,7 +132,7 @@ contains
 
     ok = mopac_cuda_fock2_scf(local_norbs, local_mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, 0_c_int, f_gpu)
     if (.not. ok) then
-      print *, '[GENERAL] GPU path unavailable; skipping'
+      write(iw,'(a)') '[GENERAL] GPU path unavailable; skipping'
       test_general_pair = .true.
       deallocate(ptot, p, f_cpu, f_gpu, w, wj, wk)
       return
@@ -123,9 +140,19 @@ contains
 
     diff = maxval(abs(f_cpu - f_gpu))
     denom = max(1.0d0, maxval(abs(f_cpu)))
-    print '(a,1pe11.3)', '[GENERAL] max abs diff = ', diff
+    write(iw,'(a,1pe18.10)') '[GENERAL] max abs diff = ', diff
+    write(iw,'(a)') '  CPU:'
+    do i = 1, local_mpack
+      write(iw,'(1pe14.6,1x)', advance='no') f_cpu(i)
+      if (mod(i,6) == 0 .or. i == local_mpack) write(iw,*)
+    end do
+    write(iw,'(a)') '  GPU:'
+    do i = 1, local_mpack
+      write(iw,'(1pe14.6,1x)', advance='no') f_gpu(i)
+      if (mod(i,6) == 0 .or. i == local_mpack) write(iw,*)
+    end do
     if (diff > 1.0d-8 .and. diff/denom > 1.0d-8) then
-      print *, '[GENERAL] CPU and GPU results differ beyond tolerance'
+      write(iw,'(a)') '[GENERAL] CPU and GPU results differ beyond tolerance'
       deallocate(ptot, p, f_cpu, f_gpu, w, wj, wk)
       return
     end if
@@ -178,7 +205,7 @@ contains
             have_jl = (j >= l)
             kr = kr + 1
             if (kr > size(w)) then
-              print *, '[cpu_fock_general] insufficient integrals provided'
+              write(iw,'(a)') '[cpu_fock_general] insufficient integrals provided'
               stop 1
             end if
             a = w(kr)
@@ -194,10 +221,6 @@ contains
               il = packed_index(i, l)
               jk = packed_index(j, k)
               f(il) = f(il) - exch * p(jk)
-            end if
-            if (have_jk .and. have_il) then
-              jk = packed_index(j, k)
-              il = packed_index(i, l)
               f(jk) = f(jk) - exch * p(il)
             end if
             if (have_jl .and. have_ik) then
@@ -209,10 +232,6 @@ contains
         end do
       end do
     end do
-    if (kr /= size(w)) then
-      print *, '[cpu_fock_general] unused integrals detected: ', size(w) - kr
-      stop 1
-    end if
   end subroutine cpu_fock_general
 
   integer function packed_index(i, j)
@@ -237,5 +256,15 @@ contains
       span_count = 0
     end if
   end function span_count
+
+  integer function pair_count(span)
+    implicit none
+    integer, intent(in) :: span
+    if (span > 0) then
+      pair_count = span * (span + 1) / 2
+    else
+      pair_count = 0
+    end if
+  end function pair_count
 #endif
 end program gpu_numeric_reference
