@@ -128,7 +128,7 @@ contains
     diff = maxval(abs(f_cpu - f_gpu))
     denom = max(1.0d0, maxval(abs(f_cpu)))
     print '(a,1pe18.10)', '[GENERAL] max abs diff = ', diff
-    print '(a)') trim('[GENERAL] CPU:')
+    print '(a)', '[GENERAL] CPU:'
     do i = 1, local_mpack
       write(*,'(1pe14.6,1x)', advance='no') f_cpu(i)
       if (mod(i,6) == 0 .or. i == local_mpack) write(*,*)
