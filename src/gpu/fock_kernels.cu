@@ -269,12 +269,15 @@ __device__ void fock_pair_update(int ia, int ib, int ja, int jb,
       for (int j = ja; j <= i; ++j) {
         double aa = (i == j) ? 1.0 : 2.0;
         int ij = packed_index_zero(i, j);
+        n1 += 1; // 1-based column index within the packed block
         int n2 = 0;
         for (int k = ia; k <= ib; ++k) {
           for (int l = ia; l <= k; ++l) {
             double bb = (k == l) ? 1.0 : 2.0;
             int kl = packed_index_zero(k, l);
-            double a = w[(n2++) * nn + n1];
+            n2 += 1; // 1-based row index within the packed block
+            int idx = (n2 - 1) * nn + (n1 - 1);
+            double a = w[idx];
             atomicAdd_double(&f[ij], bb * a * ptot[kl]);
             atomicAdd_double(&f[kl], aa * a * ptot[ij]);
             double exch = a * aa * bb * 0.25;
@@ -296,7 +299,6 @@ __device__ void fock_pair_update(int ia, int ib, int ja, int jb,
             }
           }
         }
-        n1 += 1;
       }
     }
   }
