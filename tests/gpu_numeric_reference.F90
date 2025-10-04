@@ -11,6 +11,7 @@ program gpu_numeric_reference
 #ifdef GPU
   if (.not. test_light_light()) failures = failures + 1
   if (.not. test_general_pair()) failures = failures + 1
+  if (.not. test_heavy_light()) failures = failures + 1
 #else
   print *, 'GPU support not enabled; skipping gpu_numeric_reference'
 #endif
@@ -34,11 +35,9 @@ contains
     double precision :: diff, denom
 
     test_light_light = .false.
-
     local_norbs = 2
     call reset_dimensions(local_norbs)
     local_mpack = mpack
-
     nfirst = [1_c_int, 2_c_int]
     nlast  = [1_c_int, 2_c_int]
 
@@ -83,7 +82,6 @@ contains
     integer :: len_w, i
 
     test_general_pair = .false.
-
     local_norbs = 4
     call reset_dimensions(local_norbs)
     local_mpack = mpack
@@ -147,6 +145,56 @@ contains
     deallocate(ptot, p, f_cpu, f_gpu, w, wj, wk)
   end function test_general_pair
 
+  logical function test_heavy_light()
+    implicit none
+    integer, parameter :: numat = 2
+    integer(c_int) :: nfirst(numat), nlast(numat)
+    integer :: local_norbs, local_mpack
+    double precision, allocatable :: ptot(:), p(:), w(:)
+    double precision :: f_cpu(6), f_gpu(6)
+    logical(c_bool) :: ok
+    double precision :: diff, denom
+
+    test_heavy_light = .false.
+    local_norbs = 3
+    call reset_dimensions(local_norbs)
+    local_mpack = mpack
+
+    allocate(ptot(local_mpack), p(local_mpack), w(6))
+    ptot = (/1.05d0, 0.02d0, 0.01d0, 0.98d0, 0.03d0, 0.90d0/)
+    p    = (/1.00d0, 0.01d0, 0.01d0, 0.95d0, 0.02d0, 0.88d0/)
+    w    = (/0.10d0, 0.12d0, 0.14d0, 0.16d0, 0.18d0, 0.20d0/)
+
+    nfirst = [1_c_int, 3_c_int]
+    nlast  = [2_c_int, 3_c_int]
+
+    call cpu_heavy_light_reference(1, 2, 3, ptot, p, w, f_cpu)
+
+    f_gpu = 0.0d0
+    ok = mopac_cuda_fock2_scf(local_norbs, local_mpack, numat, nfirst, nlast, ptot, p, w, w, w, 0_c_int, f_gpu)
+    if (.not. ok) then
+      print *, '[HEAVY-LIGHT] GPU path unavailable; skipping'
+      test_heavy_light = .true.
+      deallocate(ptot, p, w)
+      return
+    end if
+
+    diff = maxval(abs(f_cpu - f_gpu(1:local_mpack)))
+    denom = max(1.0d0, maxval(abs(f_cpu)))
+    print '(a,1pe18.10)', '[HEAVY-LIGHT] max abs diff = ', diff
+    print '(a)', '[HEAVY-LIGHT] CPU:'
+    write(*,'(6(1pe14.6,1x))') f_cpu(1:local_mpack)
+    print '(a)', '  GPU:'
+    write(*,'(6(1pe14.6,1x))') f_gpu(1:local_mpack)
+    if (diff > 1.0d-8 .and. diff/denom > 1.0d-8) then
+      print *, '[HEAVY-LIGHT] CPU and GPU results differ beyond tolerance'
+      deallocate(ptot, p, w)
+      return
+    end if
+    test_heavy_light = .true.
+    deallocate(ptot, p, w)
+  end function test_heavy_light
+
   subroutine cpu_fock_light_light(ptot, p, w, f)
     implicit none
     double precision, intent(in) :: ptot(:), p(:), w(:)
@@ -171,8 +219,7 @@ contains
     double precision, intent(inout) :: f(:)
     integer :: i, j, k, l, kr
     double precision :: aa, bb, a, exch
-    integer :: ij, kl, ik, il, jk, jl
-    logical :: have_ik, have_il, have_jk, have_jl
+    integer :: ij, kl
 
     f = 0.0d0
     kr = 0
@@ -186,10 +233,6 @@ contains
             bb = 2.0d0
             if (k == l) bb = 1.0d0
             kl = packed_index(k, l)
-            have_ik = (i >= k)
-            have_il = (i >= l)
-            have_jk = (j >= k)
-            have_jl = (j >= l)
             kr = kr + 1
             if (kr > size(w)) then
               print *, '[cpu_fock_general] insufficient integrals provided'
@@ -199,38 +242,136 @@ contains
             f(ij) = f(ij) + bb * a * ptot(kl)
             f(kl) = f(kl) + aa * a * ptot(ij)
             exch = a * aa * bb * 0.25d0
-            if (have_ik .and. have_jl) then
-              ik = packed_index(i, k)
-              jl = packed_index(j, l)
-              f(ik) = f(ik) - exch * p(jl)
+            if (i >= k .and. j >= l) f(packed_index(i, k)) = f(packed_index(i, k)) - exch * p(packed_index(j, l))
+            if (i >= l .and. j >= k) then
+              f(packed_index(i, l)) = f(packed_index(i, l)) - exch * p(packed_index(j, k))
+              f(packed_index(j, k)) = f(packed_index(j, k)) - exch * p(packed_index(i, l))
             end if
-            if (have_il .and. have_jk) then
-              il = packed_index(i, l)
-              jk = packed_index(j, k)
-              f(il) = f(il) - exch * p(jk)
-              f(jk) = f(jk) - exch * p(il)
-            end if
-            if (have_jl .and. have_ik) then
-              jl = packed_index(j, l)
-              ik = packed_index(i, k)
-              f(jl) = f(jl) - exch * p(ik)
-            end if
+            if (j >= l .and. i >= k) f(packed_index(j, l)) = f(packed_index(j, l)) - exch * p(packed_index(i, k))
           end do
         end do
       end do
     end do
   end subroutine cpu_fock_general
 
+ subroutine cpu_heavy_light_reference(heavy_start, heavy_end, light_atom, ptot, p, w, f)
+    implicit none
+    integer, intent(in) :: heavy_start, heavy_end, light_atom
+    double precision, intent(in) :: ptot(:), p(:), w(:)
+    double precision, intent(inout) :: f(:)
+    integer :: span, coulomb_len, offset
+    integer :: rel, relj, orb_i, orb_j, map
+    double precision :: ptot_ll, sumdia, sumoff, val, acc
+
+    f = 0.0d0
+    span = heavy_end - heavy_start + 1
+    if (span <= 0) return
+    coulomb_len = span * (span + 1) / 2
+    ptot_ll = ptot(packed_index(light_atom, light_atom))
+    sumdia = 0.0d0
+    sumoff = 0.0d0
+    offset = 0
+    do rel = 0, span - 1
+      orb_i = heavy_start + rel
+      if (rel > 0) then
+        do relj = 0, rel - 1
+          orb_j = heavy_start + relj
+          if (offset < coulomb_len) then
+            val = w(offset + 1)
+          else
+            val = 0.0d0
+          end if
+          offset = offset + 1
+          f(packed_index(orb_i, orb_j)) = f(packed_index(orb_i, orb_j)) + ptot_ll * val
+          sumoff = sumoff + ptot(packed_index(orb_i, orb_j)) * val
+        end do
+      end if
+      if (offset < coulomb_len) then
+        val = w(offset + 1)
+      else
+        val = 0.0d0
+      end if
+      offset = offset + 1
+      f(packed_index(orb_i, orb_i)) = f(packed_index(orb_i, orb_i)) + ptot_ll * val
+      sumdia = sumdia + ptot(packed_index(orb_i, orb_i)) * val
+    end do
+    f(packed_index(light_atom, light_atom)) = f(packed_index(light_atom, light_atom)) + sumoff * 2.0d0 + sumdia
+
+    do rel = 0, span - 1
+      orb_i = heavy_start + rel
+      acc = 0.0d0
+      do relj = 0, span - 1
+        map = jindex_lookup(rel + 1, span, relj + 1)
+        if (map <= 0 .or. map > coulomb_len) cycle
+        acc = acc + p(packed_index(heavy_start + relj, light_atom)) * w(map)
+      end do
+      f(packed_index(orb_i, light_atom)) = f(packed_index(orb_i, light_atom)) - acc
+    end do
+  end subroutine cpu_heavy_light_reference
+
+  integer function jindex_lookup(row, span, col)
+    implicit none
+    integer, intent(in) :: row, span, col
+    integer :: offset
+    if (span <= 0) then
+      jindex_lookup = 0
+      return
+    end if
+    offset = (row - 1) * span + col
+    if (offset < 1 .or. offset > 256) then
+      jindex_lookup = 0
+    else
+      jindex_lookup = jindex_table(offset)
+    end if
+  end function jindex_lookup
+
+  integer function jindex_table(idx)
+    implicit none
+    integer, intent(in) :: idx
+    integer, save :: table(256)
+    logical, save :: initialized = .false.
+    integer :: i, j, k, l, m, ij, ji, ik, kl, lk
+
+    if (.not. initialized) then
+      m = 0
+      do i = 1, 4
+        do j = 1, 4
+          ij = min(i, j)
+          ji = i + j - ij
+          do k = 1, 4
+            do l = 1, 4
+              m = m + 1
+              ik = min(i, k)
+              lk = k + l - min(k, l)
+              kl = min(k, l)
+              table(m) = (ifact_from(ji) + ij) * 10 + ifact_from(lk) + kl - 10
+            end do
+          end do
+        end do
+      end do
+      initialized = .true.
+    end if
+
+    if (idx < 1 .or. idx > 256) then
+      jindex_table = 0
+    else
+      jindex_table = table(idx)
+    end if
+  end function jindex_table
+
+  integer function ifact_from(n)
+    implicit none
+    integer, intent(in) :: n
+    ifact_from = n * (n - 1) / 2
+  end function ifact_from
+
   integer function packed_index(i, j)
     implicit none
     integer, intent(in) :: i, j
-    integer :: ii, jj
-    ii = i
-    jj = j
-    if (ii >= jj) then
-      packed_index = (ii * (ii - 1)) / 2 + jj
+    if (i >= j) then
+      packed_index = (i * (i - 1)) / 2 + j
     else
-      packed_index = (jj * (jj - 1)) / 2 + ii
+      packed_index = (j * (j - 1)) / 2 + i
     end if
   end function packed_index
 
