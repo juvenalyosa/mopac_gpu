@@ -24,6 +24,7 @@
       use iso_c_binding, only: c_bool, c_int
 #endif
       use cosmo_C, only : useps
+      use chanel_C, only : iw
 
 !***********************************************************************
 !-----------------------------------------------
