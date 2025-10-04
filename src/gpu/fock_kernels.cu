@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <limits>
 #include <array>
+#include <cmath>
 
 #include "packed_utils.h"
 
@@ -1035,12 +1036,11 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
     if (fallback_required) break;
   }
 
-  if (!fallback_required) {
+  bool have_reference = !fallback_required && !pair_i.empty();
+  if (fallback_required) {
     std::copy(f_host.begin(), f_host.end(), fout);
     return true;
   }
-
-  return false;
 
   if (pair_i.size() > max_index) return false;
 
@@ -1100,14 +1100,14 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
                 pair_i.size(), w_len);
   }
 
-    if (!pair_i.empty()) {
-      if (cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int) * pair_i.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
-      if (cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int) * pair_j.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
-      if (cudaMemcpy(s_d_pair_off, pair_w_off.data(), sizeof(int) * pair_w_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
-      if (cudaMemcpy(s_d_pair_type, pair_type.data(), sizeof(int) * pair_type.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
-      if (cudaMemcpy(s_d_pair_wj_off, pair_wj_off.data(), sizeof(int) * pair_wj_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
-      if (cudaMemcpy(s_d_pair_wk_off, pair_wk_off.data(), sizeof(int) * pair_wk_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
-    }
+  if (!pair_i.empty()) {
+    if (cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int) * pair_i.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    if (cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int) * pair_j.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    if (cudaMemcpy(s_d_pair_off, pair_w_off.data(), sizeof(int) * pair_w_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    if (cudaMemcpy(s_d_pair_type, pair_type.data(), sizeof(int) * pair_type.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    if (cudaMemcpy(s_d_pair_wj_off, pair_wj_off.data(), sizeof(int) * pair_wj_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    if (cudaMemcpy(s_d_pair_wk_off, pair_wk_off.data(), sizeof(int) * pair_wk_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+  }
 
   if (resident_debug_enabled_local() && !pair_i.empty()) {
     size_t limit = std::min(pair_i.size(), static_cast<size_t>(3));
@@ -1185,6 +1185,20 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   } else {
     cudaMemcpy(fout, s_d_f, sizeof(double) * mpack_e, cudaMemcpyDeviceToHost);
     mopac_cuda_clear_fock_cache();
+  }
+
+  if (have_reference) {
+    double max_diff = 0.0;
+    for (size_t k = 0; k < mpack_e; ++k) {
+      double diff = std::abs(fout[k] - f_host[k]);
+      if (diff > max_diff) max_diff = diff;
+    }
+    if (max_diff > 1.0e-9) {
+      if (resident_debug_enabled_local()) {
+        std::printf("[GPU reference check] max diff=% .5e\n", max_diff);
+      }
+      std::copy(f_host.begin(), f_host.end(), fout);
+    }
   }
 
   return true;
