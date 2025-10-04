@@ -1,7 +1,6 @@
 program gpu_numeric_reference
   use iso_fortran_env, only : real64
   use molkst_C, only : norbs, mpack
-  use chanel_C, only : iw
 #ifdef GPU
   use iso_c_binding, only : c_bool, c_int
   use gpu_fock_interfaces, only : mopac_cuda_fock2_scf
@@ -10,7 +9,6 @@ program gpu_numeric_reference
   integer :: failures
   failures = 0
 #ifdef GPU
-  call init_console()
   if (.not. test_light_light()) failures = failures + 1
   if (.not. test_general_pair()) failures = failures + 1
 #else
@@ -19,21 +17,11 @@ program gpu_numeric_reference
   if (failures /= 0) stop 1
 contains
 #ifdef GPU
-  subroutine init_console()
-    implicit none
-    open(unit=iw, file='gpu_numeric_reference.log', status='replace', action='write')
-  end subroutine init_console
-
   subroutine reset_dimensions(n)
-    integer, intent(in) :: n
-    call setup_indices(n)
-  end subroutine reset_dimensions
-
-  subroutine setup_indices(n)
     integer, intent(in) :: n
     norbs = n
     mpack = n * (n + 1) / 2
-  end subroutine setup_indices
+  end subroutine reset_dimensions
 
   logical function test_light_light()
     implicit none
@@ -66,18 +54,18 @@ contains
 
     ok = mopac_cuda_fock2_scf(local_norbs, local_mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, 0_c_int, f_gpu)
     if (.not. ok) then
-      write(iw, '(a)') '[LIGHT-LIGHT] GPU path unavailable; skipping'
+      print *, '[LIGHT-LIGHT] GPU path unavailable; skipping'
       test_light_light = .true.
       return
     end if
 
     diff = maxval(abs(f_cpu - f_gpu))
     denom = max(1.0d0, maxval(abs(f_cpu)))
-    write(iw,'(a,1pe18.10)') '[LIGHT-LIGHT] max abs diff = ', diff
-    write(iw,'(a,3(1pe14.6,1x))') '  CPU:', f_cpu
-    write(iw,'(a,3(1pe14.6,1x))') '  GPU:', f_gpu
+    print '(a,1pe18.10)', '[LIGHT-LIGHT] max abs diff = ', diff
+    print '(a,3(1pe14.6,1x))', '  CPU:', f_cpu
+    print '(a,3(1pe14.6,1x))', '  GPU:', f_gpu
     if (diff > 1.0d-8 .and. diff/denom > 1.0d-8) then
-      write(iw,'(a)') '[LIGHT-LIGHT] CPU and GPU results differ beyond tolerance'
+      print *, '[LIGHT-LIGHT] CPU and GPU results differ beyond tolerance'
       return
     end if
     test_light_light = .true.
@@ -111,11 +99,10 @@ contains
     nfirst = [1_c_int, 3_c_int]
     nlast  = [2_c_int, 4_c_int]
 
-    len_w = span_count(3,4)
-    len_w = pair_count(len_w)
-    len_w = len_w * pair_count(span_count(1,2))
+    len_w = pair_count(span_count(3, 4))
+    len_w = len_w * pair_count(span_count(1, 2))
     if (len_w <= 0) then
-      write(iw,'(a)') '[GENERAL] no integrals to process'
+      print *, '[GENERAL] no integrals to process'
       test_general_pair = .true.
       deallocate(ptot, p, f_cpu, f_gpu)
       return
@@ -132,7 +119,7 @@ contains
 
     ok = mopac_cuda_fock2_scf(local_norbs, local_mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, 0_c_int, f_gpu)
     if (.not. ok) then
-      write(iw,'(a)') '[GENERAL] GPU path unavailable; skipping'
+      print *, '[GENERAL] GPU path unavailable; skipping'
       test_general_pair = .true.
       deallocate(ptot, p, f_cpu, f_gpu, w, wj, wk)
       return
@@ -140,19 +127,19 @@ contains
 
     diff = maxval(abs(f_cpu - f_gpu))
     denom = max(1.0d0, maxval(abs(f_cpu)))
-    write(iw,'(a,1pe18.10)') '[GENERAL] max abs diff = ', diff
-    write(iw,'(a)') '  CPU:'
+    print '(a,1pe18.10)', '[GENERAL] max abs diff = ', diff
+    print '(a)') trim('[GENERAL] CPU:')
     do i = 1, local_mpack
-      write(iw,'(1pe14.6,1x)', advance='no') f_cpu(i)
-      if (mod(i,6) == 0 .or. i == local_mpack) write(iw,*)
+      write(*,'(1pe14.6,1x)', advance='no') f_cpu(i)
+      if (mod(i,6) == 0 .or. i == local_mpack) write(*,*)
     end do
-    write(iw,'(a)') '  GPU:'
+    print '(a)', '  GPU:'
     do i = 1, local_mpack
-      write(iw,'(1pe14.6,1x)', advance='no') f_gpu(i)
-      if (mod(i,6) == 0 .or. i == local_mpack) write(iw,*)
+      write(*,'(1pe14.6,1x)', advance='no') f_gpu(i)
+      if (mod(i,6) == 0 .or. i == local_mpack) write(*,*)
     end do
     if (diff > 1.0d-8 .and. diff/denom > 1.0d-8) then
-      write(iw,'(a)') '[GENERAL] CPU and GPU results differ beyond tolerance'
+      print *, '[GENERAL] CPU and GPU results differ beyond tolerance'
       deallocate(ptot, p, f_cpu, f_gpu, w, wj, wk)
       return
     end if
@@ -205,7 +192,7 @@ contains
             have_jl = (j >= l)
             kr = kr + 1
             if (kr > size(w)) then
-              write(iw,'(a)') '[cpu_fock_general] insufficient integrals provided'
+              print *, '[cpu_fock_general] insufficient integrals provided'
               stop 1
             end if
             a = w(kr)
