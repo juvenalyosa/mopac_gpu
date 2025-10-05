@@ -198,76 +198,34 @@ static inline void host_pair_general(int ia, int ib, int ja, int jb,
                                      const double *w_block,
                                      double *f_host) {
   if (!w_block) return;
-  if (ia > ja) {
-    int kr = 0;
-    for (int i = ia; i <= ib; ++i) {
-      for (int j = ia; j <= i; ++j) {
-        double aa = (i == j) ? 1.0 : 2.0;
-        size_t ij = packed_index_host(i, j);
-        for (int k = ja; k <= jb; ++k) {
-          for (int l = ja; l <= k; ++l) {
-            double bb = (k == l) ? 1.0 : 2.0;
-            size_t kl = packed_index_host(k, l);
-            double a = w_block[kr++];
-            f_host[ij] += bb * a * ptot[kl];
-            f_host[kl] += aa * a * ptot[ij];
-            double exch = a * aa * bb * 0.25;
-            if (i >= k && j >= l) {
-              size_t ik = packed_index_host(i, k);
-              size_t jl = packed_index_host(j, l);
-              f_host[ik] -= exch * p[jl];
-            }
-            if (i >= l && j >= k) {
-              size_t il = packed_index_host(i, l);
-              size_t jk = packed_index_host(j, k);
-              f_host[il] -= exch * p[jk];
-              f_host[jk] -= exch * p[il];
-            }
-            if (j >= l && i >= k) {
-              size_t jl = packed_index_host(j, l);
-              size_t ik = packed_index_host(i, k);
-              f_host[jl] -= exch * p[ik];
-            }
+  int kr = 0;
+  for (int i = ia; i <= ib; ++i) {
+    for (int j = ia; j <= i; ++j) {
+      double aa = (i == j) ? 1.0 : 2.0;
+      size_t ij = packed_index_host(i, j);
+      for (int k = ja; k <= jb; ++k) {
+        for (int l = ja; l <= k; ++l) {
+          double bb = (k == l) ? 1.0 : 2.0;
+          size_t kl = packed_index_host(k, l);
+          double a = w_block[kr++];
+          f_host[ij] += bb * a * ptot[kl];
+          f_host[kl] += aa * a * ptot[ij];
+          double exch = a * aa * bb * 0.25;
+          if (i >= k && j >= l) {
+            size_t ik = packed_index_host(i, k);
+            size_t jl = packed_index_host(j, l);
+            f_host[ik] -= exch * p[jl];
           }
-        }
-      }
-    }
-  } else {
-    int nn = pair_count(jb - ja + 1);
-    if (nn <= 0) return;
-    int n1 = 0;
-    for (int i = ja; i <= jb; ++i) {
-      for (int j = ja; j <= i; ++j) {
-        double aa = (i == j) ? 1.0 : 2.0;
-        size_t ij = packed_index_host(i, j);
-        n1 += 1;
-        int n2 = 0;
-        for (int k = ia; k <= ib; ++k) {
-          for (int l = ia; l <= k; ++l) {
-            double bb = (k == l) ? 1.0 : 2.0;
-            size_t kl = packed_index_host(k, l);
-            n2 += 1;
-            int idx = (n2 - 1) * nn + (n1 - 1);
-            double a = w_block[idx];
-            f_host[ij] += bb * a * ptot[kl];
-            f_host[kl] += aa * a * ptot[ij];
-            double exch = a * aa * bb * 0.25;
-            if (i >= k && j >= l) {
-              size_t ik = packed_index_host(i, k);
-              size_t jl = packed_index_host(j, l);
-              f_host[ik] -= exch * p[jl];
-            }
-            if (i >= l && j >= k) {
-              size_t il = packed_index_host(i, l);
-              size_t jk = packed_index_host(j, k);
-              f_host[il] -= exch * p[jk];
-              f_host[jk] -= exch * p[il];
-            }
-            if (j >= l && i >= k) {
-              size_t jl = packed_index_host(j, l);
-              size_t ik = packed_index_host(i, k);
-              f_host[jl] -= exch * p[ik];
-            }
+          if (i >= l && j >= k) {
+            size_t il = packed_index_host(i, l);
+            size_t jk = packed_index_host(j, k);
+            f_host[il] -= exch * p[jk];
+            f_host[jk] -= exch * p[il];
+          }
+          if (j >= l && i >= k) {
+            size_t jl = packed_index_host(j, l);
+            size_t ik = packed_index_host(i, k);
+            f_host[jl] -= exch * p[ik];
           }
         }
       }
@@ -436,76 +394,34 @@ __device__ void fock_pair_update(int ia, int ib, int ja, int jb,
                                  const double *ptot, const double *p,
                                  const double *w, double *f) {
   if (!w || !ptot || !p || !f) return;
-  if (ia > ja) {
-    int kr = 0;
-    for (int i = ia; i <= ib; ++i) {
-      for (int j = ia; j <= i; ++j) {
-        double aa = (i == j) ? 1.0 : 2.0;
-        int ij = packed_index_zero(i, j);
-        for (int k = ja; k <= jb; ++k) {
-          for (int l = ja; l <= k; ++l) {
-            double bb = (k == l) ? 1.0 : 2.0;
-            int kl = packed_index_zero(k, l);
-            double a = w[kr++];
-            atomicAdd_double(&f[ij], bb * a * ptot[kl]);
-            atomicAdd_double(&f[kl], aa * a * ptot[ij]);
-            double exch = a * aa * bb * 0.25;
-            if (i >= k && j >= l) {
-              int ik = packed_index_zero(i, k);
-              int jl = packed_index_zero(j, l);
-              atomicAdd_double(&f[ik], -exch * p[jl]);
-            }
-            if (i >= l && j >= k) {
-              int il = packed_index_zero(i, l);
-              int jk = packed_index_zero(j, k);
-              atomicAdd_double(&f[il], -exch * p[jk]);
-              atomicAdd_double(&f[jk], -exch * p[il]);
-            }
-            if (j >= l && i >= k) {
-              int jl = packed_index_zero(j, l);
-              int ik = packed_index_zero(i, k);
-              atomicAdd_double(&f[jl], -exch * p[ik]);
-            }
+  int kr = 0;
+  for (int i = ia; i <= ib; ++i) {
+    for (int j = ia; j <= i; ++j) {
+      double aa = (i == j) ? 1.0 : 2.0;
+      int ij = packed_index_zero(i, j);
+      for (int k = ja; k <= jb; ++k) {
+        for (int l = ja; l <= k; ++l) {
+          double bb = (k == l) ? 1.0 : 2.0;
+          int kl = packed_index_zero(k, l);
+          double a = w[kr++];
+          atomicAdd_double(&f[ij], bb * a * ptot[kl]);
+          atomicAdd_double(&f[kl], aa * a * ptot[ij]);
+          double exch = a * aa * bb * 0.25;
+          if (i >= k && j >= l) {
+            int ik = packed_index_zero(i, k);
+            int jl = packed_index_zero(j, l);
+            atomicAdd_double(&f[ik], -exch * p[jl]);
           }
-        }
-      }
-    }
-  } else {
-    int nn = pair_count(jb - ja + 1);
-    if (nn <= 0) return;
-    int n1 = 0;
-    for (int i = ja; i <= jb; ++i) {
-      for (int j = ja; j <= i; ++j) {
-        double aa = (i == j) ? 1.0 : 2.0;
-        int ij = packed_index_zero(i, j);
-        n1 += 1; // 1-based column index within the packed block
-        int n2 = 0;
-        for (int k = ia; k <= ib; ++k) {
-          for (int l = ia; l <= k; ++l) {
-            double bb = (k == l) ? 1.0 : 2.0;
-            int kl = packed_index_zero(k, l);
-            n2 += 1; // 1-based row index within the packed block
-            int idx = (n2 - 1) * nn + (n1 - 1);
-            double a = w[idx];
-            atomicAdd_double(&f[ij], bb * a * ptot[kl]);
-            atomicAdd_double(&f[kl], aa * a * ptot[ij]);
-            double exch = a * aa * bb * 0.25;
-            if (i >= k && j >= l) {
-              int ik = packed_index_zero(i, k);
-              int jl = packed_index_zero(j, l);
-              atomicAdd_double(&f[ik], -exch * p[jl]);
-            }
-            if (i >= l && j >= k) {
-              int il = packed_index_zero(i, l);
-              int jk = packed_index_zero(j, k);
-              atomicAdd_double(&f[il], -exch * p[jk]);
-              atomicAdd_double(&f[jk], -exch * p[il]);
-            }
-            if (j >= l && i >= k) {
-              int jl = packed_index_zero(j, l);
-              int ik = packed_index_zero(i, k);
-              atomicAdd_double(&f[jl], -exch * p[ik]);
-            }
+          if (i >= l && j >= k) {
+            int il = packed_index_zero(i, l);
+            int jk = packed_index_zero(j, k);
+            atomicAdd_double(&f[il], -exch * p[jk]);
+            atomicAdd_double(&f[jk], -exch * p[il]);
+          }
+          if (j >= l && i >= k) {
+            int jl = packed_index_zero(j, l);
+            int ik = packed_index_zero(i, k);
+            atomicAdd_double(&f[jl], -exch * p[ik]);
           }
         }
       }
