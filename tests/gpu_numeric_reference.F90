@@ -196,7 +196,7 @@ contains
     nfirst = [1_c_int, 5_c_int]
     nlast  = [4_c_int, 8_c_int]
 
-    call cpu_fock_general(1, 4, 5, 8, ptot, p, w, f_cpu)
+    call cpu_fock_general(nfirst(2), nlast(2), nfirst(1), nlast(1), ptot, p, w, f_cpu)
 
     ok = mopac_cuda_fock2_scf(8, mpack, numat, nfirst, nlast, ptot, p, w, w, w, 0_c_int, f_gpu)
     if (.not. ok) then
@@ -248,10 +248,10 @@ contains
       wk(i) = 2.0d-3 * dble(i)
     end do
 
-    nfirst = [3_c_int, 1_c_int]
-    nlast  = [4_c_int, 2_c_int]
+    nfirst = [1_c_int, 3_c_int]
+    nlast  = [2_c_int, 4_c_int]
 
-    call cpu_fock_periodic(3, 4, 1, 2, ptot, p, wj, wk, f_cpu)
+    call cpu_fock_periodic(nfirst(2), nlast(2), nfirst(1), nlast(1), ptot, p, wj, wk, f_cpu)
 
     ok = mopac_cuda_fock2_scf(4, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, 1_c_int, f_gpu)
     if (.not. ok) then
