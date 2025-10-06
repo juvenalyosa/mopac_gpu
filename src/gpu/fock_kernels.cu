@@ -592,15 +592,15 @@ __device__ void fock_pair_general(int ia, int ib, int ja, int jb,
                                  const double *w, double *f, int dbg_tid = -1) {
   if (!w || !ptot || !p || !f) {
     if (dbg_tid >= 0 && dbg_tid < 2) {
-      printf("[GPU LL] null ptr check w=%p ptot=%p p=%p f=%p\n",
+      printf("[GPU GEN] null ptr check w=%p ptot=%p p=%p f=%p\n",
              (const void*)w, (const void*)ptot, (const void*)p, (void*)f);
     }
     return;
   }
   if (dbg_tid >= 0 && dbg_tid < 2) {
-    f[ii] = -999.0;
-    printf("[GPU LL] entry ptrs w=%p ptot=%p p=%p f=%p\n",
-           (const void*)w, (const void*)ptot, (const void*)p, (void*)f);
+    printf("[GPU GEN] entry ptrs w=%p ptot=%p p=%p f=%p ia=%d ib=%d ja=%d jb=%d\n",
+           (const void*)w, (const void*)ptot, (const void*)p, (void*)f,
+           ia, ib, ja, jb);
   }
   int span_i = span_count(ia, ib);
   int span_j = span_count(ja, jb);
