@@ -65,6 +65,51 @@ enum PairTypeCodes {
   PAIR_GENERAL = 4,
   PAIR_PERIODIC = 5
 };
+
+static constexpr int JAB_SUMA_MAP[10][16] = {
+  { 0, 10, 30, 60, 10, 20, 40, 70, 30, 40, 50, 80, 60, 70, 80, 90 },
+  { 1, 11, 31, 61, 11, 21, 41, 71, 31, 41, 51, 81, 61, 71, 81, 91 },
+  { 2, 12, 32, 62, 12, 22, 42, 72, 32, 42, 52, 82, 62, 72, 82, 92 },
+  { 3, 13, 33, 63, 13, 23, 43, 73, 33, 43, 53, 83, 63, 73, 83, 93 },
+  { 4, 14, 34, 64, 14, 24, 44, 74, 34, 44, 54, 84, 64, 74, 84, 94 },
+  { 5, 15, 35, 65, 15, 25, 45, 75, 35, 45, 55, 85, 65, 75, 85, 95 },
+  { 6, 16, 36, 66, 16, 26, 46, 76, 36, 46, 56, 86, 66, 76, 86, 96 },
+  { 7, 17, 37, 67, 17, 27, 47, 77, 37, 47, 57, 87, 67, 77, 87, 97 },
+  { 8, 18, 38, 68, 18, 28, 48, 78, 38, 48, 58, 88, 68, 78, 88, 98 },
+  { 9, 19, 39, 69, 19, 29, 49, 79, 39, 49, 59, 89, 69, 79, 89, 99 },
+};
+
+static constexpr int JAB_SUMB_MAP[10][16] = {
+  { 0, 1, 3, 6, 1, 2, 4, 7, 3, 4, 5, 8, 6, 7, 8, 9 },
+  { 10, 11, 13, 16, 11, 12, 14, 17, 13, 14, 15, 18, 16, 17, 18, 19 },
+  { 20, 21, 23, 26, 21, 22, 24, 27, 23, 24, 25, 28, 26, 27, 28, 29 },
+  { 30, 31, 33, 36, 31, 32, 34, 37, 33, 34, 35, 38, 36, 37, 38, 39 },
+  { 40, 41, 43, 46, 41, 42, 44, 47, 43, 44, 45, 48, 46, 47, 48, 49 },
+  { 50, 51, 53, 56, 51, 52, 54, 57, 53, 54, 55, 58, 56, 57, 58, 59 },
+  { 60, 61, 63, 66, 61, 62, 64, 67, 63, 64, 65, 68, 66, 67, 68, 69 },
+  { 70, 71, 73, 76, 71, 72, 74, 77, 73, 74, 75, 78, 76, 77, 78, 79 },
+  { 80, 81, 83, 86, 81, 82, 84, 87, 83, 84, 85, 88, 86, 87, 88, 89 },
+  { 90, 91, 93, 96, 91, 92, 94, 97, 93, 94, 95, 98, 96, 97, 98, 99 },
+};
+
+static constexpr int KAB_SUM_MAP[16][16] = {
+  { 0, 1, 3, 6, 10, 11, 13, 16, 30, 31, 33, 36, 60, 61, 63, 66 },
+  { 1, 2, 4, 7, 11, 12, 14, 17, 31, 32, 34, 37, 61, 62, 64, 67 },
+  { 3, 4, 5, 8, 13, 14, 15, 18, 33, 34, 35, 38, 63, 64, 65, 68 },
+  { 6, 7, 8, 9, 16, 17, 18, 19, 36, 37, 38, 39, 66, 67, 68, 69 },
+  { 10, 11, 13, 16, 20, 21, 23, 26, 40, 41, 43, 46, 70, 71, 73, 76 },
+  { 11, 12, 14, 17, 21, 22, 24, 27, 41, 42, 44, 47, 71, 72, 74, 77 },
+  { 13, 14, 15, 18, 23, 24, 25, 28, 43, 44, 45, 48, 73, 74, 75, 78 },
+  { 16, 17, 18, 19, 26, 27, 28, 29, 46, 47, 48, 49, 76, 77, 78, 79 },
+  { 30, 31, 33, 36, 40, 41, 43, 46, 50, 51, 53, 56, 80, 81, 83, 86 },
+  { 31, 32, 34, 37, 41, 42, 44, 47, 51, 52, 54, 57, 81, 82, 84, 87 },
+  { 33, 34, 35, 38, 43, 44, 45, 48, 53, 54, 55, 58, 83, 84, 85, 88 },
+  { 36, 37, 38, 39, 46, 47, 48, 49, 56, 57, 58, 59, 86, 87, 88, 89 },
+  { 60, 61, 63, 66, 70, 71, 73, 76, 80, 81, 83, 86, 90, 91, 93, 96 },
+  { 61, 62, 64, 67, 71, 72, 74, 77, 81, 82, 84, 87, 91, 92, 94, 97 },
+  { 63, 64, 65, 68, 73, 74, 75, 78, 83, 84, 85, 88, 93, 94, 95, 98 },
+  { 66, 67, 68, 69, 76, 77, 78, 79, 86, 87, 88, 89, 96, 97, 98, 99 },
+};
 __device__ __constant__ int c_jindex[256];
 static int jindex_ready = 0;
 static std::array<int,256> host_jindex;
@@ -217,33 +262,64 @@ static inline void host_pair_general(int ia, int ib, int ja, int jb,
                                      const double *w_block,
                                      double *f_host) {
   if (!w_block) return;
-  int kr = 0;
-  for (int i = ia; i <= ib; ++i) {
-    for (int j = ia; j <= i; ++j) {
-      double aa = (i == j) ? 1.0 : 2.0;
-      size_t ij = packed_index_host(i, j);
-      for (int k = ja; k <= jb; ++k) {
-        for (int l = ja; l <= k; ++l) {
-          double bb = (k == l) ? 1.0 : 2.0;
-          size_t kl = packed_index_host(k, l);
-          double a = w_block[kr++];
-          f_host[ij] += bb * a * ptot[kl];
-          f_host[kl] += aa * a * ptot[ij];
-          double exch = a * aa * bb * 0.25;
-          if (i >= k && j >= l) {
+  int span_i = span_count(ia, ib);
+  int span_j = span_count(ja, jb);
+  if (span_i <= 0 || span_j <= 0) return;
+
+  if (ia > ja) {
+    size_t kr = 0;
+    for (int i = ia; i <= ib; ++i) {
+      for (int j = ia; j <= i; ++j) {
+        double aa = (i == j) ? 1.0 : 2.0;
+        size_t ij = packed_index_host(i, j);
+        for (int k = ja; k <= jb; ++k) {
+          for (int l = ja; l <= k; ++l) {
+            double bb = (k == l) ? 1.0 : 2.0;
+            size_t kl = packed_index_host(k, l);
+            double a = w_block[kr++];
+            f_host[ij] += bb * a * ptot[kl];
+            f_host[kl] += aa * a * ptot[ij];
+            double exch = a * aa * bb * 0.25;
             size_t ik = packed_index_host(i, k);
-            size_t jl = packed_index_host(j, l);
-            f_host[ik] -= exch * p[jl];
-          }
-          if (i >= l && j >= k) {
             size_t il = packed_index_host(i, l);
             size_t jk = packed_index_host(j, k);
+            size_t jl = packed_index_host(j, l);
+            f_host[ik] -= exch * p[jl];
             f_host[il] -= exch * p[jk];
             f_host[jk] -= exch * p[il];
+            f_host[jl] -= exch * p[ik];
           }
-          if (j >= l && i >= k) {
-            size_t jl = packed_index_host(j, l);
+        }
+      }
+    }
+  } else {
+    int nn = pair_count(span_j);
+    if (nn <= 0) return;
+    int n1 = 0;
+    for (int i = ja; i <= jb; ++i) {
+      for (int j = ja; j <= i; ++j) {
+        ++n1;
+        double aa = (i == j) ? 1.0 : 2.0;
+        size_t ij = packed_index_host(i, j);
+        int n2 = 0;
+        for (int k = ia; k <= ib; ++k) {
+          for (int l = ia; l <= k; ++l) {
+            ++n2;
+            double bb = (k == l) ? 1.0 : 2.0;
+            size_t kl = packed_index_host(k, l);
+            size_t idx = static_cast<size_t>(n2 - 1) * static_cast<size_t>(nn)
+                       + static_cast<size_t>(n1 - 1);
+            double a = w_block[idx];
+            f_host[ij] += bb * a * ptot[kl];
+            f_host[kl] += aa * a * ptot[ij];
+            double exch = a * aa * bb * 0.25;
             size_t ik = packed_index_host(i, k);
+            size_t il = packed_index_host(i, l);
+            size_t jk = packed_index_host(j, k);
+            size_t jl = packed_index_host(j, l);
+            f_host[ik] -= exch * p[jl];
+            f_host[il] -= exch * p[jk];
+            f_host[jk] -= exch * p[il];
             f_host[jl] -= exch * p[ik];
           }
         }
@@ -303,6 +379,99 @@ static inline void host_pair_heavy_light(int heavy_start, int heavy_end, int lig
     }
     table_index += span;
     f_host[idx_il] -= acc;
+  }
+}
+
+static inline void host_pair_heavy_heavy(int ia, int ib, int ja, int jb,
+                                         const double *ptot, const double *p,
+                                         const double *w_block,
+                                         double *f_host) {
+  if (!w_block || !ptot || !p || !f_host) return;
+  int span_i = span_count(ia, ib);
+  int span_j = span_count(ja, jb);
+  if (span_i != 4 || span_j != 4) {
+    host_pair_general(ia, ib, ja, jb, ptot, p, w_block, f_host);
+    return;
+  }
+
+  double p_block_a[16];
+  double p_block_b[16];
+  double p_cross[16];
+
+  int idx = 0;
+  for (int row = ia; row <= ib; ++row) {
+    for (int col = ia; col <= ib; ++col) {
+      p_block_a[idx++] = ptot[packed_index_host(row, col)];
+    }
+  }
+
+  idx = 0;
+  for (int row = ja; row <= jb; ++row) {
+    for (int col = ja; col <= jb; ++col) {
+      p_block_b[idx++] = ptot[packed_index_host(row, col)];
+    }
+  }
+
+  idx = 0;
+  for (int row = ia; row <= ib; ++row) {
+    for (int col = ja; col <= jb; ++col) {
+      size_t packed = packed_index_host(row, col);
+      p_cross[idx++] = p[packed];
+    }
+  }
+
+  double suma[10];
+  double sumb[10];
+  for (int row = 0; row < 10; ++row) {
+    double sa = 0.0;
+    double sb = 0.0;
+    for (int col = 0; col < 16; ++col) {
+      sa += p_block_a[col] * w_block[JAB_SUMA_MAP[row][col]];
+      sb += p_block_b[col] * w_block[JAB_SUMB_MAP[row][col]];
+    }
+    suma[row] = sa;
+    sumb[row] = sb;
+  }
+
+  int pair_idx = 0;
+  for (int offset = 0; offset < span_i; ++offset) {
+    int orb_a = ia + offset;
+    int orb_b = ja + offset;
+    for (int inner = 0; inner <= offset; ++inner) {
+      int orb_a_j = ia + inner;
+      int orb_b_j = ja + inner;
+      size_t idx_a = packed_index_host(orb_a, orb_a_j);
+      size_t idx_b = packed_index_host(orb_b, orb_b_j);
+      f_host[idx_a] += sumb[pair_idx];
+      f_host[idx_b] += suma[pair_idx];
+      ++pair_idx;
+    }
+  }
+
+  double sums[16];
+  for (int row = 0; row < 16; ++row) {
+    double total = 0.0;
+    for (int col = 0; col < 16; ++col) {
+      total += p_cross[col] * w_block[KAB_SUM_MAP[row][col]];
+    }
+    sums[row] = total;
+  }
+
+  int sum_idx = 0;
+  if (ia > ja) {
+    for (int i = ia; i <= ib; ++i) {
+      for (int j = ja; j <= jb; ++j) {
+        size_t pos = packed_index_host(i, j);
+        f_host[pos] -= sums[sum_idx++];
+      }
+    }
+  } else {
+    for (int i = ia; i <= ib; ++i) {
+      for (int j = ja; j <= jb; ++j) {
+        size_t pos = packed_index_host(j, i);
+        f_host[pos] -= sums[sum_idx++];
+      }
+    }
   }
 }
 
@@ -409,37 +578,67 @@ __host__ __device__ inline int packed_index_zero(int a, int b) {
   return static_cast<int>(mopac_gpu::packed_index(a, b));
 }
 
-__device__ void fock_pair_update(int ia, int ib, int ja, int jb,
+__device__ void fock_pair_general(int ia, int ib, int ja, int jb,
                                  const double *ptot, const double *p,
                                  const double *w, double *f) {
   if (!w || !ptot || !p || !f) return;
-  int kr = 0;
-  for (int i = ia; i <= ib; ++i) {
-    for (int j = ia; j <= i; ++j) {
-      double aa = (i == j) ? 1.0 : 2.0;
-      int ij = packed_index_zero(i, j);
-      for (int k = ja; k <= jb; ++k) {
-        for (int l = ja; l <= k; ++l) {
-          double bb = (k == l) ? 1.0 : 2.0;
-          int kl = packed_index_zero(k, l);
-          double a = w[kr++];
-          atomicAdd_double(&f[ij], bb * a * ptot[kl]);
-          atomicAdd_double(&f[kl], aa * a * ptot[ij]);
-          double exch = a * aa * bb * 0.25;
-          if (i >= k && j >= l) {
+  int span_i = span_count(ia, ib);
+  int span_j = span_count(ja, jb);
+  if (span_i <= 0 || span_j <= 0) return;
+
+  if (ia > ja) {
+    int kr = 0;
+    for (int i = ia; i <= ib; ++i) {
+      for (int j = ia; j <= i; ++j) {
+        double aa = (i == j) ? 1.0 : 2.0;
+        int ij = packed_index_zero(i, j);
+        for (int k = ja; k <= jb; ++k) {
+          for (int l = ja; l <= k; ++l) {
+            double bb = (k == l) ? 1.0 : 2.0;
+            int kl = packed_index_zero(k, l);
+            double a = w[kr++];
+            atomicAdd_double(&f[ij], bb * a * ptot[kl]);
+            atomicAdd_double(&f[kl], aa * a * ptot[ij]);
+            double exch = a * aa * bb * 0.25;
             int ik = packed_index_zero(i, k);
-            int jl = packed_index_zero(j, l);
-            atomicAdd_double(&f[ik], -exch * p[jl]);
-          }
-          if (i >= l && j >= k) {
             int il = packed_index_zero(i, l);
             int jk = packed_index_zero(j, k);
+            int jl = packed_index_zero(j, l);
+            atomicAdd_double(&f[ik], -exch * p[jl]);
             atomicAdd_double(&f[il], -exch * p[jk]);
             atomicAdd_double(&f[jk], -exch * p[il]);
+            atomicAdd_double(&f[jl], -exch * p[ik]);
           }
-          if (j >= l && i >= k) {
-            int jl = packed_index_zero(j, l);
+        }
+      }
+    }
+  } else {
+    int nn = pair_count(span_j);
+    if (nn <= 0) return;
+    int n1 = 0;
+    for (int i = ja; i <= jb; ++i) {
+      for (int j = ja; j <= i; ++j) {
+        ++n1;
+        double aa = (i == j) ? 1.0 : 2.0;
+        int ij = packed_index_zero(i, j);
+        int n2 = 0;
+        for (int k = ia; k <= ib; ++k) {
+          for (int l = ia; l <= k; ++l) {
+            ++n2;
+            double bb = (k == l) ? 1.0 : 2.0;
+            int kl = packed_index_zero(k, l);
+            int idx = (n2 - 1) * nn + (n1 - 1);
+            double a = w[idx];
+            atomicAdd_double(&f[ij], bb * a * ptot[kl]);
+            atomicAdd_double(&f[kl], aa * a * ptot[ij]);
+            double exch = a * aa * bb * 0.25;
             int ik = packed_index_zero(i, k);
+            int il = packed_index_zero(i, l);
+            int jk = packed_index_zero(j, k);
+            int jl = packed_index_zero(j, l);
+            atomicAdd_double(&f[ik], -exch * p[jl]);
+            atomicAdd_double(&f[il], -exch * p[jk]);
+            atomicAdd_double(&f[jk], -exch * p[il]);
             atomicAdd_double(&f[jl], -exch * p[ik]);
           }
         }
@@ -458,7 +657,6 @@ __device__ inline void fock_pair_light_light(int ia, int ja,
   int jj = packed_index_zero(ja, ja);
   int ij = (ia >= ja) ? packed_index_zero(ia, ja)
                       : packed_index_zero(ja, ia);
-  atomicAdd_double(&f[0], 1.0);
   atomicAdd_double(&f[ii], val * ptot[jj]);
   atomicAdd_double(&f[jj], val * ptot[ii]);
   atomicAdd_double(&f[ij], -val * p[ij]);
@@ -522,6 +720,100 @@ __device__ inline void fock_pair_heavy_light(int heavy_start, int heavy_end, int
     atomicAdd_double(&f[idx_il], -acc);
     if (dbg_tid >= 0 && dbg_tid < 2) {
       printf("[GPU heavy-light] rel=%d acc=% .5e\n", rel, acc);
+    }
+  }
+}
+
+__device__ void fock_pair_heavy_heavy(int ia, int ib, int ja, int jb,
+                                      const double *ptot, const double *p,
+                                      const double *w_block,
+                                      double *f) {
+  if (!w_block || !ptot || !p || !f) return;
+  int span_i = span_count(ia, ib);
+  int span_j = span_count(ja, jb);
+  if (span_i != 4 || span_j != 4) {
+    fock_pair_general(ia, ib, ja, jb, ptot, p, w_block, f);
+    return;
+  }
+
+  double p_block_a[16];
+  double p_block_b[16];
+  double p_cross[16];
+
+  int idx = 0;
+  for (int row = ia; row <= ib; ++row) {
+    for (int col = ia; col <= ib; ++col) {
+      p_block_a[idx++] = ptot[packed_index_zero(row, col)];
+    }
+  }
+
+  idx = 0;
+  for (int row = ja; row <= jb; ++row) {
+    for (int col = ja; col <= jb; ++col) {
+      p_block_b[idx++] = ptot[packed_index_zero(row, col)];
+    }
+  }
+
+  idx = 0;
+  for (int row = ia; row <= ib; ++row) {
+    for (int col = ja; col <= jb; ++col) {
+      int packed = (row >= col) ? packed_index_zero(row, col)
+                                : packed_index_zero(col, row);
+      p_cross[idx++] = p[packed];
+    }
+  }
+
+  double suma[10];
+  double sumb[10];
+  for (int row = 0; row < 10; ++row) {
+    double sa = 0.0;
+    double sb = 0.0;
+    for (int col = 0; col < 16; ++col) {
+      sa += p_block_a[col] * w_block[JAB_SUMA_MAP[row][col]];
+      sb += p_block_b[col] * w_block[JAB_SUMB_MAP[row][col]];
+    }
+    suma[row] = sa;
+    sumb[row] = sb;
+  }
+
+  int pair_idx = 0;
+  for (int offset = 0; offset < span_i; ++offset) {
+    int orb_a = ia + offset;
+    int orb_b = ja + offset;
+    for (int inner = 0; inner <= offset; ++inner) {
+      int orb_a_j = ia + inner;
+      int orb_b_j = ja + inner;
+      int idx_a = packed_index_zero(orb_a, orb_a_j);
+      int idx_b = packed_index_zero(orb_b, orb_b_j);
+      atomicAdd_double(&f[idx_a], sumb[pair_idx]);
+      atomicAdd_double(&f[idx_b], suma[pair_idx]);
+      ++pair_idx;
+    }
+  }
+
+  double sums[16];
+  for (int row = 0; row < 16; ++row) {
+    double total = 0.0;
+    for (int col = 0; col < 16; ++col) {
+      total += p_cross[col] * w_block[KAB_SUM_MAP[row][col]];
+    }
+    sums[row] = total;
+  }
+
+  int sum_idx = 0;
+  if (ia > ja) {
+    for (int i = ia; i <= ib; ++i) {
+      for (int j = ja; j <= jb; ++j) {
+        int pos = packed_index_zero(i, j);
+        atomicAdd_double(&f[pos], -sums[sum_idx++]);
+      }
+    }
+  } else {
+    for (int i = ia; i <= ib; ++i) {
+      for (int j = ja; j <= jb; ++j) {
+        int pos = packed_index_zero(j, i);
+        atomicAdd_double(&f[pos], -sums[sum_idx++]);
+      }
     }
   }
 }
@@ -615,13 +907,16 @@ __global__ void fock_pairs_kernel(int npairs,
       fock_pair_heavy_light(ja, jb, ia, ptot, p, w_block, f, debug_flag ? tid : -1);
       break;
     case PAIR_HEAVY_HEAVY:
-      fock_pair_update(ia, ib, ja, jb, ptot, p, w_block, f);
+      fock_pair_heavy_heavy(ia, ib, ja, jb, ptot, p, w_block, f);
+      break;
+    case PAIR_GENERAL:
+      fock_pair_general(ia, ib, ja, jb, ptot, p, w_block, f);
       break;
     case PAIR_PERIODIC:
       fock_pair_periodic(ia, ib, ja, jb, ptot, p, wj_block, wk_block, f);
       break;
     default:
-      fock_pair_update(ia, ib, ja, jb, ptot, p, w_block, f);
+      fock_pair_general(ia, ib, ja, jb, ptot, p, w_block, f);
       break;
   }
 }
@@ -963,8 +1258,10 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
           host_pair_light_light(ia, ja, ptot, p, w_host, f_host.data());
           break;
         case PAIR_GENERAL:
-        case PAIR_HEAVY_HEAVY:
           host_pair_general(ia, ib, ja, jb, ptot, p, w_host, f_host.data());
+          break;
+        case PAIR_HEAVY_HEAVY:
+          host_pair_heavy_heavy(ia, ib, ja, jb, ptot, p, w_host, f_host.data());
           break;
         case PAIR_HEAVY_LIGHT:
           host_pair_heavy_light(ia, ib, ja, ptot, p, w_host, f_host.data());
