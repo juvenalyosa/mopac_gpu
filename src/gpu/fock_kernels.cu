@@ -666,12 +666,18 @@ __device__ inline void fock_pair_light_light(int ia, int ja,
   int jj = packed_index_zero(ja, ja);
   int ij = (ia >= ja) ? packed_index_zero(ia, ja)
                       : packed_index_zero(ja, ia);
-  atomicAdd_double(&f[ii], val * ptot[jj]);
-  atomicAdd_double(&f[jj], val * ptot[ii]);
-  atomicAdd_double(&f[ij], -val * p[ij]);
+  double contrib_ii = val * ptot[jj];
+  double contrib_jj = val * ptot[ii];
+  double contrib_ij = -val * p[ij];
+  f[ii] += contrib_ii;
+  f[jj] += contrib_jj;
+  f[ij] += contrib_ij;
   if (dbg_tid >= 0 && dbg_tid < 2) {
-    printf("[GPU] LL tid=%d val=% .5e f[ii]=% .5e f[jj]=% .5e f[ij]=% .5e\n",
-           dbg_tid, val, f[ii], f[jj], f[ij]);
+    printf("[GPU LL] tid=%d val=% .5e ptrs(w=%p ptot=%p p=%p f=%p) ii=%d jj=%d ij=%d contribs=% .5e % .5e % .5e\n",
+           dbg_tid, val, (const void*)w, (const void*)ptot, (const void*)p, (void*)f,
+           ii, jj, ij, contrib_ii, contrib_jj, contrib_ij);
+    printf("[GPU LL] after f[ii]=% .5e f[jj]=% .5e f[ij]=% .5e\n",
+           f[ii], f[jj], f[ij]);
   }
 }
 
