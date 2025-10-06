@@ -672,14 +672,18 @@ __device__ inline void fock_pair_light_light(int ia, int ja,
                                              const double *w, double *f,
                                              int dbg_tid) {
   if (dbg_tid >= 0 && dbg_tid < 2) {
-    printf("[GPU LL] entry w=%p ptot=%p p=%p f=%p\n",
-           (const void*)w, (const void*)ptot, (const void*)p, (void*)f);
+    printf("[GPU LL] tid=%d entry w=%p ptot=%p p=%p f=%p\n",
+           dbg_tid, (const void*)w, (const void*)ptot, (const void*)p, (void*)f);
   }
   if (!w || !ptot || !p || !f) {
     if (dbg_tid >= 0 && dbg_tid < 2) {
       printf("[GPU LL] null ptr abort\n");
     }
     return;
+  }
+  if (dbg_tid >= 0 && dbg_tid < 2) {
+    printf("[GPU LL] tid=%d w0=% .5e ii_ptr=%p\n",
+           dbg_tid, w[0], (void*)f);
   }
   double val = w[0];
   int ii = packed_index_zero(ia, ia);
@@ -931,8 +935,9 @@ __global__ void fock_pairs_kernel(int npairs,
   const double *wk_block = (wk && pair_wk_off) ? (wk + pair_wk_off[tid]) : nullptr;
 
   if (debug_flag && tid < 5) {
-    printf("[GPU resident debug] kernel tid=%d ii=%d jj=%d type=%d ia=%d ib=%d ja=%d jb=%d\n",
-           tid, ii, jj, type, ia, ib, ja, jb);
+    printf("[GPU kernel] tid=%d ii=%d jj=%d type=%d ia=%d ib=%d ja=%d jb=%d f=%p w=%p wj=%p wk=%p\n",
+           tid, ii, jj, type, ia, ib, ja, jb, (void*)f,
+           (const void*)w_block, (const void*)wj_block, (const void*)wk_block);
   }
 
   switch (type) {
