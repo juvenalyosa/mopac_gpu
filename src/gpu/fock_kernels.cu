@@ -677,6 +677,10 @@ __device__ inline void fock_pair_light_light(int ia, int ja,
   int jj = packed_index_zero(ja, ja);
   int ij = (ia >= ja) ? packed_index_zero(ia, ja)
                       : packed_index_zero(ja, ia);
+  f[ii] = 111.0;
+  f[jj] = 222.0;
+  f[ij] = 333.0;
+  return;
   double contrib_ii = val * ptot[jj];
   double contrib_jj = val * ptot[ii];
   double contrib_ij = -val * p[ij];
