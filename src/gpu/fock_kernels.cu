@@ -76,6 +76,8 @@ static int th_ll MOPAC_UNUSED = 64;
 static int th_lh MOPAC_UNUSED = 32;
 static int th_hh MOPAC_UNUSED = 16;
 static int th_inited MOPAC_UNUSED = 0;
+static int verify_fock_inited = 0;
+static int verify_fock_enabled = 0;
 // Profiling accumulators
 static long long prof_atoms = 0;
 static long long prof_ll_pairs = 0, prof_lh_pairs = 0, prof_hh_pairs = 0;
@@ -149,6 +151,22 @@ static inline void ensure_profile_collect() {
     prof_inited = 1;
   }
 }
+
+static inline bool fock_verification_enabled() {
+  if (!verify_fock_inited) {
+    const char* s = std::getenv("MOPAC_GPU_VERIFY_FOCK");
+    if (s && *s) {
+      if (!(std::strcmp(s, "0") == 0 || std::strcmp(s, "off") == 0 ||
+            std::strcmp(s, "false") == 0 || std::strcmp(s, "n") == 0 ||
+            std::strcmp(s, "N") == 0)) {
+        verify_fock_enabled = 1;
+      }
+    }
+    verify_fock_inited = 1;
+  }
+  return verify_fock_enabled != 0;
+}
+
 static inline bool ensure_buf_int(int **ptr, size_t *cap_elems, size_t need_elems) {
   if (*cap_elems < need_elems) {
     if (*ptr) cudaFree(*ptr);
@@ -922,51 +940,47 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
     }
   }
 
-  // CPU-side mirror for basic pair types (light-light and general two-centre)
-  std::vector<double> f_host(mpack_e, 0.0);
-  bool fallback_required = false;
-  for (size_t idx = 0; idx < pair_i.size(); ++idx) {
-    int type = pair_type[idx];
-    int ii = pair_i[idx];
-    int jj = pair_j[idx];
-    int ia = nfirst[ii - 1];
-    int ib = nlast[ii - 1];
-    int ja = nfirst[jj - 1];
-    int jb = nlast[jj - 1];
-    const double *w_host = (w && pair_w_off.size() > idx) ? (w + pair_w_off[idx]) : nullptr;
-    const double *wj_host = (wj && pair_wj_off.size() > idx) ? (wj + pair_wj_off[idx]) : nullptr;
-    const double *wk_host = (wk && pair_wk_off.size() > idx) ? (wk + pair_wk_off[idx]) : nullptr;
-    switch (type) {
-      case PAIR_LIGHT_LIGHT:
-        host_pair_light_light(ia, ja, ptot, p, w_host, f_host.data());
-        break;
-      case PAIR_GENERAL:
-        host_pair_general(ia, ib, ja, jb, ptot, p, w_host, f_host.data());
-        break;
-      case PAIR_HEAVY_HEAVY:
-        host_pair_general(ia, ib, ja, jb, ptot, p, w_host, f_host.data());
-        break;
-      case PAIR_HEAVY_LIGHT:
-        host_pair_heavy_light(ia, ib, ja, ptot, p, w_host, f_host.data());
-        break;
-      case PAIR_LIGHT_HEAVY:
-        host_pair_heavy_light(ja, jb, ia, ptot, p, w_host, f_host.data());
-        break;
-      case PAIR_PERIODIC:
-        host_pair_periodic(ia, ib, ja, jb, ptot, p, wj_host, wk_host, f_host.data());
-        break;
-      default:
-        fallback_required = true;
-        break;
+  bool want_verify = fock_verification_enabled() || resident_debug_enabled_local();
+  std::vector<double> f_host;
+  if (want_verify) f_host.assign(mpack_e, 0.0);
+  bool unsupported_kind = false;
+  if (want_verify) {
+    for (size_t idx = 0; idx < pair_i.size(); ++idx) {
+      int type = pair_type[idx];
+      int ii = pair_i[idx];
+      int jj = pair_j[idx];
+      int ia = nfirst[ii - 1];
+      int ib = nlast[ii - 1];
+      int ja = nfirst[jj - 1];
+      int jb = nlast[jj - 1];
+      const double *w_host = (w && pair_w_off.size() > idx) ? (w + pair_w_off[idx]) : nullptr;
+      const double *wj_host = (wj && pair_wj_off.size() > idx) ? (wj + pair_wj_off[idx]) : nullptr;
+      const double *wk_host = (wk && pair_wk_off.size() > idx) ? (wk + pair_wk_off[idx]) : nullptr;
+      switch (type) {
+        case PAIR_LIGHT_LIGHT:
+          host_pair_light_light(ia, ja, ptot, p, w_host, f_host.data());
+          break;
+        case PAIR_GENERAL:
+        case PAIR_HEAVY_HEAVY:
+          host_pair_general(ia, ib, ja, jb, ptot, p, w_host, f_host.data());
+          break;
+        case PAIR_HEAVY_LIGHT:
+          host_pair_heavy_light(ia, ib, ja, ptot, p, w_host, f_host.data());
+          break;
+        case PAIR_LIGHT_HEAVY:
+          host_pair_heavy_light(ja, jb, ia, ptot, p, w_host, f_host.data());
+          break;
+        case PAIR_PERIODIC:
+          host_pair_periodic(ia, ib, ja, jb, ptot, p, wj_host, wk_host, f_host.data());
+          break;
+        default:
+          unsupported_kind = true;
+          break;
+      }
+      if (unsupported_kind) break;
     }
-    if (fallback_required) break;
   }
-
-  bool have_reference = !fallback_required && !pair_i.empty();
-  if (fallback_required) {
-    std::copy(f_host.begin(), f_host.end(), fout);
-    return true;
-  }
+  if (unsupported_kind) return false;
 
   if (pair_i.size() > max_index) return false;
 
@@ -1113,17 +1127,15 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
     mopac_cuda_clear_fock_cache();
   }
 
-  if (have_reference) {
+  if (want_verify && !f_host.empty()) {
     double max_diff = 0.0;
     for (size_t k = 0; k < mpack_e; ++k) {
       double diff = std::abs(fout[k] - f_host[k]);
       if (diff > max_diff) max_diff = diff;
     }
     if (max_diff > 1.0e-9) {
-      if (resident_debug_enabled_local()) {
-        std::printf("[GPU reference check] max diff=% .5e\n", max_diff);
-      }
-      std::copy(f_host.begin(), f_host.end(), fout);
+      std::printf("[GPU FOCK verify] max diff=% .5e\n", max_diff);
+      return false;
     }
   }
 

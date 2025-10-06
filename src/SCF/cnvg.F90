@@ -18,6 +18,10 @@
 !   M o d u l e s
 !-----------------------------------------------
       use molkst_C, only : norbs, numcal, keywrd, mpack, method_indo
+#ifdef GPU
+      use mod_vars_cuda, only : resident_scf
+      use gpu_density_interfaces, only : mopac_cuda_update_density_from_host
+#endif
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -142,4 +146,7 @@
           pnew(j) = p(j)
         end do
       end do
+#ifdef GPU
+      if (resident_scf) call mopac_cuda_update_density_from_host(mpack, p)
+#endif
       end subroutine cnvg

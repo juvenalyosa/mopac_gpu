@@ -31,6 +31,12 @@ module gpu_density_interfaces
       real(c_double)        :: packed(*)
     end subroutine mopac_cuda_register_packed_density
 
+    subroutine mopac_cuda_update_density_from_host(linear, packed) bind(C,name='mopac_cuda_update_density_from_host')
+      import :: c_int, c_double
+      integer(c_int), value :: linear
+      real(c_double), intent(in) :: packed(*)
+    end subroutine mopac_cuda_update_density_from_host
+
     function mopac_cuda_fetch_packed_density(host_ptr, linear) bind(C,name='mopac_cuda_fetch_packed_density') result(ok)
       import :: c_double, c_size_t, c_bool
       real(c_double)        :: host_ptr(*)

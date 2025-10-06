@@ -92,18 +92,26 @@
       lid = (id == 0)
 ! Optional experimental GPU Fock build (scaffold)
 #ifdef GPU
-      ! Default to GPU Fock build when GPU is enabled and this is not a derivative build.
-      ! Allow users to opt-out via MOPAC_NOFOCKGPU (any non-empty value disables),
-      ! or explicitly opt-in via legacy MOPAC_FOCK_GPU (kept for backward compatibility).
+      ! Default to the GPU Fock build when GPU support is available and this is not a derivative build.
+      ! Users can opt out by setting MOPAC_GPU_EXACT_SC to 0/off/false, and the legacy
+      ! MOPAC_FOCK_GPU flag is still accepted for backward compatibility.
       if (.not. deriv) then
         want_gpu = .false.
-        allow_gpu = .false.
+        allow_gpu = .true.
         legacy_env = .false.
 
         envs = 1 ; line8 = ''
         call get_environment_variable('MOPAC_GPU_EXACT_SC', line8, status=envs)
         if (envs == 0) then
-          if (trim(adjustl(line8)) /= '') allow_gpu = .true.
+          line8 = adjustl(line8)
+          if (len_trim(line8) /= 0) then
+            select case (line8(1:1))
+            case ('0','n','N','f','F','o','O')
+              allow_gpu = .false.
+            case default
+              allow_gpu = .true.
+            end select
+          end if
         end if
 
         envs = 1 ; line8 = ''
@@ -112,8 +120,10 @@
           if (trim(adjustl(line8)) /= '') legacy_env = .true.
         end if
 
-        if (legacy_env .and. .not. allow_gpu) then
-          write(iw,'(1x,a)') '[GPU FOCK] ignoring legacy MOPAC_FOCK_GPU – enable MOPAC_GPU_EXACT_SC for the new path'
+        if (.not. allow_gpu .and. .not. legacy_env) then
+          write(iw,'(1x,a)') '[GPU FOCK] GPU path disabled by MOPAC_GPU_EXACT_SC value'
+        else if (legacy_env .and. .not. allow_gpu) then
+          write(iw,'(1x,a)') '[GPU FOCK] legacy MOPAC_FOCK_GPU request ignored – unset it or enable the GPU path explicitly'
         end if
 
         want_gpu = allow_gpu
@@ -124,7 +134,7 @@
           if (ok) then
             return
           else
-            write(iw,'(1x,a)') '[GPU FOCK] experimental path unavailable – reverting to CPU reference implementation'
+            write(iw,'(1x,a)') '[GPU FOCK] device path reported an error – reverting to CPU implementation'
           end if
         end if
       end if

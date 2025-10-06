@@ -38,11 +38,13 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       logical :: legacy_env
       character(len=32) :: env_resident
       logical :: debug_density
+      logical :: verify_density
       character(len=32) :: env_debug
       double precision, allocatable :: pp_ref(:)
       double precision, allocatable :: pp_dev(:)
       double precision, allocatable :: xmat_ref(:,:)
       double precision :: diff, max_diff, rms_acc, max_dev, rms_dev
+      logical :: verification_failed
       integer :: idx, info_ref
       logical(c_bool) :: ok_dev
 #endif
@@ -72,7 +74,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       ! Allow runtime override to force CPU density even when lgpu is true
 #ifdef GPU
       iopc_eff = iopc
-      allow_gpu = .false.
+      allow_gpu = .true.
       legacy_env = .false.
       env_cpu = '' ; istat_env = 1
       call get_environment_variable('MOPAC_CPU_DENSITY', env_cpu, status=istat_env)
@@ -80,11 +82,20 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
         if (trim(adjustl(env_cpu)) /= '') then
           if (iopc == 4) iopc_eff = 5   ! GPU DSYRK -> CPU DSYRK
           if (iopc == 2) iopc_eff = 3   ! GPU DGEMM -> CPU DGEMM
+          allow_gpu = .false.
         end if
       end if
       call get_environment_variable('MOPAC_GPU_EXACT_SC', env_cpu, status=istat_env)
       if (istat_env == 0) then
-        if (trim(adjustl(env_cpu)) /= '') allow_gpu = .true.
+        env_cpu = adjustl(env_cpu)
+        if (len_trim(env_cpu) /= 0) then
+          select case (env_cpu(1:1))
+          case ('0','n','N','f','F','o','O')
+            allow_gpu = .false.
+          case default
+            allow_gpu = .true.
+          end select
+        end if
       end if
 
       env_cpu = '' ; istat_env = 1
@@ -93,12 +104,15 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
         if (trim(adjustl(env_cpu)) /= '') legacy_env = .true.
       end if
 
-      if (legacy_env .and. .not. allow_gpu) then
-        write(6,'(1x,a)') '[GPU DENSITY] MOPAC_FOCK_GPU ignored – enable MOPAC_GPU_EXACT_SC to opt into the rewrite'
+      if (.not. allow_gpu .and. .not. legacy_env) then
+        write(6,'(1x,a)') '[GPU DENSITY] GPU path disabled via MOPAC_GPU_EXACT_SC'
+        call flush(6)
+      else if (legacy_env .and. .not. allow_gpu) then
+        write(6,'(1x,a)') '[GPU DENSITY] legacy MOPAC_FOCK_GPU request ignored – enable the GPU path explicitly'
         call flush(6)
       end if
 
-      use_resident = .false.
+      use_resident = allow_gpu
       env_resident = '' ; istat_env = 1
       call get_environment_variable('MOPAC_RESIDENT_SCF', env_resident, status=istat_env)
       if (istat_env == 0) then
@@ -107,6 +121,8 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
           select case (env_resident(1:1))
           case ('0','n','N','f','F','o','O')
             use_resident = .false.
+          case default
+            use_resident = allow_gpu
           end select
           if (len_trim(env_resident) >= 3) then
             if (env_resident(1:3) == 'off' .or. env_resident(1:3) == 'OFF') use_resident = .false.
@@ -116,18 +132,29 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       if (.not. allow_gpu) use_resident = .false.
       gpu_density_used = .false.
       resident_scf = use_resident
-      need_host_density = .not. use_resident
+      need_host_density = .true.
       call mopac_cuda_set_resident_mode(merge(1,0,use_resident))
       debug_density = .false.
+      verify_density = .false.
+      env_debug = '' ; istat_env = 1
+      call get_environment_variable('MOPAC_GPU_VERIFY_DENSITY', env_debug, status=istat_env)
+      if (istat_env == 0) then
+        if (trim(adjustl(env_debug)) /= '') then
+          verify_density = .true.
+          debug_density = .true.
+        end if
+      end if
       env_debug = '' ; istat_env = 1
       call get_environment_variable('MOPAC_GPU_DENSITY_DEBUG', env_debug, status=istat_env)
       if (istat_env == 0) then
         if (trim(adjustl(env_debug)) /= '') debug_density = .true.
       end if
+      if (verify_density) need_host_density = .true.
       if (debug_density) then
         write(6,'(1x,"[GPU density debug] enabled: iopc=",i0)') iopc_eff
         call flush(6)
       end if
+      verification_failed = .false.
       Select case (iopc_eff)
 #else
       Select case (iopc)
@@ -178,17 +205,30 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
                 rms_acc = rms_acc + diff*diff
               end do
               if (mpack > 0) rms_acc = sqrt(rms_acc / mpack)
-              write(*,'(1x,"[GPU density debug] case=2 max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
-              if (max_diff > 1.d-6 .and. mpack >= 5) then
-                write(*,'(1x,"[GPU density debug] case=2 sample",5(1x,1pe12.5))') &
-                     pp(1),pp_ref(1),pp(2),pp_ref(2),pp(3)
+              if (verify_density .and. max_diff > 1.d-9) then
+                write(6,'(1x,"[GPU density verify] case=2 max diff=",1pe12.5)') max_diff
+                call flush(6)
+                verification_failed = .true.
+                pp(:) = pp_ref(:)
+                need_host_density = .true.
+                gpu_density_used = .false.
+                use_resident = .false.
+                resident_scf = .false.
+                call mopac_cuda_set_resident_mode(0)
+                call mopac_cuda_clear_density_cache()
+              else
+                write(*,'(1x,"[GPU density debug] case=2 max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
+                if (max_diff > 1.d-6 .and. mpack >= 5) then
+                  write(*,'(1x,"[GPU density debug] case=2 sample",5(1x,1pe12.5))') &
+                       pp(1),pp_ref(1),pp(2),pp_ref(2),pp(3)
+                end if
+                call flush(6)
               end if
-              call flush(6)
             end if
 #ifdef GPU
-            if (use_resident) then
+            if (.not. verification_failed .and. use_resident) then
               call mopac_cuda_register_packed_density(mpack, pp)
-              if (debug_density) then
+              if (debug_density .and. .not. verification_failed) then
                 allocate(pp_dev(mpack), stat=istat_loc)
                 ok_dev = mopac_cuda_fetch_packed_density(pp_dev, int(mpack, kind=c_size_t))
                 if (ok_dev .eqv. .true._c_bool) then
@@ -284,16 +324,29 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
                 rms_acc = rms_acc + diff*diff
               end do
               if (mpack > 0) rms_acc = sqrt(rms_acc / mpack)
-              write(*,'(1x,"[GPU density debug] case=2b max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
-              if (max_diff > 1.d-6 .and. mpack >= 5) then
-                write(*,'(1x,"[GPU density debug] case=2b sample",5(1x,1pe12.5))') &
-                     pp(1),pp_ref(1),pp(2),pp_ref(2),pp(3)
+              if (verify_density .and. max_diff > 1.d-9) then
+                write(6,'(1x,"[GPU density verify] case=2b max diff=",1pe12.5)') max_diff
+                call flush(6)
+                verification_failed = .true.
+                pp(:) = pp_ref(:)
+                need_host_density = .true.
+                gpu_density_used = .false.
+                use_resident = .false.
+                resident_scf = .false.
+                call mopac_cuda_set_resident_mode(0)
+                call mopac_cuda_clear_density_cache()
+              else
+                write(*,'(1x,"[GPU density debug] case=2b max=",1pe12.5," rms=",1pe12.5)') max_diff, rms_acc
+                if (max_diff > 1.d-6 .and. mpack >= 5) then
+                  write(*,'(1x,"[GPU density debug] case=2b sample",5(1x,1pe12.5))') &
+                       pp(1),pp_ref(1),pp(2),pp_ref(2),pp(3)
+                end if
+                call flush(6)
               end if
-              call flush(6)
               deallocate(pp_ref, xmat_ref, stat=istat_loc)
             end if
 #ifdef GPU
-            if (use_resident) then
+            if (.not. verification_failed .and. use_resident) then
               call mopac_cuda_register_packed_density(mpack, pp)
             else
               call mopac_cuda_clear_density_cache()

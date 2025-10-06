@@ -41,6 +41,7 @@
       use iso_c_binding, only: c_ptr, c_null_ptr, c_associated, c_loc, c_bool, c_size_t
       Use mod_vars_cuda, only: lgpu, real_cuda, prec, resident_scf
       use density_cuda_i
+      use gpu_density_interfaces, only: mopac_cuda_update_density_from_host
       use gpu_diag_state, only: have_device_eigvecs
       use eigenvectors_cuda_mod, only: eigenvectors_CUDA_fetch
       use gpu_runtime_interfaces, only: mopac_cuda_get_density_device_ptr, mopac_cuda_get_fock_device_ptr, &
@@ -1070,18 +1071,21 @@
           i = 1 ; line = ''
           call get_environment_variable('MOPAC_CPU_DENSITY', line, status=i)
           if (i == 0) then
-            if (trim(adjustl(line)) /= '') then
-              call densit (c, norbs, norbs, nalpha, 1.d0, na1el, fract, pa, 1)
+          if (trim(adjustl(line)) /= '') then
+            call densit (c, norbs, norbs, nalpha, 1.d0, na1el, fract, pa, 1)
+#ifdef GPU
+            if (resident_scf) call mopac_cuda_update_density_from_host(mpack, pa)
+#endif
             else
               call density_for_GPU (c, fract, nalpha, nalpha_open, 1.d0, mpack,norbs, 1, pa, iopc_calcp)
 #ifdef GPU
-              if (resident_scf) need_fetch_pa = .true.
+              if (resident_scf) need_fetch_pa = .false.
 #endif
             end if
           else
             call density_for_GPU (c, fract, nalpha, nalpha_open, 1.d0, mpack,norbs, 1, pa, iopc_calcp)
 #ifdef GPU
-            if (resident_scf) need_fetch_pa = .true.
+              if (resident_scf) need_fetch_pa = .false.
 #endif
           end if
           if (modea /= 3 .and. .not. (newdg .and. okpuly)) then
@@ -1095,6 +1099,9 @@
         else
           if (halfe) then
             call densit (c, norbs, norbs, na2el, 2.d0, na1el, fract, p, 1)
+#ifdef GPU
+            if (resident_scf) call mopac_cuda_update_density_from_host(mpack, p)
+#endif
           else
             ! Optional hard override to use CPU density
             i = 1 ; line = ''
@@ -1102,16 +1109,19 @@
             if (i == 0) then
             if (trim(adjustl(line)) /= '') then
               call densit (c, norbs, norbs, na2el, 2.d0, na1el, fract, p, 1)
+#ifdef GPU
+              if (resident_scf) call mopac_cuda_update_density_from_host(mpack, p)
+#endif
             else
               call density_for_GPU (c, fract, na2el, na1el, 2.d0, mpack, norbs, 1, p, iopc_calcp)
 #ifdef GPU
-              if (resident_scf) need_fetch_p = .true.
+              if (resident_scf) need_fetch_p = .false.
 #endif
             end if
           else
             call density_for_GPU (c, fract, na2el, na1el, 2.d0, mpack, norbs, 1, p, iopc_calcp)
 #ifdef GPU
-            if (resident_scf) need_fetch_p = .true.
+            if (resident_scf) need_fetch_p = .false.
 #endif
           end if
         end if
@@ -1245,16 +1255,19 @@
         if (i == 0) then
           if (trim(adjustl(line)) /= '') then
             call densit (cb, norbs, norbs, nbeta, 1.d0, nb1el, fract, pb, 1)
+#ifdef GPU
+            if (resident_scf) call mopac_cuda_update_density_from_host(mpack, pb)
+#endif
           else
             call density_for_GPU (cb, fract, nbeta, nbeta_open, 1.d0, mpack, norbs, 1, pb, iopc_calcp)
 #ifdef GPU
-            if (resident_scf) need_fetch_pb = .true.
+            if (resident_scf) need_fetch_pb = .false.
 #endif
           end if
         else
           call density_for_GPU (cb, fract, nbeta, nbeta_open, 1.d0, mpack, norbs, 1, pb, iopc_calcp)
 #ifdef GPU
-          if (resident_scf) need_fetch_pb = .true.
+          if (resident_scf) need_fetch_pb = .false.
 #endif
         end if
         if (.not.(newdg .and. okpuly)) then

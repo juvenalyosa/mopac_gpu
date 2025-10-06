@@ -2570,6 +2570,42 @@ void mopac_cuda_density_add_diag(int n, double value) {
   invalidate_packed_density();
 }
 
+extern "C" void mopac_cuda_update_density_from_host(int linear, const double *packed_host) {
+  if (!resident_mode_enabled()) return;
+  if (!g_density_full_valid) return;
+  if (!packed_host) return;
+  int n = g_density_full_n;
+  size_t expected = (size_t)n * (size_t)(n + 1) / 2;
+  if (linear <= 0 || (size_t)linear != expected) {
+    invalidate_packed_density();
+    return;
+  }
+  size_t bytes = (size_t)linear * sizeof(double);
+  double *packed_dev = nullptr;
+  cudaStream_t s = g_stream ? g_stream : 0;
+  if (cudaMalloc((void**)&packed_dev, bytes) != cudaSuccess) {
+    invalidate_packed_density();
+    return;
+  }
+  cudaError_t copy_status = cudaMemcpyAsync(packed_dev, packed_host, bytes, cudaMemcpyHostToDevice, s);
+  if (copy_status != cudaSuccess) {
+    cudaFree(packed_dev);
+    invalidate_packed_density();
+    return;
+  }
+  int total = n * n;
+  int block = 256;
+  int grid = (total + block - 1) / block;
+  unpack_lower_to_full_kernel<<<grid, block, 0, s>>>(packed_dev, g_density_full.ptr, n);
+  cudaError_t kernel_status = cudaGetLastError();
+  cudaFree(packed_dev);
+  if (kernel_status != cudaSuccess) {
+    invalidate_packed_density();
+    return;
+  }
+  invalidate_packed_density();
+}
+
 void mopac_cuda_register_packed_density(int linear, double *packed_host) {
   if (!resident_mode_enabled()) {
     invalidate_packed_density();
