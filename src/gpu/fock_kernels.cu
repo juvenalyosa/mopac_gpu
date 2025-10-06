@@ -686,10 +686,6 @@ __device__ inline void fock_pair_light_light(int ia, int ja,
   int jj = packed_index_zero(ja, ja);
   int ij = (ia >= ja) ? packed_index_zero(ia, ja)
                       : packed_index_zero(ja, ia);
-  f[ii] = 111.0;
-  f[jj] = 222.0;
-  f[ij] = 333.0;
-  return;
   double contrib_ii = val * ptot[jj];
   double contrib_jj = val * ptot[ii];
   double contrib_ij = -val * p[ij];
@@ -1423,6 +1419,19 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
                                            s_d_f, debug_flag);
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) return false;
+    if (debug_flag) {
+      std::vector<double> probe(5, 0.0);
+      size_t probe_len = std::min(probe.size(), static_cast<size_t>(mpack));
+      if (probe_len > 0) {
+        cudaMemcpy(probe.data(), s_d_f, sizeof(double) * probe_len, cudaMemcpyDeviceToHost);
+        std::printf("[GPU resident debug] post-kernel f sample:");
+        for (size_t idx = 0; idx < probe_len; ++idx) {
+          std::printf(" % .5e", probe[idx]);
+        }
+        std::printf("\n");
+        std::fflush(stdout);
+      }
+    }
   }
 
   if (want_timing && t_start && t_stop) {
