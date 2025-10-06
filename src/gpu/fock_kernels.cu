@@ -1575,8 +1575,22 @@ bool mopac_cuda_fock2(int norbs, int mpack, int numat,
                                            s_d_nf, s_d_nl,
                                            s_d_ptot, s_d_p,
                                            s_d_w, nullptr, nullptr,
-                                           s_d_f, 0);
-    cudaError_t err = cudaDeviceSynchronize(); if (err != cudaSuccess) return false;
+                                           s_d_f, 1);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) return false;
+    {
+      std::vector<double> probe(5, 0.0);
+      size_t probe_len = std::min(probe.size(), static_cast<size_t>(mpack));
+      if (probe_len > 0) {
+        cudaMemcpy(probe.data(), s_d_f, sizeof(double) * probe_len, cudaMemcpyDeviceToHost);
+        std::printf("[GPU resident debug] post-kernel (keep) f sample:");
+        for (size_t idx = 0; idx < probe_len; ++idx) {
+          std::printf(" % .5e", probe[idx]);
+        }
+        std::printf("\n");
+        std::fflush(stdout);
+      }
+    }
   }
 
   cudaMemcpy(f, s_d_f, sizeof(double)*mpack_e, cudaMemcpyDeviceToHost);
