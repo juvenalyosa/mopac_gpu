@@ -1122,6 +1122,11 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
       std::fflush(stdout);
     }
     mopac_cuda_register_fock_device(mpack, fout, s_d_f);
+    if (want_verify) {
+      if (mopac_cuda_fetch_fock(fout, mpack_e) != true) {
+        cudaMemcpy(fout, s_d_f, sizeof(double) * mpack_e, cudaMemcpyDeviceToHost);
+      }
+    }
   } else {
     cudaMemcpy(fout, s_d_f, sizeof(double) * mpack_e, cudaMemcpyDeviceToHost);
     mopac_cuda_clear_fock_cache();

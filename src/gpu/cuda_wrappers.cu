@@ -45,6 +45,8 @@
 #  endif
 #endif
 
+extern "C" bool mopac_cuda_fetch_fock(double *host_ptr, size_t linear);
+
 // Lightweight verbose/timing control for BLAS wrappers
 static int w_verbose = 0; static int w_inited = 0;
 static inline void ensure_w_verbose() {
