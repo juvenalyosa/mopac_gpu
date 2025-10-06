@@ -28,6 +28,7 @@ extern "C" int mopac_cuda_get_resident_mode();
 extern "C" void mopac_cuda_clear_fock_cache();
 extern "C" void mopac_cuda_register_fock_device(int linear, double *host_ptr, const double *src_dev);
 extern "C" bool mopac_cuda_fock_copy_cached(double *dest, size_t len, const double *host_ptr);
+extern "C" bool mopac_cuda_fetch_fock(double *host_ptr, size_t linear);
 
 // Atomic add for double that works on pre-6.0 architectures via CAS
 __device__ inline double atomicAdd_double(double* address, double val) {
