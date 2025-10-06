@@ -590,7 +590,17 @@ __host__ __device__ inline int packed_index_zero(int a, int b) {
 __device__ void fock_pair_general(int ia, int ib, int ja, int jb,
                                  const double *ptot, const double *p,
                                  const double *w, double *f) {
-  if (!w || !ptot || !p || !f) return;
+  if (!w || !ptot || !p || !f) {
+    if (dbg_tid >= 0 && dbg_tid < 2) {
+      printf("[GPU LL] null ptr check w=%p ptot=%p p=%p f=%p\n",
+             (const void*)w, (const void*)ptot, (const void*)p, (void*)f);
+    }
+    return;
+  }
+  if (dbg_tid >= 0 && dbg_tid < 2) {
+    printf("[GPU LL] entry ptrs w=%p ptot=%p p=%p f=%p\n",
+           (const void*)w, (const void*)ptot, (const void*)p, (void*)f);
+  }
   int span_i = span_count(ia, ib);
   int span_j = span_count(ja, jb);
   if (span_i <= 0 || span_j <= 0) return;
