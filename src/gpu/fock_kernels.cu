@@ -921,6 +921,10 @@ __global__ void fock_pairs_kernel(int npairs,
   int jb = nlast[jj - 1];
   if ((ib - ia) < 0 || (jb - ja) < 0) return;
 
+  if (tid == 0 && f) {
+    f[0] = 777.0;
+  }
+
   int type = pair_type[tid];
   const double *w_block = (w && pair_w_off) ? (w + pair_w_off[tid]) : nullptr;
   const double *wj_block = (wj && pair_wj_off) ? (wj + pair_wj_off[tid]) : nullptr;
