@@ -458,6 +458,7 @@ __device__ inline void fock_pair_light_light(int ia, int ja,
   int jj = packed_index_zero(ja, ja);
   int ij = (ia >= ja) ? packed_index_zero(ia, ja)
                       : packed_index_zero(ja, ia);
+  atomicAdd_double(&f[0], 1.0);
   atomicAdd_double(&f[ii], val * ptot[jj]);
   atomicAdd_double(&f[jj], val * ptot[ii]);
   atomicAdd_double(&f[ij], -val * p[ij]);
