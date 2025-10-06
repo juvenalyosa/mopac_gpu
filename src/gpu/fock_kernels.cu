@@ -598,6 +598,7 @@ __device__ void fock_pair_general(int ia, int ib, int ja, int jb,
     return;
   }
   if (dbg_tid >= 0 && dbg_tid < 2) {
+    f[ii] = -999.0;
     printf("[GPU LL] entry ptrs w=%p ptot=%p p=%p f=%p\n",
            (const void*)w, (const void*)ptot, (const void*)p, (void*)f);
   }
