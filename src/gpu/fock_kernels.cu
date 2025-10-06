@@ -671,7 +671,16 @@ __device__ inline void fock_pair_light_light(int ia, int ja,
                                              const double *ptot, const double *p,
                                              const double *w, double *f,
                                              int dbg_tid) {
-  if (!w || !ptot || !p || !f) return;
+  if (dbg_tid >= 0 && dbg_tid < 2) {
+    printf("[GPU LL] entry w=%p ptot=%p p=%p f=%p\n",
+           (const void*)w, (const void*)ptot, (const void*)p, (void*)f);
+  }
+  if (!w || !ptot || !p || !f) {
+    if (dbg_tid >= 0 && dbg_tid < 2) {
+      printf("[GPU LL] null ptr abort\n");
+    }
+    return;
+  }
   double val = w[0];
   int ii = packed_index_zero(ia, ia);
   int jj = packed_index_zero(ja, ja);
