@@ -589,7 +589,7 @@ __host__ __device__ inline int packed_index_zero(int a, int b) {
 
 __device__ void fock_pair_general(int ia, int ib, int ja, int jb,
                                  const double *ptot, const double *p,
-                                 const double *w, double *f) {
+                                 const double *w, double *f, int dbg_tid = -1) {
   if (!w || !ptot || !p || !f) {
     if (dbg_tid >= 0 && dbg_tid < 2) {
       printf("[GPU LL] null ptr check w=%p ptot=%p p=%p f=%p\n",
@@ -935,13 +935,13 @@ __global__ void fock_pairs_kernel(int npairs,
       fock_pair_heavy_heavy(ia, ib, ja, jb, ptot, p, w_block, f);
       break;
     case PAIR_GENERAL:
-      fock_pair_general(ia, ib, ja, jb, ptot, p, w_block, f);
+      fock_pair_general(ia, ib, ja, jb, ptot, p, w_block, f, debug_flag ? tid : -1);
       break;
     case PAIR_PERIODIC:
       fock_pair_periodic(ia, ib, ja, jb, ptot, p, wj_block, wk_block, f);
       break;
     default:
-      fock_pair_general(ia, ib, ja, jb, ptot, p, w_block, f);
+      fock_pair_general(ia, ib, ja, jb, ptot, p, w_block, f, debug_flag ? tid : -1);
       break;
   }
 }
