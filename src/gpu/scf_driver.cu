@@ -168,7 +168,7 @@ extern "C" bool mopac_cuda_scf_run(MopacGpuScfContext *ctx) {
     return false;
   }
   if (ctx->numat <= 0) {
-    set_last_error("GPU SCF: number of atoms not provided");
+    set_last_error("GPU SCF stub: number of atoms not provided");
     return false;
   }
 

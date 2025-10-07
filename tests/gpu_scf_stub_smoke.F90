@@ -14,6 +14,8 @@ program gpu_scf_stub_smoke
   ctx%nalpha     = 2
   ctx%nbeta      = 1
   ctx%mpack      = 6
+  ctx%numat      = 1
+  ctx%n2elec     = 1
   ctx%max_iter   = 25
   ctx%energy_tol = 1.0d-8
   ctx%density_tol = 1.0d-8
