@@ -78,9 +78,11 @@ contains
       deallocate(ptot, p, f_cpu, f_gpu, ifact_local)
       return
     end if
-    allocate(w(len_w))
+    allocate(w(len_w), wj(len_w), wk(len_w))
     do i = 1, len_w
       w(i) = 1.0d-3 * dble(i)
+      wj(i) = w(i)
+      wk(i) = w(i)
     end do
 
     print *, 'DEBUG ', trim(label), ' nfirst=', nfirst
@@ -99,11 +101,12 @@ contains
       return
     end if
 
-    ok = mopac_cuda_fock2_scf(local_norbs, local_mpack, 2, nfirst, nlast, ptot, p, w, f_gpu)
+    ok = mopac_cuda_fock2_scf(local_norbs, local_mpack, 2, nfirst, nlast,
+         ptot, p, w, wj, wk, 0_c_int, f_gpu)
     if (.not. ok) then
       print *, 'GPU path unavailable for ', trim(label), ' case; skipping'
       run_case = .true.
-      deallocate(ptot, p, f_cpu, f_gpu, w, ifact_local)
+      deallocate(ptot, p, f_cpu, f_gpu, w, wj, wk, ifact_local)
       return
     end if
 
@@ -115,13 +118,13 @@ contains
     end do
     if (diff > 1.0d-8 .and. diff/denom > 1.0d-8) then
       print *, 'GPU/CPU mismatch for ', trim(label), ': diff=', diff, ' denom=', denom
-      deallocate(ptot, p, f_cpu, f_gpu, w, ifact_local)
+      deallocate(ptot, p, f_cpu, f_gpu, w, wj, wk, ifact_local)
       return
     end if
     print *, 'GPU/CPU match for ', trim(label), ' diff=', diff
     run_case = .true.
 
-    deallocate(ptot, p, f_cpu, f_gpu, w, ifact_local)
+    deallocate(ptot, p, f_cpu, f_gpu, w, wj, wk, ifact_local)
   end function run_case
 #endif
 end program gpu_fock_pair_compare
