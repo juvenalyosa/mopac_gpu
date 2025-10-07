@@ -339,6 +339,13 @@
 #ifdef GPU
       if (gpu_scf_enabled) then
         call gpu_scf_context_clear(gpu_scf_ctx)
+        if (use_disk) then
+          gpu_scf_enabled = .false.
+          write(iw,'(1x,a)') '[GPU SCF] Disabled: integral disk mode not supported'
+          call flush(iw)
+        end if
+      end if
+      if (gpu_scf_enabled) then
         gpu_scf_ctx%norbs = norbs
         gpu_scf_ctx%nalpha = nalpha
         gpu_scf_ctx%nbeta = nbeta
@@ -428,7 +435,6 @@
           if (capps) ee = ee + capcor(nat, nfirst, nlast, p, h)
 
           escf = (ee + enuclr)*enrgy + atheat
-          nscf = nscf + 1
           if (emin == 0.D0) then
             emin = escf
           else
@@ -442,7 +448,7 @@
             bshift = -10.D0
             okpuly = .FALSE.
           end if
-          return
+          goto 600
         else
           call gpu_scf_last_error(gpu_scf_message)
           if (len_trim(gpu_scf_message) == 0) gpu_scf_message = 'GPU SCF driver unavailable'
