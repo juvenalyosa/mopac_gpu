@@ -340,6 +340,8 @@
       if (gpu_scf_enabled) then
         call gpu_scf_context_clear(gpu_scf_ctx)
         if (use_disk) then
+          lgpu = .false.
+          resident_scf = .false.
           gpu_scf_enabled = .false.
           write(iw,'(1x,a)') '[GPU SCF] Disabled: integral disk mode not supported'
           call flush(iw)

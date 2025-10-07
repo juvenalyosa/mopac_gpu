@@ -17,7 +17,7 @@
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
-      use molkst_C, only : numcal, norbs, mpack, n2elec, id, numat_ref => numat
+      use molkst_C, only : numcal, norbs, mpack, n2elec, id, numat_ref => numat, use_disk
 #ifdef GPU
       use mod_vars_cuda, only: lgpu
       use gpu_fock_interfaces
@@ -126,7 +126,11 @@
           write(iw,'(1x,a)') '[GPU FOCK] legacy MOPAC_FOCK_GPU request ignored – unset it or enable the GPU path explicitly'
         end if
 
-        want_gpu = allow_gpu
+        want_gpu = allow_gpu .and. .not. use_disk
+
+        if (use_disk .and. allow_gpu) then
+          write(iw,'(1x,a)') '[GPU FOCK] Disabled: integral disk mode not supported'
+        end if
 
         if (want_gpu) then
           periodic_flag = merge(1_c_int, 0_c_int, id /= 0)
