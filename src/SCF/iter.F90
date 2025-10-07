@@ -27,7 +27,7 @@
         &    nclose, nopen, fract, numcal, mpack, iflepo, iscf, &
     &    enuclr, keywrd, gnorm, moperr, last, nscf, emin, nelecs, &
          limscf, atheat, is_PARAM, id, line, lxfac, nalpha_open, &
-         nbeta_open, npulay, method_indo, use_disk
+         nbeta_open, npulay, method_indo, use_disk, n2elec
       USE reimers_C, only: dd, ff, tot, cc0, aa, dtmp, nb2
       use cosmo_C, only : useps
       use ga_harness
@@ -344,9 +344,62 @@
         gpu_scf_ctx%nbeta = nbeta
         gpu_scf_ctx%mpack = mpack
         gpu_scf_ctx%max_iter = itrmax
+        gpu_scf_ctx%numat = numat
+        gpu_scf_ctx%n2elec = n2elec
+        if (id /= 0) then
+          gpu_scf_ctx%periodic = 1
+        else
+          gpu_scf_ctx%periodic = 0
+        end if
         gpu_scf_ctx%energy_tol = scfcrt
         gpu_scf_ctx%density_tol = scorr
         gpu_scf_ctx%flags = GPU_SCF_FLAG_USE_DIIS
+        gpu_scf_ctx%h_core = c_loc(h(1))
+        gpu_scf_ctx%overlap = c_null_ptr
+        gpu_scf_ctx%density_alpha = c_loc(pa(1))
+        if (uhf) then
+          gpu_scf_ctx%density_beta = c_loc(pb(1))
+        else
+          gpu_scf_ctx%density_beta = c_null_ptr
+        end if
+        gpu_scf_ctx%density_total = c_loc(p(1))
+        gpu_scf_ctx%fock_alpha = c_loc(f(1))
+        if (uhf) then
+          gpu_scf_ctx%fock_beta = c_loc(fb(1))
+        else
+          gpu_scf_ctx%fock_beta = c_null_ptr
+        end if
+        gpu_scf_ctx%coeff_alpha = c_loc(c(1,1))
+        if (uhf) then
+          gpu_scf_ctx%coeff_beta = c_loc(cb(1,1))
+        else
+          gpu_scf_ctx%coeff_beta = c_null_ptr
+        end if
+        gpu_scf_ctx%eigvals_alpha = c_loc(eigs(1))
+        if (uhf) then
+          gpu_scf_ctx%eigvals_beta = c_loc(eigb(1))
+        else
+          gpu_scf_ctx%eigvals_beta = c_null_ptr
+        end if
+        if (allocated(nfirst) .and. allocated(nlast)) then
+          gpu_scf_ctx%nfirst = c_loc(nfirst(1))
+          gpu_scf_ctx%nlast  = c_loc(nlast(1))
+        else
+          gpu_scf_ctx%nfirst = c_null_ptr
+          gpu_scf_ctx%nlast  = c_null_ptr
+        end if
+        if (n2elec > 0 .and. allocated(w)) then
+          gpu_scf_ctx%two_e_w  = c_loc(w(1))
+          gpu_scf_ctx%two_e_wj = c_loc(w(1))
+        else
+          gpu_scf_ctx%two_e_w  = c_null_ptr
+          gpu_scf_ctx%two_e_wj = c_null_ptr
+        end if
+        if (n2elec > 0 .and. allocated(wk)) then
+          gpu_scf_ctx%two_e_wk = c_loc(wk(1))
+        else
+          gpu_scf_ctx%two_e_wk = c_null_ptr
+        end if
         if (uhf) then
           gpu_scf_ctx%flags = ior(gpu_scf_ctx%flags, GPU_SCF_FLAG_UHF)
         else
@@ -355,8 +408,41 @@
         if (debug) gpu_scf_ctx%flags = ior(gpu_scf_ctx%flags, GPU_SCF_FLAG_DEBUG)
         if (gpu_scf_run(gpu_scf_ctx)) then
           call gpu_scf_last_error(gpu_scf_message)
-          if (len_trim(gpu_scf_message) == 0) gpu_scf_message = 'GPU SCF stub reported success'
-          write (iw,'(1x,a)') '[GPU SCF] Experimental GPU path completed: ' // trim(gpu_scf_message)
+          if (len_trim(gpu_scf_message) == 0) then
+            write(gpu_scf_message,'(a,i0,a,es12.3,a,es12.3)') 'iterations=', &
+                 max(1, gpu_scf_ctx%iterations), ' dE=', gpu_scf_ctx%energy_delta, &
+                 ' rmsP=', gpu_scf_ctx%density_rms
+          end if
+          write (iw,'(1x,a)') '[GPU SCF] GPU path completed: ' // trim(gpu_scf_message)
+          niter = max(1, gpu_scf_ctx%iterations)
+          pl = gpu_scf_ctx%density_rms
+          diff = gpu_scf_ctx%energy_delta
+          call flush(iw)
+
+          ee = helect(norbs, pa, h, f)
+          if (uhf) then
+            ee = ee + helect(norbs, pb, h, fb)
+          else
+            ee = ee*2.D0
+          end if
+          if (capps) ee = ee + capcor(nat, nfirst, nlast, p, h)
+
+          escf = (ee + enuclr)*enrgy + atheat
+          nscf = nscf + 1
+          if (emin == 0.D0) then
+            emin = escf
+          else
+            emin = min(emin, escf)
+          end if
+          shift = 1.D0
+          if (allcon .and. abs(bshift - 4.44D0) < 1.D-7) then
+            camkin = .FALSE.
+            allcon = .FALSE.
+            newdg = .FALSE.
+            bshift = -10.D0
+            okpuly = .FALSE.
+          end if
+          return
         else
           call gpu_scf_last_error(gpu_scf_message)
           if (len_trim(gpu_scf_message) == 0) gpu_scf_message = 'GPU SCF driver unavailable'
