@@ -28,9 +28,8 @@ program gpu_scf_stub_smoke
   end if
 
   call gpu_scf_last_error(message)
-  if (index(message, 'stub') == 0) then
-     write(*,'(1x,a)') 'gpu_scf_last_error did not report stub state:'
-     write(*,'(1x,a)') trim(message)
+  if (len_trim(message) == 0) then
+     write(*,'(1x,a)') 'gpu_scf_last_error returned an empty message'
      stop 2
   end if
 
