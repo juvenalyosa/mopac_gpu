@@ -54,7 +54,7 @@ module Common_arrays_C
   &  ipKa_sorted,& ! List of ionizable hydrogen atoms, sorted by pKa
   &ipKa_unsorted,& ! List of ionizable hydrogen atoms, not yet sorted by pKa
   &  dummy
-  integer(c_int), dimension (:), allocatable :: nfirst, nlast
+  integer(c_int), dimension (:), allocatable, target :: nfirst, nlast
   integer, dimension (:,:), allocatable :: &
   &  loc,        & !  Indices of atoms and coordinates marked for optimization
   &  ibonds,     & !  Atom numbers of atoms bonded to a given atom
@@ -74,7 +74,7 @@ module Common_arrays_C
   character ::chains(100)*1            !  Names of chains in proteins
   double precision :: break_coords(3,400) = 0.d0   !  Locations of breaks in a PDB structure
 !
-  double precision, dimension (:), allocatable :: &
+  double precision, dimension (:), allocatable, target :: &
   &  xparam,     & !  Values of geometric parameters marked for optimization
   &  xparef,     & !  Reference copy of xparam
   &  uspd,       & !  Initial values of one-electron diagonal (Uss, Upp, and Udd)
@@ -161,7 +161,7 @@ module Common_arrays_C
                    !  Units         cal/(K.Mol)
   &  S_tot         !  Term          Entropy at temperatures in T_range
                    !  Units         cal/(K.Mol)
-  double precision, dimension (:,:), allocatable :: &
+  double precision, dimension (:,:), allocatable, target :: &
   &  geo,        & !  Term          Geometry
                    !  Definition    Coordinates of all atoms in units defined by input
                    !  Units         Angstroms and radians

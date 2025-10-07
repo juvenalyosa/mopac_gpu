@@ -354,49 +354,49 @@
         gpu_scf_ctx%energy_tol = scfcrt
         gpu_scf_ctx%density_tol = scorr
         gpu_scf_ctx%flags = GPU_SCF_FLAG_USE_DIIS
-        gpu_scf_ctx%h_core = c_loc(h(1))
+        gpu_scf_ctx%h_core = c_loc(h)
         gpu_scf_ctx%overlap = c_null_ptr
-        gpu_scf_ctx%density_alpha = c_loc(pa(1))
+        gpu_scf_ctx%density_alpha = c_loc(pa)
         if (uhf) then
-          gpu_scf_ctx%density_beta = c_loc(pb(1))
+          gpu_scf_ctx%density_beta = c_loc(pb)
         else
           gpu_scf_ctx%density_beta = c_null_ptr
         end if
-        gpu_scf_ctx%density_total = c_loc(p(1))
-        gpu_scf_ctx%fock_alpha = c_loc(f(1))
+        gpu_scf_ctx%density_total = c_loc(p)
+        gpu_scf_ctx%fock_alpha = c_loc(f)
         if (uhf) then
-          gpu_scf_ctx%fock_beta = c_loc(fb(1))
+          gpu_scf_ctx%fock_beta = c_loc(fb)
         else
           gpu_scf_ctx%fock_beta = c_null_ptr
         end if
-        gpu_scf_ctx%coeff_alpha = c_loc(c(1,1))
+        gpu_scf_ctx%coeff_alpha = c_loc(c)
         if (uhf) then
-          gpu_scf_ctx%coeff_beta = c_loc(cb(1,1))
+          gpu_scf_ctx%coeff_beta = c_loc(cb)
         else
           gpu_scf_ctx%coeff_beta = c_null_ptr
         end if
-        gpu_scf_ctx%eigvals_alpha = c_loc(eigs(1))
+        gpu_scf_ctx%eigvals_alpha = c_loc(eigs)
         if (uhf) then
-          gpu_scf_ctx%eigvals_beta = c_loc(eigb(1))
+          gpu_scf_ctx%eigvals_beta = c_loc(eigb)
         else
           gpu_scf_ctx%eigvals_beta = c_null_ptr
         end if
         if (allocated(nfirst) .and. allocated(nlast)) then
-          gpu_scf_ctx%nfirst = c_loc(nfirst(1))
-          gpu_scf_ctx%nlast  = c_loc(nlast(1))
+          gpu_scf_ctx%nfirst = c_loc(nfirst)
+          gpu_scf_ctx%nlast  = c_loc(nlast)
         else
           gpu_scf_ctx%nfirst = c_null_ptr
           gpu_scf_ctx%nlast  = c_null_ptr
         end if
         if (n2elec > 0 .and. allocated(w)) then
-          gpu_scf_ctx%two_e_w  = c_loc(w(1))
-          gpu_scf_ctx%two_e_wj = c_loc(w(1))
+          gpu_scf_ctx%two_e_w  = c_loc(w)
+          gpu_scf_ctx%two_e_wj = c_loc(w)
         else
           gpu_scf_ctx%two_e_w  = c_null_ptr
           gpu_scf_ctx%two_e_wj = c_null_ptr
         end if
         if (n2elec > 0 .and. allocated(wk)) then
-          gpu_scf_ctx%two_e_wk = c_loc(wk(1))
+          gpu_scf_ctx%two_e_wk = c_loc(wk)
         else
           gpu_scf_ctx%two_e_wk = c_null_ptr
         end if

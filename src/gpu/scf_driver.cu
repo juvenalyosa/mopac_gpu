@@ -59,10 +59,8 @@ struct MopacGpuScfContext {
   void  *log_buffer;
 };
 
-constexpr int GPU_SCF_FLAG_USE_DIIS = 1;
-constexpr int GPU_SCF_FLAG_RHF      = 2;
-constexpr int GPU_SCF_FLAG_UHF      = 4;
-constexpr int GPU_SCF_FLAG_DEBUG    = 8;
+constexpr int GPU_SCF_FLAG_RHF = 2;
+constexpr int GPU_SCF_FLAG_UHF = 4;
 
 std::string &last_error() {
   static std::string err_msg = "GPU SCF driver not initialised";
