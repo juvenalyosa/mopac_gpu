@@ -25,7 +25,7 @@ contains
     integer :: local_norbs, local_mpack
     integer(c_int) :: nfirst(2), nlast(2)
     integer, allocatable :: ifact_local(:)
-    double precision, allocatable :: ptot(:), p(:), w(:), f_cpu(:), f_gpu(:)
+    double precision, allocatable :: ptot(:), p(:), w(:), wj(:), wk(:), f_cpu(:), f_gpu(:)
     integer :: i, len_w
     integer(c_int) :: ia, ib, ja, jb, kr
     logical(c_bool) :: ok
@@ -97,11 +97,11 @@ contains
     call fockdorbs(ia, ib, ja, jb, f_cpu, p, ptot, w, kr, ifact_local)
     if (kr /= len_w) then
       print *, 'fockdorbs consumed ', kr, ' weights but expected ', len_w, ' for ', trim(label)
-      deallocate(ptot, p, f_cpu, f_gpu, w, ifact_local)
+      deallocate(ptot, p, f_cpu, f_gpu, w, wj, wk, ifact_local)
       return
     end if
 
-    ok = mopac_cuda_fock2_scf(local_norbs, local_mpack, 2, nfirst, nlast,
+    ok = mopac_cuda_fock2_scf(local_norbs, local_mpack, 2, nfirst, nlast, &
          ptot, p, w, wj, wk, 0_c_int, f_gpu)
     if (.not. ok) then
       print *, 'GPU path unavailable for ', trim(label), ' case; skipping'
