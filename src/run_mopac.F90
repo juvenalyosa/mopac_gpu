@@ -63,8 +63,8 @@
 #endif
 #ifdef GPU
       use iso_c_binding
-      use mod_vars_cuda, only: lgpu, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu, mozyme_f2_gpu, resident_scf, &
-     &                         gpu_scf_stream_available
+      use mod_vars_cuda, only: lgpu, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu, &
+     &                         mozyme_f2_gpu, resident_scf, gpu_scf_stream_available
       use mod_vars_cuda, only: gpu_scf_task_mode, GPU_SCF_TASK_AUTO, GPU_SCF_TASK_CPU, GPU_SCF_TASK_GPU
       use gpu_info
       use settingGPUcard
