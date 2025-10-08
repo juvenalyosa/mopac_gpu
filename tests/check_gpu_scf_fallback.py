@@ -24,10 +24,17 @@ def main() -> int:
     if proc.returncode != 0:
         print("fallback test: mopac returned non-zero status", file=sys.stderr)
         return proc.returncode
-    if "[GPU SCF] Disabled: integral disk mode not supported" not in proc.stdout:
+    out_path = os.path.splitext(input_path)[0] + ".out"
+    try:
+        with open(out_path, "r", encoding="utf-8", errors="ignore") as fh:
+            out_text = fh.read()
+    except OSError as exc:
+        print(f"fallback test: unable to open output file: {exc}", file=sys.stderr)
+        return 1
+    if "[GPU SCF] Disabled: integral disk mode not supported" not in out_text:
         print("fallback test: expected GPU SCF fallback message not found", file=sys.stderr)
         return 1
-    if "SCF FIELD WAS ACHIEVED" not in proc.stdout:
+    if "SCF FIELD WAS ACHIEVED" not in out_text:
         print("fallback test: SCF did not converge", file=sys.stderr)
         return 1
     return 0
