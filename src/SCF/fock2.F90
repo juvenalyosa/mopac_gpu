@@ -19,8 +19,10 @@
 !-----------------------------------------------
       use molkst_C, only : numcal, norbs, mpack, n2elec, id, numat_ref => numat, use_disk
 #ifdef GPU
-      use mod_vars_cuda, only: lgpu
+      use mod_vars_cuda, only: lgpu, gpu_scf_stream_available
       use gpu_fock_interfaces
+      use gpu_scf_stream_driver, only: gpu_scf_stream_fock
+      use gpu_scf_stream_trace, only: gpu_stream_trace_block
       use iso_c_binding, only: c_bool, c_int
 #endif
       use cosmo_C, only : useps
@@ -72,6 +74,10 @@
       logical :: legacy_env
       logical(c_bool) :: ok
       integer(c_int) :: periodic_flag
+      logical :: stream_mode
+      logical, save :: stream_unavailable_reported = .false.
+      logical, save :: stream_failure_reported = .false.
+      integer :: kk_start
 #endif
 
       save ifact, i1fact, ione, lid, icalcn, jindex, ptot2
@@ -99,6 +105,7 @@
         want_gpu = .false.
         allow_gpu = .true.
         legacy_env = .false.
+        stream_mode = .false.
 
         envs = 1 ; line8 = ''
         call get_environment_variable('MOPAC_GPU_EXACT_SC', line8, status=envs)
@@ -126,10 +133,32 @@
           write(iw,'(1x,a)') '[GPU FOCK] legacy MOPAC_FOCK_GPU request ignored – unset it or enable the GPU path explicitly'
         end if
 
-        want_gpu = allow_gpu .and. .not. use_disk
+        want_gpu = allow_gpu
 
-        if (use_disk .and. allow_gpu) then
-          write(iw,'(1x,a)') '[GPU FOCK] Disabled: integral disk mode not supported'
+        if (use_disk) then
+          if (gpu_scf_stream_available) then
+            stream_mode = .true.
+          else
+            if (allow_gpu .and. .not. stream_unavailable_reported) then
+              write(iw,'(1x,a)') '[GPU FOCK] Disk streaming unavailable – reverting to CPU implementation'
+              call flush(iw)
+              stream_unavailable_reported = .true.
+            end if
+            want_gpu = .false.
+          end if
+        end if
+
+        if (stream_mode) then
+          periodic_flag = merge(1_c_int, 0_c_int, id /= 0)
+          if (gpu_scf_stream_fock(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic_flag, f)) then
+            return
+          end if
+          if (.not. stream_failure_reported) then
+            write(iw,'(1x,a)') '[GPU FOCK] Disk streaming path failed – reverting to CPU implementation'
+            call flush(iw)
+            stream_failure_reported = .true.
+          end if
+          want_gpu = .false.
         end if
 
         if (want_gpu) then
@@ -246,7 +275,13 @@
           jb = nlast(jj)
           if (lid) then    !  System does not use periodic boundary conditions
             if (ib - ia >= 6 .or. jb - ja >= 6) then
+#ifdef GPU
+              kk_start = kk
+#endif
               call fockdorbs(ia, ib, ja, jb, f, p, ptot, w, kk, ifact)
+#ifdef GPU
+              call gpu_stream_trace_block('J-LL', ia, ib, ja, jb, kk - kk_start)
+#endif
 
             else if (ib - ia >= 3 .and. jb - ja >= 3) then
 !
@@ -259,6 +294,7 @@
 !
 !  COULOMB TERMS
 !
+              kk_start = kk
               call jab (ia, ja, pja, pjb, w(kk+1), f)
 !
 !  EXCHANGE TERMS
@@ -280,13 +316,20 @@
               end do
               call kab (ia, ja, pk, w(kk+1), f)
               kk = kk + 100
+#ifdef GPU
+              call gpu_stream_trace_block('J-HH', ia, ib, ja, jb, kk - kk_start)
+#endif
             else if (ib - ia >= 3 .and. ja == jb) then
+#ifdef GPU
+              kk_start = kk
+#endif
 !
 !                         LIGHT-ATOM  - HEAVY-ATOM
 !
 !
 !   COULOMB TERMS
 !
+              kk_start = kk
               sumdia = 0.D0
               sumoff = 0.D0
               ll = i1fact(ja)
@@ -336,7 +379,13 @@
                 f(i1) = f(i1) - sum
               end do
               kk = kk + 10
+#ifdef GPU
+              call gpu_stream_trace_block('J-HL', ia, ib, ja, jb, kk - kk_start)
+#endif
             else if (jb - ja >= 3 .and. ia == ib) then
+#ifdef GPU
+              kk_start = kk
+#endif
 !
 !                         HEAVY-ATOM - LIGHT-ATOM
 !
@@ -393,6 +442,9 @@
               end do
               kk = kk + 10
             else if (jb == ja .and. ia == ib) then
+#ifdef GPU
+              kk_start = kk
+#endif
 !
 !                         LIGHT-ATOM - LIGHT-ATOM
 !
@@ -409,6 +461,9 @@
               kk = kk + 1
             end if
           else
+#ifdef GPU
+            kk_start = kk
+#endif
             do i = ia, ib
               ka = ifact(i)
               do j = ia, i

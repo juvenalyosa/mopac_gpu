@@ -62,12 +62,14 @@
       use mdi_implementation, only: use_mdi, open_mdi, close_mdi, initialize_mdi, respond_to_commands
 #endif
 #ifdef GPU
-      Use iso_c_binding
-      Use mod_vars_cuda, only: lgpu, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu, mozyme_f2_gpu, resident_scf
-      Use mod_vars_cuda, only: gpu_scf_task_mode, GPU_SCF_TASK_AUTO, GPU_SCF_TASK_CPU, GPU_SCF_TASK_GPU
-      Use gpu_info
-      Use settingGPUcard
+      use iso_c_binding
+      use mod_vars_cuda, only: lgpu, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu, mozyme_f2_gpu, resident_scf, &
+     &                         gpu_scf_stream_available
+      use mod_vars_cuda, only: gpu_scf_task_mode, GPU_SCF_TASK_AUTO, GPU_SCF_TASK_CPU, GPU_SCF_TASK_GPU
+      use gpu_info
+      use settingGPUcard
       use gpu_runtime_interfaces
+      use gpu_scf_stream_interfaces, only: mopac_cuda_scf_stream_supported
 #endif
       implicit none
       integer ::  i, j, k, l
@@ -477,6 +479,13 @@
           end if
         end if
 
+        if (mopac_cuda_scf_stream_supported() .eqv. .true._c_bool) then
+          gpu_scf_stream_available = .true.
+        else
+          gpu_scf_stream_available = .false.
+        end if
+        if (gpu_scf_task_mode == GPU_SCF_TASK_CPU) gpu_scf_stream_available = .false.
+
         select case (gpu_scf_task_mode)
         case (GPU_SCF_TASK_CPU)
           write(iw,'(1x,a)') '[GPU SCF] mode request: cpu'
@@ -503,6 +512,7 @@
             write(iw,'(3x,a,1x,l1)') 'mozyme_2gpu=', mozyme_force_2gpu
             write(iw,'(3x,a,1x,l1)') 'mozyme_f2_gpu=', mozyme_f2_gpu
             write(iw,'(3x,a,1x,l1)') 'resident_scf=', resident_scf
+            write(iw,'(3x,a,1x,l1)') 'gpu_scf_stream_available=', gpu_scf_stream_available
 
             ! Policy: ORTHO on GPU (auto on for CC>=7.0 unless env says otherwise)
             env = '' ; i = 1

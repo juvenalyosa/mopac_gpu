@@ -26,6 +26,7 @@ module mod_vars_cuda
   integer, parameter :: GPU_SCF_TASK_CPU  = 1
   integer, parameter :: GPU_SCF_TASK_GPU  = 2
   integer :: gpu_scf_task_mode = GPU_SCF_TASK_AUTO
+  logical :: gpu_scf_stream_available = .false.
   real, parameter :: real_cuda = selected_real_kind(8)
   integer, parameter :: prec = 8
   integer :: ngpus,gpu_id
