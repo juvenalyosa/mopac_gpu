@@ -37,7 +37,7 @@ contains
     integer, intent(in) :: periodic_flag
     double precision, intent(inout), target :: f(mpack)
 
-    type(gpu_scf_stream_cookie) :: cookie
+    type(gpu_scf_stream_cookie), target :: cookie
     type(c_ptr) :: cookie_ptr
     integer :: ii, jj
     integer :: ia, ib, ja, jb
@@ -47,10 +47,9 @@ contains
     integer :: kk
     integer(c_int) :: status
     integer(c_int) :: final_status
-    real(c_double), pointer :: block_j(:)
-    real(c_double), pointer :: block_k(:)
     integer :: wj_size
     integer :: wk_size
+    logical :: have_wk
     logical :: supported
     integer :: num_atoms
 
@@ -125,17 +124,21 @@ contains
           exit outer_atoms
         end if
 
-        block_j => wj(kk + 1 : kk + len_block)
-        if (wk_size >= kk + len_block) then
-          block_k => wk(kk + 1 : kk + len_block)
-        else
-          block_k => wj(kk + 1 : kk + len_block)
-        end if
+        have_wk = (wk_size >= kk + len_block)
 
-        call mopac_cuda_scf_stream_publish(cookie_ptr,                                            &
+        if (have_wk) then
+          call mopac_cuda_scf_stream_publish(cookie_ptr,                                          &
              int(ia, kind=c_int), int(ib, kind=c_int),                                            &
              int(ja, kind=c_int), int(jb, kind=c_int),                                            &
-             int(len_block, kind=c_int), block_j, block_k, status)
+             int(len_block, kind=c_int),                                                          &
+             wj(kk + 1 : kk + len_block), wk(kk + 1 : kk + len_block), status)
+        else
+          call mopac_cuda_scf_stream_publish(cookie_ptr,                                          &
+             int(ia, kind=c_int), int(ib, kind=c_int),                                            &
+             int(ja, kind=c_int), int(jb, kind=c_int),                                            &
+             int(len_block, kind=c_int),                                                          &
+             wj(kk + 1 : kk + len_block), wj(kk + 1 : kk + len_block), status)
+        end if
 
         if (status /= 0_c_int) then
           exit outer_atoms
