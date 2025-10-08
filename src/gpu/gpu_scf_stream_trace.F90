@@ -12,7 +12,8 @@ contains
     if (.not. trace_initialized) call gpu_stream_trace_init()
     if (.not. trace_enabled) return
     if (trace_unit < 0) then
-      open(newunit=trace_unit, file='gpu_stream_trace.log', status='unknown', position='append')
+      trace_unit = 97
+      open(unit=trace_unit, file='gpu_stream_trace.log', status='unknown', position='append', action='write')
     end if
     write(trace_unit,'(a,1x,4i8,1x,i8)') trim(tag), ia, ib, ja, jb, len
     flush(trace_unit)
