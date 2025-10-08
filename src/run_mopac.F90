@@ -63,7 +63,8 @@
 #endif
 #ifdef GPU
       Use iso_c_binding
-      Use mod_vars_cuda, only: lgpu, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu, mozyme_f2_gpu, resident_scf
+      Use mod_vars_cuda, only: lgpu, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu, mozyme_f2_gpu, resident_scf, &
+        gpu_scf_task_mode, GPU_SCF_TASK_AUTO, GPU_SCF_TASK_CPU, GPU_SCF_TASK_GPU
       Use gpu_info
       Use settingGPUcard
       use gpu_runtime_interfaces
@@ -405,6 +406,26 @@
         if (i == 0) then
           if (trim(adjustl(line)) /= '') lgpu = .true.
         end if
+        call get_environment_variable('MOPAC_GPU_SCFTASK', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            select case (line(1:1))
+            case('c','C')
+              gpu_scf_task_mode = GPU_SCF_TASK_CPU
+              lgpu = .false.
+            case('g','G')
+              gpu_scf_task_mode = GPU_SCF_TASK_GPU
+              lgpu = .true.
+            case default
+              gpu_scf_task_mode = GPU_SCF_TASK_AUTO
+            end select
+          else
+            gpu_scf_task_mode = GPU_SCF_TASK_AUTO
+          end if
+        else
+          gpu_scf_task_mode = GPU_SCF_TASK_AUTO
+        end if
         ! Optional MOZYME GPU override via environment variable
         call get_environment_variable('MOZYME_GPU', line, status=i)
         if (i == 0) then
@@ -456,6 +477,14 @@
           end if
         end if
 
+        select case (gpu_scf_task_mode)
+        case (GPU_SCF_TASK_CPU)
+          write(iw,'(1x,a)') '[GPU SCF] mode request: cpu'
+        case (GPU_SCF_TASK_GPU)
+          write(iw,'(1x,a)') '[GPU SCF] mode request: gpu'
+        case default
+          write(iw,'(1x,a)') '[GPU SCF] mode request: auto'
+        end select
         ! Optional debug summary
         call get_environment_variable('MOPAC_GPU_DEBUG', line, status=i)
         if (i == 0) then

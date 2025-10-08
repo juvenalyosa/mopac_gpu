@@ -22,6 +22,10 @@ module mod_vars_cuda
   logical :: mozyme_f2_gpu = .true.
   integer :: mozyme_gpu_min_block = 4
   logical :: resident_scf = .false.
+  integer, parameter :: GPU_SCF_TASK_AUTO = 0
+  integer, parameter :: GPU_SCF_TASK_CPU  = 1
+  integer, parameter :: GPU_SCF_TASK_GPU  = 2
+  integer :: gpu_scf_task_mode = GPU_SCF_TASK_AUTO
   real, parameter :: real_cuda = selected_real_kind(8)
   integer, parameter :: prec = 8
   integer :: ngpus,gpu_id

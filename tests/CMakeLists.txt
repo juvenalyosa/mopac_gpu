@@ -104,6 +104,11 @@ endif()
 add_test(NAME "gpu-scf-stub-smoke" COMMAND mopac-gpu-scf-stub-smoke)
 set_tests_properties(gpu-scf-stub-smoke PROPERTIES ENVIRONMENT "MOPAC_GPU_SCF_STUB_LOG=1;MOPAC_GPU_SCF_EXPERIMENTAL=off")
 
+add_test(NAME "gpu-scf-disk-fallback"
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/check_gpu_scf_fallback.py
+          $<TARGET_FILE:mopac>)
+set_tests_properties(gpu-scf-disk-fallback PROPERTIES LABELS "gpu")
+
 if(NOT TARGET mopac-gpu-fock-pair-compare)
   add_executable(mopac-gpu-fock-pair-compare gpu_fock_pair_compare.F90)
   target_link_libraries(mopac-gpu-fock-pair-compare PRIVATE mopac-core)

@@ -1,0 +1,4 @@
+PM7 1SCF GEO-OK XYZ
+GPU disk fallback smoke test
+  H     0.000000  0   0.000000  0   0.000000  0
+  H     0.740000  1   0.000000  0   0.000000  0  1  0  0

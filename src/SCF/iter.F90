@@ -39,7 +39,8 @@
 #endif
 #ifdef GPU
       use iso_c_binding, only: c_ptr, c_null_ptr, c_associated, c_loc, c_bool, c_size_t
-      Use mod_vars_cuda, only: lgpu, real_cuda, prec, resident_scf
+      Use mod_vars_cuda, only: lgpu, real_cuda, prec, resident_scf, gpu_scf_task_mode, &
+           GPU_SCF_TASK_AUTO, GPU_SCF_TASK_CPU, GPU_SCF_TASK_GPU
       use density_cuda_i
       use gpu_density_interfaces, only: mopac_cuda_update_density_from_host
       use gpu_diag_state, only: have_device_eigvecs
@@ -137,6 +138,14 @@
           end select
         end if
       end if
+      select case (gpu_scf_task_mode)
+      case (GPU_SCF_TASK_CPU)
+        gpu_scf_enabled = .false.
+      case (GPU_SCF_TASK_GPU)
+        gpu_scf_enabled = .true.
+      case default
+        continue
+      end select
 #endif
       if (icalcn /= numcal) then
         call delete_iter_arrays
@@ -339,12 +348,19 @@
 #ifdef GPU
       if (gpu_scf_enabled) then
         call gpu_scf_context_clear(gpu_scf_ctx)
-        if (use_disk) then
-          lgpu = .false.
-          resident_scf = .false.
-          gpu_scf_enabled = .false.
+      end if
+      if (use_disk) then
+        if (lgpu) then
           write(iw,'(1x,a)') '[GPU SCF] Disabled: integral disk mode not supported'
           call flush(iw)
+        end if
+        lgpu = .false.
+        resident_scf = .false.
+        gpu_scf_enabled = .false.
+        if (halfe) then
+          iopc_calcp = 3
+        else
+          iopc_calcp = 5
         end if
       end if
       if (gpu_scf_enabled) then
