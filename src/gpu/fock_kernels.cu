@@ -1173,6 +1173,52 @@ void mopac_cuda_grad_buffers_release() {
 // =============== SCF Fock (J/K) on GPU (experimental) ===============
 extern "C" {
 
+bool mopac_cuda_launch_pairs_kernel(int npairs,
+                                    const int *pair_i,
+                                    const int *pair_j,
+                                    const int *pair_type,
+                                    const int *pair_w_off,
+                                    const int *pair_wj_off,
+                                    const int *pair_wk_off,
+                                    const int *nfirst,
+                                    const int *nlast,
+                                    const double *ptot,
+                                    const double *p,
+                                    const double *w,
+                                    const double *wj,
+                                    const double *wk,
+                                    double *f,
+                                    int debug_flag) {
+  if (npairs <= 0 || !pair_i || !pair_j || !pair_type ||
+      !pair_w_off || !nfirst || !nlast || !ptot || !p || !f) {
+    return false;
+  }
+  int threads = 128;
+  if (npairs < threads) threads = npairs;
+  int blocks = (npairs + threads - 1) / threads;
+  fock_pairs_kernel<<<blocks, threads>>>(npairs,
+                                         pair_i,
+                                         pair_j,
+                                         pair_type,
+                                         pair_w_off,
+                                         pair_wj_off,
+                                         pair_wk_off,
+                                         nfirst,
+                                         nlast,
+                                         ptot,
+                                         p,
+                                         w,
+                                         wj,
+                                         wk,
+                                         f,
+                                         debug_flag);
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) return false;
+  err = cudaDeviceSynchronize();
+  return err == cudaSuccess;
+}
+
+
 bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
                           const int *nfirst, const int *nlast,
                           const double *ptot, const double *p,

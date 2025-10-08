@@ -33,23 +33,22 @@ extern "C" void mopac_cuda_register_fock_device(int linear, double *host_ptr, co
 extern "C" bool mopac_cuda_fetch_fock(double *host_ptr, size_t linear);
 extern "C" void mopac_cuda_clear_fock_cache();
 extern "C" int mopac_cuda_get_resident_mode();
-
-extern __global__ void fock_pairs_kernel(int npairs,
-                                         const int *pair_i,
-                                         const int *pair_j,
-                                         const int *pair_type,
-                                         const int *pair_w_off,
-                                         const int *pair_wj_off,
-                                         const int *pair_wk_off,
-                                         const int *nfirst,
-                                         const int *nlast,
-                                         const double *ptot,
-                                         const double *p,
-                                         const double *w,
-                                         const double *wj,
-                                         const double *wk,
-                                         double *f,
-                                         int debug_flag);
+extern "C" bool mopac_cuda_launch_pairs_kernel(int npairs,
+                                               const int *pair_i,
+                                               const int *pair_j,
+                                               const int *pair_type,
+                                               const int *pair_w_off,
+                                               const int *pair_wj_off,
+                                               const int *pair_wk_off,
+                                               const int *nfirst,
+                                               const int *nlast,
+                                               const double *ptot,
+                                               const double *p,
+                                               const double *w,
+                                               const double *wj,
+                                               const double *wk,
+                                               double *f,
+                                               int debug_flag);
 
 namespace {
 struct MopacGpuScfContext {
@@ -977,39 +976,27 @@ extern "C" void mopac_cuda_scf_stream_finalize(void *cookie_ptr, int *status) {
   } else {
     int npairs = static_cast<int>(session.pair_i.size());
     if (npairs > 0) {
-      int threads = 128;
-      if (npairs < threads) threads = npairs;
-      int blocks = (npairs + threads - 1) / threads;
       double *w_dev  = (session.total_w_len  > 0) ? session.d_w  : nullptr;
       double *wj_dev = (session.total_wj_len > 0) ? session.d_wj : nullptr;
       double *wk_dev = (session.total_wk_len > 0) ? session.d_wk : nullptr;
-
-      fock_pairs_kernel<<<blocks, threads>>>(npairs,
-                                             session.d_pair_i,
-                                             session.d_pair_j,
-                                             session.d_pair_type,
-                                             session.d_pair_w_off,
-                                             session.d_pair_wj_off,
-                                             session.d_pair_wk_off,
-                                             session.d_nfirst,
-                                             session.d_nlast,
-                                             session.d_ptot,
-                                             session.d_p,
-                                             w_dev,
-                                             wj_dev,
-                                             wk_dev,
-                                             session.d_f,
-                                             0);
-      cudaError_t err = cudaGetLastError();
-      if (err != cudaSuccess) {
-        set_stream_error(session, cuda_error_message("fock_pairs_kernel launch", err), STREAM_STATUS_INTERNAL);
+      if (!mopac_cuda_launch_pairs_kernel(npairs,
+                                          session.d_pair_i,
+                                          session.d_pair_j,
+                                          session.d_pair_type,
+                                          session.d_pair_w_off,
+                                          session.d_pair_wj_off,
+                                          session.d_pair_wk_off,
+                                          session.d_nfirst,
+                                          session.d_nlast,
+                                          session.d_ptot,
+                                          session.d_p,
+                                          w_dev,
+                                          wj_dev,
+                                          wk_dev,
+                                          session.d_f,
+                                          0)) {
+        set_stream_error(session, "GPU SCF stream finalize: pair kernel launch failed", STREAM_STATUS_INTERNAL);
         rc = session.error_code;
-      } else {
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-          set_stream_error(session, cuda_error_message("fock_pairs_kernel synchronize", err), STREAM_STATUS_INTERNAL);
-          rc = session.error_code;
-        }
       }
     }
 
