@@ -250,6 +250,9 @@ struct StreamSession {
   size_t total_w_len = 0;
   size_t total_wj_len = 0;
   size_t total_wk_len = 0;
+  size_t max_w_len = 0;
+  size_t max_wj_len = 0;
+  size_t max_wk_len = 0;
 
   double *d_ptot = nullptr;
   double *d_p = nullptr;
@@ -272,6 +275,7 @@ struct StreamSession {
   int error_code = 0;
   std::string error_msg;
   size_t next_block = 0;
+  size_t processed_blocks = 0;
 };
 
 std::unordered_map<void*, std::unique_ptr<StreamSession>> &stream_sessions() {
@@ -358,6 +362,10 @@ void set_stream_error(StreamSession &session, const std::string &msg, int code) 
   session.error = true;
   session.error_code = code;
   session.error_msg = msg;
+  if (gpu_logging_enabled()) {
+    std::fprintf(stderr, "[GPU STREAM] error: %s (code=%d)\n", msg.c_str(), code);
+    std::fflush(stderr);
+  }
   set_last_error(msg);
 }
 
@@ -426,6 +434,9 @@ bool build_expected_blocks(StreamSession &session, std::string &err) {
       session.pair_w_off.push_back(static_cast<int>(w_off));
       session.pair_wj_off.push_back(static_cast<int>(wj_off));
       session.pair_wk_off.push_back(static_cast<int>(wk_off));
+      session.max_w_len = std::max(session.max_w_len, static_cast<size_t>(blk.len_w));
+      session.max_wj_len = std::max(session.max_wj_len, static_cast<size_t>(blk.len_wj));
+      session.max_wk_len = std::max(session.max_wk_len, static_cast<size_t>(blk.len_wk));
 
       w_off += static_cast<size_t>(chunks.chunk_w);
       wj_off += static_cast<size_t>(chunks.chunk_wj);
@@ -461,32 +472,27 @@ bool allocate_stream_buffers(StreamSession &session, std::string &err) {
   errc = cudaMalloc(reinterpret_cast<void **>(&session.d_nlast), sizeof(int) * atoms_e);
   if (errc != cudaSuccess) { err = cuda_error_message("cudaMalloc nlast", errc); return false; }
 
-  if (session.total_w_len > 0) {
-    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_w), sizeof(double) * session.total_w_len);
-    if (errc != cudaSuccess) { err = cuda_error_message("cudaMalloc w", errc); return false; }
+  size_t coulomb_cap = std::max(session.max_w_len, session.max_wj_len);
+  if (coulomb_cap > 0) {
+    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_w), sizeof(double) * coulomb_cap);
+    if (errc != cudaSuccess) { err = cuda_error_message("cudaMalloc stream coulomb", errc); return false; }
   }
-  if (session.total_wj_len > 0) {
-    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_wj), sizeof(double) * session.total_wj_len);
-    if (errc != cudaSuccess) { err = cuda_error_message("cudaMalloc wj", errc); return false; }
+  if (session.max_wk_len > 0) {
+    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_wk), sizeof(double) * session.max_wk_len);
+    if (errc != cudaSuccess) { err = cuda_error_message("cudaMalloc stream exchange", errc); return false; }
   }
-  if (session.total_wk_len > 0) {
-    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_wk), sizeof(double) * session.total_wk_len);
-    if (errc != cudaSuccess) { err = cuda_error_message("cudaMalloc wk", errc); return false; }
-  }
-
-  if (!session.pair_i.empty()) {
-    size_t pairs = session.pair_i.size();
-    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_pair_i), sizeof(int) * pairs);
+  if (!session.blocks.empty()) {
+    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_pair_i), sizeof(int));
     if (errc != cudaSuccess) { err = cuda_error_message("cudaMalloc pair_i", errc); return false; }
-    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_pair_j), sizeof(int) * pairs);
+    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_pair_j), sizeof(int));
     if (errc != cudaSuccess) { err = cuda_error_message("cudaMalloc pair_j", errc); return false; }
-    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_pair_type), sizeof(int) * pairs);
+    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_pair_type), sizeof(int));
     if (errc != cudaSuccess) { err = cuda_error_message("cudaMalloc pair_type", errc); return false; }
-    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_pair_w_off), sizeof(int) * pairs);
+    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_pair_w_off), sizeof(int));
     if (errc != cudaSuccess) { err = cuda_error_message("cudaMalloc pair_w_off", errc); return false; }
-    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_pair_wj_off), sizeof(int) * pairs);
+    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_pair_wj_off), sizeof(int));
     if (errc != cudaSuccess) { err = cuda_error_message("cudaMalloc pair_wj_off", errc); return false; }
-    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_pair_wk_off), sizeof(int) * pairs);
+    errc = cudaMalloc(reinterpret_cast<void **>(&session.d_pair_wk_off), sizeof(int));
     if (errc != cudaSuccess) { err = cuda_error_message("cudaMalloc pair_wk_off", errc); return false; }
   }
 
@@ -506,22 +512,6 @@ bool allocate_stream_buffers(StreamSession &session, std::string &err) {
   if (errc != cudaSuccess) { err = cuda_error_message("cudaMemcpy nfirst", errc); return false; }
   errc = cudaMemcpy(session.d_nlast, session.nlast_host, sizeof(int) * atoms_e, cudaMemcpyHostToDevice);
   if (errc != cudaSuccess) { err = cuda_error_message("cudaMemcpy nlast", errc); return false; }
-
-  if (!session.pair_i.empty()) {
-    size_t bytes = sizeof(int) * session.pair_i.size();
-    errc = cudaMemcpy(session.d_pair_i, session.pair_i.data(), bytes, cudaMemcpyHostToDevice);
-    if (errc != cudaSuccess) { err = cuda_error_message("cudaMemcpy pair_i", errc); return false; }
-    errc = cudaMemcpy(session.d_pair_j, session.pair_j.data(), bytes, cudaMemcpyHostToDevice);
-    if (errc != cudaSuccess) { err = cuda_error_message("cudaMemcpy pair_j", errc); return false; }
-    errc = cudaMemcpy(session.d_pair_type, session.pair_type.data(), bytes, cudaMemcpyHostToDevice);
-    if (errc != cudaSuccess) { err = cuda_error_message("cudaMemcpy pair_type", errc); return false; }
-    errc = cudaMemcpy(session.d_pair_w_off, session.pair_w_off.data(), bytes, cudaMemcpyHostToDevice);
-    if (errc != cudaSuccess) { err = cuda_error_message("cudaMemcpy pair_w_off", errc); return false; }
-    errc = cudaMemcpy(session.d_pair_wj_off, session.pair_wj_off.data(), bytes, cudaMemcpyHostToDevice);
-    if (errc != cudaSuccess) { err = cuda_error_message("cudaMemcpy pair_wj_off", errc); return false; }
-    errc = cudaMemcpy(session.d_pair_wk_off, session.pair_wk_off.data(), bytes, cudaMemcpyHostToDevice);
-    if (errc != cudaSuccess) { err = cuda_error_message("cudaMemcpy pair_wk_off", errc); return false; }
-  }
 
   return true;
 }
@@ -832,6 +822,7 @@ extern "C" void mopac_cuda_scf_stream_register(void *cookie_ptr) {
   session->active = true;
   session->error = false;
   session->next_block = 0;
+  session->processed_blocks = 0;
 
   {
     std::lock_guard<std::mutex> guard(stream_mutex());
@@ -900,43 +891,133 @@ extern "C" void mopac_cuda_scf_stream_publish(void *cookie_ptr,
   }
 
   cudaError_t err;
-  if (blk.len_w > 0 && session.d_w) {
-    err = cudaMemcpy(session.d_w + blk.w_off, wj, sizeof(double) * static_cast<size_t>(blk.len_w),
-                     cudaMemcpyHostToDevice);
+  size_t coulomb_len = static_cast<size_t>((blk.len_w > 0) ? blk.len_w : blk.len_wj);
+  if (coulomb_len > 0) {
+    size_t coulomb_cap = std::max(session.max_w_len, session.max_wj_len);
+    if (coulomb_len > coulomb_cap) {
+      set_stream_error(session, "GPU SCF stream publish: coulomb block exceeds staging capacity", STREAM_STATUS_INTERNAL);
+      if (status) *status = session.error_code;
+      return;
+    }
+    if (!session.d_w) {
+      set_stream_error(session, "GPU SCF stream publish: coulomb staging unavailable", STREAM_STATUS_INTERNAL);
+      if (status) *status = session.error_code;
+      return;
+    }
+    err = cudaMemcpy(session.d_w, wj, sizeof(double) * coulomb_len, cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
-      set_stream_error(session, cuda_error_message("cudaMemcpy w block", err), STREAM_STATUS_COPY_FAILED);
+      set_stream_error(session, cuda_error_message("cudaMemcpy stream coulomb", err), STREAM_STATUS_COPY_FAILED);
       if (status) *status = session.error_code;
       return;
     }
   }
-  if (blk.len_wj > 0 && session.d_wj) {
-    err = cudaMemcpy(session.d_wj + blk.wj_off, wj, sizeof(double) * static_cast<size_t>(blk.len_wj),
-                     cudaMemcpyHostToDevice);
+
+  size_t exchange_len = static_cast<size_t>(blk.len_wk);
+  if (exchange_len > 0) {
+    if (exchange_len > session.max_wk_len) {
+      set_stream_error(session, "GPU SCF stream publish: exchange block exceeds staging capacity", STREAM_STATUS_INTERNAL);
+      if (status) *status = session.error_code;
+      return;
+    }
+    const double *wk_src = wk ? wk : wj;
+    if (!wk_src) {
+      set_stream_error(session, "GPU SCF stream publish: exchange payload missing", STREAM_STATUS_BAD_ARGS);
+      if (status) *status = session.error_code;
+      return;
+    }
+    if (!session.d_wk) {
+      set_stream_error(session, "GPU SCF stream publish: exchange staging unavailable", STREAM_STATUS_INTERNAL);
+      if (status) *status = session.error_code;
+      return;
+    }
+    err = cudaMemcpy(session.d_wk, wk_src, sizeof(double) * exchange_len, cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
-      set_stream_error(session, cuda_error_message("cudaMemcpy wj block", err), STREAM_STATUS_COPY_FAILED);
+      set_stream_error(session, cuda_error_message("cudaMemcpy stream exchange", err), STREAM_STATUS_COPY_FAILED);
       if (status) *status = session.error_code;
       return;
     }
   }
-  if (blk.len_wk > 0) {
-    if (!wk) {
-      set_stream_error(session, "GPU SCF stream publish: exchange block missing", STREAM_STATUS_BAD_ARGS);
+
+  int pair_i_val = blk.ii;
+  int pair_j_val = blk.jj;
+  int pair_type_val = blk.type;
+  int zero = 0;
+  if (session.d_pair_i) {
+    err = cudaMemcpy(session.d_pair_i, &pair_i_val, sizeof(int), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+      set_stream_error(session, cuda_error_message("cudaMemcpy pair_i", err), STREAM_STATUS_COPY_FAILED);
       if (status) *status = session.error_code;
       return;
     }
-    if (session.d_wk) {
-      err = cudaMemcpy(session.d_wk + blk.wk_off, wk, sizeof(double) * static_cast<size_t>(blk.len_wk),
-                       cudaMemcpyHostToDevice);
-      if (err != cudaSuccess) {
-        set_stream_error(session, cuda_error_message("cudaMemcpy wk block", err), STREAM_STATUS_COPY_FAILED);
-        if (status) *status = session.error_code;
-        return;
-      }
+  }
+  if (session.d_pair_j) {
+    err = cudaMemcpy(session.d_pair_j, &pair_j_val, sizeof(int), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+      set_stream_error(session, cuda_error_message("cudaMemcpy pair_j", err), STREAM_STATUS_COPY_FAILED);
+      if (status) *status = session.error_code;
+      return;
     }
+  }
+  if (session.d_pair_type) {
+    err = cudaMemcpy(session.d_pair_type, &pair_type_val, sizeof(int), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+      set_stream_error(session, cuda_error_message("cudaMemcpy pair_type", err), STREAM_STATUS_COPY_FAILED);
+      if (status) *status = session.error_code;
+      return;
+    }
+  }
+  if (session.d_pair_w_off) {
+    err = cudaMemcpy(session.d_pair_w_off, &zero, sizeof(int), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+      set_stream_error(session, cuda_error_message("cudaMemcpy pair_w_off", err), STREAM_STATUS_COPY_FAILED);
+      if (status) *status = session.error_code;
+      return;
+    }
+  }
+  if (session.d_pair_wj_off) {
+    err = cudaMemcpy(session.d_pair_wj_off, &zero, sizeof(int), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+      set_stream_error(session, cuda_error_message("cudaMemcpy pair_wj_off", err), STREAM_STATUS_COPY_FAILED);
+      if (status) *status = session.error_code;
+      return;
+    }
+  }
+  if (session.d_pair_wk_off) {
+    err = cudaMemcpy(session.d_pair_wk_off, &zero, sizeof(int), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+      set_stream_error(session, cuda_error_message("cudaMemcpy pair_wk_off", err), STREAM_STATUS_COPY_FAILED);
+      if (status) *status = session.error_code;
+      return;
+    }
+  }
+
+  double *w_ptr = (blk.len_w > 0) ? session.d_w : nullptr;
+  double *wj_ptr = (blk.len_wj > 0) ? session.d_w : ((blk.len_w > 0) ? session.d_w : nullptr);
+  double *wk_ptr = (blk.len_wk > 0) ? session.d_wk : nullptr;
+  if (!mopac_cuda_launch_pairs_kernel(1,
+                                      session.d_pair_i,
+                                      session.d_pair_j,
+                                      session.d_pair_type,
+                                      session.d_pair_w_off,
+                                      session.d_pair_wj_off,
+                                      session.d_pair_wk_off,
+                                      session.d_nfirst,
+                                      session.d_nlast,
+                                      session.d_ptot,
+                                      session.d_p,
+                                      w_ptr,
+                                      wj_ptr,
+                                      wk_ptr,
+                                      session.d_f,
+                                      0)) {
+    set_stream_error(session, "GPU SCF stream publish: pair kernel launch failed", STREAM_STATUS_INTERNAL);
+    if (status) *status = session.error_code;
+    return;
   }
 
   session.filled[session.next_block] = 1;
   session.next_block += 1;
+  session.processed_blocks += 1;
   if (verbose) {
     std::fprintf(stderr, "[GPU STREAM] publish ok (block %zu/%zu)\n",
                  session.next_block, session.blocks.size());
@@ -973,53 +1054,28 @@ extern "C" void mopac_cuda_scf_stream_finalize(void *cookie_ptr, int *status) {
   } else if (session.next_block != session.blocks.size()) {
     set_stream_error(session, "GPU SCF stream finalize: missing blocks detected", STREAM_STATUS_INTERNAL);
     rc = session.error_code;
+  } else if (session.processed_blocks != session.blocks.size()) {
+    set_stream_error(session, "GPU SCF stream finalize: incomplete kernel accumulation", STREAM_STATUS_INTERNAL);
+    rc = session.error_code;
   } else {
-    int npairs = static_cast<int>(session.pair_i.size());
-    if (npairs > 0) {
-      double *w_dev  = (session.total_w_len  > 0) ? session.d_w  : nullptr;
-      double *wj_dev = (session.total_wj_len > 0) ? session.d_wj : nullptr;
-      double *wk_dev = (session.total_wk_len > 0) ? session.d_wk : nullptr;
-      if (!mopac_cuda_launch_pairs_kernel(npairs,
-                                          session.d_pair_i,
-                                          session.d_pair_j,
-                                          session.d_pair_type,
-                                          session.d_pair_w_off,
-                                          session.d_pair_wj_off,
-                                          session.d_pair_wk_off,
-                                          session.d_nfirst,
-                                          session.d_nlast,
-                                          session.d_ptot,
-                                          session.d_p,
-                                          w_dev,
-                                          wj_dev,
-                                          wk_dev,
-                                          session.d_f,
-                                          0)) {
-        set_stream_error(session, "GPU SCF stream finalize: pair kernel launch failed", STREAM_STATUS_INTERNAL);
-        rc = session.error_code;
-      }
-    }
-
-    if (rc == STREAM_STATUS_SUCCESS) {
-      size_t bytes = sizeof(double) * static_cast<size_t>(session.mpack);
-      bool resident = (mopac_cuda_get_resident_mode() != 0);
-      if (resident) {
-        mopac_cuda_register_fock_device(session.mpack, session.f_host, session.d_f);
-        if (!mopac_cuda_fetch_fock(session.f_host, static_cast<size_t>(session.mpack))) {
-          cudaError_t err = cudaMemcpy(session.f_host, session.d_f, bytes, cudaMemcpyDeviceToHost);
-          if (err != cudaSuccess) {
-            set_stream_error(session, cuda_error_message("cudaMemcpy fock resident fallback", err), STREAM_STATUS_COPY_FAILED);
-            rc = session.error_code;
-          }
-        }
-      } else {
+    size_t bytes = sizeof(double) * static_cast<size_t>(session.mpack);
+    bool resident = (mopac_cuda_get_resident_mode() != 0);
+    if (resident) {
+      mopac_cuda_register_fock_device(session.mpack, session.f_host, session.d_f);
+      if (!mopac_cuda_fetch_fock(session.f_host, static_cast<size_t>(session.mpack))) {
         cudaError_t err = cudaMemcpy(session.f_host, session.d_f, bytes, cudaMemcpyDeviceToHost);
         if (err != cudaSuccess) {
-          set_stream_error(session, cuda_error_message("cudaMemcpy fock", err), STREAM_STATUS_COPY_FAILED);
+          set_stream_error(session, cuda_error_message("cudaMemcpy fock resident fallback", err), STREAM_STATUS_COPY_FAILED);
           rc = session.error_code;
-        } else {
-          mopac_cuda_clear_fock_cache();
         }
+      }
+    } else {
+      cudaError_t err = cudaMemcpy(session.f_host, session.d_f, bytes, cudaMemcpyDeviceToHost);
+      if (err != cudaSuccess) {
+        set_stream_error(session, cuda_error_message("cudaMemcpy fock", err), STREAM_STATUS_COPY_FAILED);
+        rc = session.error_code;
+      } else {
+        mopac_cuda_clear_fock_cache();
       }
     }
   }
