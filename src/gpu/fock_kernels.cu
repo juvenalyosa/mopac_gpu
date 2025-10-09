@@ -1254,6 +1254,48 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   const size_t max_index = static_cast<size_t>(std::numeric_limits<int>::max());
   long long ll_pairs = 0, lh_pairs = 0, hh_pairs = 0;
 
+  // Optional: force selected pair kinds to be accumulated on CPU for correctness
+  // Syntax: MOPAC_GPU_FOCK_CPU_TYPES=HH,HL,LL,GEN,PER (comma-separated)
+  auto parse_cpu_types = []() {
+    int mask = 0; // bit0=LL, bit1=HL, bit2=HH, bit3=GEN, bit4=PER
+    const char *s = std::getenv("MOPAC_GPU_FOCK_CPU_TYPES");
+    if (!s || !*s) return mask;
+    std::string str(s);
+    size_t start = 0;
+    while (start < str.size()) {
+      size_t comma = str.find(',', start);
+      std::string tok = str.substr(start, (comma == std::string::npos ? str.size() : comma) - start);
+      // trim
+      auto trim = [](std::string &x){ size_t b=x.find_first_not_of(" \t"); size_t e=x.find_last_not_of(" \t"); if (b==std::string::npos) { x.clear(); return; } x = x.substr(b, e-b+1); };
+      trim(tok);
+      for (auto &c : tok) c = (char)std::toupper((unsigned char)c);
+      if (tok == "LL") mask |= 1<<0;
+      else if (tok == "HL") mask |= 1<<1;
+      else if (tok == "HH") mask |= 1<<2;
+      else if (tok == "GEN") mask |= 1<<3;
+      else if (tok == "PER" || tok == "PERIODIC") mask |= 1<<4;
+      if (comma == std::string::npos) break;
+      start = comma + 1;
+    }
+    return mask;
+  };
+  int cpu_type_mask = parse_cpu_types();
+  auto want_cpu_pair = [&](int type)->bool {
+    switch (type) {
+      case PAIR_LIGHT_LIGHT: return (cpu_type_mask & (1<<0)) != 0;
+      case PAIR_HEAVY_LIGHT:
+      case PAIR_LIGHT_HEAVY: return (cpu_type_mask & (1<<1)) != 0;
+      case PAIR_HEAVY_HEAVY: return (cpu_type_mask & (1<<2)) != 0;
+      case PAIR_GENERAL:     return (cpu_type_mask & (1<<3)) != 0;
+      case PAIR_PERIODIC:    return (cpu_type_mask & (1<<4)) != 0;
+      default: return false;
+    }
+  };
+
+  // Accumulator for pairs we keep on CPU (optional correctness mode)
+  std::vector<double> f_cpu_accum;
+  if (cpu_type_mask != 0) f_cpu_accum.assign(mpack_e, 0.0);
+
   for (int ii = 1; ii <= numat; ++ii) {
     int ia = nfirst[ii - 1];
     int ib = nlast[ii - 1];
@@ -1309,12 +1351,45 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
       if (wj_len >= max_index || wj_len + static_cast<size_t>(chunk_wj) > max_index) return false;
       if (wk_len >= max_index || wk_len + static_cast<size_t>(chunk_wk) > max_index) return false;
 
+      // Record pair and offsets
       pair_i.push_back(ii);
       pair_j.push_back(jj);
       pair_type.push_back(type);
       pair_w_off.push_back(static_cast<int>(w_len));
       pair_wj_off.push_back(static_cast<int>(wj_len));
       pair_wk_off.push_back(static_cast<int>(wk_len));
+
+      // Optionally accumulate this pair on CPU and exclude from GPU launch
+      if (cpu_type_mask != 0 && want_cpu_pair(type)) {
+        const double *w_host  = (w  && chunk_w  > 0) ? (w  + w_len)  : nullptr;
+        const double *wj_host = (wj && chunk_wj > 0) ? (wj + wj_len) : nullptr;
+        const double *wk_host = (wk && chunk_wk > 0) ? (wk + wk_len) : nullptr;
+        if (type == PAIR_LIGHT_LIGHT) {
+          int ia = nfirst[ii - 1];
+          int ja = nfirst[jj - 1];
+          host_pair_light_light(ia, ja, ptot, p, w_host, f_cpu_accum.data());
+        } else if (type == PAIR_HEAVY_LIGHT) {
+          int ia = nfirst[ii - 1];
+          int ib = nlast[ii - 1];
+          int ja = nfirst[jj - 1];
+          host_pair_heavy_light(ia, ib, ja, ptot, p, w_host, f_cpu_accum.data());
+        } else if (type == PAIR_LIGHT_HEAVY) {
+          int ia = nfirst[jj - 1];
+          int ib = nlast[jj - 1];
+          int ja = nfirst[ii - 1];
+          host_pair_heavy_light(ia, ib, ja, ptot, p, w_host, f_cpu_accum.data());
+        } else if (type == PAIR_HEAVY_HEAVY) {
+          int ia = nfirst[ii - 1];
+          int ib = nlast[ii - 1];
+          int ja = nfirst[jj - 1];
+          int jb = nlast[jj - 1];
+          host_pair_heavy_heavy(ia, ib, ja, jb, ptot, p, w_host, f_cpu_accum.data());
+        } else if (type == PAIR_PERIODIC) {
+          int ia = nfirst[ii - 1]; int ib = nlast[ii - 1];
+          int ja = nfirst[jj - 1]; int jb = nlast[jj - 1];
+          host_pair_periodic(ia, ib, ja, jb, ptot, p, wj_host ? wj_host : w_host, wk_host ? wk_host : (wj_host ? wj_host : w_host), f_cpu_accum.data());
+        }
+      }
 
       w_len += static_cast<size_t>(chunk_w);
       wj_len += static_cast<size_t>(chunk_wj);
@@ -1439,13 +1514,39 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
                 pair_i.size(), w_len);
   }
 
+  // Build compact GPU pair lists if some pairs are reserved for CPU
+  std::vector<int> pair_i_gpu, pair_j_gpu, pair_type_gpu, pair_w_off_gpu, pair_wj_off_gpu, pair_wk_off_gpu;
   if (!pair_i.empty()) {
-    if (cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int) * pair_i.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
-    if (cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int) * pair_j.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
-    if (cudaMemcpy(s_d_pair_off, pair_w_off.data(), sizeof(int) * pair_w_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
-    if (cudaMemcpy(s_d_pair_type, pair_type.data(), sizeof(int) * pair_type.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
-    if (cudaMemcpy(s_d_pair_wj_off, pair_wj_off.data(), sizeof(int) * pair_wj_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
-    if (cudaMemcpy(s_d_pair_wk_off, pair_wk_off.data(), sizeof(int) * pair_wk_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    if (cpu_type_mask == 0) {
+      // Fast path: copy all pairs
+      if (cudaMemcpy(s_d_pair_i, pair_i.data(), sizeof(int) * pair_i.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+      if (cudaMemcpy(s_d_pair_j, pair_j.data(), sizeof(int) * pair_j.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+      if (cudaMemcpy(s_d_pair_off, pair_w_off.data(), sizeof(int) * pair_w_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+      if (cudaMemcpy(s_d_pair_type, pair_type.data(), sizeof(int) * pair_type.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+      if (cudaMemcpy(s_d_pair_wj_off, pair_wj_off.data(), sizeof(int) * pair_wj_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+      if (cudaMemcpy(s_d_pair_wk_off, pair_wk_off.data(), sizeof(int) * pair_wk_off.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+    } else {
+      // Compact
+      for (size_t t = 0; t < pair_i.size(); ++t) {
+        int type = pair_type[t];
+        if (want_cpu_pair(type)) continue;
+        pair_i_gpu.push_back(pair_i[t]);
+        pair_j_gpu.push_back(pair_j[t]);
+        pair_type_gpu.push_back(pair_type[t]);
+        pair_w_off_gpu.push_back(pair_w_off[t]);
+        pair_wj_off_gpu.push_back(pair_wj_off[t]);
+        pair_wk_off_gpu.push_back(pair_wk_off[t]);
+      }
+      if (!pair_i_gpu.empty()) {
+        if (!ensure_pair_buffers(pair_i_gpu.size())) return false;
+        if (cudaMemcpy(s_d_pair_i, pair_i_gpu.data(), sizeof(int) * pair_i_gpu.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+        if (cudaMemcpy(s_d_pair_j, pair_j_gpu.data(), sizeof(int) * pair_j_gpu.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+        if (cudaMemcpy(s_d_pair_off, pair_w_off_gpu.data(), sizeof(int) * pair_w_off_gpu.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+        if (cudaMemcpy(s_d_pair_type, pair_type_gpu.data(), sizeof(int) * pair_type_gpu.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+        if (cudaMemcpy(s_d_pair_wj_off, pair_wj_off_gpu.data(), sizeof(int) * pair_wj_off_gpu.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+        if (cudaMemcpy(s_d_pair_wk_off, pair_wk_off_gpu.data(), sizeof(int) * pair_wk_off_gpu.size(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+      }
+    }
   }
 
   if (resident_debug_enabled_local() && !pair_i.empty()) {
@@ -1471,11 +1572,12 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
     cudaEventRecord(t_start);
   }
 
-  if (!pair_i.empty()) {
+  size_t gpu_pairs_count = (cpu_type_mask == 0) ? pair_i.size() : pair_i_gpu.size();
+  if (gpu_pairs_count > 0) {
     int threads = 128;
-    int blocks = static_cast<int>((pair_i.size() + threads - 1) / threads);
+    int blocks = static_cast<int>((gpu_pairs_count + threads - 1) / threads);
     int debug_flag = resident_debug_enabled_local() ? 1 : 0;
-    fock_pairs_kernel<<<blocks, threads>>>(static_cast<int>(pair_i.size()),
+    fock_pairs_kernel<<<blocks, threads>>>(static_cast<int>(gpu_pairs_count),
                                            s_d_pair_i, s_d_pair_j, s_d_pair_type,
                                            s_d_pair_off, s_d_pair_wj_off, s_d_pair_wk_off,
                                            s_d_nf, s_d_nl,
@@ -1532,14 +1634,25 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
       std::printf("\n");
       std::fflush(stdout);
     }
+    // If some pairs were accumulated on CPU, add them to device F before handing out
+    if (cpu_type_mask != 0) {
+      std::vector<double> f_dev(mpack_e);
+      cudaMemcpy(f_dev.data(), s_d_f, sizeof(double) * mpack_e, cudaMemcpyDeviceToHost);
+      for (size_t k = 0; k < mpack_e; ++k) f_dev[k] += f_cpu_accum[k];
+      // Copy back to device buffer and register
+      cudaMemcpy(s_d_f, f_dev.data(), sizeof(double) * mpack_e, cudaMemcpyHostToDevice);
+    }
     mopac_cuda_register_fock_device(mpack, fout, s_d_f);
     if (!mopac_cuda_fetch_fock(fout, mpack_e)) {
       cudaMemcpy(fout, s_d_f, sizeof(double) * mpack_e, cudaMemcpyDeviceToHost);
     }
   } else {
-    // Fetch contributions-only and add to existing host baseline F
+    // Fetch contributions-only and add CPU-accumulated pairs and baseline
     std::vector<double> f_contrib(mpack_e);
     if (cudaMemcpy(f_contrib.data(), s_d_f, sizeof(double) * mpack_e, cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+    if (cpu_type_mask != 0) {
+      for (size_t k = 0; k < mpack_e; ++k) f_contrib[k] += f_cpu_accum[k];
+    }
     for (size_t k = 0; k < mpack_e; ++k) fout[k] = f_base[k] + f_contrib[k];
     mopac_cuda_clear_fock_cache();
   }
@@ -1547,8 +1660,9 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   if (want_verify && !f_host.empty()) {
     double max_diff = 0.0;
     for (size_t k = 0; k < mpack_e; ++k) {
-      // Compare device contributions to CPU contributions by stripping the host baseline
-      double diff = std::abs((fout[k] - f_base[k]) - f_host[k]);
+      // Compare device+CPU hybrid contributions to CPU contributions by stripping the host baseline
+      double dev_contrib = fout[k] - f_base[k];
+      double diff = std::abs(dev_contrib - f_host[k]);
       if (diff > max_diff) max_diff = diff;
     }
     if (max_diff > 1.0e-9) {
