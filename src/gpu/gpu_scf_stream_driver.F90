@@ -26,6 +26,7 @@ contains
 
   logical function gpu_scf_stream_fock(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic_flag, f)
     use iso_c_binding, only: c_int, c_double, c_ptr, c_loc
+    use chanel_C,      only: iw
     implicit none
     integer, intent(in) :: norbs, mpack, numat
     integer, intent(in), target :: nfirst(*), nlast(*)
@@ -45,6 +46,8 @@ contains
     integer :: pairs_i, pairs_j
     integer :: len_block
     integer :: kk
+    integer :: nblocks, nblocks_w, nblocks_wjwk
+    integer :: total_len, total_w_len, total_wjwk_len
     logical :: use_w
     integer(c_int) :: status
     integer(c_int) :: final_status
@@ -80,6 +83,12 @@ contains
     call mopac_cuda_scf_stream_register(cookie_ptr)
 
     kk = 0
+    nblocks = 0
+    nblocks_w = 0
+    nblocks_wjwk = 0
+    total_len = 0
+    total_w_len = 0
+    total_wjwk_len = 0
     status = 0_c_int
     final_status = 0_c_int
     wj_size = size(wj)
@@ -159,6 +168,12 @@ contains
              int(ja, kind=c_int), int(jb, kind=c_int),                                            &
              int(len_block, kind=c_int),                                                          &
              w(kk + 1 : kk + len_block), w(kk + 1 : kk + len_block), status)
+          if (status == 0_c_int) then
+            nblocks = nblocks + 1
+            nblocks_w = nblocks_w + 1
+            total_len = total_len + len_block
+            total_w_len = total_w_len + len_block
+          end if
         else
           ! General/periodic cases use split WJ/WK layout
           have_wk = (wk_size >= kk + len_block)
@@ -175,6 +190,12 @@ contains
                int(len_block, kind=c_int),                                                        &
                wj(kk + 1 : kk + len_block), wj(kk + 1 : kk + len_block), status)
           end if
+          if (status == 0_c_int) then
+            nblocks = nblocks + 1
+            nblocks_wjwk = nblocks_wjwk + 1
+            total_len = total_len + len_block
+            total_wjwk_len = total_wjwk_len + len_block
+          end if
         end if
 
         if (status /= 0_c_int) then
@@ -186,7 +207,14 @@ contains
 
     call mopac_cuda_scf_stream_finalize(cookie_ptr, final_status)
     if (status /= 0_c_int .and. final_status == 0_c_int) final_status = status
-    if (final_status == 0_c_int) gpu_scf_stream_fock = .true.
+    if (final_status == 0_c_int) then
+      gpu_scf_stream_fock = .true.
+      write(iw,'(1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0)') &
+        '[STREAM] engaged: blocks=', nblocks, 'W-blocks=', nblocks_w, 'WJ/WK-blocks=', nblocks_wjwk, &
+        'periodic=', periodic_flag
+      write(iw,'(1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0)') &
+        '[STREAM] lengths:', total_len, 'W-len=', total_w_len, 'WJ/WK-len=', total_wjwk_len
+    end if
   end function gpu_scf_stream_fock
 
 end module gpu_scf_stream_driver
