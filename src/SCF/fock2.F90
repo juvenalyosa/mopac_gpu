@@ -153,6 +153,13 @@
           if (gpu_scf_stream_fock(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic_flag, f)) then
             return
           end if
+          ! Try non-stream GPU builder as a fallback before going to CPU
+          if (allow_gpu) then
+            ok = mopac_cuda_fock2_scf(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic_flag, f)
+            if (ok) then
+              return
+            end if
+          end if
           if (.not. stream_failure_reported) then
             write(iw,'(1x,a)') '[GPU FOCK] Disk streaming path failed – reverting to CPU implementation'
             call flush(iw)

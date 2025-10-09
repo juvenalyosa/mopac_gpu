@@ -121,17 +121,24 @@ contains
 
         if (len_block <= 0) cycle
         if (periodic_flag /= 0) then
+          ! Periodic (solid-state) case uses split WJ/WK layout
           use_w = .false.
         else if (span_i >= 7 .or. span_j >= 7) then
+          ! Any d-containing pair uses legacy W layout
           use_w = .true.
         else if (span_i >= 4 .and. span_j >= 4) then
+          ! Heavy-heavy pair uses legacy W layout (100 elements)
           use_w = .true.
         else if ((span_i >= 4 .and. span_j == 1) .or. (span_j >= 4 .and. span_i == 1)) then
+          ! Heavy-light pair uses legacy W layout (10 elements)
           use_w = .true.
         else if (span_i == 1 .and. span_j == 1) then
+          ! Light-light pair uses legacy W layout (1 element)
           use_w = .true.
         else
-          use_w = .false.
+          ! General molecular (non-periodic) pair also uses legacy W layout
+          ! to match CPU fock2 behavior.
+          use_w = .true.
         end if
 
         if (use_w) then
