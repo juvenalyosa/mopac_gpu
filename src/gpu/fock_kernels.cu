@@ -1228,6 +1228,12 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   const bool periodic = (periodic_flag != 0);
   size_t atoms_e = static_cast<size_t>(numat);
   size_t mpack_e = static_cast<size_t>(mpack);
+  // Determine resident mode early so we can choose how to initialize device F
+  bool resident = (mopac_cuda_get_resident_mode() != 0);
+  // Capture host baseline F (H-core + shifts already in fout) for verification and
+  // for non-resident accumulation on host.
+  std::vector<double> f_base;
+  f_base.assign(fout, fout + mpack);
 
   std::vector<int> pair_i;
   std::vector<int> pair_j;
@@ -1380,7 +1386,14 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   if (!ensure_buf_double(&s_d_wk, &cap_wk, wk_len)) return false;
   if (!ensure_pair_buffers(pair_i.size())) return false;
 
-  cudaMemset(s_d_f, 0, sizeof(double) * mpack_e);
+  // Initialize device F buffer: in resident mode accumulate on top of the host baseline
+  // so the device holds the full F (needed by downstream GPU consumers). Otherwise, keep
+  // contributions-only on device and add to host baseline after the kernel.
+  if (resident) {
+    if (cudaMemcpy(s_d_f, fout, sizeof(double) * mpack_e, cudaMemcpyHostToDevice) != cudaSuccess) return false;
+  } else {
+    if (cudaMemset(s_d_f, 0, sizeof(double) * mpack_e) != cudaSuccess) return false;
+  }
 
     cudaMemcpy(s_d_nf, nfirst, sizeof(int) * atoms_e, cudaMemcpyHostToDevice);
     cudaMemcpy(s_d_nl, nlast, sizeof(int) * atoms_e, cudaMemcpyHostToDevice);
@@ -1509,7 +1522,6 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
     }
   }
 
-  bool resident = (mopac_cuda_get_resident_mode() != 0);
   if (resident) {
     if (resident_debug_enabled_local()) {
       size_t limit = std::min(mpack_e, static_cast<size_t>(5));
@@ -1525,14 +1537,18 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
       cudaMemcpy(fout, s_d_f, sizeof(double) * mpack_e, cudaMemcpyDeviceToHost);
     }
   } else {
-    cudaMemcpy(fout, s_d_f, sizeof(double) * mpack_e, cudaMemcpyDeviceToHost);
+    // Fetch contributions-only and add to existing host baseline F
+    std::vector<double> f_contrib(mpack_e);
+    if (cudaMemcpy(f_contrib.data(), s_d_f, sizeof(double) * mpack_e, cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+    for (size_t k = 0; k < mpack_e; ++k) fout[k] = f_base[k] + f_contrib[k];
     mopac_cuda_clear_fock_cache();
   }
 
   if (want_verify && !f_host.empty()) {
     double max_diff = 0.0;
     for (size_t k = 0; k < mpack_e; ++k) {
-      double diff = std::abs(fout[k] - f_host[k]);
+      // Compare device contributions to CPU contributions by stripping the host baseline
+      double diff = std::abs((fout[k] - f_base[k]) - f_host[k]);
       if (diff > max_diff) max_diff = diff;
     }
     if (max_diff > 1.0e-9) {
