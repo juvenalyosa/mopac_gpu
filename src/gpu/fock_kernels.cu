@@ -344,53 +344,10 @@ static inline void host_pair_heavy_light(int heavy_start, int heavy_end, int lig
                                          const double *w_block,
                                          double *f_host) {
   if (!w_block || !ptot || !p || !f_host) return;
-  if (!host_jindex_ready) ensure_jindex_device();
   int span = heavy_end - heavy_start + 1;
   if (span <= 0) return;
-  int coulomb_len = span * (span + 1) / 2;
-  size_t ll = packed_index_host(light_atom, light_atom);
-  double ptot_ll = ptot[ll];
-  double sumoff = 0.0;
-  double sumdia = 0.0;
-  int offset = 0;
-  for (int rel = 0; rel < span; ++rel) {
-    int orb_i = heavy_start + rel;
-    if (rel > 0) {
-      for (int relj = 0; relj < rel; ++relj) {
-        int orb_j = heavy_start + relj;
-        size_t idx = packed_index_host(orb_i, orb_j);
-        double val = (offset < coulomb_len) ? w_block[offset] : 0.0;
-        offset++;
-        f_host[idx] += ptot_ll * val;
-        sumoff += ptot[idx] * val;
-      }
-    }
-    double val = (offset < coulomb_len) ? w_block[offset] : 0.0;
-    offset++;
-    size_t idx_ii = packed_index_host(orb_i, orb_i);
-    f_host[idx_ii] += ptot_ll * val;
-    sumdia += ptot[idx_ii] * val;
-  }
-  f_host[ll] += sumoff * 2.0 + sumdia;
-
-  // Heavy-light integrals are stored in fixed 10-entry blocks (Fortran legacy layout).
-  const int heavy_light_block_len = 10;
-  int table_index = 0;
-  for (int rel = 0; rel < span; ++rel) {
-    int orb_i = heavy_start + rel;
-    size_t idx_il = packed_index_host(orb_i, light_atom);
-    double acc = 0.0;
-    for (int relj = 0; relj < span; ++relj) {
-      int map = host_jindex[table_index + relj];
-      if (map <= 0 || map > heavy_light_block_len) continue;
-      double wij = w_block[map - 1];
-      int orb_j = heavy_start + relj;
-      size_t idx_pl = packed_index_host(orb_j, light_atom);
-      acc += p[idx_pl] * wij;
-    }
-    table_index += span;
-    f_host[idx_il] -= acc;
-  }
+  // Use general pair mapping for correctness
+  host_pair_general(heavy_start, heavy_end, light_atom, light_atom, ptot, p, w_block, f_host);
 }
 
 static inline void host_pair_heavy_heavy(int ia, int ib, int ja, int jb,
@@ -713,56 +670,8 @@ __device__ inline void fock_pair_heavy_light(int heavy_start, int heavy_end, int
                                              double *f,
                                              int dbg_tid) {
   if (!w_block || !ptot || !p || !f) return;
-  int span = heavy_end - heavy_start + 1;
-  if (span <= 0) return;
-
-  int coulomb_len = span * (span + 1) / 2;
-  int ll = packed_index_zero(light_atom, light_atom);
-  double ptot_ll = ptot[ll];
-  // Coulomb contribution: mirror CPU order
-  int wpos = 0;
-  double sumoff = 0.0;
-  double sumdia = 0.0;
-  for (int rel = 0; rel < span; ++rel) {
-    int orb_i = heavy_start + rel;
-    for (int relj = 0; relj < rel; ++relj) {
-      int orb_j = heavy_start + relj;
-      double val = (wpos < coulomb_len) ? w_block[wpos] : 0.0;
-      wpos++;
-      int idx = packed_index_zero(orb_i, orb_j);
-      atomicAdd_double(&f[idx], ptot_ll * val);
-      sumoff += ptot[idx] * val;
-    }
-    double diag = (wpos < coulomb_len) ? w_block[wpos] : 0.0;
-    wpos++;
-    int idx_ii = packed_index_zero(orb_i, orb_i);
-    atomicAdd_double(&f[idx_ii], ptot_ll * diag);
-    sumdia += ptot[idx_ii] * diag;
-  }
-  atomicAdd_double(&f[ll], 2.0 * sumoff + sumdia);
-
-  // Exchange contraction using jindex table
-  // Heavy-light integrals are stored in fixed 10-entry blocks (Fortran legacy layout).
-  constexpr int heavy_light_block_len = 10;
-  int table_index = 0;
-  for (int rel = 0; rel < span; ++rel) {
-    int orb_i = heavy_start + rel;
-    int idx_il = packed_index_zero(orb_i, light_atom);
-    double acc = 0.0;
-    for (int relj = 0; relj < span; ++relj) {
-      int map = c_jindex[table_index + relj];
-      if (map <= 0 || map > heavy_light_block_len) continue;
-      double val = w_block[map - 1];
-      int orb_j = heavy_start + relj;
-      int idx_pl = packed_index_zero(orb_j, light_atom);
-      acc += p[idx_pl] * val;
-    }
-    table_index += span;
-    atomicAdd_double(&f[idx_il], -acc);
-    if (dbg_tid >= 0 && dbg_tid < 2) {
-      printf("[GPU heavy-light] rel=%d acc=% .5e\n", rel, acc);
-    }
-  }
+  // Use general mapping for HL
+  fock_pair_general(heavy_start, heavy_end, light_atom, light_atom, ptot, p, w_block, f, dbg_tid);
 }
 
 __device__ void fock_pair_heavy_heavy(int ia, int ib, int ja, int jb,
@@ -770,93 +679,8 @@ __device__ void fock_pair_heavy_heavy(int ia, int ib, int ja, int jb,
                                       const double *w_block,
                                       double *f) {
   if (!w_block || !ptot || !p || !f) return;
-  int span_i = span_count(ia, ib);
-  int span_j = span_count(ja, jb);
-  if (span_i != 4 || span_j != 4) {
-    fock_pair_general(ia, ib, ja, jb, ptot, p, w_block, f);
-    return;
-  }
-
-  double p_block_a[16];
-  double p_block_b[16];
-  double p_cross[16];
-
-  int idx = 0;
-  for (int row = ia; row <= ib; ++row) {
-    for (int col = ia; col <= ib; ++col) {
-      p_block_a[idx++] = ptot[packed_index_zero(row, col)];
-    }
-  }
-
-  idx = 0;
-  for (int row = ja; row <= jb; ++row) {
-    for (int col = ja; col <= jb; ++col) {
-      p_block_b[idx++] = ptot[packed_index_zero(row, col)];
-    }
-  }
-
-  idx = 0;
-  for (int row = ia; row <= ib; ++row) {
-    for (int col = ja; col <= jb; ++col) {
-      int packed = (row >= col) ? packed_index_zero(row, col)
-                                : packed_index_zero(col, row);
-      p_cross[idx++] = p[packed];
-    }
-  }
-
-  double suma[10];
-  double sumb[10];
-  for (int row = 0; row < 10; ++row) {
-    double sa = 0.0;
-    double sb = 0.0;
-    for (int col = 0; col < 16; ++col) {
-      sa += p_block_a[col] * w_block[jab_suma_index(row, col)];
-      sb += p_block_b[col] * w_block[jab_sumb_index(row, col)];
-    }
-    suma[row] = sa;
-    sumb[row] = sb;
-  }
-
-  int pair_idx = 0;
-  for (int offset = 0; offset < span_i; ++offset) {
-    int orb_a = ia + offset;
-    int orb_b = ja + offset;
-    for (int inner = 0; inner <= offset; ++inner) {
-      int orb_a_j = ia + inner;
-      int orb_b_j = ja + inner;
-      int idx_a = packed_index_zero(orb_a, orb_a_j);
-      int idx_b = packed_index_zero(orb_b, orb_b_j);
-      atomicAdd_double(&f[idx_a], sumb[pair_idx]);
-      atomicAdd_double(&f[idx_b], suma[pair_idx]);
-      ++pair_idx;
-    }
-  }
-
-  double sums[16];
-  for (int row = 0; row < 16; ++row) {
-    double total = 0.0;
-    for (int col = 0; col < 16; ++col) {
-      total += p_cross[col] * w_block[kab_sum_index(row, col)];
-    }
-    sums[row] = total;
-  }
-
-  int sum_idx = 0;
-  if (ia > ja) {
-    for (int i = ia; i <= ib; ++i) {
-      for (int j = ja; j <= jb; ++j) {
-        int pos = packed_index_zero(i, j);
-        atomicAdd_double(&f[pos], -sums[sum_idx++]);
-      }
-    }
-  } else {
-    for (int i = ia; i <= ib; ++i) {
-      for (int j = ja; j <= jb; ++j) {
-        int pos = packed_index_zero(j, i);
-        atomicAdd_double(&f[pos], -sums[sum_idx++]);
-      }
-    }
-  }
+  // Unified general path for correctness
+  fock_pair_general(ia, ib, ja, jb, ptot, p, w_block, f);
 }
 
 __device__ void fock_pair_periodic(int ia, int ib, int ja, int jb,
