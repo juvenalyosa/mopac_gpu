@@ -1614,13 +1614,92 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   if (want_verify && !f_host.empty()) {
     double max_diff = 0.0;
     for (size_t k = 0; k < mpack_e; ++k) {
-      // Compare device+CPU hybrid contributions to CPU contributions by stripping the host baseline
       double dev_contrib = fout[k] - f_base[k];
       double diff = std::abs(dev_contrib - f_host[k]);
       if (diff > max_diff) max_diff = diff;
     }
     if (max_diff > 1.0e-9) {
       std::printf("[GPU FOCK verify] max diff=% .5e\n", max_diff);
+      const char *pp_env = std::getenv("MOPAC_GPU_VERIFY_PER_PAIR");
+      if (pp_env && *pp_env) {
+        // One-pair device arrays
+        int *d1_i=nullptr, *d1_j=nullptr, *d1_t=nullptr, *d1_wo=nullptr, *d1_wjo=nullptr, *d1_wko=nullptr;
+        double *d_f_tmp=nullptr;
+        cudaMalloc((void**)&d1_i,   sizeof(int));
+        cudaMalloc((void**)&d1_j,   sizeof(int));
+        cudaMalloc((void**)&d1_t,   sizeof(int));
+        cudaMalloc((void**)&d1_wo,  sizeof(int));
+        cudaMalloc((void**)&d1_wjo, sizeof(int));
+        cudaMalloc((void**)&d1_wko, sizeof(int));
+        cudaMalloc((void**)&d_f_tmp, sizeof(double)*mpack_e);
+
+        std::vector<double> host_pair(mpack_e, 0.0);
+        std::vector<double> dev_pair(mpack_e, 0.0);
+
+        for (size_t t = 0; t < pair_i.size(); ++t) {
+          std::fill(host_pair.begin(), host_pair.end(), 0.0);
+          int ii = pair_i[t]; int jj = pair_j[t]; int type = pair_type[t];
+          int ia = nfirst[ii - 1]; int ib = nlast[ii - 1];
+          int ja = nfirst[jj - 1]; int jb = nlast[jj - 1];
+          const double *w_host  = (w  && pair_w_off.size()  > t) ? (w  + pair_w_off[t])  : nullptr;
+          const double *wj_host = (wj && pair_wj_off.size() > t) ? (wj + pair_wj_off[t]) : nullptr;
+          const double *wk_host = (wk && pair_wk_off.size() > t) ? (wk + pair_wk_off[t]) : nullptr;
+          switch (type) {
+            case PAIR_LIGHT_LIGHT:
+              host_pair_light_light(ia, ja, ptot, p, w_host, host_pair.data());
+              break;
+            case PAIR_GENERAL:
+              host_pair_general(ia, ib, ja, jb, ptot, p, w_host, host_pair.data());
+              break;
+            case PAIR_HEAVY_HEAVY:
+              host_pair_heavy_heavy(ia, ib, ja, jb, ptot, p, w_host, host_pair.data());
+              break;
+            case PAIR_HEAVY_LIGHT:
+              host_pair_heavy_light(ia, ib, ja, ptot, p, w_host, host_pair.data());
+              break;
+            case PAIR_LIGHT_HEAVY:
+              host_pair_heavy_light(ja, jb, ia, ptot, p, w_host, host_pair.data());
+              break;
+            case PAIR_PERIODIC:
+              host_pair_periodic(ia, ib, ja, jb, ptot, p, wj_host ? wj_host : w_host, wk_host ? wk_host : (wj_host ? wj_host : w_host), host_pair.data());
+              break;
+          }
+
+          cudaMemset(d_f_tmp, 0, sizeof(double)*mpack_e);
+          cudaMemcpy(d1_i,   &pair_i[t], sizeof(int), cudaMemcpyHostToDevice);
+          cudaMemcpy(d1_j,   &pair_j[t], sizeof(int), cudaMemcpyHostToDevice);
+          cudaMemcpy(d1_t,   &pair_type[t], sizeof(int), cudaMemcpyHostToDevice);
+          cudaMemcpy(d1_wo,  &pair_w_off[t], sizeof(int), cudaMemcpyHostToDevice);
+          cudaMemcpy(d1_wjo, &pair_wj_off[t], sizeof(int), cudaMemcpyHostToDevice);
+          cudaMemcpy(d1_wko, &pair_wk_off[t], sizeof(int), cudaMemcpyHostToDevice);
+          fock_pairs_kernel<<<1, 1>>>(1,
+                                      d1_i, d1_j, d1_t,
+                                      d1_wo, d1_wjo, d1_wko,
+                                      s_d_nf, s_d_nl,
+                                      s_d_ptot, s_d_p,
+                                      s_d_w, s_d_wj, s_d_wk,
+                                      d_f_tmp, 0);
+          cudaDeviceSynchronize();
+          cudaMemcpy(dev_pair.data(), d_f_tmp, sizeof(double)*mpack_e, cudaMemcpyDeviceToHost);
+          double local_max = 0.0; size_t local_k = 0;
+          for (size_t k = 0; k < mpack_e; ++k) {
+            double diff = std::abs(dev_pair[k] - host_pair[k]);
+            if (diff > local_max) { local_max = diff; local_k = k; }
+          }
+          if (local_max > 1.0e-8) {
+            std::printf("[GPU FOCK per-pair] type=%d ii=%d jj=%d ia..ib=%d..%d ja..jb=%d..%d max=% .5e at idx=%zu\n",
+                        type, ii, jj, ia, ib, ja, jb, local_max, local_k);
+            int printN = (mpack < 5) ? (int)mpack : 5;
+            std::printf("  host:"); for (int s = 0; s < printN; ++s) std::printf(" % .5e", host_pair[s]); std::printf("\n");
+            std::printf("  dev :"); for (int s = 0; s < printN; ++s) std::printf(" % .5e", dev_pair[s]); std::printf("\n");
+            std::fflush(stdout);
+            break;
+          }
+        }
+        if (d1_i) cudaFree(d1_i); if (d1_j) cudaFree(d1_j); if (d1_t) cudaFree(d1_t);
+        if (d1_wo) cudaFree(d1_wo); if (d1_wjo) cudaFree(d1_wjo); if (d1_wko) cudaFree(d1_wko);
+        if (d_f_tmp) cudaFree(d_f_tmp);
+      }
       return false;
     }
   }
