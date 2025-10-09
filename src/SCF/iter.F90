@@ -147,6 +147,28 @@
       case default
         continue
       end select
+
+      ! Auto‑guard: disable GPU SCF for very small systems even if forced
+      ! Users can override by setting MOPAC_GPU_MIN_NORBS=0
+      block
+        integer :: min_norbs_th, ios_env
+        character(len=32) :: env_min
+        min_norbs_th = 30
+        env_min = '' ; ios_env = 1
+        call get_environment_variable('MOPAC_GPU_MIN_NORBS', env_min, status=ios_env)
+        if (ios_env == 0) then
+          env_min = adjustl(env_min)
+          if (len_trim(env_min) > 0) then
+            read(env_min, *, iostat=ios_env) min_norbs_th
+            if (ios_env /= 0) min_norbs_th = 30
+          end if
+        end if
+        if (min_norbs_th > 0) then
+          if (norbs < min_norbs_th) then
+            gpu_scf_enabled = .false.
+          end if
+        end if
+      end block
 #endif
       if (icalcn /= numcal) then
         call delete_iter_arrays
