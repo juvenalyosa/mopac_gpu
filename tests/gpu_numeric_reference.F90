@@ -47,7 +47,7 @@ contains
 
     call cpu_fock_light_light(ptot, p, w, f_cpu)
 
-    ok = mopac_cuda_fock2_scf(2, 3, numat, nfirst, nlast, ptot, p, w, w, w, 0_c_int, f_gpu)
+    ok = mopac_cuda_fock2_scf(2, 3, numat, nfirst, nlast, ptot, p, w, w, w, 0_c_int, int(size(w),kind=c_int), f_gpu)
     if (.not. ok) then
       print *, '[LIGHT-LIGHT] GPU path unavailable; skipping'
       test_light_light = .true.
@@ -93,7 +93,7 @@ contains
 
     call cpu_fock_general(3, 4, 1, 2, ptot, p, w, f_cpu)
 
-    ok = mopac_cuda_fock2_scf(4, mpack, numat, nfirst, nlast, ptot, p, w, w, w, 0_c_int, f_gpu)
+    ok = mopac_cuda_fock2_scf(4, mpack, numat, nfirst, nlast, ptot, p, w, w, w, 0_c_int, int(size(w),kind=c_int), f_gpu)
     if (.not. ok) then
       print *, '[GENERAL] GPU path unavailable; skipping'
       test_general_pair = .true.
@@ -145,7 +145,7 @@ contains
 
     call cpu_heavy_light_reference(1, 4, 5, ptot, p, w, f_cpu)
 
-    ok = mopac_cuda_fock2_scf(5, mpack, numat, nfirst, nlast, ptot, p, w, w, w, 0_c_int, f_gpu)
+    ok = mopac_cuda_fock2_scf(5, mpack, numat, nfirst, nlast, ptot, p, w, w, w, 0_c_int, int(size(w),kind=c_int), f_gpu)
     if (.not. ok) then
       print *, '[HEAVY-LIGHT] GPU path unavailable; skipping'
       test_heavy_light = .true.
@@ -198,7 +198,7 @@ contains
 
     call cpu_fock_general(nfirst(2), nlast(2), nfirst(1), nlast(1), ptot, p, w, f_cpu)
 
-    ok = mopac_cuda_fock2_scf(8, mpack, numat, nfirst, nlast, ptot, p, w, w, w, 0_c_int, f_gpu)
+    ok = mopac_cuda_fock2_scf(8, mpack, numat, nfirst, nlast, ptot, p, w, w, w, 0_c_int, int(size(w),kind=c_int), f_gpu)
     if (.not. ok) then
       print *, '[HEAVY-HEAVY] GPU path unavailable; skipping'
       test_heavy_heavy = .true.
@@ -253,7 +253,7 @@ contains
 
     call cpu_fock_periodic(nfirst(2), nlast(2), nfirst(1), nlast(1), ptot, p, wj, wk, f_cpu)
 
-    ok = mopac_cuda_fock2_scf(4, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, 1_c_int, f_gpu)
+    ok = mopac_cuda_fock2_scf(4, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, 1_c_int, int(size(w),kind=c_int), f_gpu)
     if (.not. ok) then
       print *, '[PERIODIC] GPU path unavailable; skipping'
       test_periodic_pair = .true.

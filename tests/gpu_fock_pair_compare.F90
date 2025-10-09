@@ -102,7 +102,7 @@ contains
     end if
 
     ok = mopac_cuda_fock2_scf(local_norbs, local_mpack, 2, nfirst, nlast, &
-         ptot, p, w, wj, wk, 0_c_int, f_gpu)
+         ptot, p, w, wj, wk, 0_c_int, int(size(w),kind=c_int), f_gpu)
     if (.not. ok) then
       print *, 'GPU path unavailable for ', trim(label), ' case; skipping'
       run_case = .true.
