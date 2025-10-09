@@ -65,6 +65,11 @@ Barranquilla MOPAC uses a hybrid: begin with EDIIS‑like damped mixing and adap
 
 ## HMTR Geometry Optimization — Trust‑Region with GPU Support
 
+HMTR stands for Hierarchical Memetic Trust‑Region:
+- H (Hierarchical): multi‑level organization of candidates (global → local), enabling coarse‑to‑fine searches.
+- M (Memetic): population‑based proposals combined with local refinement (a “memetic” hybrid of global and local search).
+- TR (Trust‑Region): rigorous local models (quadratic) solved within a radius Δ, with radius adaptation via the acceptance ratio ρ.
+
 Geometry optimization minimizes the potential energy surface `E(R)` with respect to nuclear coordinates `R`. HMTR combines a trust‑region model with population‑based exploration (torsional memetics) and batched GPU evaluation.
 
 1) Quadratic model around `R_k`:
