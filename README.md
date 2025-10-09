@@ -41,37 +41,40 @@ In short: Barranquilla MOPAC brings semiempirical physics to large systems with 
 
 ---
 
-## Physics Background — SCF, Fock Build, and Energy
+## Background — SCF, Fock Build, and Energy
 
-Let `S` be the overlap, `H` the one‑electron core Hamiltonian, `P` the (spin‑summed) density, and `F` the Fock matrix. For RHF (closed shell) in an AO basis:
+Let `S` be the AO overlap matrix, `H` the one‑electron (core) Hamiltonian, `F` the Fock matrix, and `P` the (spin‑summed) density. Semiempirical PMx/NDDO Hamiltonians replace expensive four‑center electron‑repulsion integrals with analytic, parameterized two‑center forms, so the Fock assembly becomes a sum of two‑center “atom‑pair” contractions.
 
-- Fock build (semiempirical PMx):
+For a closed‑shell (RHF) problem, the Fock operator has the form
 ```
-F = H + G[P] = H + J[P] − K[P]
+F[P] = H + G[P] = H + J[P] − K[P]
 ```
-where the two‑electron contribution `G[P]` is evaluated with NDDO/PMx formulas and pretabulated parameters. In practice we evaluate `J`/`K` as batched two‑center contractions over atom blocks.
+where `J` and `K` are the Coulomb and exchange contributions constructed by contracting the AO density over two‑center kernels derived from the NDDO/PMx parameter set. In practice, these contractions are evaluated as independent batches over atom pairs `A,B`, which is the key to GPU offload.
 
-- Density build (RHF):
+Given `F`, the SCF solves the generalized eigenvalue problem
+```
+F C = S C ε
+```
+which yields molecular orbitals `C` and eigenvalues `ε`. Occupied subspaces define the density. For RHF the density is
 ```
 P = 2 · C_occ · C_occ^T
 ```
-or with fractional occupations for open shells/temperature smearing as needed.
+(with finite‑temperature or fractional occupations when required). For UHF the spin channels are separated, `P = P^α + P^β` with corresponding `F^α, F^β` and occupations per spin.
 
-- Total electronic energy (AO packed form):
+The total electronic energy in AO (packed‑lower) storage is
 ```
-E_elec = 1/2 · Tr[P · (H + F)]
+E_elec = 1/2 · Tr[ P · (H + F) ]
 E_total = E_elec + E_nuclear
 ```
-
-- Commutator residual (generalized):
+and in UHF the natural variant is `E_elec = 1/2 · Tr[ P^α · (H + F^α) + P^β · (H + F^β) ]`. Self‑consistency is monitored via the generalized commutator residual
 ```
 R = F P S − S P F
 ```
-and SCF convergence is judged by ‖R‖ (plus energy and density deltas).
+with convergence declared when ‖R‖ and the changes in `E` and `P` fall below user‑defined tolerances.
 
-CDIIS (Pulay): builds an optimal linear combination of past Fock/density pairs by minimizing the residual norm subject to sum‑to‑one constraints. It converges rapidly near the fixed point but can overshoot far from it. EDIIS forms a convex energy‑minimizing combination and is more stable far from self‑consistency.
+The SCF loop is: start from a guess `P`, assemble `F[P]`, solve `F C = S C ε`, update occupations and form a new `P`, mix the density/Fock information using a convergence accelerator, measure `R`, and iterate. Near the fixed point, Pulay’s CDIIS (commutator DIIS) constructs an optimal linear combination of recent Fock/density pairs that minimizes the residual norm. Far from self‑consistency, CDIIS can be over‑aggressive; energy DIIS (EDIIS) forms a convex combination that lowers the total energy and is more stable.
 
-Barranquilla MOPAC uses a hybrid: begin with EDIIS‑like damped mixing and adaptive level shift, then switch on CDIIS automatically when the residual is small enough.
+Barranquilla MOPAC adopts a hybrid strategy: begin with EDIIS‑like damped mixing and an adaptive negative level shift on the virtual space to stabilize the spectral gap, then switch on CDIIS automatically once the residual is small (or after a few iterations). This strategy reduces iterations while preserving the underlying semiempirical physics and the final fixed point.
 
 ---
 
