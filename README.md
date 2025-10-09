@@ -80,33 +80,38 @@ Barranquilla MOPAC adopts a hybrid strategy: begin with EDIIS‑like damped mixi
 
 ## HMTR Geometry Optimization — Trust‑Region with GPU Support
 
-HMTR stands for Hierarchical Memetic Trust‑Region:
-- H (Hierarchical): multi‑level organization of candidates (global → local), enabling coarse‑to‑fine searches.
-- M (Memetic): population‑based proposals combined with local refinement (a “memetic” hybrid of global and local search).
-- TR (Trust‑Region): rigorous local models (quadratic) solved within a radius Δ, with radius adaptation via the acceptance ratio ρ.
+HMTR (Hierarchical Memetic Trust‑Region) is a geometry optimizer that minimizes the potential energy surface \(E(R)\) with respect to the nuclear coordinates \(R\) by coupling two complementary mechanisms. A memetic, population‑based stage proposes diverse candidate geometries (with an emphasis on torsional subspaces for large biomolecules), and a rigorous trust‑region micro‑solver refines each candidate using a quadratic model. The design is well‑suited to GPUs because many energy/gradient evaluations for different candidates can be batched.
 
-Geometry optimization minimizes the potential energy surface `E(R)` with respect to nuclear coordinates `R`. HMTR combines a trust‑region model with population‑based exploration (torsional memetics) and batched GPU evaluation.
+At a current geometry \(R_k\), the optimizer builds a local quadratic model of the energy around \(R_k\)
+```
+m_k(p) = E(R_k) + g_k^T p + (1/2) p^T B_k p
+```
+where \(g_k = \partial E/\partial R |_{R_k}\) is the gradient and \(B_k\) is a Hessian or quasi‑Newton approximation. The trial step \(p\) is obtained by solving the trust‑region subproblem
+```
+minimize_p  m_k(p)  subject to  ‖p‖ ≤ Δ_k
+```
+with a norm chosen for the coordinate representation (Cartesian, internal, or torsional; a diagonal scaling can be used to account for units). If \(B_k\) is positive definite and the unconstrained Newton step \(p_N = -B_k^{-1} g_k\) satisfies \(‖p_N‖ ≤ Δ_k\), then \(p = p_N\) is used. Otherwise, a truncated step on the trust‑region boundary is computed, for example via the dogleg path between the Cauchy (steepest‑descent) point and the Newton point, or with truncated conjugate gradients.
 
-1) Quadratic model around `R_k`:
+The model quality is assessed by the ratio of actual to predicted decrease
 ```
-m_k(p) = E(R_k) + g_k^T p + 1/2 p^T B_k p
+ρ_k = [ E(R_k) − E(R_k + p_k) ] / [ m_k(0) − m_k(p_k) ]
 ```
-where `g_k = ∂E/∂R |_(R_k)` and `B_k` is a Hessian (or quasi‑Newton) approximation. The trial step `p` solves the trust‑region subproblem `‖p‖ ≤ Δ_k`.
+and both the step and the trust‑region radius are updated accordingly. A step is accepted when \(ρ_k\) exceeds a small threshold \(η_0\) (e.g., 0.1), in which case \(R_{k+1} = R_k + p_k\); otherwise the step is rejected and \(R_{k+1} = R_k\). The trust radius is adapted: if \(ρ_k\) is large (e.g., \(ρ_k ≥ η_2\)), then the radius is expanded \(Δ_{k+1} = τ_{\text{expand}} Δ_k\); if \(ρ_k\) is poor (e.g., \(ρ_k ≤ η_1\)), then the radius is shrunk \(Δ_{k+1} = τ_{\text{shrink}} Δ_k\); otherwise the radius is left unchanged. Typical values are \(η_1 \approx 0.25\), \(η_2 \approx 0.75\), \(τ_{\text{expand}} \approx 2\), \(τ_{\text{shrink}} \approx 1/2\).
 
-2) Acceptance ratio:
+To update the curvature model, HMTR employs a quasi‑Newton formula such as BFGS. Let \(s_k = p_k\) and \(y_k = g(R_k + p_k) − g(R_k)\). The BFGS update reads
 ```
-ρ_k = (E(R_k) − E(R_k + p)) / (m_k(0) − m_k(p))
+B_{k+1} = B_k − (B_k s_k s_k^T B_k) / (s_k^T B_k s_k) + (y_k y_k^T) / (y_k^T s_k)
 ```
-Update the radius Δ_k by comparing `ρ_k` to thresholds η₁ < η₂ (e.g., η₁=0.25, η₂=0.75): shrink Δ if ρ is small (poor model), expand if ρ is large (good model), otherwise keep Δ.
+with a standard damping if \(y_k^T s_k\) is too small, to maintain positive definiteness. The gradients \(g\) are obtained from the semiempirical electronic structure (Hellmann–Feynman plus Pulay terms), and the trust‑region solve treats the nuclear surface only; the SCF is converged at each geometry evaluation.
 
-3) Quasi‑Newton update of `B_k` (e.g., BFGS):
+The “memetic” component maintains a population of candidate geometries and uses simple evolutionary moves in a low‑curvature subspace (e.g., torsions). A particle‑swarm‑like update for torsions is convenient:
 ```
-s_k = p,   y_k = g(R_k + p) − g(R_k)
-B_{k+1} = B_k − (B_k s_k s_k^T B_k) / (s_k^T B_k s_k)
-          + (y_k y_k^T) / (y_k^T s_k)
+v_{i}^{t+1} = ω v_{i}^{t} + c1·r1 ⊙ (pbest_i − θ_i^t) + c2·r2 ⊙ (gbest − θ_i^t)
+θ_{i}^{t+1} = wrap( θ_i^t + v_{i}^{t+1} )
 ```
+where \(θ_i\) are the torsions of particle \(i\), \(v_i\) their velocities, \(pbest_i\) the best torsions previously found by particle \(i\), and \(gbest\) the global best in the population. The operator `wrap` enforces periodicity and any box constraints; \(ω, c1, c2\) are inertial and cognitive/social weights and \(r1, r2\) are uniform random vectors. Each particle is then refined by the trust‑region micro‑optimizer described above. The population proposal stage is trivially parallel and is evaluated in batches on GPU(s); the trust‑region steps are cheap relative to the energy/gradient calls and run on the host.
 
-HMTR augments 1–3 with a memetic torsion subspace and a particle‑swarm‑like outer loop to propose diverse trial moves, then refines locally with the trust‑region micro‑optimizer (radius/rho thresholds are in `src/optimization/hmtr.F90`). Energies and gradients are evaluated batched on the GPU (when enabled) for the trial population, which is effective for large biomolecules where many local proposals can be examined concurrently.
+In practice, HMTR’s effectiveness on proteins and soft materials comes from combining torsional diversity (to escape narrow basins separated by small barriers) with a principled local model to accept or reject moves. The acceptance ratio \(ρ\) acts as a universal quality indicator independent of the particular coordinate choice or step generator, and the trust‑region radius adapts the aggressiveness of local refinement automatically. All energy and gradient evaluations use the same semiempirical Hamiltonian and SCF stack described earlier; the GPU acceleration enters only through batched evaluations across the population or internal micro‑batches.
 
 ### Math Appendix: Semiempirical (NDDO/PMx) Essentials
 
