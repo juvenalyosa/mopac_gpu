@@ -45,6 +45,7 @@ contains
     integer :: pairs_i, pairs_j
     integer :: len_block
     integer :: kk
+    logical :: use_w
     integer(c_int) :: status
     integer(c_int) :: final_status
     integer :: wj_size
@@ -119,25 +120,55 @@ contains
         end if
 
         if (len_block <= 0) cycle
-        if (kk + len_block > wj_size) then
-          status = -3_c_int
-          exit outer_atoms
+        if (periodic_flag /= 0) then
+          use_w = .false.
+        else if (span_i >= 7 .or. span_j >= 7) then
+          use_w = .true.
+        else if (span_i >= 4 .and. span_j >= 4) then
+          use_w = .true.
+        else if ((span_i >= 4 .and. span_j == 1) .or. (span_j >= 4 .and. span_i == 1)) then
+          use_w = .true.
+        else if (span_i == 1 .and. span_j == 1) then
+          use_w = .true.
+        else
+          use_w = .false.
         end if
 
-        have_wk = (wk_size >= kk + len_block)
-
-        if (have_wk) then
-          call mopac_cuda_scf_stream_publish(cookie_ptr,                                          &
-             int(ia, kind=c_int), int(ib, kind=c_int),                                            &
-             int(ja, kind=c_int), int(jb, kind=c_int),                                            &
-             int(len_block, kind=c_int),                                                          &
-             wj(kk + 1 : kk + len_block), wk(kk + 1 : kk + len_block), status)
+        if (use_w) then
+          if (kk + len_block > size(w)) then
+            status = -3_c_int
+            exit outer_atoms
+          end if
         else
+          if (kk + len_block > wj_size) then
+            status = -3_c_int
+            exit outer_atoms
+          end if
+        end if
+
+        if (use_w) then
+          ! Heavy/LL/HL/HH and d-orbital cases use legacy W layout
           call mopac_cuda_scf_stream_publish(cookie_ptr,                                          &
              int(ia, kind=c_int), int(ib, kind=c_int),                                            &
              int(ja, kind=c_int), int(jb, kind=c_int),                                            &
              int(len_block, kind=c_int),                                                          &
-             wj(kk + 1 : kk + len_block), wj(kk + 1 : kk + len_block), status)
+             w(kk + 1 : kk + len_block), w(kk + 1 : kk + len_block), status)
+        else
+          ! General/periodic cases use split WJ/WK layout
+          have_wk = (wk_size >= kk + len_block)
+          if (have_wk) then
+            call mopac_cuda_scf_stream_publish(cookie_ptr,                                        &
+               int(ia, kind=c_int), int(ib, kind=c_int),                                          &
+               int(ja, kind=c_int), int(jb, kind=c_int),                                          &
+               int(len_block, kind=c_int),                                                        &
+               wj(kk + 1 : kk + len_block), wk(kk + 1 : kk + len_block), status)
+          else
+            call mopac_cuda_scf_stream_publish(cookie_ptr,                                        &
+               int(ia, kind=c_int), int(ib, kind=c_int),                                          &
+               int(ja, kind=c_int), int(jb, kind=c_int),                                          &
+               int(len_block, kind=c_int),                                                        &
+               wj(kk + 1 : kk + len_block), wj(kk + 1 : kk + len_block), status)
+          end if
         end if
 
         if (status /= 0_c_int) then
