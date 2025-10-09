@@ -1,0 +1,3 @@
+GEO_DAT="test_dense.pdb" PM6-D3H4X HMTR  XYZ  GEO-OK  CHARGE=-6  SINGLET  MOZYME MOZYME_GPU MOZYME_MINBLK=4 PULAY ITRY=200 SHIFT=-50
+Dense frequency job — harmonic analysis for thermochemistry
+
