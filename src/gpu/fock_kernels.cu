@@ -3,6 +3,8 @@
 #include <cublas_v2.h>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <cctype>
 #include <vector>
 #include <algorithm>
 #include <limits>
