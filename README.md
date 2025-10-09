@@ -1,523 +1,196 @@
-# Molecular Orbital PACkage (MOPAC)
+# Barranquilla MOPAC — A GPU‑Accelerated Semiempirical Flavor of MOPAC
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![DOI](https://zenodo.org/badge/177640376.svg)](https://zenodo.org/badge/latestdoi/177640376)
-[![Anaconda-Server Badge](https://anaconda.org/conda-forge/mopac/badges/version.svg)](https://anaconda.org/conda-forge/mopac)
-![build](https://github.com/openmopac/mopac/actions/workflows/CI.yaml/badge.svg)
-[![codecov](https://codecov.io/gh/openmopac/mopac/branch/main/graph/badge.svg?token=qM2KeRvw06)](https://codecov.io/gh/openmopac/mopac)
+Barranquilla MOPAC is an implementation of MOPAC specialized for large systems (proteins, DNA/RNA, polymers, and extended materials) with deterministic GPU acceleration and smart SCF. It preserves the physics and accuracy of the semiempirical framework while exploiting locality and tensor contraction structure on modern GPUs.
 
-This is the official repository of the modern open-source version of MOPAC, which is now released under an Apache license
-(versions 22.0.0 through 23.0.3 are available under an LGPL license).
-This is a direct continuation of the commercial development and distribution of MOPAC, which ended at MOPAC 2016.
-Commercial versions of MOPAC are no longer supported, and all MOPAC users are encouraged to switch to the most recent open-source version.
+Contents
+- Why Barranquilla MOPAC? (Large‑system specialization)
+- Physics background (semiempirical PMx, Fock build, SCF equations)
+- HMTR geometry optimization (trust‑region, models, update rules)
+- GPU implementation (conventional SCF and MOZYME)
+- Automatic policies (no‑tuning defaults)
+- Build and run (with examples)
+- Advanced controls
+- Performance expectations and best practices
 
-[![mopac_at_molssi](.github/mopac_at_molssi.png)](https://molssi.org)
+---
 
-MOPAC is actively maintained and curated by the [Molecular Sciences Software Institute (MolSSI)](https://molssi.org).
+## Why Barranquilla MOPAC?
 
-## Recommended: Protein GPU Quickstart
+Semiempirical NDDO/PMx Hamiltonians (e.g., PM7) balance physics‑based interactions with parametrized approximations. They replace costly four‑center integrals with analytic formulas and tabulated parameters, dramatically reducing the expense of assembling the Fock matrix. This makes semiempirical methods ideal for large systems:
 
-For protein and protein–ligand jobs, the GPU path is used automatically on large systems — no environment variables required.
+- Biomolecules (proteins, DNA/RNA): localized electronic structure and nearsightedness of matter make interactions short‑ranged; MOZYME’s localized orbital machinery gives near‑linear scaling in practice.
+- Polymers and materials: repeated motifs and short‑range couplings map well to block‑sparse contractions.
+- Long trajectories and scans: faster SCF cycles and robust convergence reduce wall‑clock and failure modes.
 
-1) Build the GPU binary (set your GPU architecture)
-- Tesla P4 → 61, V100 → 70, A100 → 80, RTX 30xx → 86
+Barranquilla MOPAC layers on top of that:
+- GPU acceleration of the heavy “general” two‑center J/K build (dominant cost on large systems) while keeping compact corner cases on CPU for correctness.
+- A hybrid SCF mixer (EDIIS→CDIIS) with adaptive level shifting and damping to reduce iterations without sacrificing predictability.
+- Automatic policies so you only choose the number of GPUs; the code picks the rest.
+
+---
+
+## Physics Background — SCF, Fock Build, and Energy
+
+Let `S` be the overlap, `H` the one‑electron core Hamiltonian, `P` the (spin‑summed) density, and `F` the Fock matrix. For RHF (closed shell) in an AO basis:
+
+- Fock build (semiempirical PMx):
+```
+F = H + G[P] = H + J[P] − K[P]
+```
+where the two‑electron contribution `G[P]` is evaluated with NDDO/PMx formulas and pretabulated parameters. In practice we evaluate `J`/`K` as batched two‑center contractions over atom blocks.
+
+- Density build (RHF):
+```
+P = 2 · C_occ · C_occ^T
+```
+or with fractional occupations for open shells/temperature smearing as needed.
+
+- Total electronic energy (AO packed form):
+```
+E_elec = 1/2 · Tr[P · (H + F)]
+E_total = E_elec + E_nuclear
+```
+
+- Commutator residual (generalized):
+```
+R = F P S − S P F
+```
+and SCF convergence is judged by ‖R‖ (plus energy and density deltas).
+
+CDIIS (Pulay): builds an optimal linear combination of past Fock/density pairs by minimizing the residual norm subject to sum‑to‑one constraints. It converges rapidly near the fixed point but can overshoot far from it. EDIIS forms a convex energy‑minimizing combination and is more stable far from self‑consistency.
+
+Barranquilla MOPAC uses a hybrid: begin with EDIIS‑like damped mixing and adaptive level shift, then switch on CDIIS automatically when the residual is small enough.
+
+---
+
+## HMTR Geometry Optimization — Trust‑Region with GPU Support
+
+Geometry optimization minimizes the potential energy surface `E(R)` with respect to nuclear coordinates `R`. HMTR combines a trust‑region model with population‑based exploration (torsional memetics) and batched GPU evaluation.
+
+1) Quadratic model around `R_k`:
+```
+m_k(p) = E(R_k) + g_k^T p + 1/2 p^T B_k p
+```
+where `g_k = ∂E/∂R |_(R_k)` and `B_k` is a Hessian (or quasi‑Newton) approximation. The trial step `p` solves the trust‑region subproblem `‖p‖ ≤ Δ_k`.
+
+2) Acceptance ratio:
+```
+ρ_k = (E(R_k) − E(R_k + p)) / (m_k(0) − m_k(p))
+```
+Update the radius Δ_k by comparing `ρ_k` to thresholds η₁ < η₂ (e.g., η₁=0.25, η₂=0.75): shrink Δ if ρ is small (poor model), expand if ρ is large (good model), otherwise keep Δ.
+
+3) Quasi‑Newton update of `B_k` (e.g., BFGS):
+```
+s_k = p,   y_k = g(R_k + p) − g(R_k)
+B_{k+1} = B_k − (B_k s_k s_k^T B_k) / (s_k^T B_k s_k)
+          + (y_k y_k^T) / (y_k^T s_k)
+```
+
+HMTR augments 1–3 with a memetic torsion subspace and a particle‑swarm‑like outer loop to propose diverse trial moves, then refines locally with the trust‑region micro‑optimizer (radius/rho thresholds are in `src/optimization/hmtr.F90`). Energies and gradients are evaluated batched on the GPU (when enabled) for the trial population, which is effective for large biomolecules where many local proposals can be examined concurrently.
+
+---
+
+## GPU Implementation
+
+Conventional SCF
+- Two‑center J/K build: the heavy “general” blocks are offloaded to the GPU. Compact corner cases (LL/HL/HH) run on CPU by default to preserve accuracy (and because they are cheap on CPU). Streaming is used for very large problems to feed J/K slices to the device without building a giant in‑memory buffer.
+- Eigensolver and density: cuSOLVER Dsyevd on device, with eigenvectors kept resident; SYRK/GEMM used to form densities. Near the fixed point, resident SCF reduces PCIe transfers.
+
+MOZYME (proteins)
+- Localized pair kernels (F2/DF2) offloaded to GPU when blocks exceed a minimum size (MOZYME_MINBLK), with single‑ or multi‑GPU policies depending on architecture. Large proteins benefit substantially from this path.
+
+Design choices for correctness
+- Compact LL/HL/HH pairs remain on CPU by default (exact by construction) while general J/K dominates runtime on GPU.
+- Verification hooks allow A/B testing (debug) without runtime cost in production.
+
+---
+
+## Automatic Policies
+
+At startup Barranquilla MOPAC measures the system and GPU and applies:
+- Small SCF (very small AO basis): GPU off (CPU is faster). Default threshold `norbs < 30`.
+- Medium SCF: GPU on for general J/K; resident SCF on; streaming not forced.
+- Large SCF: GPU on + streaming (fast NVMe TMPDIR recommended).
+- MOZYME: GPU pair kernels enabled on newer GPUs; can be forced via env on older ones.
+
+These are printed in the run header when `MOPAC_GPU_DEBUG=1` is set.
+
+---
+
+## Build & Run
+
+Build (CPU+GPU)
 ```
 cmake -S . -B build-gpu -G Ninja -DGPU=ON -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_CUDA_ARCHITECTURES=61
-cmake --build build-gpu -j
+      -DCMAKE_CUDA_ARCHITECTURES=native
+cmake --build build-gpu --parallel
 ```
 
-2) Prepare a minimal protein input (PM7 + GEO_DAT)
-Create `protein_gpu.mop` next to your PDB:
+Small molecule (CPU preferred)
 ```
-PM7 GEO_DAT=modeljuv.B99990166_withH_rep0_step5000.pdb MOZYME 1SCF EIGS VECTORS
-Protein quick GPU test
-
+./build-gpu/mopac ethanol.mop
 ```
 
-3) Run (GPU is auto‑enabled for large systems)
+Medium/large molecule (SCF on GPU)
 ```
+export CUDA_VISIBLE_DEVICES=0
+./build-gpu/mopac big.mop
+```
+
+Protein (MOZYME)
+```
+PM7 GEO_DAT=protein.pdb MOZYME MOZYME_GPU MOZYME_MINBLK=4 PULAY ITRY=200
 ./build-gpu/mopac protein_gpu.mop
 ```
 
-Notes
-- MOZYME is recommended for large biomolecules; the MOZYME GPU path is used automatically when a GPU is available.
-- Add `NOGPU` to the keyword line only if you want to force CPU.
-- VRAM rule of thumb (double precision): one dense `n×n` uses `8·n²` bytes; SCF peak ≈ `40–56·n²` bytes/GPU.
+Tip: remove `1SCF` and raise `ITRY` to observe actual convergence.
 
-If you need CPU vs GPU details, advanced GPU features, or troubleshooting, see the sections further below.
+---
 
-## Quick Start (Ubuntu + GPU)
+## Advanced Controls (Optional)
 
-1) Install prerequisites
-- NVIDIA driver + CUDA Toolkit 11.2+ (verify `nvidia-smi` and `nvcc --version`)
-- Build tools and BLAS/LAPACK:
-  - `sudo apt-get install -y build-essential cmake gfortran ninja-build libopenblas-dev liblapack-dev`
+GPU/SCF policy
+- `MOPAC_GPU_MIN_NORBS=NN`  Auto‑guard cutoff (default 30).
+- `MOPAC_GPU_AUTOPOLICY_OFF=1`  Disable auto policy.
+- `MOPAC_FORCEGPU=1`  Force GPU even if small.
+- `MOPAC_RESIDENT_SCF=1`  Keep SCF data resident on GPU.
 
-2) Configure and build (one build for everything)
-- `export CUDAToolkit_ROOT=/usr/local/cuda`   # adjust if needed
-- `cmake -S . -B build -G Ninja -DGPU=ON -DCMAKE_BUILD_TYPE=Release \\
-         -DCUDA_ARCHS=native`  # or a fatbin: -DCUDA_ARCHS=61;70;75;80;86;89;90
-- `cmake --build build --parallel`
+SCF hybrid mixer
+- `EDIIS` keyword: enable hybrid mode.
+- `MOPAC_SCF_HYBRID=on`  Hybrid without keyword.
+- `MOPAC_SCF_SWITCH_PL`, `MOPAC_SCF_EDIIS_ITERS`  Control EDIIS→CDIIS switch.
+- `MOPAC_SCF_DAMP=on`, `MOPAC_SCF_ALPHA_MIN/MAX/K`  Damping parameters.
+- `MOPAC_SCF_ADAPTIVE_SHIFT=on`  Adaptive level shift schedule.
 
-3) Run a calculation (manual, no scripts)
-- CPU run (explicitly disable GPU):
-  - Add `NOGPU` to the first keyword line of your `.mop` input
-  - Run: `./build/mopac path/to/your_input.mop`
-- GPU run (recommended for larger systems):
-  - Keep your input unchanged (no `NOGPU`)
-  - Export: `export MOPAC_FORCEGPU=1`  # enable GPU if available
-  - Optional: `export MOPAC_FASTGPU=1` # faster SCF by keeping data on GPU
-  - Run: `./build/mopac path/to/your_input.mop`
+MOZYME
+- `MOZYME`, `MOZYME_GPU`, `MOZYME_MINBLK=INT`  Enable and tune MOZYME GPU.
+- `MOPAC_MOZYME_F2_GPU=1`  Force pair GPU on older GPUs.
 
-Examples
-- Minimal water input (PM7): `examples/water_pm7_gpu.mop`
-  - Prints eigenvectors (includes `EIGS VECTORS`).
-  - GPU (recommended on larger systems):
-    - `export MOPAC_FORCEGPU=1`
-    - `./build/mopac examples/water_pm7_gpu.mop`
-  - CPU only:
-    - Edit the first line to prepend the keyword `NOGPU`, e.g., `NOGPU PM7 1SCF EIGS VECTORS`
-    - `./build/mopac examples/water_pm7_gpu.mop`
+Verification and profiling
+- `MOPAC_GPU_PROFILE=1`  Prints GPU pair counts and timings.
+- `MOPAC_GPU_VERIFY_FOCK=1`  Debug verifier for GPU J/K vs CPU.
 
-Useful runtime toggles (set only if needed)
-- `MOPAC_GPU_EIGEN_MIN=400`   # GPU eigensolve cutoff in AOs (default 400)
-- `MOPAC_EIG2HOST=1`          # copy eigenvectors back to host immediately
-- `MOPAC_PIN_USER=1`          # pin user arrays to reduce extra host memcpy
-- `MOPAC_STREAMS=off`         # disable CUDA streams (debugging)
-- `MOPAC_DETERMINISTIC=1`     # enforce deterministic cuBLAS settings (no atomics, host pointer mode)
-- `MOPAC_GPU_VERBOSE=1`       # print timing/GF/s for GEMM/SYRK (single/multi-GPU)
- - `MOPAC_MIN_CC=7.0`         # require GPU CC >= 7.0 (filters out older devices)
+---
 
-Fock build on GPU (default when GPU is enabled)
-- By default, the two-center Fock build runs on the GPU when available.
-- Opt-out: set `MOPAC_NOFOCKGPU=1` to force CPU Fock build.
-- Legacy opt-in: `MOPAC_FOCK_GPU=1` is still honored if you need explicit control.
+## Performance Expectations
 
-Multi-GPU BLAS (cuBLASXt)
-- For dense BLAS-3 (GEMM/SYRK) in density builds, MOPAC uses cuBLASXt across multiple GPUs when `ngpus > 1`.
-- Device selection: set `MOPAC_CUBLASXT_DEVICES="0,1"` to specify the GPU list; otherwise all detected GPUs are used.
-- Tuning: `MOPAC_CUBLASXT_BLOCK=256` sets Xt block dim; `MOPAC_CUBLASXT_CPU_RATIO=0.0` keeps work entirely on GPUs.
+- Older GPUs (e.g., TITAN X CC 5.2): modest DP throughput; expect small–moderate gains from MOZYME and general J/K offload.
+- Modern DP GPUs (V100/A100/H100): conventional SCF 2–6×; MOZYME 2–6× on large systems with resident/streaming and tuned block sizes.
 
-Multi-GPU Eigensolver roadmap
-- Current: DSYEVD uses single-GPU cuSOLVER with optional keep-on-device mode.
-- Optional (experimental): set `MOPAC_EIG_MG=1` to attempt a multi-GPU eigensolver path.
-  - Present implementation is a placeholder that safely falls back to single-GPU; a full cuSOLVERMg integration requires distributed data and will be staged separately.
-  - Env hints reserved for future MG: `MOPAC_EIG_MG_BLKSIZE=256`, `MOPAC_EIG_MG_GRID=2x2`, `MOPAC_EIG_MG_VERBOSE=1`.
-  - Threshold to enable MG attempt: `MOPAC_EIG_MG_MIN=3000` (AOs).
+Best practices
+- Use MOZYME for biomolecules; tune `MOZYME_MINBLK` (3–6).
+- Let the auto‑guard keep tiny SCFs on CPU.
+- Place TMPDIR on fast NVMe for streaming.
+- Use `EDIIS` for tough SCFs.
 
-Printing eigenvectors
-- Add `EIGS VECTORS` to the keyword line; if eigenvectors were kept on the GPU, MOPAC fetches them automatically before printing.
+---
 
-## Installation
+## Roadmap
 
-Open-source MOPAC is available through multiple distributon channels, and it can also be compiled from source using CMake.
-In addition to continuing the distribution of self-contained installers on the
-[old commercial website](http://openmopac.net/Download_MOPAC_Executable_Step2.html) and here on GitHub,
-MOPAC can also be installed using multiple package managers and accessed through containers.
+- Host‑side pre‑expansion of compact LL/HL/HH blocks to the “general” order for one robust GPU kernel.
+- cuSOLVERMg multi‑GPU diagonalization on supported platforms.
+- Deeper overlap and batched pair launches to reduce kernel overhead.
 
-### Self-contained installers
+---
 
-Self-contained graphical installers for Linux, Mac, and Windows are available on GitHub for each release,
-which are constructed using the [Qt Installer Framework](https://doc.qt.io/qtinstallerframework/).
-
-While the installers are meant to be run from a desktop environment by default, they can also be run from a command line without user input.
-On Linux, the basic command-line installation syntax is:
-
-`./mopac-x.y.z-linux.run install --accept-licenses --confirm-command --root type_installation_directory_here`
-
-For more information on command-line installation, see the [Qt Installer Framework Documentation](https://doc.qt.io/qtinstallerframework/ifw-cli.html).
-
-Linux installations without a desktop environment may not have the shared libraries required for the graphical installers,
-and there have also been isolated reports of problems with the Qt installer on other platforms. A minimal, compressed-archive installer
-is available for each platform as an alternative for users that have problems with the Qt installer.
-
-The minimum glibc version required for the precompiled version of MOPAC on Linux is currently 2.17.
-
-#### Library path issues
-
-The pre-built MOPAC executables use the RPATH system on Mac and Linux to connect with its shared libraries,
-including the `libiomp5` Intel OpenMP redistributable library. The `libiomp5` library is not properly versioned, and the recent version used by
-MOPAC is not compatible with older versions that might also exist on a user's machine. If a directory containing an old version of `libiomp5`
-is in the shared library path (`LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on Mac), this will override the RPATH system, link MOPAC to the
-wrong library, and cause an error in MOPAC execution. On Mac, this can be fixed by switching the offending directories to the failsafe shared library
-path, `DYLD_FALLBACK_LIBRARY_PATH`. On Linux, the use of `LD_LIBRARY_PATH` is generally discouraged for widespread use, and there is no simple
-workaround available. The newer version of `libiomp5` is backwards compatible, so replacing the offending version with the version used by MOPAC
-should preserve the functionality of other software that depends on the library.
-
-### Package managers
-
-The officially supported package manager for MOPAC is the [conda-forge channel of Conda](https://anaconda.org/conda-forge/mopac).
-MOPAC is also packaged by major Linux distributions including
-[Fedora](https://packages.fedoraproject.org/pkgs/mopac/mopac/) and
-[Debian](https://tracker.debian.org/pkg/mopac).
-It is also available in the [Google Play store](https://play.google.com/store/apps/details?id=cz.m).
-
-[![Packaging status](https://repology.org/badge/vertical-allrepos/mopac.svg?columns=2)](https://repology.org/project/mopac/versions)
-
-### Docker/Apptainer Containers
-
-The official [Docker](https://www.docker.com) and [Apptainer](https://apptainer.org) ([Singularity](https://sylabs.io)) containers for MOPAC 22.0.6 ([Conda version](https://anaconda.org/conda-forge/mopac)) are developed and
-maintained by [MolSSI Container Hub](https://molssi.github.io/molssi-hub/index.html) and are distributed by the MolSSI Docker Hub [repository](https://hub.docker.com/r/molssi/mopac220-mamba141).
-
-### CMake
-
-MOPAC uses a CMake build system. For a single, unified build (CPU+GPU when available), follow the Quick Start above. If you need CPU‑only:
-
-```
-cmake -S . -B build-cpu -G Ninja -DGPU=OFF -DCMAKE_BUILD_TYPE=Release
-cmake --build build-cpu --parallel
-```
-
-### GPU Support (CUDA)
-
-Experimental CUDA acceleration is available and can be enabled at configure time:
-
-```
-cmake -DGPU=ON ..
-make
-```
-
-This builds CUDA wrappers for selected linear algebra routines (GEMM, SYRK) and an accelerated eigenvector rotation used in the SCF procedure. If multiple compatible NVIDIA GPUs are present, MOPAC will use up to two devices to speed up select steps.
-
-MOZYME-specific GPU controls
-- MOZYME_GPU: enable MOZYME GPU acceleration (rank-1 GEMM/SYRK in density construction).
-- MOZYME_2GPU: force MOZYME density updates to use two GPUs when at least two suitable devices exist.
-- MOZYME_MINBLK=INT: minimum localized block size to offload rank-1 operations (default: 16).
-- MOZYME_GPUPAIR=a,b: explicitly select two 1-based GPU device IDs for MOZYME 2-GPU density (e.g., 1,2).
-- MOZYME_GPUIGNORE=a,b,c: 1-based device IDs to ignore for auto-selection (applies to single and multi-GPU).
-
-General GPU toggles
-- NOGPU: disable all GPU usage.
-- Environment MOPAC_FORCEGPU=1: force-enable GPU when supported (overrides small-system heuristic).
-
-Examples
-- Single GPU: `MOZYME MOZYME_GPU`
-- Force two GPUs with explicit pair: `MOZYME MOZYME_GPU MOZYME_2GPU MOZYME_GPUPAIR=1,2`
-- Increase offload threshold: `MOZYME MOZYME_GPU MOZYME_MINBLK=32`
-
-Note: Optional verification helpers and CI recipes have been removed from this quick path to keep usage simple. See scripts/ and .github/ for advanced options.
-
-### GPU Usage and Examples
-
-Build-time options
-- `-DGPU=ON`: enables CUDA wrappers and GPU-aware code paths.
-- `-DAUTO_BLAS=ON`: let CMake discover BLAS/LAPACK (recommended). If OFF, set `-DMOPAC_LINK` and `-DMOPAC_LINK_PATH` manually.
-- `-DENABLE_GPU_TESTS=ON`: registers GPU checks with `ctest` (requires `GPU=ON`).
-- `-DENABLE_CUSOLVER_MG=ON`: attempt to detect and link cuSOLVERMg; current code uses a safe stub until a full MG implementation lands.
-
-Runtime environment knobs
-- `MOPAC_NOGPU=1`: disable GPU paths entirely.
-- `MOPAC_FORCEGPU=1`: force-enable GPU (bypasses small-system heuristic if any).
-- `MOPAC_STREAMS=off` (or `0`): disable custom CUDA streams (helpful for debugging ordering). Default uses streams for overlap.
-- `CUDA_VISIBLE_DEVICES=...`: standard CUDA device masking (e.g., `0` or `0,1`).
-
-MOZYME-specific GPU keywords (in the MOPAC keyword line)
-- `MOZYME_2GPU`: use two GPUs for MOZYME density rank‑1 updates when available.
-- `MOZYME_MINBLK=INT`: minimum localized block size to offload (default 16).
-- `MOZYME_GPUPAIR=a,b`: explicit 1‑based GPU IDs (e.g., `1,2`).
-
-Notes
-- 1‑GPU SCF and MOZYME paths offload dense BLAS and rotations using cuBLAS/cuSOLVER.
-- 2‑GPU MOZYME density uses a row‑sliced outer‑product implementation; device pair defaults to `0,1` or can be set via `MOZYME_GPUPAIR`.
-- Internally, MOPAC uses grow‑only device and pinned‑host caches to avoid repeated allocations and to overlap copies with compute.
-- Experimental (phase 2): GPU orthogonalization helpers (Cholesky + TRSM) are available via new interfaces for future fully GPU‑resident SCF wiring.
-- Experimental (phase 3): GPU Fock build scaffold (MOPAC_FOCK_GPU=1) is wired; current implementation falls back to CPU until kernels are enabled.
-
-Common build recipes
-- CPU only, auto BLAS:
-  - `cmake -S . -B build-cpu -DAUTO_BLAS=ON`
-  - `cmake --build build-cpu -j`
-- GPU build (CUDA on PATH), auto BLAS:
-  - `cmake -S . -B build-gpu -DGPU=ON -DAUTO_BLAS=ON`
-  - `cmake --build build-gpu -j`
-
-Quick verification executables (when `GPU=ON`)
-- 1‑GPU rotation check: `./build-gpu/mopac-gpu-rot-verify`
-- 2‑GPU rotation check: `CUDA_VISIBLE_DEVICES=0,1 ./build-gpu/mopac-gpu-rot-2gpu-verify`
-- Density check: `./build-gpu/mopac-gpu-density-verify`
-- SCF (density + Fock) compare: `./build-gpu/mopac-gpu-scf-compare`
-
-Benchmark tool (with CLI flags)
-- Build target: `./build-gpu/mopac-gpu-bench`
-- Default run prints first‑call vs cached timings and GFLOP/s for GEMM/SYRK:
-  - `./build-gpu/mopac-gpu-bench`
-- Custom sizes/iterations and options:
-  - `./build-gpu/mopac-gpu-bench --gemm=2048,2048,128,10 --syrk=2048,128,10 --syrk-full --dsyevd=1024,3 --rot1=2048,5 --rot2=4096,5`
-
-End‑to‑end examples and benchmarking tools are available in `scripts/` and `tests/`, but are intentionally omitted here to keep usage simple. Refer to those directories if you need automated comparisons or performance studies.
-
-Expected correctness
-- The GPU paths are designed to match the CPU numerics to double‑precision round‑off. Typical diffs:
-  - Densities/Fock: 0 or ~1e‑15
-  - Rotations/Eigenvalues: ~1e‑15 to 1e‑14
-  - If diffs exceed ~1e‑12 consistently, please open an issue with input and environment details.
-
-## Enhanced GPU SCF (cuSOLVER + Reduced Transfers)
-
-This release adds a high‑performance GPU SCF path that keeps heavy linear‑algebra on the device and reduces PCIe transfers while preserving double‑precision accuracy.
-
-What’s new
-- Exact eigensolve on GPU: SCF uses cuSOLVER `Dsyevd` for symmetric eigenvalue problems in double precision.
-- Size‑aware routing: A configurable cutoff avoids GPU overhead on small matrices; CPU LAPACK is used below the threshold.
-- Keep‑on‑GPU mode: Optionally keep eigenvectors on the GPU after diagonalization and form the density on device (cuBLAS `Dsyrk`/`Dgemm`), copying only the density back.
-- Smarter H2D/D2H: Skip copying `C` when `beta=0` and optionally pin user arrays to reduce extra memcpy.
-- Auto‑fetch for printing: When `EIGS VECTORS` is requested, MOPAC automatically fetches eigenvectors to host for printing even if they were kept on GPU.
-
-Build on Ubuntu (GPU)
-1) Install dependencies
-   - NVIDIA drivers + CUDA Toolkit 11.2+ (verify `nvidia-smi` and `nvcc --version`)
-   - `sudo apt-get install -y build-essential cmake gfortran ninja-build libopenblas-dev liblapack-dev`
-2) Configure and build
-   - `export CUDAToolkit_ROOT=/usr/local/cuda`            # adjust if needed
-   - `cmake -S . -B build -G Ninja -DGPU=ON -DCMAKE_BUILD_TYPE=Release \\
-            -DCMAKE_CUDA_ARCHITECTURES=70;80;86`         # match your GPUs
-   - `cmake --build build --parallel`
-3) Binaries: `build/mopac`, `build/mopac-param`
-
-Runtime controls (environment)
-- `MOPAC_FORCEGPU=1`            Force‑enable GPU if any suitable device exists.
-- `MOPAC_GPU_EIGEN_MIN=400`     Size cutoff (AOs) for GPU eigensolve; smaller sizes stay on CPU. Default: 400.
-- `MOPAC_FASTGPU=1`             Keep eigenvectors on the GPU; build density on device; copy back only the density.
-- `MOPAC_EIG2HOST=1`            Also fetch eigenvectors to host immediately after GPU diagonalization (optional).
-- `MOPAC_PIN_USER=1`            Pin user arrays to cut extra host memcpy (falls back safely if unsupported).
-- `MOPAC_STREAMS=off`           Disable CUDA streams (debug/diagnostics).
-- `MOPAC_NOGPU=1`               Disable all GPU functionality.
-- `MOPAC_ORTHO_GPU=1`           Experimental: orthogonalize F with S on GPU (Cholesky + TRSM) before eigensolve.
-- `MOPAC_DIIS_GEN=1`            Experimental: use generalized Pulay residual R = F P S − S P F (GPU-assisted).
-- `MOPAC_DIIS_GPU=1`            Experimental: solve DIIS linear system on GPU (cuSOLVER small dense solve).
-- `MOPAC_DIIS_GPU_BMAT=1`       Experimental: assemble DIIS B‑matrix column on GPU (BLAS‑3, R^T r).
-- `MOPAC_DIIS_GPU_BUF=1`        Experimental: keep DIIS residuals in a persistent GPU buffer (fewer host copies).
-- `MOPAC_DIIS_GPU_BFULL=1`      Experimental: build full DIIS B = R^T R on GPU each iteration.
-- `MOPAC_PARTIAL_EIG=1`         Experimental: partial eigensolve (RHF): compute only the lowest nclose eigenpairs with a block subspace method.
-- `MOPAC_PARTIAL_TOL=1e-8`      Tolerance for partial eigensolve residuals.
-- `MOPAC_PARTIAL_MAXIT=50`      Max iterations for partial eigensolve.
-- `MOPAC_PURIFY=1`              Experimental: diagonalization-free purification (RHF). Builds density via TC2 in orthonormal basis.
-- `MOPAC_PURIFY_GPU=1`          Experimental: accelerate purification with GPU (GEMM/TRSM helpers).
-- `MOPAC_PURIFY_TOL=1e-8`       Purification tolerance on ||X - X^2||_F and trace targeting.
-- `MOPAC_PURIFY_MAXIT=100`      Max purification iterations.
-- `MOPAC_FOCK_GPU=1`            Experimental: enable GPU Fock build path (currently a scaffold; falls back to CPU if not available).
-
-Typical usage
-- Large system, fast SCF:
-  - `export MOPAC_FORCEGPU=1`
-  - `export MOPAC_FASTGPU=1`
-  - Optional tuning: `export MOPAC_GPU_EIGEN_MIN=600`
-  - Optional: `export MOPAC_PIN_USER=1`
-  - Run: `./build/mopac examples/your_input.mop`
-- Print eigenvectors on fast path:
-  - Add `EIGS VECTORS` to the keyword line; MOPAC auto‑fetches eigenvectors if they were kept on GPU.
-  - Or set `MOPAC_EIG2HOST=1` to fetch right after eigensolve.
-- Disable GPU (for comparison): `MOPAC_NOGPU=1 ./build/mopac examples/your_input.mop`
-
-Performance guidance
-- Small (< 300–400 AOs): CPU LAPACK/BLAS is often as fast due to GPU overheads. The cutoff avoids regressions.
-- Medium (≈ 500–1500 AOs): 1.5–4× faster SCF with cuSOLVER + cuBLAS, especially with `MOPAC_FASTGPU=1`.
-- Large (≥ 2000 AOs): 3–8× faster SCF; benefits grow with basis size; ensure sufficient VRAM (see below).
-- Gradients: When ported selectively to cuBLAS (symmetric GEMM/SYRK contractions) expect 1.5–3× on large systems.
-
-VRAM sizing (double precision)
-- One dense `n×n` matrix ≈ `8·n²` bytes.
-- Typical SCF peak (eigensolve + density) ≈ `40–56·n²` bytes per GPU (includes cuSOLVER workspace and caches).
-- Examples (per device):
-  - n=2000: one matrix ~32 MB; SCF peak ~160–225 MB; worst‑case caches ~300–500 MB.
-  - n=3000: one matrix ~72 MB; peak ~360–500 MB; worst‑case ~0.7–1.2 GB.
-  - n=5000: one matrix ~200 MB; peak ~1.0–1.4 GB; worst‑case ~2–3 GB.
-- 2 GPUs halve per‑device footprint for certain outer‑products; eigensolve remains single‑GPU.
-
-Accuracy and reproducibility
-- All GPU math runs in double precision (cuBLAS D* and cuSOLVER `Dsyevd`).
-- Results match CPU within ulp‑level differences; eigenvectors can differ by phase/sign (expected behavior).
-- SCF tolerances and convergence criteria are unchanged.
-
-Troubleshooting
-- CUDA not found at configure time: set `CUDAToolkit_ROOT` or ensure CUDA is on PATH/LD_LIBRARY_PATH.
-- Link errors to `cusolver/cublas`: ensure `/usr/local/cuda/lib64` is in `LD_LIBRARY_PATH`.
-- Architecture mismatch: set `-DCMAKE_CUDA_ARCHITECTURES` to your GPU’s compute capability.
-- Streams/ordering issues: run with `MOPAC_STREAMS=off`.
-- Disable GPU quickly: `MOPAC_NOGPU=1` or add `NOGPU` to the input keywords.
-
-### Local GPU Verification Helper (MOZYME)
-
-To quickly compare CPU vs 1‑GPU vs 2‑GPU energies on a small MOZYME case:
-
-- Build the helper target (from your build dir):
-  - `cmake --build build --target mozyme-gpu-verify`
-
-- Or run the script manually for more control:
-  - `bash scripts/test_mozyme_gpu.sh ./build/mopac tests/mozyme_h2o.mop [pair] [tol]`
-  - Examples:
-    - Default devices, default tolerance (`1e-4`):
-      - `bash scripts/test_mozyme_gpu.sh ./build/mopac tests/mozyme_h2o.mop`
-    - Force device pair `1,2` (1‑based) for the 2‑GPU check and set tolerance to `5e-4`:
-      - `bash scripts/test_mozyme_gpu.sh ./build/mopac tests/mozyme_h2o.mop 1,2 5e-4`
-
-What it does
-- Makes three copies of the input and prepends the appropriate keywords: `NOGPU`, `MOZYME_GPU`, and `MOZYME_2GPU` (and `MOZYME_GPUPAIR=…` if you passed a pair).
-- Runs each, then extracts the (final) heat of formation from either the `.out` file or the `.log` if no `.out` was produced.
-- Prints CPU/1‑GPU/2‑GPU energies and their absolute differences against the CPU value.
-
-Troubleshooting the helper
-- If energies are blank, the script prints the temp folder name (e.g., `mozyme_h2o_testgpu.XXXXXX`). Inspect `cpu.log`, `gpu1.log`, `gpu2.log` and any `.out` files in that directory.
-- The script matches either `FINAL HEAT OF FORMATION` or `HEAT OF FORMATION` and takes the last occurrence.
-- “bash: …/libtinfo.so.6: no version information available”: typically harmless (conda/bash libtinfo mismatch). You can invoke the system shell explicitly: `/bin/bash scripts/test_mozyme_gpu.sh …`.
-- If you use a nested build directory, pass the correct path to `mopac` (e.g., `./build/mopac`).
-
-## Documentation
-
-The main source for MOPAC documentation is presently its old [online user manual](http://openmopac.net/manual/index.html).
-
-There is a [new documentation website](https://openmopac.github.io) under development, but it is not yet ready for general use.
-
-## CPU vs GPU: Step‑by‑Step Instructions
-
-This section provides detailed, step‑by‑step instructions to build and run MOPAC in CPU‑only mode and in GPU‑accelerated mode, including recommended runtime flags and a worked example using `GEO_DAT=`.
-
-### A. Prerequisites
-
-- CPU‑only
-  - GFortran 9+ (or another Fortran compiler)
-  - CMake 3.14+
-  - Ninja or Make (Ninja recommended)
-  - BLAS/LAPACK (OpenBLAS or MKL)
-
-- GPU (NVIDIA)
-  - NVIDIA GPU + recent driver
-  - CUDA Toolkit 11.2+ (verify `nvidia-smi` and `nvcc --version`)
-  - CMake 3.18+ (for CUDA language)
-
-Ubuntu packages (example):
-
-```
-sudo apt-get update
-sudo apt-get install -y build-essential cmake ninja-build gfortran libopenblas-dev liblapack-dev
-```
-
-### B. Building MOPAC
-
-1) CPU‑only
-
-```
-cmake -S . -B build-cpu -G Ninja -DGPU=OFF -DCMAKE_BUILD_TYPE=Release
-cmake --build build-cpu -j
-```
-
-2) GPU (Tesla P4 example, compute capability 6.1)
-
-```
-export CUDAToolkit_ROOT=/usr/local/cuda   # if needed
-cmake -S . -B build-gpu -G Ninja -DGPU=ON -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_CUDA_ARCHITECTURES=61
-cmake --build build-gpu -j
-```
-
-Portable multi‑arch build (optional): `-DCMAKE_CUDA_ARCHITECTURES=61;70;75;80;86`.
-
-### C. Running: CPU vs GPU
-
-- CPU run (use CPU build, or disable GPU):
-  - `./build-cpu/mopac input.mop`
-  - Or: `MOPAC_NOGPU=1 ./build-gpu/mopac input.mop`
-
-- GPU run (recommended for medium/large systems):
-  - `export MOPAC_FORCEGPU=1`
-  - `./build-gpu/mopac input.mop`
-
-Recommended GPU flags:
-- Determinism: `export MOPAC_DETERMINISTIC=1`
-- Fast path (keep on device): `export MOPAC_FASTGPU=1`
-- Optional orthogonalization: `export MOPAC_ORTHO_GPU=1`
-- Streams off (debug): `export MOPAC_STREAMS=off`
-
-Advanced (optional):
-- Partial eig (RHF): `MOPAC_PARTIAL_EIG=1` (`MOPAC_PARTIAL_TOL=1e-8`, `MOPAC_PARTIAL_MAXIT=50`)
-- Purification (RHF): `MOPAC_PURIFY=1` and `MOPAC_PURIFY_GPU=1` (`MOPAC_PURIFY_TOL`, `MOPAC_PURIFY_MAXIT`)
-- DIIS on GPU: `MOPAC_DIIS_GEN=1`, `MOPAC_DIIS_GPU_BUF=1`, `MOPAC_DIIS_GPU_BFULL=1`, `MOPAC_DIIS_GPU=1`
-- Experimental Fock GPU: `MOPAC_FOCK_GPU=1` (falls back to CPU until kernels are enabled)
-
-### D. Worked Example (PDB via GEO_DAT)
-
-Create `protein_pm7_gpu.mop`:
-
-```
-PM7 GEO_DAT=modeljuv.B99990166_withH_rep0_step5000.pdb 1SCF EIGS VECTORS
-Protein quick GPU test
-
-```
-
-Run on GPU (Tesla P4):
-
-```
-export MOPAC_FORCEGPU=1
-export MOPAC_DETERMINISTIC=1
-export MOPAC_ORTHO_GPU=1
-export MOPAC_FASTGPU=1
-./build-gpu/mopac protein_pm7_gpu.mop
-```
-
-Run on CPU (baseline):
-
-```
-unset MOPAC_FORCEGPU; export MOPAC_NOGPU=1
-./build-cpu/mopac protein_pm7_gpu.mop
-```
-
-### E. One‑Command Build & Test
-
-Use the helper script:
-
-```
-# GPU build for P4 (sm_61) and quick run with PDB
-./scripts/build_and_test.sh --gpu on --arch 61 \
-  --pdb modeljuv.B99990166_withH_rep0_step5000.pdb
-
-# CPU‑only
-./scripts/build_and_test.sh --gpu off --pdb modeljuv.B99990166_withH_rep0_step5000.pdb
-```
-
-### F. Choosing CPU vs GPU
-
-- < 300–400 AOs: often CPU is as fast; consider CPU or raise `MOPAC_GPU_EIGEN_MIN`.
-- 500–1500 AOs: GPU typically 1.5–4× faster (especially with `MOPAC_FASTGPU=1`).
-- ≥ 2000 AOs: GPU often 3–8× faster; ensure enough VRAM.
-
-### G. Troubleshooting
-
-- CUDA not found: set `CUDAToolkit_ROOT` or ensure `nvcc` is on PATH.
-- Link errors: ensure `/usr/local/cuda/lib64` in `LD_LIBRARY_PATH`.
-- Arch mismatch: set `-DCMAKE_CUDA_ARCHITECTURES` (e.g., 61 for P4).
-- Streams/ordering: `MOPAC_STREAMS=off`.
-- Determinism: `MOPAC_DETERMINISTIC=1`.
-
-<!-- Protein GPU Quickstart duplicated above for prominence; advanced details follow. -->
-
-## Interfaces
-
-While MOPAC is primarily a self-contained command-line program whose behavior is specified by an input file, it also has other modes of
-operation, some of which only require the MOPAC shared library and not the executable. Note that API calls to the MOPAC library are not
-thread safe. Each thread must load its own instance of the MOPAC library, such as by running independent calling programs.
-
-### MDI Engine
-
-MOPAC can be compiled to run as an MDI Engine through the [MolSSI Driver Interface Library](https://github.com/MolSSI-MDI/MDI_Library)
-by setting `-DMDI=ON` when running CMake. See [MDI documentation](https://molssi-mdi.github.io/MDI_Library) for more information.
-
-### Run from library
-
-MOPAC calculations can be run as a C-like library call to `run_mopac_from_input(path_to_file)` where `path_to_file` is a C string
-containing the system path to a MOPAC input file. Alternatively, a Fortran wrapper in the `include` directory allows this to be run as
-the subroutine `run_mopac_from_input_f(path_to_file)` in the `mopac_api_f` module where `path_to_file` is a Fortran string.
-
-### Diskless/stateless API
-
-A subset of MOPAC calculations can be run through a C-like Application Programming Interface (API) defined by the `mopac.h` C header file
-in the `include` directory, which also has a Fortran wrapper for convenience to Fortran software developers. Calculations run through this API
-do not use any input or output files or any other form of disk access, and the data structures of the API contain all relevant information
-regarding the input and output of the MOPAC calculation. The functionality and data exposed by this API is limited and has been designed to
-align with the most common observed uses of MOPAC. Future expansion of this functionality and data will be considered upon request.
-
-## Citation
-
-We are validating the implementation, so please proceed with caution, and if this repository need to be cited, feel free to get the citation from github repository.
-
-Powered by Juvenal Yosa PhD. y.r.juvenal@umcg juvenal.yosa@unisimon.edu.co
+© 2025 Barranquilla MOPAC (OpenMOPAC). Apache‑2.0 License.

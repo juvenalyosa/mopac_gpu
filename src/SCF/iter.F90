@@ -66,6 +66,11 @@
       double precision :: shift, shiftb, shfmax, ten, tenold, plchek, scorr, shfto, shftbo, titer0
       double precision :: enrgy, sellim, summ, eold_alpha, eold_beta, ofract, sum1, sum2, diff, eold, escf, titer
       double precision, dimension(norbs) :: theta
+      ! Hybrid SCF controls (EDIIS->CDIIS), damping and adaptive shift
+      logical :: hybrid_enable, adaptive_shift_on, damp_enable
+      logical :: hybrid_allow_cdiis
+      double precision :: hybrid_switch_pl, alpha_min_h, alpha_max_h, alpha_k_h
+      integer :: ediis_max_iter
 #ifdef GPU
       type(c_ptr) :: fock_dev
       type(c_ptr) :: density_dev
@@ -103,6 +108,16 @@
       data plb/ 0.D0/
       data scorr/ 0.D0/
       data abprt/ '     ', 'ALPHA', ' BETA'/
+      ! Defaults for hybrid SCF (off by default unless enabled via env/keywords)
+      hybrid_enable = .false.
+      adaptive_shift_on = .false.
+      damp_enable = .false.
+      hybrid_allow_cdiis = .true.
+      hybrid_switch_pl = 1.0D-2
+      alpha_min_h = 0.10D0
+      alpha_max_h = 0.50D0
+      alpha_k_h   = 0.30D0
+      ediis_max_iter = 6
 !
 !  INITIALIZE
 !
@@ -190,6 +205,76 @@
         prtfok = index(keywrd,' FOCK') /=0 .and. debug
         prtvec = index(keywrd,' VEC') + index(keywrd,' ALLVEC') /=0 .and. debug
         debug = index(keywrd,' ITER') /= 0
+        ! Enable hybrid mode from keyword or environment
+        if (index(keywrd,' EDIIS') /= 0) then
+          hybrid_enable = .true.
+          adaptive_shift_on = .true.
+          damp_enable = .true.
+        end if
+        i = 1 ; line = ''
+        call get_environment_variable('MOPAC_SCF_HYBRID', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) > 0) then
+            select case (line(1:1))
+            case('0','n','N','f','F')
+              hybrid_enable = .false.
+            case default
+              hybrid_enable = .true.
+            end select
+          end if
+        end if
+        i = 1 ; line = ''
+        call get_environment_variable('MOPAC_SCF_ADAPTIVE_SHIFT', line, status=i)
+        if (i == 0 .and. len_trim(adjustl(line)) > 0) adaptive_shift_on = .true.
+        i = 1 ; line = ''
+        call get_environment_variable('MOPAC_SCF_DAMP', line, status=i)
+        if (i == 0 .and. len_trim(adjustl(line)) > 0) damp_enable = .true.
+        i = 1 ; line = ''
+        call get_environment_variable('MOPAC_SCF_SWITCH_PL', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) > 0) then
+            read(line,*,err=10) hybrid_switch_pl
+          end if
+        end if
+10      continue
+        i = 1 ; line = ''
+        call get_environment_variable('MOPAC_SCF_EDIIS_ITERS', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) > 0) then
+            read(line,*,err=11) ediis_max_iter
+          end if
+        end if
+11      continue
+        i = 1 ; line = ''
+        call get_environment_variable('MOPAC_SCF_ALPHA_MIN', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) > 0) then
+            read(line,*,err=12) alpha_min_h
+          end if
+        end if
+12      continue
+        i = 1 ; line = ''
+        call get_environment_variable('MOPAC_SCF_ALPHA_MAX', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) > 0) then
+            read(line,*,err=13) alpha_max_h
+          end if
+        end if
+13      continue
+        i = 1 ; line = ''
+        call get_environment_variable('MOPAC_SCF_ALPHA_K', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) > 0) then
+            read(line,*,err=14) alpha_k_h
+          end if
+        end if
+14      continue
 !
 ! INITIALIZE SOME LOGICALS AND CONSTANTS
 !
@@ -575,6 +660,12 @@
 
       incitr = modea/=3 .and. modeb/=3
       if (incitr) niter = niter + 1
+      ! Hybrid switching: allow CDIIS (Pulay) only after residual drops or after a few iterations
+      if (hybrid_enable) then
+        hybrid_allow_cdiis = (pl <= hybrid_switch_pl) .or. (niter > ediis_max_iter)
+      else
+        hybrid_allow_cdiis = .true.
+      end if
       if (timitr) then
         titer = seconds(1)
         write (iw, *)
@@ -651,6 +742,14 @@
           if (okpuly .or. abs(bshift-4.44D0)<1.D-5) then
             shift = -8.D0
             if (newdg) shift = 0.D0
+          else if (hybrid_enable .and. adaptive_shift_on) then
+            if (pl > 10.0D0 * hybrid_switch_pl) then
+              shift = -8.D0
+            else if (pl > hybrid_switch_pl) then
+              shift = -2.D0
+            else
+              shift = 0.D0
+            end if
           end if
           if (uhf) then
             if (newdg .and. .not.(halfe .or. camkin)) then
@@ -663,6 +762,14 @@
             if (okpuly .or. abs(bshift-4.44D0)<1.D-5) then
               shiftb = -8.D0
               if (newdg) shiftb = 0.D0
+            else if (hybrid_enable .and. adaptive_shift_on) then
+              if (plb > 10.0D0 * hybrid_switch_pl) then
+                shiftb = -8.D0
+              else if (plb > hybrid_switch_pl) then
+                shiftb = -2.D0
+              else
+                shiftb = 0.D0
+              end if
             end if
             eigb(ihomob+1:norbs) = eigb(ihomob+1:norbs) + shiftb
           end if
@@ -1111,7 +1218,7 @@
 !                        INVOKE PULAY'S CONVERGER                      *
 !                                                                      *
 !***********************************************************************
-           if (okpuly .and. makea .and. iredy>1) then
+           if (okpuly .and. hybrid_allow_cdiis .and. makea .and. iredy>1) then
             if (.not. Allocated (pulay_work1)) then
               allocate (pulay_work1(norbs, norbs), pulay_work2(norbs, norbs), &
               & pulay_work3(norbs, norbs), stat=i)
@@ -1266,6 +1373,16 @@
 #ifdef GPU
           call fetch_packed_density_if_needed(p, mpack, need_fetch_p, 'p', niter)
 #endif
+          ! EDIIS-like damped mixing (RHF) before CNVG when hybrid mode and CDIIS not yet allowed
+          if (hybrid_enable .and. damp_enable .and. .not. hybrid_allow_cdiis) then
+            double precision :: alpha_loc, t_res
+            t_res = max(pl, 1.0D-12)
+            alpha_loc = alpha_k_h * hybrid_switch_pl / t_res
+            alpha_loc = max(alpha_min_h, min(alpha_max_h, alpha_loc))
+            do i = 1, mpack
+              p(i) = (1.0D0 - alpha_loc) * pold(i) + alpha_loc * p(i)
+            end do
+          end if
           call cnvg (p, pold, pold2,  niter, pl)
         end if
       end if
@@ -1312,7 +1429,7 @@
 !                        INVOKE PULAY'S CONVERGER                      *
 !                                                                      *
 !***********************************************************************
-            if (okpuly .and. makeb .and. iredy>1) then
+          if (okpuly .and. hybrid_allow_cdiis .and. makeb .and. iredy>1) then
               if (.not. Allocated (pulay_work1)) then
                 allocate (pulay_work1(norbs, norbs), pulay_work2(norbs, norbs), &
                 & pulay_work3(norbs, norbs), stat=i)
@@ -1411,6 +1528,15 @@
 #ifdef GPU
           call fetch_packed_density_if_needed(pb, mpack, need_fetch_pb, 'pb', niter)
 #endif
+          if (hybrid_enable .and. damp_enable .and. .not. hybrid_allow_cdiis) then
+            double precision :: alpha_loc_b, t_resb
+            t_resb = max(plb, 1.0D-12)
+            alpha_loc_b = alpha_k_h * hybrid_switch_pl / t_resb
+            alpha_loc_b = max(alpha_min_h, min(alpha_max_h, alpha_loc_b))
+            do i = 1, mpack
+              pb(i) = (1.0D0 - alpha_loc_b) * pbold(i) + alpha_loc_b * pb(i)
+            end do
+          end if
           i = niter
           if (camkin) i = 7
           call cnvg (pb, pbold, pbold2, i, plb)

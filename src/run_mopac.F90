@@ -496,6 +496,53 @@
         case default
           write(iw,'(1x,a)') '[GPU SCF] mode request: auto'
         end select
+        ! Auto policy: adjust resident_scf and streaming based on problem size and device
+        block
+          use molkst_C, only: norbs
+          integer :: jdev
+          integer :: cc_major, cc_minor
+          character(len=32) :: env_auto
+          logical :: auto_policy
+          integer :: small_thr, medium_thr
+          auto_policy = .true.
+          small_thr = 30
+          medium_thr = 800
+          env_auto = '' ; i = 1
+          call get_environment_variable('MOPAC_GPU_AUTOPOLICY_OFF', env_auto, status=i)
+          if (i == 0) then
+            if (trim(adjustl(env_auto)) /= '') auto_policy = .false.
+          end if
+          if (auto_policy .and. lgpu) then
+            jdev = gpu_id + 1
+            if (jdev < 1 .or. jdev > nDevices) jdev = 1
+            cc_major = 0 ; cc_minor = 0
+            if (nDevices > 0) then
+              cc_major = major(jdev)
+              cc_minor = minor(jdev)
+            end if
+            if (norbs < small_thr) then
+              ! Very small: prefer CPU
+              resident_scf = .false.
+              gpu_scf_stream_available = .false.
+              lgpu = .false.
+            else if (norbs < medium_thr) then
+              ! Medium: enable resident SCF, avoid streaming
+              resident_scf = .true.
+              ! keep streaming availability flag as detected but do not force it
+            else
+              ! Large: enable streaming if supported
+              resident_scf = .true.
+              if (mopac_cuda_scf_stream_supported() .eqv. .true._c_bool) then
+                gpu_scf_stream_available = .true.
+              end if
+            end if
+            ! MOZYME policy: on older GPUs (CC<6), leave F2 on CPU unless forced
+            if (mozyme .and. cc_major < 6) then
+              mozyme_f2_gpu = .false.
+            end if
+          end if
+        end block
+
         ! Optional debug summary
         call get_environment_variable('MOPAC_GPU_DEBUG', line, status=i)
         if (i == 0) then
