@@ -1209,7 +1209,9 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
   // Optional: force selected pair kinds to be accumulated on CPU for correctness
   // Syntax: MOPAC_GPU_FOCK_CPU_TYPES=HH,HL,LL,GEN,PER (comma-separated)
   auto parse_cpu_types = []() {
-    int mask = 0; // bit0=LL, bit1=HL, bit2=HH, bit3=GEN, bit4=PER
+    // Default: keep HH on CPU for correctness until validated
+    int mask = (1<<2); // bit0=LL, bit1=HL, bit2=HH, bit3=GEN, bit4=PER
+    // Allow override via env
     const char *s = std::getenv("MOPAC_GPU_FOCK_CPU_TYPES");
     if (!s || !*s) return mask;
     std::string str(s);
