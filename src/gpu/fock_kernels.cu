@@ -123,8 +123,7 @@ __host__ __device__ inline int kab_sum_index(int row, int col) {
 }
 __device__ __constant__ int c_jindex[256];
 static int jindex_ready = 0;
-static std::array<int,256> host_jindex;
-static bool host_jindex_ready = false;
+// host_jindex removed: device constant table c_jindex is sufficient
 static int verbose = 0; static int verbose_inited = 0;
 static int csv_enabled = 0; static int csv_inited = 0;
 static int prof_collect = 0; static int prof_inited = 0;
@@ -512,8 +511,6 @@ static void ensure_jindex_device() {
       }
     }
   }
-  for (int t = 0; t < 256; ++t) host_jindex[t] = host_idx[t];
-  host_jindex_ready = true;
   cudaMemcpyToSymbol(c_jindex, host_idx, sizeof(host_idx));
   jindex_ready = 1;
 }
@@ -1149,23 +1146,31 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
       } else {
         bool has_d = (span_i >= 7) || (span_j >= 7);
         if (has_d) {
+          // d-containing → legacy W layout
           type = PAIR_GENERAL;
           chunk_w = pairs_i * pairs_j;
         } else if (span_i >= 4 && span_j >= 4) {
+          // HH → compact W (100)
           type = PAIR_HEAVY_HEAVY;
           chunk_w = 100;
         } else if (span_i >= 4 && span_j == 1) {
+          // HL → compact W (10)
           type = PAIR_HEAVY_LIGHT;
           chunk_w = 10;
         } else if (span_j >= 4 && span_i == 1) {
+          // LH → compact W (10)
           type = PAIR_LIGHT_HEAVY;
           chunk_w = 10;
         } else if (span_i == 1 && span_j == 1) {
+          // LL → W (1)
           type = PAIR_LIGHT_LIGHT;
           chunk_w = 1;
         } else {
-          type = PAIR_GENERAL;
-          chunk_w = pairs_i * pairs_j;
+          // General molecular (non-periodic) → split J/K layout (WJ/WK)
+          type = PAIR_PERIODIC;
+          chunk_w = 0;
+          chunk_wj = pairs_i * pairs_j;
+          chunk_wk = pairs_i * pairs_j;
         }
       }
 

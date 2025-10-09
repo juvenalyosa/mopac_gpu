@@ -136,9 +136,9 @@ contains
           ! Light-light pair uses legacy W layout (1 element)
           use_w = .true.
         else
-          ! General molecular (non-periodic) pair also uses legacy W layout
-          ! to match CPU fock2 behavior.
-          use_w = .true.
+          ! General molecular (non-periodic) pair uses split WJ/WK layout
+          ! (same as periodic-style general path in CPU fock2)
+          use_w = .false.
         end if
 
         if (use_w) then
