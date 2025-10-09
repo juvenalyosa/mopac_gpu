@@ -638,9 +638,15 @@
         call vecprt (h, norbs)
       end if
       iredy = 1
-  180 continue
+ 180 continue
       niter = 0
       frst = .TRUE.
+      ! Print SCF hybrid profile once per calculation
+      if (nscf == 0) then
+        write (iw,'(1x,a,l1,1x,a,l1,1x,a,l1,1x,a,1pe9.2,1x,a,i0)') &
+          '[SCF] hybrid=', hybrid_enable, 'damp=', damp_enable, 'adapt_shift=', adaptive_shift_on, &
+          'switch_pl=', hybrid_switch_pl, 'ediis_iters=', ediis_max_iter
+      end if
       if (camkin) then
         modea = 1
         modeb = 1

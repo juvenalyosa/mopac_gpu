@@ -496,6 +496,26 @@
         case default
           write(iw,'(1x,a)') '[GPU SCF] mode request: auto'
         end select
+
+        ! Always print a concise auto‑profile summary so users see the selected policies
+        block
+          use molkst_C, only : norbs
+          character(len=16) :: size_cls
+          if (norbs < 30) then
+            size_cls = 'small'
+          else if (norbs < 800) then
+            size_cls = 'medium'
+          else
+            size_cls = 'large'
+          end if
+          write(iw,'(1x,a,1x,i0,1x,a,1x,a)') '[PROFILE] norbs=', norbs, 'class=', trim(size_cls)
+          write(iw,'(1x,a,1x,l1,1x,a,1x,l1)') '[PROFILE] resident_scf=', resident_scf, 'streaming_avail=', gpu_scf_stream_available
+          write(iw,'(1x,a)') '[PROFILE] pair split: compact (LL/HL/HH)=CPU, general=GPU'
+          if (mozyme) then
+            write(iw,'(1x,a,1x,l1,1x,a,1x,i0)') '[PROFILE] MOZYME_GPU=', mozyme_gpu, 'minblk=', mozyme_gpu_min_block
+            write(iw,'(1x,a,1x,l1)') '[PROFILE] MOZYME_F2_GPU=', mozyme_f2_gpu
+          end if
+        end block
         ! Auto policy: adjust resident_scf and streaming based on problem size and device
         block
           use molkst_C, only: norbs

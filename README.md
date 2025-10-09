@@ -16,16 +16,28 @@ Contents
 
 ## Why Barranquilla MOPAC?
 
-Semiempirical NDDO/PMx Hamiltonians (e.g., PM7) balance physics‑based interactions with parametrized approximations. They replace costly four‑center integrals with analytic formulas and tabulated parameters, dramatically reducing the expense of assembling the Fock matrix. This makes semiempirical methods ideal for large systems:
+Barranquilla MOPAC is a semiempirical, GPU‑accelerated MOPAC flavor designed for very large systems — proteins, DNA/RNA, polymers, and extended materials — where conventional ab‑initio scaling is prohibitive. It couples the physics of PMx/NDDO Hamiltonians with architectures that favor massive, batched linear algebra, and adds SCF/optimizer logic that reduces iteration counts reliably.
 
-- Biomolecules (proteins, DNA/RNA): localized electronic structure and nearsightedness of matter make interactions short‑ranged; MOZYME’s localized orbital machinery gives near‑linear scaling in practice.
-- Polymers and materials: repeated motifs and short‑range couplings map well to block‑sparse contractions.
-- Long trajectories and scans: faster SCF cycles and robust convergence reduce wall‑clock and failure modes.
+1) Semiempirical physics that fits large systems
+- PMx (e.g., PM7) under the NDDO approximation replaces explicit four‑center ERIs with closed‑form, parameterized two‑center expressions. The Fock build becomes a sum of two‑center “atom‑pair” contractions rather than dense rank‑4 tensor algebra.
+- The electronic nearsightedness principle in condensed/biological matter implies locality: far‑separated fragments weakly interact. With localized orbitals (MOZYME), the Fock/density operators become block‑sparse with compact support on atom blocks/torsional neighborhoods.
+- For biomolecules (proteins, nucleic acids) and polymers, repeating motifs and short‑range couplings yield a natural hierarchy of blocks — exactly what modern GPUs process well when streamed as independent batches.
 
-Barranquilla MOPAC layers on top of that:
-- GPU acceleration of the heavy “general” two‑center J/K build (dominant cost on large systems) while keeping compact corner cases on CPU for correctness.
-- A hybrid SCF mixer (EDIIS→CDIIS) with adaptive level shifting and damping to reduce iterations without sacrificing predictability.
-- Automatic policies so you only choose the number of GPUs; the code picks the rest.
+2) Algorithmic structure aligned to GPUs
+- Two‑center J/K build dominates the SCF wall‑clock on large systems. In Barranquilla, the “general” two‑center blocks are fed to the GPU as batched pair kernels, while compact corner cases (LL/HL/HH) remain on the CPU by default. This split maximizes GPU throughput where it matters and preserves numerical exactness for the fragile corner cases.
+- Streaming/resident modes: very large cases can stream pair slices (J/K blocks) from host/disk, staging them into device memory with predictable memory footprints; medium cases keep SCF data resident to amortize H2D/D2H traffic.
+- Determinism and verification: when enabled (developer mode), per‑pair verifiers compare device and host contributions without impacting production runs.
+
+3) Robust self‑consistency (fewer iterations, same physics)
+- CDIIS (Pulay) converges very fast near the fixed point but can overshoot early; EDIIS (energy DIIS) is safer far from convergence. Barranquilla uses a hybrid EDIIS→CDIIS strategy with residual‑based switching, adaptive negative level shifts for virtuals, and residual‑proportional damping. You get faster, more predictable SCF with no change to the underlying Hamiltonian.
+
+4) Geometry optimization that scales
+- The HMTR optimizer (Hierarchical Memetic Trust‑Region) marries population‑based, torsion‑aware exploration with a rigorous trust‑region micro‑solver. It batches energy/gradient calls — which are the dominant cost at each geometry step — across GPU(s), and it adapts the trust radius using the standard acceptance ratio ρ. This approach is particularly effective for proteins (many low‑curvature torsions) and soft materials.
+
+5) Automatic policies (no tuning required)
+- Barranquilla selects CPU/GPU policies from problem size and device CC: small SCFs stay on CPU; medium cases keep data resident; large cases stream J/K; MOZYME pair work is enabled on newer GPUs and can be forced when needed. You typically only choose the number of GPUs; the code chooses the rest.
+
+In short: Barranquilla MOPAC brings semiempirical physics to large systems with a GPU‑first execution model where it counts (general two‑center J/K), combines it with smarter SCF/optimizer logic to cut iterations, and keeps correctness safeguards for the fragile corners.
 
 ---
 
@@ -92,6 +104,26 @@ B_{k+1} = B_k − (B_k s_k s_k^T B_k) / (s_k^T B_k s_k)
 ```
 
 HMTR augments 1–3 with a memetic torsion subspace and a particle‑swarm‑like outer loop to propose diverse trial moves, then refines locally with the trust‑region micro‑optimizer (radius/rho thresholds are in `src/optimization/hmtr.F90`). Energies and gradients are evaluated batched on the GPU (when enabled) for the trial population, which is effective for large biomolecules where many local proposals can be examined concurrently.
+
+### Math Appendix: Semiempirical (NDDO/PMx) Essentials
+
+Under the Neglect of Diatomic Differential Overlap (NDDO), the AO basis is orthogonalized within atoms and overlap is neglected between different atoms beyond specific terms. Key parameterizations appear as:
+
+- On‑site Coulomb integrals α_A and resonance integrals β_A (orbital dependent in extended models). For a diatomic pair (A,B), two‑center quantities depend on the interatomic distance R_AB.
+- Two‑center Coulomb γ_AB (electron–electron repulsion between net charges localized on A and B):
+```
+γ_AB(R) ≈ 1 / sqrt( R^2 + δ_A^2 + δ_B^2 )
+```
+with screening radii δ_A, δ_B from parameters. In PMx, distance‑dependent forms are used to fit heats of formation and other observables.
+
+In matrix language (suppressing AO indices), the semiempirical Fock for a closed shell is:
+```
+F = H_core + J(P) − K(P)
+H_core(AO) ≈ α + β terms (on‑site and nearest‑neighbor resonance)
+J(P)  ≈ ∑_{A≤B}  Γ_AB : P_AB    (pairwise Coulomb contraction)
+K(P)  ≈ ∑_{A≤B}  Λ_AB : P_AB    (pairwise exchange contraction)
+```
+where `Γ_AB, Λ_AB` are small pairwise tensors generated by NDDO/PMx formulas, and `P_AB` is the block of the density over orbitals centered on atoms A and B. This “pairwise” structure is what enables efficient two‑center batching on GPUs.
 
 ---
 
