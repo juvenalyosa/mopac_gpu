@@ -21,7 +21,7 @@ extern "C" bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
                                       const int *nfirst, const int *nlast,
                                       const double *ptot, const double *p,
                                       const double *w, const double *wj, const double *wk,
-                                      int periodic_flag,
+                                      int periodic_flag, int n2elec,
                                       double *fout);
 
 extern "C" void mopac_cuda_dsyevd_keep(int n, double *A, int lda, double *W, int *info);
@@ -626,7 +626,7 @@ extern "C" bool mopac_cuda_scf_run(MopacGpuScfContext *ctx) {
     if (!mopac_cuda_fock2_scf(norbs, mpack, numat,
                               nfirst, nlast,
                               ptot_iter.data(), pa_iter.data(),
-                              w, wj, wk, periodic_flag,
+                              w, wj, wk, periodic_flag, std::max(0, ctx->n2elec),
                               f_alpha)) {
       set_last_error("GPU SCF: alpha Fock build failed");
       return false;
@@ -651,7 +651,7 @@ extern "C" bool mopac_cuda_scf_run(MopacGpuScfContext *ctx) {
       if (!mopac_cuda_fock2_scf(norbs, mpack, numat,
                                 nfirst, nlast,
                                 ptot_iter.data(), pb_iter.data(),
-                                w, wj, wk, periodic_flag,
+                                w, wj, wk, periodic_flag, std::max(0, ctx->n2elec),
                                 f_beta)) {
         set_last_error("GPU SCF: beta Fock build failed");
         return false;

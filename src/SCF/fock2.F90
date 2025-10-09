@@ -155,7 +155,7 @@
           end if
           ! Try non-stream GPU builder as a fallback before going to CPU
           if (allow_gpu) then
-            ok = mopac_cuda_fock2_scf(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic_flag, f)
+            ok = mopac_cuda_fock2_scf(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic_flag, n2elec, f)
             if (ok) then
               return
             end if
@@ -170,7 +170,7 @@
 
         if (want_gpu) then
           periodic_flag = merge(1_c_int, 0_c_int, id /= 0)
-          ok = mopac_cuda_fock2_scf(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic_flag, f)
+          ok = mopac_cuda_fock2_scf(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic_flag, n2elec, f)
           if (ok) then
             return
           else

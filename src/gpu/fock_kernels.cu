@@ -1172,7 +1172,7 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
                           const int *nfirst, const int *nlast,
                           const double *ptot, const double *p,
                           const double *w, const double *wj, const double *wk,
-                          int periodic_flag,
+                          int periodic_flag, int n2elec,
                           double *fout) {
   ensure_verbose(); ensure_thresholds(); ensure_csv(); ensure_profile_collect();
   ensure_jindex_device();
@@ -1445,8 +1445,11 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
     std::fflush(stdout);
   }
 
-  if (w_len > 0) {
-    cudaMemcpy(s_d_w, w, sizeof(double) * w_len, cudaMemcpyHostToDevice);
+  // Copy full W table as provided by host (n2elec) to ensure compact blocks are available
+  size_t w_total = (n2elec > 0) ? (size_t)n2elec : w_len;
+  if (w_total > 0) {
+    if (!ensure_buf_double(&s_d_w, &cap_w, w_total)) return false;
+    cudaMemcpy(s_d_w, w, sizeof(double) * w_total, cudaMemcpyHostToDevice);
   }
   if (wj_len > 0) {
     cudaMemcpy(s_d_wj, wj, sizeof(double) * wj_len, cudaMemcpyHostToDevice);

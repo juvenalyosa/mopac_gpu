@@ -25,7 +25,7 @@ module gpu_fock_interfaces
       logical(c_bool)       :: ok
     end function mopac_cuda_fock2_keep
 
-    function mopac_cuda_fock2_scf(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic, fout) &
+    function mopac_cuda_fock2_scf(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic, n2elec, fout) &
       bind(C,name='mopac_cuda_fock2_scf') result(ok)
       use iso_c_binding
       integer(c_int), value :: norbs, mpack, numat
@@ -35,6 +35,7 @@ module gpu_fock_interfaces
       real(c_double)        :: wj(*)
       real(c_double)        :: wk(*)
       integer(c_int), value :: periodic
+      integer(c_int), value :: n2elec
       real(c_double)        :: fout(mpack)
       logical(c_bool)       :: ok
     end function mopac_cuda_fock2_scf
