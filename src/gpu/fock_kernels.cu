@@ -123,7 +123,7 @@ __host__ __device__ inline int kab_sum_index(int row, int col) {
 }
 __device__ __constant__ int c_jindex[256];
 static int jindex_ready = 0;
-// host_jindex removed: device constant table c_jindex is sufficient
+static std::array<int,256> host_jindex;
 static int verbose = 0; static int verbose_inited = 0;
 static int csv_enabled = 0; static int csv_inited = 0;
 static int prof_collect = 0; static int prof_inited = 0;
@@ -511,6 +511,8 @@ static void ensure_jindex_device() {
       }
     }
   }
+  // Mirror table to host array for host-side verification routines
+  for (int t = 0; t < 256; ++t) host_jindex[t] = host_idx[t];
   cudaMemcpyToSymbol(c_jindex, host_idx, sizeof(host_idx));
   jindex_ready = 1;
 }
@@ -667,8 +669,50 @@ __device__ inline void fock_pair_heavy_light(int heavy_start, int heavy_end, int
                                              double *f,
                                              int dbg_tid) {
   if (!w_block || !ptot || !p || !f) return;
-  // Use general mapping for HL
-  fock_pair_general(heavy_start, heavy_end, light_atom, light_atom, ptot, p, w_block, f, dbg_tid);
+  int span = span_count(heavy_start, heavy_end);
+  if (span <= 0) return;
+
+  int coulomb_len = span * (span + 1) / 2;
+  int ll = packed_index_zero(light_atom, light_atom);
+  double ptot_ll = ptot[ll];
+  int wpos = 0;
+  double sumoff = 0.0;
+  double sumdia = 0.0;
+  for (int rel = 0; rel < span; ++rel) {
+    int orb_i = heavy_start + rel;
+    for (int relj = 0; relj < rel; ++relj) {
+      int orb_j = heavy_start + relj;
+      double val = (wpos < coulomb_len) ? w_block[wpos] : 0.0;
+      wpos++;
+      int idx = packed_index_zero(orb_i, orb_j);
+      atomicAdd_double(&f[idx], ptot_ll * val);
+      sumoff += ptot[idx] * val;
+    }
+    double diag = (wpos < coulomb_len) ? w_block[wpos] : 0.0;
+    wpos++;
+    int idx_ii = packed_index_zero(orb_i, orb_i);
+    atomicAdd_double(&f[idx_ii], ptot_ll * diag);
+    sumdia += ptot[idx_ii] * diag;
+  }
+  atomicAdd_double(&f[ll], 2.0 * sumoff + sumdia);
+
+  constexpr int heavy_light_block_len = 10;
+  int table_index = 0;
+  for (int rel = 0; rel < span; ++rel) {
+    int orb_i = heavy_start + rel;
+    int idx_il = packed_index_zero(orb_i, light_atom);
+    double acc = 0.0;
+    for (int relj = 0; relj < span; ++relj) {
+      int map = c_jindex[table_index + relj];
+      if (map <= 0 || map > heavy_light_block_len) continue;
+      double val = w_block[map - 1];
+      int orb_j = heavy_start + relj;
+      int idx_pl = packed_index_zero(orb_j, light_atom);
+      acc += p[idx_pl] * val;
+    }
+    table_index += span;
+    atomicAdd_double(&f[idx_il], -acc);
+  }
 }
 
 __device__ void fock_pair_heavy_heavy(int ia, int ib, int ja, int jb,
@@ -676,8 +720,93 @@ __device__ void fock_pair_heavy_heavy(int ia, int ib, int ja, int jb,
                                       const double *w_block,
                                       double *f) {
   if (!w_block || !ptot || !p || !f) return;
-  // Unified general path for correctness
-  fock_pair_general(ia, ib, ja, jb, ptot, p, w_block, f);
+  int span_i = span_count(ia, ib);
+  int span_j = span_count(ja, jb);
+  if (span_i != 4 || span_j != 4) {
+    fock_pair_general(ia, ib, ja, jb, ptot, p, w_block, f);
+    return;
+  }
+
+  double p_block_a[16];
+  double p_block_b[16];
+  double p_cross[16];
+
+  int idx = 0;
+  for (int row = ia; row <= ib; ++row) {
+    for (int col = ia; col <= ib; ++col) {
+      p_block_a[idx++] = ptot[packed_index_zero(row, col)];
+    }
+  }
+
+  idx = 0;
+  for (int row = ja; row <= jb; ++row) {
+    for (int col = ja; col <= jb; ++col) {
+      p_block_b[idx++] = ptot[packed_index_zero(row, col)];
+    }
+  }
+
+  idx = 0;
+  for (int row = ia; row <= ib; ++row) {
+    for (int col = ja; col <= jb; ++col) {
+      int packed = (row >= col) ? packed_index_zero(row, col)
+                                : packed_index_zero(col, row);
+      p_cross[idx++] = p[packed];
+    }
+  }
+
+  double suma[10];
+  double sumb[10];
+  for (int row = 0; row < 10; ++row) {
+    double sa = 0.0;
+    double sb = 0.0;
+    for (int col = 0; col < 16; ++col) {
+      sa += p_block_a[col] * w_block[jab_suma_index(row, col)];
+      sb += p_block_b[col] * w_block[jab_sumb_index(row, col)];
+    }
+    suma[row] = sa;
+    sumb[row] = sb;
+  }
+
+  int pair_idx = 0;
+  for (int offset = 0; offset < span_i; ++offset) {
+    int orb_a = ia + offset;
+    int orb_b = ja + offset;
+    for (int inner = 0; inner <= offset; ++inner) {
+      int orb_a_j = ia + inner;
+      int orb_b_j = ja + inner;
+      int idx_a = packed_index_zero(orb_a, orb_a_j);
+      int idx_b = packed_index_zero(orb_b, orb_b_j);
+      atomicAdd_double(&f[idx_a], sumb[pair_idx]);
+      atomicAdd_double(&f[idx_b], suma[pair_idx]);
+      ++pair_idx;
+    }
+  }
+
+  double sums[16];
+  for (int row = 0; row < 16; ++row) {
+    double total = 0.0;
+    for (int col = 0; col < 16; ++col) {
+      total += p_cross[col] * w_block[kab_sum_index(row, col)];
+    }
+    sums[row] = total;
+  }
+
+  int sum_idx = 0;
+  if (ia > ja) {
+    for (int i = ia; i <= ib; ++i) {
+      for (int j = ja; j <= jb; ++j) {
+        int pos = packed_index_zero(i, j);
+        atomicAdd_double(&f[pos], -sums[sum_idx++]);
+      }
+    }
+  } else {
+    for (int i = ia; i <= ib; ++i) {
+      for (int j = ja; j <= jb; ++j) {
+        int pos = packed_index_zero(j, i);
+        atomicAdd_double(&f[pos], -sums[sum_idx++]);
+      }
+    }
+  }
 }
 
 __device__ void fock_pair_periodic(int ia, int ib, int ja, int jb,
@@ -1146,31 +1275,25 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
       } else {
         bool has_d = (span_i >= 7) || (span_j >= 7);
         if (has_d) {
-          // d-containing → legacy W layout
           type = PAIR_GENERAL;
           chunk_w = pairs_i * pairs_j;
         } else if (span_i >= 4 && span_j >= 4) {
-          // HH → compact W (100)
           type = PAIR_HEAVY_HEAVY;
           chunk_w = 100;
         } else if (span_i >= 4 && span_j == 1) {
-          // HL → compact W (10)
           type = PAIR_HEAVY_LIGHT;
           chunk_w = 10;
         } else if (span_j >= 4 && span_i == 1) {
-          // LH → compact W (10)
           type = PAIR_LIGHT_HEAVY;
           chunk_w = 10;
         } else if (span_i == 1 && span_j == 1) {
-          // LL → W (1)
           type = PAIR_LIGHT_LIGHT;
           chunk_w = 1;
         } else {
-          // General molecular (non-periodic) → split J/K layout (WJ/WK)
-          type = PAIR_PERIODIC;
-          chunk_w = 0;
-          chunk_wj = pairs_i * pairs_j;
-          chunk_wk = pairs_i * pairs_j;
+          // General molecular (non-periodic) pairs are covered by the compact
+          // cases above; fallback to general W layout to match CPU
+          type = PAIR_GENERAL;
+          chunk_w = pairs_i * pairs_j;
         }
       }
 
