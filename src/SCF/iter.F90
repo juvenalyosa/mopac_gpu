@@ -71,6 +71,7 @@
       logical :: hybrid_allow_cdiis
       double precision :: hybrid_switch_pl, alpha_min_h, alpha_max_h, alpha_k_h
       integer :: ediis_max_iter
+      double precision :: alpha_loc, t_res, alpha_loc_b, t_resb
 #ifdef GPU
       type(c_ptr) :: fock_dev
       type(c_ptr) :: density_dev
