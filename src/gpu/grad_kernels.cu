@@ -29,6 +29,22 @@ static int experimental_mode = -1;  // -1 unset, 0 disabled, 1 enabled
 
 constexpr double kCoulombKcalPerAng = 332.063712949;  // kcal/mol * Å / e^2
 
+// Atomic add for double that works on pre-6.0 architectures via CAS
+__device__ inline double atomicAdd_double(double* address, double val) {
+#if __CUDA_ARCH__ >= 600
+  return atomicAdd(address, val);
+#else
+  unsigned long long int* address_as_ull = (unsigned long long int*)address;
+  unsigned long long int old = *address_as_ull, assumed;
+  do {
+    assumed = old;
+    double sum = val + __longlong_as_double(assumed);
+    old = atomicCAS(address_as_ull, assumed, __double_as_longlong(sum));
+  } while (assumed != old);
+  return __longlong_as_double(old);
+#endif
+}
+
 static bool experimental_enabled() {
   if (experimental_mode >= 0) return experimental_mode == 1;
   const char *env = std::getenv("MOPAC_GPU_GRAD_EXPERIMENTAL");
@@ -67,12 +83,12 @@ __global__ void coulomb_gradient_kernel(int pair_count,
   double gz = scale * dz;
   int offset_i = atom_i * 3;
   int offset_j = atom_j * 3;
-  atomicAdd(&grad[offset_i + 0], gx);
-  atomicAdd(&grad[offset_i + 1], gy);
-  atomicAdd(&grad[offset_i + 2], gz);
-  atomicAdd(&grad[offset_j + 0], -gx);
-  atomicAdd(&grad[offset_j + 1], -gy);
-  atomicAdd(&grad[offset_j + 2], -gz);
+  atomicAdd_double(&grad[offset_i + 0], gx);
+  atomicAdd_double(&grad[offset_i + 1], gy);
+  atomicAdd_double(&grad[offset_i + 2], gz);
+  atomicAdd_double(&grad[offset_j + 0], -gx);
+  atomicAdd_double(&grad[offset_j + 1], -gy);
+  atomicAdd_double(&grad[offset_j + 2], -gz);
 }
 
 static inline void touch_buffers() {
