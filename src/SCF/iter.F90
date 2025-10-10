@@ -1382,7 +1382,6 @@
 #endif
           ! EDIIS-like damped mixing (RHF) before CNVG when hybrid mode and CDIIS not yet allowed
           if (hybrid_enable .and. damp_enable .and. .not. hybrid_allow_cdiis) then
-            double precision :: alpha_loc, t_res
             t_res = max(pl, 1.0D-12)
             alpha_loc = alpha_k_h * hybrid_switch_pl / t_res
             alpha_loc = max(alpha_min_h, min(alpha_max_h, alpha_loc))
@@ -1536,7 +1535,6 @@
           call fetch_packed_density_if_needed(pb, mpack, need_fetch_pb, 'pb', niter)
 #endif
           if (hybrid_enable .and. damp_enable .and. .not. hybrid_allow_cdiis) then
-            double precision :: alpha_loc_b, t_resb
             t_resb = max(plb, 1.0D-12)
             alpha_loc_b = alpha_k_h * hybrid_switch_pl / t_resb
             alpha_loc_b = max(alpha_min_h, min(alpha_max_h, alpha_loc_b))
