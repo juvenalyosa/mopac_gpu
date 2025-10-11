@@ -1,4 +1,5 @@
 // Portable CUDA interop for MOPAC: cuBLAS GEMM, cuSOLVER SYEVD, and basic GPU info
+// Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cublasLt.h>

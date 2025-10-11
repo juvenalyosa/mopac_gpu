@@ -1,3 +1,4 @@
+! Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
 module gpu_scf_stream_driver
   use iso_c_binding
   use gpu_scf_stream_interfaces, only: mopac_cuda_scf_stream_supported, &

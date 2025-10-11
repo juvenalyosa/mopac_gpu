@@ -2,6 +2,7 @@
 
 #include "mopac_hmtr.h"
 
+// Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
 #include <cuda_runtime.h>
 #include <cmath>
 #include <cstdio>

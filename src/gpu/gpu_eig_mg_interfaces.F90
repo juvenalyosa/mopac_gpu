@@ -1,4 +1,5 @@
 ! Fortran interface for (future) cuSOLVERMg eigensolver integration
+! Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
 module gpu_eig_mg_interfaces
   use iso_c_binding
   implicit none

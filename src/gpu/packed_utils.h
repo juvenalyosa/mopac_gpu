@@ -1,3 +1,4 @@
+// Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
 #ifndef MOPAC_GPU_PACKED_UTILS_H
 #define MOPAC_GPU_PACKED_UTILS_H
 

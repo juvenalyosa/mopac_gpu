@@ -1,4 +1,5 @@
 // Minimal light-light branch for Fock derivative (dfock2) on GPU
+// Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cstdio>

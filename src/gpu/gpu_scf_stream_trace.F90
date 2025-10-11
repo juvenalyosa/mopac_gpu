@@ -1,3 +1,4 @@
+! Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
 module gpu_scf_stream_trace
   implicit none
   private

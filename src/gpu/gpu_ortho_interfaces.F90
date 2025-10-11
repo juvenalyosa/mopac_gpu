@@ -1,4 +1,5 @@
 ! Fortran interfaces for GPU orthogonalization helpers (Phase 2)
+! Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
 module gpu_ortho_interfaces
   use iso_c_binding
   implicit none
@@ -35,4 +36,3 @@ module gpu_ortho_interfaces
     end subroutine mopac_cuda_density_from_c
   end interface
 end module gpu_ortho_interfaces
-

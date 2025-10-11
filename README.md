@@ -1,4 +1,6 @@
 # Barranquilla MOPAC — A GPU‑Accelerated Semiempirical Flavor of MOPAC
+<!-- NOTE (modification): 2025-10-11 — Added GPU usage cheat sheet and
+     configuration matrix for keywords/envs and per‑GPU guidance. -->
 
 Barranquilla MOPAC is an implementation of MOPAC specialized for large systems (proteins, DNA/RNA, polymers, and extended materials) with deterministic GPU acceleration and smart SCF. It preserves the physics and accuracy of the semiempirical framework while exploiting locality and tensor contraction structure on modern GPUs.
 

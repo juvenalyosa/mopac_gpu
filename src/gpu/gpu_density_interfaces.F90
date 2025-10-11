@@ -1,4 +1,5 @@
 ! Fortran interfaces to GPU density builders that consume device-resident eigenvectors
+! Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
 module gpu_density_interfaces
   use iso_c_binding, only : c_int, c_double, c_size_t, c_bool, c_ptr
   implicit none

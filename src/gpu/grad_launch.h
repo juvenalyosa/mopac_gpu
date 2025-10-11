@@ -1,3 +1,4 @@
+// Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
 #pragma once
 
 #include <cuda_runtime.h>

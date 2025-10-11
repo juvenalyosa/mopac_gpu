@@ -13,6 +13,12 @@
 ! See the License for the specific language governing permissions and
 ! limitations under the License.
 
+! NOTE (modification): 2025-10-11 — Applied by Codex CLI assistant
+! - Fixed duplicate local declarations of alpha_loc/t_res and alpha_loc_b/t_resb
+!   inside hybrid SCF damped-mixing blocks to satisfy Fortran type rules and
+!   resolve compiler error "already has basic type of REAL".
+!   Numerical behavior is unchanged (variables are already declared at scope).
+
       subroutine iter(ee, fulscf, rand)
       use common_arrays_C, only : eigs, p, pa, pb, cb, h, &
        &  c, nat, nfirst, nlast, eigb, pdiag, f, w, wk, fb

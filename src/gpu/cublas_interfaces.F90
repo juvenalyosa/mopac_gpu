@@ -1,4 +1,5 @@
 ! Minimal CU-BLAS interfaces used by MOPAC GPU paths
+! Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
 module mopac_cublas_interfaces
   use iso_c_binding
   implicit none

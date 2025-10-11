@@ -1,4 +1,9 @@
 // Stage-1 CUDA scaffolding for SCF gradient accumulation.
+// Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
+// NOTE (modification): 2025-10-11 — Applied by Codex CLI assistant
+// - Added atomicAdd_double fallback for architectures without native FP64 atomics
+//   (sm < 600), and updated Coulomb gradient kernel to use it. This enables
+//   successful builds for sm_52 (Maxwell/TITAN X) while preserving correctness.
 // Currently provides a Coulomb-only experimental kernel guarded by
 // MOPAC_GPU_GRAD_EXPERIMENTAL. The default behaviour is to return false so
 // callers can fall back to the trusted CPU implementation.

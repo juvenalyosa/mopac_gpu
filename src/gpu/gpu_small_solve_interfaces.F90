@@ -1,3 +1,4 @@
+! Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
 module gpu_small_solve_interfaces
   use iso_c_binding
   implicit none
@@ -11,4 +12,3 @@ module gpu_small_solve_interfaces
     end subroutine mopac_cuda_solve_linear
   end interface
 end module gpu_small_solve_interfaces
-
