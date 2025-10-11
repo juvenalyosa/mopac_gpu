@@ -1,5 +1,5 @@
 # Barranquilla MOPAC — A GPU‑Accelerated Semiempirical Flavor of MOPAC
-<img src="logo/barranquilla_logo.png" alt="Barranquilla MOPAC Logo" width="320" />
+<img src="logo/barranquilla_logo.png" alt="Barranquilla MOPAC Logo" style="max-width: 100%; width: 720px; height: auto;" />
 <!-- NOTE (modification): 2025-10-11 — Added GPU usage cheat sheet and
      configuration matrix for keywords/envs and per‑GPU guidance. -->
 
