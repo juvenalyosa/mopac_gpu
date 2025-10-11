@@ -544,3 +544,44 @@ Best practices
 ---
 
 © 2025 Barranquilla MOPAC (OpenMOPAC). Apache‑2.0 License.
+
+---
+
+Publication note
+- A peer‑reviewed publication describing Barranquilla MOPAC’s algorithms and GPU implementation is in preparation.
+- In the meantime, please cite this repository in scholarly work that uses this software.
+- Forthcoming Barranquilla paper (anticipated authors): Juvenal Yosa, Josef Melcr, Anthonie van der Wekken, M. R. Groves.
+
+BibTeX (repository)
+```
+@misc{barranquilla_mopac_repo,
+  author       = {Juvenal Yosa},
+  title        = {Barranquilla MOPAC — A GPU-Accelerated Semiempirical Flavor of MOPAC},
+  year         = {2025},
+  howpublished = {GitHub repository},
+  note         = {UMCG Groningen; Universidad Simón Bolívar; Protyon},
+  url          = {<repo_url_here>}
+}
+```
+
+Also consider citing the original MOPAC (Apache 2.0) distribution when appropriate:
+```
+@software{mopac_software,
+  title        = {MOPAC},
+  author       = {Jonathan E. Moussa and James J. P. Stewart},
+  year         = {2025},
+  version      = {23.1.2},
+  doi          = {10.5281/zenodo.6511958}
+}
+```
+
+Forthcoming Barranquilla paper (placeholder BibTeX)
+```
+@misc{barranquilla_mopac_yosa_2025,
+  author       = {Yosa, Juvenal and Melcr, Josef and van der Wekken, Anthonie and Groves, M. R.},
+  title        = {Barranquilla MOPAC: GPU-Accelerated Semiempirical Calculations for Large Systems},
+  year         = {2025},
+  note         = {In preparation},
+  url          = {<preprint_or_doi_when_available>}
+}
+```
