@@ -551,17 +551,16 @@ Best practices
 Publication note
 - A peer‑reviewed publication describing Barranquilla MOPAC’s algorithms and GPU implementation is in preparation.
 - In the meantime, please cite this repository in scholarly work that uses this software.
-- Forthcoming Barranquilla paper (anticipated authors): Juvenal Yosa, Josef Melcr, Anthonie van der Wekken, M. R. Groves.
 
 BibTeX (repository)
 ```
 @misc{barranquilla_mopac_repo,
-  author       = {Juvenal Yosa},
+  author       = {Yosa, Juvenal and Melcr, Josef and van der Wekken, Anthonie and Groves, M. R.},
   title        = {Barranquilla MOPAC — A GPU-Accelerated Semiempirical Flavor of MOPAC},
   year         = {2025},
   howpublished = {GitHub repository},
   note         = {UMCG Groningen; Universidad Simón Bolívar; Protyon},
-  url          = {<repo_url_here>}
+  url          = {https://github.com/juvenalyosa/mopac_gpu}
 }
 ```
 
