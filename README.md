@@ -426,6 +426,16 @@ Best practices
 - Host‑side pre‑expansion of compact LL/HL/HH blocks to the “general” order for one robust GPU kernel.
 - cuSOLVERMg multi‑GPU diagonalization on supported platforms.
 - Deeper overlap and batched pair launches to reduce kernel overhead.
+---
+
+## Development & Collaboration
+
+- Developed by: Dr. Juvenal Yosa (UMCG — Groningen, Netherlands)
+  - Address: Hanzeplein 1, 9713 GZ Groningen, The Netherlands
+- In collaboration with: Universidad Simón Bolívar — Barranquilla, Colombia
+  - Address: Carrera 54 # 64 - 222, Barranquilla, Atlántico, Colombia
+- And: Protyon — Groningen, Netherlands
+  - Address: Winschoterdiep 50, 9723 AB Groningen, The Netherlands
 
 ---
 
