@@ -267,6 +267,90 @@ These are printed in the run header when `MOPAC_GPU_DEBUG=1` is set.
 
 ---
 
+## GPU Usage Cheat Sheet (Keywords, Envs, GPUs)
+
+Key ideas
+- Conventional SCF (no MOZYME) offloads the dominant two‑center J/K build to GPU and shows the clearest speedups.
+- MOZYME accelerates density (batched SYRK/GEMM) on GPU for large localized blocks; current pair kernels primarily benefit d‑orbital cases, while protein s/p pair work remains CPU‑side.
+- Resident vs. streaming is automatic by size; both can be overridden with environment flags.
+
+Build configuration
+- Enable: `-DGPU=ON`
+- Target SMs: `-DCUDA_ARCHS=<sm>`
+  - Maxwell TITAN X: `52`
+  - V100: `70`  •  A100: `80`  •  H100: `90`
+  - RTX 30/40 (limited FP64): `86`/`89`
+
+Common environment flags
+- Force/disable GPU: `MOPAC_FORCEGPU=1`, `MOPAC_NOGPU=1`
+- SCF task: `MOPAC_GPU_SCFTASK=gpu|cpu|auto`, optional driver: `MOPAC_GPU_SCF_EXPERIMENTAL=1`
+- Residency: `MOPAC_RESIDENT_SCF=1` (prefer resident on medium systems)
+- Diagnostics: `MOPAC_GPU_PROFILE=1|2`, `MOPAC_GPU_VERBOSE=1`, `MOPAC_GPU_SCF_DEBUG=1`, `MOPAC_GPU_STREAM_TRACE=1`
+- Eigenvectors host fetch (printing): set `MOPAC_EIG2HOST` non‑empty
+
+MOZYME (localized) flags
+- Enable/disable: keyword `MOZYME_GPU`, or env `MOZYME_GPU_FORCE=1` / `MOZYME_GPU_OFF=1`
+- Pair kernels (F2/DF2): `MOPAC_MOZYME_F2_GPU=1` (on). Current kernels mainly benefit d‑orbital cases.
+- Block threshold: `MOZYME_MINBLK=<n>` (2–4 for big blocks; 1 to be aggressive)
+- Two GPUs: `MOZYME_GPUPAIR=a,b` (1‑based)
+
+Recommended profiles by GPU
+- Maxwell sm_52 (TITAN X):
+  - Build with `-DCUDA_ARCHS=52`.
+  - Conventional SCF: `MOPAC_FORCEGPU=1 MOPAC_RESIDENT_SCF=1` (visible speedups on large cases).
+  - MOZYME proteins: prefer CPU density (`MOZYME_GPU_OFF=1`) and use threaded BLAS.
+
+- Volta V100 / Ampere A100 / Hopper H100 (strong FP64):
+  - Build with `-DCUDA_ARCHS=70|80|90`.
+  - Conventional SCF: `MOPAC_GPU_SCFTASK=gpu MOPAC_GPU_SCF_EXPERIMENTAL=1`.
+  - MOZYME: `MOZYME_GPU MOZYME_MINBLK=2–4` and `MOPAC_MOZYME_F2_GPU=1`; multi‑GPU via `MOZYME_GPUPAIR`.
+
+- RTX 30/40 (sm_86/89, limited FP64):
+  - Conventional SCF still helps for large systems; MOZYME density offload helps on bigger blocks; s/p pair work remains CPU.
+
+Quick recipes
+- Conventional SCF (GPU, medium): `MOPAC_FORCEGPU=1 MOPAC_RESIDENT_SCF=1`
+- Conventional SCF (GPU, very large/streaming): add `MOPAC_GPU_PROFILE=2`
+- MOZYME (proteins) density on GPU: `MOZYME_GPU MOZYME_MINBLK=2–4` and `MOPAC_MOZYME_F2_GPU=1`
+
+## GPU Configuration Matrix (Scenarios → Settings)
+
+- Conventional SCF — molecular (non‑periodic)
+  - Small (norbs < 30): default CPU; optional test `MOPAC_FORCEGPU=1` (little/no speedup).
+  - Medium (30–800): `MOPAC_FORCEGPU=1 MOPAC_RESIDENT_SCF=1`; leave `MOPAC_GPU_SCFTASK=auto` (or `gpu`).
+  - Large (> 800): same as medium + profiling: `MOPAC_GPU_PROFILE=2`; log shows `[STREAM] engaged` when streaming.
+
+- Conventional SCF — periodic (solids)
+  - Uses split `WJ/WK` blocks and prefers streaming. Keep `MOPAC_FORCEGPU=1`; add `MOPAC_GPU_PROFILE=2` for visibility.
+  - Optional debug: `MOPAC_GPU_SCF_DEBUG=1` and `MOPAC_GPU_STREAM_TRACE=1` to trace block publishes.
+
+- MOZYME — proteins (mostly s/p shells)
+  - GPU helps density BLAS on large localized blocks: set `MOZYME_GPU` and `MOZYME_MINBLK=2–4`.
+  - Pair kernels (F2/DF2) remain CPU for s/p; `MOPAC_MOZYME_F2_GPU=1` mainly helps d‑orbital cases.
+  - On weak‑FP64 GPUs (Maxwell, consumer RTX), CPU MOZYME often faster: `MOZYME_GPU_OFF=1` + threaded BLAS (`THREADS` keyword, `OMP_NUM_THREADS`/`MKL_NUM_THREADS`).
+
+- MOZYME — with transition metals (d shells present)
+  - Enable F2 GPU: `MOPAC_MOZYME_F2_GPU=1`; keep `MOZYME_GPU` and moderate `MOZYME_MINBLK` (2–4).
+  - Multi‑GPU density: `MOZYME_GPUPAIR=1,2` when two devices are available.
+
+- Gradients
+  - Default uses same algebra as energies. An experimental Coulomb‑only GPU gradient exists: `MOPAC_GPU_GRAD_EXPERIMENTAL=1` (for development/diagnostics).
+
+- Multi‑GPU eigensolver (experimental)
+  - Build: `-DUSE_CUSOLVER_MG=ON`. Runtime: set `MOPAC_EIG_MG=1` (and optionally `MOPAC_EIG_MG_GRID`, `MOPAC_EIG_MG_BLKSIZE`, `MOPAC_EIG_MG_MIN`).
+
+- Device selection and ignore lists
+  - Select a device: input keyword `SETGPU=<n>` (1‑based). Ignore devices: `MOZYME_GPUIGNORE=a,b,c`.
+  - Two‑GPU pairing for MOZYME: `MOZYME_GPUPAIR=a,b`.
+
+- Troubleshooting no GPU utilization
+  - Verify build targets your SM (`-DCUDA_ARCHS` in compile lines).
+  - Check profile lines in the log: `MOZYME_GPU`, `MOZYME_F2_GPU`, `resident_scf`, `[STREAM] engaged`.
+  - Integral‑on‑disk disables the full GPU SCF driver; streaming Fock can still be active.
+  - Enable `MOPAC_GPU_SCF_DEBUG=1` / `MOPAC_GPU_STREAM_TRACE=1` to see driver/stream activity.
+
+---
+
 ## Build & Run
 
 Build (CPU+GPU)
