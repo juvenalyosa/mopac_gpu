@@ -181,6 +181,66 @@ sudo apt-get install -y build-essential gfortran cmake ninja-build \
 cmake --build build-gpu --target all --parallel
 ```
 
+CPU‑only quickstart (Ubuntu)
+```
+sudo apt-get update
+sudo apt-get install -y build-essential gfortran cmake ninja-build \
+    libopenblas-dev liblapack-dev
+
+/usr/bin/cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target all --parallel
+```
+
+CUDA architectures (examples for `-DCUDA_ARCHS`)
+- Maxwell TITAN X: `52`
+- Pascal P100: `60`
+- Turing (e.g., RTX 2080 Ti): `75`
+- Volta V100: `70`
+- Ampere A100: `80`
+- Ampere RTX 30 (e.g., 3080/3090): `86`
+- Ada RTX 40 (e.g., 4080/4090): `89`
+- Hopper H100: `90`
+
+Examples
+```
+# Single architecture
+/usr/bin/cmake -S . -B build-gpu -G Ninja -DGPU=ON -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=/usr/bin/gcc-12 -DCMAKE_CXX_COMPILER=/usr/bin/g++-12 \
+  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12 -DCUDA_ARCHS=80
+
+# Fat binary for two SMs (e.g., V100 + A100 farm)
+/usr/bin/cmake -S . -B build-gpu -G Ninja -DGPU=ON -DCMAKE_BUILD_TYPE=Release \
+  -DCUDA_ARCHS="70;80"
+```
+
+CUDA install (Ubuntu)
+
+Official NVIDIA repository (recommended)
+- Ensure kernel headers and common tools are present:
+  - `sudo apt-get update && sudo apt-get install -y build-essential dkms gnupg software-properties-common`
+- Pick the repo that matches your Ubuntu release:
+  - Ubuntu 22.04 (Jammy):
+    ```
+    wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+    sudo dpkg -i cuda-keyring_1.1-1_all.deb
+    sudo apt-get update
+    sudo apt-get -y install nvidia-driver-535
+    sudo apt-get -y install cuda-toolkit-12-2
+    ```
+  - Ubuntu 20.04 (Focal): replace `ubuntu2204` with `ubuntu2004` in the keyring URL, then run the same commands.
+- After install, set your PATH/LD_LIBRARY_PATH (or add to your shell profile):
+  ```
+  export PATH=/usr/local/cuda-12.2/bin:$PATH
+  export LD_LIBRARY_PATH=/usr/local/cuda-12.2/lib64:$LD_LIBRARY_PATH
+  ```
+- Reboot if you installed/changed the driver, then verify:
+  - `nvidia-smi` (driver and GPUs present)
+  - `nvcc --version` (CUDA host tools available)
+
+Distribution packages (quick test; often older CUDA)
+- `sudo apt-get install -y nvidia-driver-535 nvidia-cuda-toolkit`
+- This may install an older toolkit; prefer NVIDIA’s repo for matching versions and features.
+
 ## GPU Implementation
 
 The GPU acceleration in Barranquilla MOPAC is designed around the two‑center nature of the semiempirical J/K build and the fact that the vast majority of work on large systems is “general” atom‑pair contractions. Corner cases with compact tables (LL/HL/HH) are intentionally left on the CPU by default; this preserves numerical exactness and has negligible performance cost because their work share is tiny.
