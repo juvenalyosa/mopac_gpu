@@ -67,6 +67,5 @@ benchmarks/publication_inputs/**/*.out
 benchmarks/publication_inputs/**/*.log
 benchmarks/publication_inputs/**/*_addh.pdb
 benchmarks/publication_inputs/**/*_hydrogenated.arc
-benchmarks/publication_inputs/**/*_hydrogenated.pdb
 benchmarks/publication_inputs/**/*.stdout.txt
 benchmarks/publication_inputs/hydrogenation_runs/

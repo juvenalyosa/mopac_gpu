@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from molecule_benchmark_report import parse_mozyme_section_times, stage_input  # noqa: E402
+from molecule_benchmark_report import parse_mozyme_section_times, referenced_files, stage_input  # noqa: E402
 
 MODES: dict[str, dict[str, str | None]] = {
     "cpu": {"MOPAC_NOGPU": "1", "MOZYME_GPU_OFF": "1", "MOPAC_FORCEGPU": None, "MOZYME_GPU_FORCE": None},
@@ -62,6 +62,9 @@ def run_mode(mopac: Path, input_path: Path, mode: str, out_dir: Path, timeout: f
     run_dir = out_dir / input_path.stem / mode
     run_dir.mkdir(parents=True, exist_ok=True)
     staged = stage_input(input_path, run_dir)
+    for ref in referenced_files(input_path):
+        if not (run_dir / Path(ref).name).exists():
+            raise SystemExit(f"{input_path.name} references {ref}, which does not exist next to the deck")
 
     env = os.environ.copy()
     env["MOPAC_MOZYME_SECTION_PROFILE"] = "1"
