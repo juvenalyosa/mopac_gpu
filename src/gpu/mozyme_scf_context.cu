@@ -1415,8 +1415,8 @@ struct MozymeScfDeviceState {
   DeviceBuffer<int> diagg_counts;
   DeviceBuffer<int> diagg_offsets;
   DeviceBuffer<int> diagg_pair_state;
-  DeviceBuffer<int> diagg_vclaim;
-  DeviceBuffer<int> diagg_oclaim;
+  DeviceBuffer<unsigned long long> diagg_vclaim;
+  DeviceBuffer<unsigned long long> diagg_oclaim;
   DeviceBuffer<int> hb_pair_counts;
   DeviceBuffer<int> hb_pair_offsets;
   DeviceBuffer<int> hb_pair_i;
@@ -2473,11 +2473,13 @@ __global__ void mozyme_addhb_finalize_control_kernel(
 // occupied candidates; ifmo/fmo emitted with a deterministic two-pass
 // (count, scan, fill) scheme so the layout matches the CPU ordering.
 //
-// diagg2: LMO pair rotations are scheduled with a "smallest pending pair at
-// both endpoints" rule inside one cooperative kernel.  Every rotation then
-// observes exactly the state the sequential CPU sweep would have produced
-// (per-LMO rotation order is identical), while independent pairs run in
-// parallel, one warp each.
+// diagg2: LMO pair rotations are scheduled inside one cooperative kernel:
+// each round, a pending pair rotates when it holds the lowest priority among
+// the pending pairs of both its LMOs, so no two concurrent rotations share an
+// LMO.  Priorities are a deterministic hash of the pair index (see
+// pair_priority), which keeps the number of rounds near the maximum LMO
+// degree; per-LMO rotation order therefore differs from the CPU sweep, within
+// the accepted energy tolerance.
 // ---------------------------------------------------------------------------
 
 namespace cg = cooperative_groups;
@@ -3246,7 +3248,7 @@ struct DiaggRotateArgs {
   double *cocc, *cvir;
   double shift, rot_const, thresh;
   int *pair_state;
-  int *vclaim, *oclaim;
+  unsigned long long *vclaim, *oclaim;
   int *work_ints;
   double *sumb_out;
   int *nrej_out;
@@ -3511,6 +3513,21 @@ __device__ void warp_rotate_pair(const DiaggRotateArgs &a, int ij, int retry,
   }
 }
 
+// Deterministic per-pair priority: a bijective 32-bit hash of the pair index
+// (high word) with the index itself as tie-breaker.  Scheduling by hash order
+// instead of CPU order keeps the sweep's round count near the maximum LMO
+// degree rather than the depth of the sequential dependency chain.
+__device__ inline unsigned long long pair_priority(int ij) {
+  unsigned x = static_cast<unsigned>(ij) * 0x9E3779B1u;
+  x ^= x >> 16;
+  x *= 0x85EBCA6Bu;
+  x ^= x >> 13;
+  x *= 0xC2B2AE35u;
+  x ^= x >> 16;
+  return (static_cast<unsigned long long>(x) << 32) |
+         static_cast<unsigned long long>(static_cast<unsigned>(ij));
+}
+
 __global__ void __launch_bounds__(kDiaggRotateThreads)
 mozyme_diagg2_parallel_kernel(DiaggRotateArgs a) {
   __shared__ int s_joff[kDiaggRotateWarps][kDiaggMaxLmoAtoms];
@@ -3536,8 +3553,8 @@ mozyme_diagg2_parallel_kernel(DiaggRotateArgs a) {
   const int gwarp = gtid >> 5;
   const int gwarps = gthreads >> 5;
 
-  for (int idx = gtid; idx < a.nvir; idx += gthreads) a.vclaim[idx] = INT_MAX;
-  for (int idx = gtid; idx < a.nocc; idx += gthreads) a.oclaim[idx] = INT_MAX;
+  for (int idx = gtid; idx < a.nvir; idx += gthreads) a.vclaim[idx] = ULLONG_MAX;
+  for (int idx = gtid; idx < a.nocc; idx += gthreads) a.oclaim[idx] = ULLONG_MAX;
   for (int ij = gtid; ij < nij; ij += gthreads) {
     const int i = a.ifmo[2 * ij];
     const int j = a.ifmo[2 * ij + 1];
@@ -3568,8 +3585,9 @@ mozyme_diagg2_parallel_kernel(DiaggRotateArgs a) {
                                               : kDiaggWorkIntFlag1);
     for (int ij = gtid; ij < nij; ij += gthreads) {
       if (ld_shared_int(a.pair_state + ij) != kPairStatePending) continue;
-      atomicMin(a.vclaim + a.ifmo[2 * ij] - 1, ij);
-      atomicMin(a.oclaim + a.ifmo[2 * ij + 1] - 1, ij);
+      const unsigned long long pri = pair_priority(ij);
+      atomicMin(a.vclaim + a.ifmo[2 * ij] - 1, pri);
+      atomicMin(a.oclaim + a.ifmo[2 * ij + 1] - 1, pri);
       *flag = 1;
     }
     grid.sync();
@@ -3580,8 +3598,8 @@ mozyme_diagg2_parallel_kernel(DiaggRotateArgs a) {
       if (ld_shared_int(a.pair_state + ij) != kPairStatePending) continue;
       const int i = a.ifmo[2 * ij];
       const int j = a.ifmo[2 * ij + 1];
-      if (ld_shared_int(a.vclaim + i - 1) != ij ||
-          ld_shared_int(a.oclaim + j - 1) != ij) {
+      const unsigned long long pri = pair_priority(ij);
+      if (__ldcg(a.vclaim + i - 1) != pri || __ldcg(a.oclaim + j - 1) != pri) {
         continue;
       }
       warp_rotate_pair(a, ij, retry, s_joff[warp_in_block],
@@ -3590,8 +3608,8 @@ mozyme_diagg2_parallel_kernel(DiaggRotateArgs a) {
       __syncwarp();
       if (lane == 0) {
         a.pair_state[ij] = kPairStateDone;
-        a.vclaim[i - 1] = INT_MAX;
-        a.oclaim[j - 1] = INT_MAX;
+        a.vclaim[i - 1] = ULLONG_MAX;
+        a.oclaim[j - 1] = ULLONG_MAX;
       }
     }
     grid.sync();
@@ -11590,8 +11608,8 @@ extern "C" int mopac_cuda_mozyme_diagg2_rotate(
   DeviceBuffer<double> d_sumb;
   DeviceBuffer<double> d_control_scalars;
   DeviceBuffer<int> d_pair_state;
-  DeviceBuffer<int> d_vclaim;
-  DeviceBuffer<int> d_oclaim;
+  DeviceBuffer<unsigned long long> d_vclaim;
+  DeviceBuffer<unsigned long long> d_oclaim;
   DeviceBuffer<int> d_work_ints;
   DeviceBuffer<int> d_ok;
   cudaEvent_t start = nullptr;
