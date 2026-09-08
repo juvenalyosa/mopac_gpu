@@ -6752,6 +6752,53 @@ bool compute_eimp_probe_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
   return ok;
 }
 
+// MOPAC_MOZYME_DIAGG_DEBUG=1: synchronize after each DIAGG kernel group and
+// report progress/errors on stderr (diagnostic only; adds host syncs).
+bool diagg_debug_enabled() {
+  static const bool enabled = env_enabled("MOPAC_MOZYME_DIAGG_DEBUG");
+  return enabled;
+}
+
+void diagg_debug_checkpoint(const char *where) {
+  if (!diagg_debug_enabled()) return;
+  const cudaError_t sync = cudaDeviceSynchronize();
+  const cudaError_t last = cudaGetLastError();
+  std::fprintf(stderr, "[DIAGG DEBUG] %s: sync=%s last=%s\n", where,
+               cudaGetErrorString(sync), cudaGetErrorString(last));
+  std::fflush(stderr);
+}
+
+void diagg_debug_dump_ints(const char *label, const int *device_ptr, int n) {
+  if (!diagg_debug_enabled() || !device_ptr || n <= 0) return;
+  std::vector<int> host(static_cast<std::size_t>(n), 0);
+  cudaDeviceSynchronize();
+  if (cudaMemcpy(host.data(), device_ptr, host.size() * sizeof(int),
+                 cudaMemcpyDeviceToHost) != cudaSuccess) {
+    std::fprintf(stderr, "[DIAGG DEBUG] %s: copy failed\n", label);
+    return;
+  }
+  std::fprintf(stderr, "[DIAGG DEBUG] %s:", label);
+  for (int v : host) std::fprintf(stderr, " %d", v);
+  std::fprintf(stderr, "\n");
+  std::fflush(stderr);
+}
+
+void diagg_debug_dump_doubles(const char *label, const double *device_ptr,
+                              int n) {
+  if (!diagg_debug_enabled() || !device_ptr || n <= 0) return;
+  std::vector<double> host(static_cast<std::size_t>(n), 0.0);
+  cudaDeviceSynchronize();
+  if (cudaMemcpy(host.data(), device_ptr, host.size() * sizeof(double),
+                 cudaMemcpyDeviceToHost) != cudaSuccess) {
+    std::fprintf(stderr, "[DIAGG DEBUG] %s: copy failed\n", label);
+    return;
+  }
+  std::fprintf(stderr, "[DIAGG DEBUG] %s:", label);
+  for (double v : host) std::fprintf(stderr, " %.6g", v);
+  std::fprintf(stderr, "\n");
+  std::fflush(stderr);
+}
+
 // Cooperative launch of the parallel diagg2 sweep: every block must be
 // resident at once for grid.sync(), so the grid is sized from occupancy.
 bool launch_diagg2_parallel(int max_pairs, DiaggRotateArgs args,
@@ -6996,6 +7043,7 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
         dev.resident_control_ints.ptr);
     if (!cuda_context_ok(cudaGetLastError(),
                          "resident diagg entry norm kernels")) break;
+    diagg_debug_checkpoint("resident diagg1 entry norms");
 
     DiaggVirtualArgs va{};
     va.nocc = nocc;
@@ -7049,6 +7097,13 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
     mozyme_diagg1_virtual_kernel<<<nvir, kDiaggBlockThreads>>>(va);
     if (!cuda_context_ok(cudaGetLastError(),
                          "resident diagg1 virtual kernels")) break;
+    diagg_debug_checkpoint("resident diagg1 virtual passes");
+    diagg_debug_dump_ints("resident diagg1 work ints", dev.diagg_work_ints.ptr,
+                          kDiaggWorkIntCount);
+    diagg_debug_dump_ints("resident diagg1 total candidates",
+                          dev.diagg_offsets.ptr + nvir, 1);
+    diagg_debug_dump_doubles("resident diagg1 sumt/tiny",
+                             dev.diagg_work_scalars.ptr, 2);
     mozyme_diagg1_occupied_eigs_kernel<<<nocc, kDiaggBlockThreads>>>(
         nocc, numat, mpack, ctx.state.icocc_dim, ctx.state.cocc_dim,
         dev.f.ptr, dev.eimp_p.ptr, dev.ncf.ptr, dev.nncf.ptr, dev.ncocc.ptr,
@@ -7070,6 +7125,15 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
         dev.resident_control_scalars.ptr);
     if (!cuda_context_ok(cudaGetLastError(),
                          "resident diagg1 finalize kernels")) break;
+    diagg_debug_checkpoint("resident diagg1 finalize");
+    diagg_debug_dump_ints("resident diagg ints after diagg1",
+                          dev.diagg_ints.ptr, kDiaggIntCount);
+    diagg_debug_dump_doubles("resident diagg scalars after diagg1",
+                             dev.diagg_scalars.ptr, kDiaggDoubleCount);
+    diagg_debug_dump_ints("resident control ints", dev.resident_control_ints.ptr,
+                          8);
+    diagg_debug_dump_doubles("resident control scalars",
+                             dev.resident_control_scalars.ptr, 8);
 
     mozyme_diagg2_prepare_control_kernel<<<1, 1>>>(
         ctx.config.diagg_mode, ctx.config.diagg_bigeps,
@@ -7089,6 +7153,11 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
             "resident diagg rotate kernel")) {
       break;
     }
+    diagg_debug_checkpoint("resident diagg2 rotate");
+    diagg_debug_dump_ints("resident diagg ints after diagg2",
+                          dev.diagg_ints.ptr, kDiaggIntCount);
+    diagg_debug_dump_doubles("resident diagg scalars after diagg2",
+                             dev.diagg_scalars.ptr, kDiaggDoubleCount);
     mozyme_diagg2_finalize_control_kernel<<<1, 1>>>(
         ctx.config.diagg2_nrejct[0], fmo_dim, dev.diagg_ints.ptr,
         dev.resident_control_ints.ptr);
@@ -10691,6 +10760,15 @@ extern "C" int mopac_cuda_mozyme_diagg1_construct(
           nvir, numat, icvir_dim, cvir_dim, d_nnce.ptr, d_nce.ptr,
           d_icvir.ptr, d_ncvir.ptr, d_iorbs.ptr, d_cvir.ptr,
           d_avir_entry.ptr, d_work_ints.ptr + kDiaggWorkIntError, nullptr);
+      if (diagg_debug_enabled()) {
+        std::fprintf(stderr,
+                     "[DIAGG DEBUG] standalone diagg1 nocc=%d nvir=%d numat=%d "
+                     "norbs=%d mpack=%d icocc=%d icvir=%d cocc=%d cvir=%d "
+                     "fmo_dim=%d capacity=%d idiagg=%d\n",
+                     nocc, nvir, numat, norbs, mpack, icocc_dim, icvir_dim,
+                     cocc_dim, cvir_dim, fmo_dim, nij_capacity, idiagg);
+      }
+      diagg_debug_checkpoint("standalone diagg1 entry norms");
 
       DiaggVirtualArgs va{};
       va.nocc = nocc;
@@ -10737,20 +10815,33 @@ extern "C" int mopac_cuda_mozyme_diagg1_construct(
 
       va.fill = 0;
       mozyme_diagg1_virtual_kernel<<<nvir, kDiaggBlockThreads>>>(va);
+      diagg_debug_checkpoint("standalone diagg1 count pass");
       mozyme_exclusive_scan_kernel<<<1, 1024>>>(nvir, nullptr, d_counts.ptr,
                                                 d_offsets.ptr, nullptr);
+      diagg_debug_checkpoint("standalone diagg1 scan");
+      diagg_debug_dump_ints("standalone diagg1 total candidates",
+                            d_offsets.ptr + nvir, 1);
       va.fill = 1;
       mozyme_diagg1_virtual_kernel<<<nvir, kDiaggBlockThreads>>>(va);
+      diagg_debug_checkpoint("standalone diagg1 fill pass");
       mozyme_diagg1_occupied_eigs_kernel<<<nocc, kDiaggBlockThreads>>>(
           nocc, numat, mpack, icocc_dim, cocc_dim, d_fao.ptr, d_p.ptr,
           d_ncf.ptr, d_nncf.ptr, d_ncocc.ptr, d_icocc.ptr, d_iorbs.ptr,
           d_nijbo.ptr, d_cocc.ptr, d_aocc.ptr, cutoff, idiagg, d_eigs.ptr,
           d_work_ints.ptr, nullptr, nullptr);
+      diagg_debug_checkpoint("standalone diagg1 occupied eigs");
       mozyme_diagg1_finalize_kernel<<<1, 1>>>(
           nvir, nij_capacity, idiagg, nf_in, safety_in, oldlim_in,
           d_offsets.ptr, d_nfmo.ptr, d_work_ints.ptr, d_work_scalars.ptr,
           d_nij.ptr, d_ijc.ptr, d_nf.ptr, d_sumt.ptr, d_tiny.ptr, d_fref.ptr,
           d_oldlim.ptr, d_safety.ptr, d_ok.ptr, nullptr, nullptr);
+      diagg_debug_checkpoint("standalone diagg1 finalize");
+      diagg_debug_dump_ints("standalone diagg1 work ints", d_work_ints.ptr,
+                            kDiaggWorkIntCount);
+      diagg_debug_dump_ints("standalone diagg1 nij/ok", d_nij.ptr, 1);
+      diagg_debug_dump_ints("standalone diagg1 ok", d_ok.ptr, 1);
+      diagg_debug_dump_doubles("standalone diagg1 sumt/tiny",
+                               d_work_scalars.ptr, 2);
     }
     if (!cuda_context_ok(cudaGetLastError(),
                          "diagg1 construct kernels")) break;
@@ -11114,7 +11205,16 @@ extern "C" int mopac_cuda_mozyme_diagg2_rotate(
       ra.ok_slot = d_ok.ptr;
       ra.resident_control_ints = nullptr;
       ra.resident_control_scalars = nullptr;
+      if (diagg_debug_enabled()) {
+        std::fprintf(stderr, "[DIAGG DEBUG] standalone diagg2 nij=%d nocc=%d "
+                             "nvir=%d retry=%d tiny=%.3g biglim=%.3g\n",
+                     nij, nocc, nvir, retry, tiny, biglim);
+      }
       if (!launch_diagg2_parallel(nij, ra, "diagg2 rotate kernel")) break;
+      diagg_debug_checkpoint("standalone diagg2 rotate");
+      diagg_debug_dump_ints("standalone diagg2 work ints", d_work_ints.ptr,
+                            kDiaggWorkIntCount);
+      diagg_debug_dump_ints("standalone diagg2 nrej", d_nrej.ptr, 1);
     }
     int ok_value = 0;
     if (!cuda_context_ok(cudaMemcpy(&ok_value, d_ok.ptr, sizeof(int),
