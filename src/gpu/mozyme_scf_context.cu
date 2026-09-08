@@ -356,12 +356,11 @@ __device__ bool mozyme_tidy_space_device(
   return true;
 }
 
-__global__ void mozyme_tidy_kernel(
+__device__ void mozyme_tidy_run_device(
     int nmos, int natoms, int norbs, int n01, int n02, double thresh,
     int use_selmos, int numred, int mode, int *nc, int *ic, double *c,
     int *nnc, int *ncmo, const int *iorbs, const int *jopt, int *iused,
-    int *ncnew, int *ncmnew, int *nncnew, int *result) {
-  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    int *ncnew, int *ncmnew, int *nncnew, int *result, int *ok_slot) {
   result[0] = 0;
   result[1] = 0;
   result[2] = 0;
@@ -370,6 +369,7 @@ __global__ void mozyme_tidy_kernel(
   if (nmos < 0 || natoms <= 0 || norbs <= 0 || n01 <= 0 || n02 <= 0 ||
       !(thresh >= 0.0) || (use_selmos != 0 && numred > 0 && !jopt)) {
     result[0] = -501;
+    if (ok_slot) *ok_slot = 0;
     return;
   }
 
@@ -380,6 +380,7 @@ __global__ void mozyme_tidy_kernel(
                                   ic, c, nnc, ncmo, iorbs, iused, &ln, &mn,
                                   &status)) {
     result[0] = status;
+    if (ok_slot) *ok_slot = 0;
     return;
   }
   if (use_selmos != 0) {
@@ -388,6 +389,7 @@ __global__ void mozyme_tidy_kernel(
                                    ic, c, nnc, ncmo, iused, jopt, ncnew,
                                    ncmnew, nncnew, &selected, &status)) {
       result[0] = status;
+      if (ok_slot) *ok_slot = 0;
       return;
     }
     result[3] = selected;
@@ -395,16 +397,29 @@ __global__ void mozyme_tidy_kernel(
                                     ic, c, nnc, ncmo, iorbs, iused, &ln, &mn,
                                     &status)) {
       result[0] = status;
+      if (ok_slot) *ok_slot = 0;
       return;
     }
   }
   if (!mozyme_tidy_space_device(nmos, natoms, norbs, n01, n02, ln, mn, nc, ic,
                                 c, nnc, ncmo, iused, &status)) {
     result[0] = status;
+    if (ok_slot) *ok_slot = 0;
     return;
   }
   result[1] = ln;
   result[2] = mn;
+}
+
+__global__ void mozyme_tidy_kernel(
+    int nmos, int natoms, int norbs, int n01, int n02, double thresh,
+    int use_selmos, int numred, int mode, int *nc, int *ic, double *c,
+    int *nnc, int *ncmo, const int *iorbs, const int *jopt, int *iused,
+    int *ncnew, int *ncmnew, int *nncnew, int *result) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  mozyme_tidy_run_device(nmos, natoms, norbs, n01, n02, thresh, use_selmos,
+                         numred, mode, nc, ic, c, nnc, ncmo, iorbs, jopt,
+                         iused, ncnew, ncmnew, nncnew, result, nullptr);
 }
 
 __global__ void mozyme_reorth_kernel(
@@ -1408,6 +1423,11 @@ struct MozymeScfDeviceState {
   DeviceBuffer<int> hb_pair_j;
   DeviceBuffer<int> hb_entry_counts;
   DeviceBuffer<int> hb_entry_offsets;
+  DeviceBuffer<int> tidy_iused;
+  DeviceBuffer<int> tidy_ncnew;
+  DeviceBuffer<int> tidy_ncmnew;
+  DeviceBuffer<int> tidy_nncnew;
+  DeviceBuffer<int> tidy_result;
   DeviceBuffer<int> isitsc_ints;
   DeviceBuffer<double> isitsc_scalars;
   DeviceBuffer<double> isitsc_escf0;
@@ -3867,6 +3887,19 @@ mozyme_check_lmo_warp_kernel(int nvec, int numat, int ic_dim, int c_dim,
   }
   const double scale = 1.0 / sqrt(norm);
   for (int k = lane; k < span; k += 32) cvec[coeff_base + k] *= scale;
+}
+
+__global__ void mozyme_tidy_resident_kernel(
+    int nmos, int natoms, int norbs, int n01, int n02, double thresh,
+    int mode, int *nc, int *ic, double *c, int *nnc, int *ncmo,
+    const int *iorbs, int *iused, int *ncnew, int *ncmnew, int *nncnew,
+    int *result, const int *resident_control_ints, int *ok_slot) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  result[0] = 0;
+  if (resident_control_terminal(resident_control_ints)) return;
+  mozyme_tidy_run_device(nmos, natoms, norbs, n01, n02, thresh, 0, 0, mode,
+                         nc, ic, c, nnc, ncmo, iorbs, nullptr, iused, ncnew,
+                         ncmnew, nncnew, result, ok_slot);
 }
 
 __device__ int mozyme_pls_supervisor_device(double ovmax, double escf,
@@ -6674,6 +6707,12 @@ bool upload_registered_state(MozymeScfContext &ctx) {
     if (!dev.hb_pair_j.resize(hb_capacity)) return false;
     if (!dev.hb_entry_counts.resize(hb_capacity)) return false;
     if (!dev.hb_entry_offsets.resize(hb_capacity + 1)) return false;
+    const std::size_t lmo_count = std::max(nocc_count, nvir_count);
+    if (!dev.tidy_iused.resize(lmo_count)) return false;
+    if (!dev.tidy_ncnew.resize(lmo_count)) return false;
+    if (!dev.tidy_ncmnew.resize(lmo_count)) return false;
+    if (!dev.tidy_nncnew.resize(lmo_count)) return false;
+    if (!dev.tidy_result.resize(8)) return false;
   }
   if (!dev.final_reorth_ws.resize(norbs_count)) return false;
   if (!dev.final_reorth_sumtot.resize(1)) return false;
@@ -6939,6 +6978,37 @@ bool compute_check_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
 
     if (!begin_resident_stage_timing(ctx, time_stage,
                                      "resident check start event")) break;
+    // The CPU loop tidies both LMO sets at the top of every iteration
+    // (compaction + even redistribution of free space); without it the
+    // resident sweep runs out of room to grow LMOs and rejects every rotation.
+    {
+      const std::size_t lmo_count =
+          static_cast<std::size_t>(std::max(nocc, nvir));
+      if (!device_buffer_ready(dev.tidy_iused, lmo_count) ||
+          !device_buffer_ready(dev.tidy_ncnew, lmo_count) ||
+          !device_buffer_ready(dev.tidy_ncmnew, lmo_count) ||
+          !device_buffer_ready(dev.tidy_nncnew, lmo_count) ||
+          !device_buffer_ready(dev.tidy_result, 8)) {
+        break;
+      }
+      mozyme_tidy_resident_kernel<<<1, 1>>>(
+          nocc, numat, ctx.config.norbs, ctx.state.icocc_dim,
+          ctx.state.cocc_dim, ctx.config.thresh, 1, dev.ncf.ptr,
+          dev.icocc.ptr, dev.cocc.ptr, dev.nncf.ptr, dev.ncocc.ptr,
+          dev.iorbs.ptr, dev.tidy_iused.ptr, dev.tidy_ncnew.ptr,
+          dev.tidy_ncmnew.ptr, dev.tidy_nncnew.ptr, dev.tidy_result.ptr,
+          dev.resident_control_ints.ptr, dev.check_ints.ptr + kCheckIntOk);
+      mozyme_tidy_resident_kernel<<<1, 1>>>(
+          nvir, numat, ctx.config.norbs, ctx.state.icvir_dim,
+          ctx.state.cvir_dim, ctx.config.thresh, 2, dev.nce.ptr,
+          dev.icvir.ptr, dev.cvir.ptr, dev.nnce.ptr, dev.ncvir.ptr,
+          dev.iorbs.ptr, dev.tidy_iused.ptr, dev.tidy_ncnew.ptr,
+          dev.tidy_ncmnew.ptr, dev.tidy_nncnew.ptr, dev.tidy_result.ptr + 4,
+          dev.resident_control_ints.ptr, dev.check_ints.ptr + kCheckIntOk);
+      if (!cuda_context_ok(cudaGetLastError(), "resident tidy kernels")) break;
+      diagg_debug_checkpoint("resident tidy");
+      diagg_debug_dump_ints("resident tidy results", dev.tidy_result.ptr, 8);
+    }
     const int occ_blocks = (nocc * 32 + kDiaggRotateThreads - 1) /
                            kDiaggRotateThreads;
     const int vir_blocks = (nvir * 32 + kDiaggRotateThreads - 1) /

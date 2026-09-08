@@ -329,8 +329,10 @@ contains
         ! Keep only explicit batched sparse Fock kernels enabled.  Generic
         ! lgpu/MOZYME_GPU paths are too broad for sparse MOZYME and can activate
         ! unrelated experimental code after the planner has already approved the
-        ! isolated production kernels.
-        mozyme_gpu = .false.
+        ! isolated production kernels.  Explicitly requested DIAGG stage
+        ! offloads are the exception: they need mozyme_gpu to stay on.
+        mozyme_gpu = mozyme_plan_env_enabled('MOPAC_MOZYME_DIAGG1_CONSTRUCT_GPU') .or. &
+          mozyme_plan_env_enabled('MOPAC_MOZYME_DIAGG2_ROTATE_GPU')
         if (mozyme_resident_fock_gpu) then
           resident_scf = .true.
           gpu_scf_stream_available = .true.
