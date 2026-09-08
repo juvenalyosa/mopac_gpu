@@ -2467,7 +2467,9 @@ namespace cg = cooperative_groups;
 constexpr int kDiaggBlockThreads = 256;
 constexpr int kDiaggMaxLmoAtoms = 1024;
 constexpr int kDiaggMaxLmoCoeffs = 2048;
-constexpr int kDiaggRotateThreads = 128;
+// Two warps per block: each warp stages both LMO atom lists plus their
+// orbital offsets in shared memory (4 x 1024 ints), 32 KB per block.
+constexpr int kDiaggRotateThreads = 64;
 constexpr int kDiaggRotateWarps = kDiaggRotateThreads / 32;
 constexpr int kDiaggWorkIntError = 0;
 constexpr int kDiaggWorkIntFlag0 = 1;
@@ -3251,7 +3253,7 @@ __device__ inline int warp_build_offsets(const int *list, int count,
     const int e = chunk + lane;
     int norb = 0;
     if (e < count) {
-      const int atom = ld_shared_int(list + e);
+      const int atom = list[e];
       if (atom < 1 || atom > numat) {
         *error = 1;
       } else {
@@ -3269,7 +3271,7 @@ __device__ inline int warp_find_in_list(const int *list, int count,
                                         int atom) {
   int pos = -1;
   for (int k = 0; k < count; ++k) {
-    if (ld_shared_int(list + k) == atom) pos = k;
+    if (list[k] == atom) pos = k;
   }
   return pos;
 }
@@ -3277,8 +3279,8 @@ __device__ inline int warp_find_in_list(const int *list, int count,
 // One warp rotates occupied LMO j against virtual LMO i (1-based).  Mirrors
 // the sequential diagg2 loop body, including LMO growth and rejection.
 __device__ void warp_rotate_pair(const DiaggRotateArgs &a, int ij, int retry,
-                                 int *joff, int *ioff, double &sumb_acc,
-                                 int &nrej_acc, int &error) {
+                                 int *joff, int *ioff, int *jlist, int *ilist,
+                                 double &sumb_acc, int &nrej_acc, int &error) {
   const int lane = threadIdx.x & 31;
   const int i = a.ifmo[2 * ij];
   const int j = a.ifmo[2 * ij + 1];
@@ -3304,8 +3306,11 @@ __device__ void warp_rotate_pair(const DiaggRotateArgs &a, int ij, int retry,
   const int incv = (i != a.nvir) ? a.nnce[i] : a.icvir_dim;
   if (iur > loopi + a.norbs) iur = loopi + a.norbs;
 
-  const int *jlist = a.icocc + jbase;
-  const int *ilist = a.icvir + ibase;
+  // Stage both atom lists in shared memory: every membership test below is a
+  // linear scan, and through L2 that dominated the rotation cost.
+  for (int e = lane; e < ncfj0; e += 32) jlist[e] = ld_shared_int(a.icocc + jbase + e);
+  for (int e = lane; e < ncei0; e += 32) ilist[e] = ld_shared_int(a.icvir + ibase + e);
+  __syncwarp();
   int local_error = 0;
   const int mlf0 = warp_build_offsets(jlist, ncfj0, a.iorbs, a.numat, joff,
                                       &local_error);
@@ -3334,7 +3339,7 @@ __device__ void warp_rotate_pair(const DiaggRotateArgs &a, int ij, int retry,
       int flag = 0;
       int norb = 0;
       if (le < ncei0) {
-        const int mie = ld_shared_int(ilist + le);
+        const int mie = ilist[le];
         if (warp_find_in_list(jlist, ncfj0, mie) < 0) {
           norb = a.iorbs[mie - 1];
           const int cb = loopi + ioff[le];
@@ -3359,7 +3364,7 @@ __device__ void warp_rotate_pair(const DiaggRotateArgs &a, int ij, int retry,
       int flag = 0;
       int norb = 0;
       if (lf < ncfj0) {
-        const int ii = ld_shared_int(jlist + lf);
+        const int ii = jlist[lf];
         if (warp_find_in_list(ilist, ncei0, ii) < 0) {
           norb = a.iorbs[ii - 1];
           const int cb = loopj + joff[lf];
@@ -3400,7 +3405,7 @@ __device__ void warp_rotate_pair(const DiaggRotateArgs &a, int ij, int retry,
       int jpos = -1;
       int mie = 0;
       if (le < ncei0) {
-        mie = ld_shared_int(ilist + le);
+        mie = ilist[le];
         norb = a.iorbs[mie - 1];
         jpos = warp_find_in_list(jlist, ncfj0, mie);
         if (jpos >= 0) {
@@ -3449,7 +3454,7 @@ __device__ void warp_rotate_pair(const DiaggRotateArgs &a, int ij, int retry,
       int norb = 0;
       int ii = 0;
       if (lf < ncfj0) {
-        ii = ld_shared_int(jlist + lf);
+        ii = jlist[lf];
         if (warp_find_in_list(ilist, ncei0, ii) < 0) {
           norb = a.iorbs[ii - 1];
           const int cb = loopj + joff[lf];
@@ -3492,6 +3497,8 @@ __global__ void __launch_bounds__(kDiaggRotateThreads)
 mozyme_diagg2_parallel_kernel(DiaggRotateArgs a) {
   __shared__ int s_joff[kDiaggRotateWarps][kDiaggMaxLmoAtoms];
   __shared__ int s_ioff[kDiaggRotateWarps][kDiaggMaxLmoAtoms];
+  __shared__ int s_jatoms[kDiaggRotateWarps][kDiaggMaxLmoAtoms];
+  __shared__ int s_iatoms[kDiaggRotateWarps][kDiaggMaxLmoAtoms];
 
   cg::grid_group grid = cg::this_grid();
   if (resident_control_terminal(a.resident_control_ints)) return;
@@ -3560,7 +3567,8 @@ mozyme_diagg2_parallel_kernel(DiaggRotateArgs a) {
         continue;
       }
       warp_rotate_pair(a, ij, retry, s_joff[warp_in_block],
-                       s_ioff[warp_in_block], sumb_acc, nrej_acc, error);
+                       s_ioff[warp_in_block], s_jatoms[warp_in_block],
+                       s_iatoms[warp_in_block], sumb_acc, nrej_acc, error);
       __syncwarp();
       if (lane == 0) {
         a.pair_state[ij] = kPairStateDone;
@@ -9831,7 +9839,27 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
     if (strict_resident) {
       int resident_loop_guard = 0;
       const int strict_loop_limit = strict_resident_loop_limit(ctx->config);
+      // Non-blocking early exit: the device decision slot is copied into
+      // pinned memory after each iteration and polled with cudaEventQuery, so
+      // the host stops launching no-op iterations once the loop is terminal
+      // without ever synchronizing inside the resident sweep.
+      int *decision_pinned = nullptr;
+      cudaEvent_t decision_event = nullptr;
+      bool decision_pending = false;
+      if (cudaHostAlloc(reinterpret_cast<void **>(&decision_pinned),
+                        sizeof(int), cudaHostAllocDefault) != cudaSuccess) {
+        decision_pinned = nullptr;
+      }
+      if (decision_pinned &&
+          cudaEventCreateWithFlags(&decision_event, cudaEventDisableTiming) !=
+              cudaSuccess) {
+        decision_event = nullptr;
+      }
       while (resident_loop_guard < strict_loop_limit) {
+        if (decision_pending && cudaEventQuery(decision_event) == cudaSuccess) {
+          decision_pending = false;
+          if (*decision_pinned != kResidentDecisionContinue) break;
+        }
         ++resident_loop_guard;
         if (!run_resident_iteration_on_gpu(*ctx, status, &accumulated_ms,
                                            false)) {
@@ -9846,7 +9874,23 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
           status->ready = 0;
           break;
         }
+        if (decision_pinned && decision_event && !decision_pending &&
+            ctx->device.resident_control_ints.ptr) {
+          if (cudaMemcpyAsync(decision_pinned,
+                              ctx->device.resident_control_ints.ptr +
+                                  kResidentControlDecision,
+                              sizeof(int), cudaMemcpyDeviceToHost,
+                              nullptr) == cudaSuccess &&
+              cudaEventRecord(decision_event, nullptr) == cudaSuccess) {
+            decision_pending = true;
+          }
+        }
       }
+      if (decision_event) {
+        cudaEventSynchronize(decision_event);
+        cudaEventDestroy(decision_event);
+      }
+      if (decision_pinned) cudaFreeHost(decision_pinned);
       if (final_code == kMozymeScfUnsupported) {
         ResidentControlSnapshot control{};
         if (!copy_resident_control_snapshot_from_gpu(*ctx, &control, false)) {
