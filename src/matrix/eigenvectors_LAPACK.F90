@@ -21,7 +21,7 @@
       use gpu_ortho_interfaces
       use overlap_build, only: build_overlap_packed, unpack_upper_to_full
       use partial_eig_gpu
-      use molkst_C, only: uhf, nclose, nalpha, nbeta
+      use molkst_C, only: uhf, nclose, nalpha, nbeta, norbs
       use eig_call_context, only: current_spin
       use gpu_eig_mg_interfaces
       use iso_c_binding, only: c_int
@@ -148,14 +148,12 @@ end if
             ortho_gpu = .false.
           end select
         else
-          if (lgpu) then
-            ccmaj = 0 ; ccmin = 0
-            call mopac_cuda_get_cc(ccmaj, ccmin)
-            ortho_gpu = (ccmaj >= 7)
-          else
-            ortho_gpu = .false.
-          end if
+          ortho_gpu = .false.
         end if
+        ! build_overlap_packed fills a norbs-sized packed matrix from the global
+        ! h array, so the transform is only meaningful (and memory-safe) for the
+        ! full Fock matrix, never for the small per-atom blocks hybrid/rsp pass.
+        if (ndim /= norbs) ortho_gpu = .false.
         env = '' ; stat_env = 1
         call get_environment_variable('MOPAC_EIG_MG_MIN', env, status=stat_env)
         if (stat_env == 0) then
