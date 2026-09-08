@@ -1436,6 +1436,16 @@ struct MozymeScfDeviceState {
   DeviceBuffer<int> tidy_orb_prefix;
   DeviceBuffer<int> tidy_ic_scratch;
   DeviceBuffer<double> tidy_c_scratch;
+  DeviceBuffer<int> density_atom_count;
+  DeviceBuffer<int> density_atom_offsets;
+  DeviceBuffer<int> density_cursor;
+  DeviceBuffer<int> density_entry_orb;
+  DeviceBuffer<int> density_list_lmo;
+  DeviceBuffer<int> density_list_coef;
+  DeviceBuffer<int> density_pair_j;
+  DeviceBuffer<int> density_pair_k;
+  DeviceBuffer<int> density_pair_counter;
+  int density_pair_count = -1;
   DeviceBuffer<int> isitsc_ints;
   DeviceBuffer<double> isitsc_scalars;
   DeviceBuffer<double> isitsc_escf0;
@@ -4132,6 +4142,274 @@ __global__ void mozyme_tidy_scatter_kernel(
   }
 }
 
+// ---- Density build by atom-pair blocks --------------------------------------
+// Instead of scattering every LMO's outer products into the packed density
+// with atomics, build an atom -> (LMO, coefficient base) index once per
+// iteration and let one warp own each packed (j >= k) block: it intersects
+// the two atom lists (sorted by LMO) and accumulates the block in registers.
+
+constexpr int kDensityIndexMaxPerAtom = 1024;
+
+__global__ void mozyme_density_pair_count_kernel(int numat, const int *nijbo,
+                                                 int *counter) {
+  const int j = blockIdx.x + 1;
+  const int k = blockIdx.y * blockDim.x + threadIdx.x + 1;
+  if (j > numat || k > j) return;
+  if (nijbo[(j - 1) + (k - 1) * numat] >= 0) atomicAdd(counter, 1);
+}
+
+__global__ void mozyme_density_pair_fill_kernel(int numat, const int *nijbo,
+                                                int capacity, int *cursor,
+                                                int *pair_j, int *pair_k) {
+  const int j = blockIdx.x + 1;
+  const int k = blockIdx.y * blockDim.x + threadIdx.x + 1;
+  if (j > numat || k > j) return;
+  if (nijbo[(j - 1) + (k - 1) * numat] < 0) return;
+  const int pos = atomicAdd(cursor, 1);
+  if (pos < capacity) {
+    pair_j[pos] = j;
+    pair_k[pos] = k;
+  }
+}
+
+// Warp per LMO: count LMO membership per atom and record each entry's
+// orbital offset inside its LMO.
+__global__ void mozyme_density_index_count_kernel(
+    int nclose, int numat, int icocc_dim, const int *ncf, const int *nncf,
+    const int *icocc, const int *iorbs, int *atom_count, int *entry_orb,
+    int *ok_out, const int *resident_control_ints) {
+  if (resident_control_terminal(resident_control_ints)) return;
+  const int lane = threadIdx.x & 31;
+  const int lmo = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+  if (lmo >= nclose) return;
+  const int base = nncf[lmo];
+  const int count = ncf[lmo];
+  if (count < 0 || base < 0 || base + count > icocc_dim) {
+    if (lane == 0) atomicExch(ok_out, 0);
+    return;
+  }
+  int running = 0;
+  for (int chunk = 0; chunk < count; chunk += 32) {
+    const int e = chunk + lane;
+    int norb = 0;
+    if (e < count) {
+      const int atom = icocc[base + e];
+      if (atom < 1 || atom > numat) {
+        atomicExch(ok_out, 0);
+      } else {
+        norb = iorbs[atom - 1];
+        atomicAdd(atom_count + atom - 1, 1);
+      }
+    }
+    const int incl = warp_inclusive_scan_int(norb);
+    if (e < count) entry_orb[base + e] = running + incl - norb;
+    running += __shfl_sync(0xffffffffu, incl, 31);
+  }
+}
+
+__global__ void mozyme_density_index_fill_kernel(
+    int nclose, int numat, int icocc_dim, const int *ncf, const int *nncf,
+    const int *ncocc, const int *icocc, const int *atom_offsets,
+    const int *entry_orb, int *cursor, int *list_lmo, int *list_coef,
+    const int *resident_control_ints) {
+  if (resident_control_terminal(resident_control_ints)) return;
+  const int lane = threadIdx.x & 31;
+  const int lmo = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+  if (lmo >= nclose) return;
+  const int base = nncf[lmo];
+  const int count = ncf[lmo];
+  if (count < 0 || base < 0 || base + count > icocc_dim) return;
+  const int cbase = ncocc[lmo];
+  for (int e = lane; e < count; e += 32) {
+    const int atom = icocc[base + e];
+    if (atom < 1 || atom > numat) continue;
+    const int pos = atomicAdd(cursor + atom - 1, 1);
+    const int slot = atom_offsets[atom - 1] + pos;
+    list_lmo[slot] = lmo;
+    list_coef[slot] = cbase + entry_orb[base + e];
+  }
+}
+
+// Block per atom: sort its (lmo, coef) segment by LMO so intersections and
+// summation order are deterministic.
+__global__ void __launch_bounds__(kDiaggBlockThreads)
+mozyme_density_index_sort_kernel(int numat, const int *atom_offsets,
+                                 int *list_lmo, int *list_coef,
+                                 int *ok_out,
+                                 const int *resident_control_ints) {
+  __shared__ unsigned long long s_keys[kDensityIndexMaxPerAtom];
+  if (resident_control_terminal(resident_control_ints)) return;
+  const int atom = blockIdx.x;
+  if (atom >= numat) return;
+  const int begin = atom_offsets[atom];
+  const int count = atom_offsets[atom + 1] - begin;
+  if (count <= 1) return;
+  if (count > kDensityIndexMaxPerAtom) {
+    if (threadIdx.x == 0) atomicExch(ok_out, 0);
+    return;
+  }
+  int padded = 1;
+  while (padded < count) padded <<= 1;
+  for (int e = threadIdx.x; e < padded; e += blockDim.x) {
+    s_keys[e] = e < count ? lmo_sort_key(list_lmo[begin + e],
+                                         list_coef[begin + e])
+                          : ~0ULL;
+  }
+  __syncthreads();
+  block_bitonic_sort_u64(s_keys, padded);
+  for (int e = threadIdx.x; e < count; e += blockDim.x) {
+    list_lmo[begin + e] = static_cast<int>(s_keys[e] >> 32);
+    list_coef[begin + e] = static_cast<int>(s_keys[e] & 0xffffffffu);
+  }
+}
+
+// Block per LMO: number of packed density elements the CPU loop touches.
+__global__ void __launch_bounds__(kDiaggBlockThreads)
+mozyme_density_expected_count_kernel(int nclose, int numat, int icocc_dim,
+                                     const int *ncf, const int *nncf,
+                                     const int *icocc, const int *iorbs,
+                                     const int *nijbo, int *expected_terms,
+                                     int *ok_out,
+                                     const int *resident_control_ints) {
+  __shared__ int s_warp[8];
+  if (resident_control_terminal(resident_control_ints)) return;
+  const int lmo = blockIdx.x;
+  if (lmo >= nclose) return;
+  const int base = nncf[lmo];
+  const int count = ncf[lmo];
+  if (count <= 0 || base < 0 || base + count > icocc_dim) {
+    if (threadIdx.x == 0) atomicExch(ok_out, 0);
+    return;
+  }
+  int local = 0;
+  const int pairs = count * count;
+  for (int pr = threadIdx.x; pr < pairs; pr += blockDim.x) {
+    const int ej = pr / count;
+    const int ek = pr - ej * count;
+    const int aj = icocc[base + ej];
+    const int ak = icocc[base + ek];
+    if (aj < ak) continue;
+    if (aj < 1 || aj > numat || ak < 1 || ak > numat) {
+      atomicExch(ok_out, 0);
+      continue;
+    }
+    if (nijbo[(aj - 1) + (ak - 1) * numat] < 0) continue;
+    const int nj = iorbs[aj - 1];
+    const int nk = iorbs[ak - 1];
+    local += (aj == ak) ? (nj * (nj + 1)) / 2 : nj * nk;
+  }
+  int total = 0;
+  block_exclusive_scan_int(local, s_warp, &total);
+  if (threadIdx.x == 0 && total > 0) atomicAdd(expected_terms, total);
+}
+
+__device__ inline int density_list_find(const int *list_lmo, int begin,
+                                        int count, int lmo) {
+  int lo = 0;
+  int hi = count - 1;
+  while (lo <= hi) {
+    const int mid = (lo + hi) >> 1;
+    const int v = list_lmo[begin + mid];
+    if (v < lmo) {
+      lo = mid + 1;
+    } else if (v > lmo) {
+      hi = mid - 1;
+    } else {
+      return mid;
+    }
+  }
+  return -1;
+}
+
+// Warp per packed (j >= k) atom-pair block.
+__global__ void __launch_bounds__(kDiaggBlockThreads)
+mozyme_density_pairs_kernel(int npairs, int numat, int mpack, int cocc_dim,
+                            const int *pair_j, const int *pair_k,
+                            const int *iorbs, const int *nijbo,
+                            const int *atom_offsets, const int *list_lmo,
+                            const int *list_coef, const double *cocc,
+                            double *p, int *updated_terms, int *ok_out,
+                            const int *resident_control_ints) {
+  if (resident_control_terminal(resident_control_ints)) return;
+  const int lane = threadIdx.x & 31;
+  const int pr = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+  if (pr >= npairs) return;
+  const int aj = pair_j[pr];
+  const int ak = pair_k[pr];
+  const int nj = iorbs[aj - 1];
+  const int nk = iorbs[ak - 1];
+  const int base = nijbo[(aj - 1) + (ak - 1) * numat];
+  const bool diagonal = (aj == ak);
+  const int elements = diagonal ? (nj * (nj + 1)) / 2 : nj * nk;
+  if (base < 0 || elements <= 0 || base + elements > mpack) {
+    if (lane == 0) atomicExch(ok_out, 0);
+    return;
+  }
+  // Each lane owns up to three packed elements of the block (<= 81).
+  int rows[3], cols[3];
+  double acc[3] = {0.0, 0.0, 0.0};
+  for (int q = 0; q < 3; ++q) {
+    const int idx = lane + 32 * q;
+    rows[q] = -1;
+    cols[q] = -1;
+    if (idx < elements) {
+      if (diagonal) {
+        int r = 0;
+        while ((r + 1) * (r + 2) / 2 <= idx) ++r;
+        rows[q] = r;
+        cols[q] = idx - (r * (r + 1)) / 2;
+      } else {
+        rows[q] = idx / nk;
+        cols[q] = idx - rows[q] * nk;
+      }
+    }
+  }
+
+  int begin_j = atom_offsets[aj - 1];
+  int count_j = atom_offsets[aj] - begin_j;
+  int begin_k = atom_offsets[ak - 1];
+  int count_k = atom_offsets[ak] - begin_k;
+  // Walk the shorter list, binary-search the longer one.
+  const bool swap_lists = count_k < count_j;
+  const int begin_s = swap_lists ? begin_k : begin_j;
+  const int count_s = swap_lists ? count_k : count_j;
+  const int begin_l = swap_lists ? begin_j : begin_k;
+  const int count_l = swap_lists ? count_j : count_k;
+  int common = 0;
+  for (int chunk = 0; chunk < count_s; chunk += 32) {
+    const int e = chunk + lane;
+    int coef_j = -1;
+    int coef_k = -1;
+    if (e < count_s) {
+      const int lmo = list_lmo[begin_s + e];
+      const int hit = density_list_find(list_lmo, begin_l, count_l, lmo);
+      if (hit >= 0) {
+        const int coef_s = list_coef[begin_s + e];
+        const int coef_l = list_coef[begin_l + hit];
+        coef_j = swap_lists ? coef_l : coef_s;
+        coef_k = swap_lists ? coef_s : coef_l;
+      }
+    }
+    unsigned mask = __ballot_sync(0xffffffffu, coef_j >= 0);
+    common += __popc(mask);
+    while (mask) {
+      const int src = __ffs(mask) - 1;
+      mask &= mask - 1;
+      const int cj = __shfl_sync(0xffffffffu, coef_j, src);
+      const int ck = __shfl_sync(0xffffffffu, coef_k, src);
+      for (int q = 0; q < 3; ++q) {
+        if (rows[q] >= 0) {
+          acc[q] += cocc[cj + rows[q]] * cocc[ck + cols[q]];
+        }
+      }
+    }
+  }
+  for (int q = 0; q < 3; ++q) {
+    if (rows[q] >= 0) p[base + lane + 32 * q] += acc[q];
+  }
+  if (lane == 0 && common > 0) atomicAdd(updated_terms, common * elements);
+}
+
 __device__ int mozyme_pls_supervisor_device(double ovmax, double escf,
                                             int *pls_ints,
                                             double *pls_scalars) {
@@ -4431,289 +4709,6 @@ __global__ void mozyme_density_spin_scale_kernel(int mpack, int mode,
     spin_scale = -2.0;
   }
   p[idx] *= spin_scale;
-}
-
-__global__ void mozyme_density_resident_kernel(
-    int nclose, int numat, int mpack, int icocc_dim, int cocc_dim,
-    const int *ncf, const int *nncf, const int *ncocc, const int *icocc,
-    const int *iorbs, const int *nijbo, const double *cocc, double *p,
-    int *updated_terms, int *ok_out, const int *resident_control_ints) {
-  if (resident_control_terminal(resident_control_ints)) return;
-  const int lmo = blockIdx.x + 1;
-  if (lmo > nclose) return;
-
-  const int atom_count = ncf[lmo - 1];
-  const int first_atom_slot = nncf[lmo - 1] + 1;
-  const int coeff_base = ncocc[lmo - 1];
-  if (atom_count <= 0 || first_atom_slot < 1) {
-    atomicExch(ok_out, 0);
-    return;
-  }
-
-  int terms_updated = 0;
-  const int pair_count = atom_count * atom_count;
-  for (int pair_idx = threadIdx.x; pair_idx < pair_count;
-       pair_idx += blockDim.x) {
-    const int local_j = pair_idx / atom_count;
-    const int local_k = pair_idx - local_j * atom_count;
-    const int jj_slot = first_atom_slot + local_j;
-    if (jj_slot < 1 || jj_slot > icocc_dim) {
-      atomicExch(ok_out, 0);
-      return;
-    }
-
-    const int atom_j = icocc[jj_slot - 1];
-    if (atom_j < 1 || atom_j > numat) {
-      atomicExch(ok_out, 0);
-      return;
-    }
-
-    const int nj = iorbs[atom_j - 1];
-    if (nj <= 0) {
-      atomicExch(ok_out, 0);
-      return;
-    }
-
-    int j_coeff_shift = 0;
-    for (int idx = 0; idx < local_j; ++idx) {
-      const int slot = first_atom_slot + idx;
-      if (slot < 1 || slot > icocc_dim) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-      const int atom = icocc[slot - 1];
-      if (atom < 1 || atom > numat) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-      const int atom_orbs = iorbs[atom - 1];
-      if (atom_orbs <= 0) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-      j_coeff_shift += atom_orbs;
-    }
-
-    const int kk_slot = first_atom_slot + local_k;
-    if (kk_slot < 1 || kk_slot > icocc_dim) {
-      atomicExch(ok_out, 0);
-      return;
-    }
-
-    const int atom_k = icocc[kk_slot - 1];
-    if (atom_k < 1 || atom_k > numat) {
-      atomicExch(ok_out, 0);
-      return;
-    }
-
-    const int nk = iorbs[atom_k - 1];
-    const int block_base = nijbo[(atom_j - 1) + (atom_k - 1) * numat];
-    if (nk <= 0) {
-      atomicExch(ok_out, 0);
-      return;
-    }
-
-    int k_coeff_base = coeff_base;
-    for (int idx = 0; idx < local_k; ++idx) {
-      const int slot = first_atom_slot + idx;
-      if (slot < 1 || slot > icocc_dim) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-      const int atom = icocc[slot - 1];
-      if (atom < 1 || atom > numat) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-      const int atom_orbs = iorbs[atom - 1];
-      if (atom_orbs <= 0) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-      k_coeff_base += atom_orbs;
-    }
-
-    if (atom_j == atom_k) {
-      if (block_base < 0) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-      int packed = 0;
-      for (int row = 1; row <= nj; ++row) {
-        const int cj_idx = coeff_base + j_coeff_shift + row - 1;
-        if (cj_idx < 0 || cj_idx >= cocc_dim) {
-          atomicExch(ok_out, 0);
-          return;
-        }
-        const double cj = cocc[cj_idx];
-        for (int col = 1; col <= row; ++col) {
-          const int ck_idx = k_coeff_base + col - 1;
-          if (ck_idx < 0 || ck_idx >= cocc_dim) {
-            atomicExch(ok_out, 0);
-            return;
-          }
-          const int p_idx = block_base + packed;
-          if (p_idx < 0 || p_idx >= mpack) {
-            atomicExch(ok_out, 0);
-            return;
-          }
-          atomicAdd_double(&p[p_idx], cj * cocc[ck_idx]);
-          ++terms_updated;
-          ++packed;
-        }
-      }
-    } else if (atom_j > atom_k && block_base >= 0) {
-      int packed = 0;
-      for (int row = 1; row <= nj; ++row) {
-        const int cj_idx = coeff_base + j_coeff_shift + row - 1;
-        if (cj_idx < 0 || cj_idx >= cocc_dim) {
-          atomicExch(ok_out, 0);
-          return;
-        }
-        const double cj = cocc[cj_idx];
-        for (int col = 1; col <= nk; ++col) {
-          const int ck_idx = k_coeff_base + col - 1;
-          if (ck_idx < 0 || ck_idx >= cocc_dim) {
-            atomicExch(ok_out, 0);
-            return;
-          }
-          const int p_idx = block_base + packed;
-          if (p_idx < 0 || p_idx >= mpack) {
-            atomicExch(ok_out, 0);
-            return;
-          }
-          atomicAdd_double(&p[p_idx], cj * cocc[ck_idx]);
-          ++terms_updated;
-          ++packed;
-        }
-      }
-    }
-  }
-
-  if (terms_updated > 0) atomicAdd(updated_terms, terms_updated);
-}
-
-__global__ void mozyme_density_expected_kernel(
-    int nclose, int numat, int mpack, int icocc_dim, int cocc_dim,
-    const int *ncf, const int *nncf, const int *ncocc, const int *icocc,
-    const int *iorbs, const int *nijbo, int *expected_terms, int *ok_out,
-    const int *resident_control_ints) {
-  if (resident_control_terminal(resident_control_ints)) return;
-  const int lmo = blockIdx.x + 1;
-  if (lmo > nclose) return;
-
-  const int atom_count = ncf[lmo - 1];
-  const int first_atom_slot = nncf[lmo - 1] + 1;
-  const int coeff_base = ncocc[lmo - 1];
-  if (atom_count <= 0 || first_atom_slot < 1 || coeff_base < 0) {
-    atomicExch(ok_out, 0);
-    return;
-  }
-
-  int lmo_terms = 0;
-  const int pair_count = atom_count * atom_count;
-  for (int pair_idx = threadIdx.x; pair_idx < pair_count;
-       pair_idx += blockDim.x) {
-    const int local_j = pair_idx / atom_count;
-    const int local_k = pair_idx - local_j * atom_count;
-    const int jj_slot = first_atom_slot + local_j;
-    const int kk_slot = first_atom_slot + local_k;
-    if (jj_slot < 1 || jj_slot > icocc_dim ||
-        kk_slot < 1 || kk_slot > icocc_dim) {
-      atomicExch(ok_out, 0);
-      return;
-    }
-
-    const int atom_j = icocc[jj_slot - 1];
-    const int atom_k = icocc[kk_slot - 1];
-    if (atom_j < 1 || atom_j > numat || atom_k < 1 || atom_k > numat) {
-      atomicExch(ok_out, 0);
-      return;
-    }
-
-    const int nj = iorbs[atom_j - 1];
-    const int nk = iorbs[atom_k - 1];
-    if (nj <= 0 || nk <= 0) {
-      atomicExch(ok_out, 0);
-      return;
-    }
-
-    int j_coeff_shift = 0;
-    for (int idx = 0; idx < local_j; ++idx) {
-      const int slot = first_atom_slot + idx;
-      if (slot < 1 || slot > icocc_dim) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-      const int atom = icocc[slot - 1];
-      if (atom < 1 || atom > numat) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-      const int atom_orbs = iorbs[atom - 1];
-      if (atom_orbs <= 0) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-      j_coeff_shift += atom_orbs;
-    }
-
-    int k_coeff_shift = 0;
-    for (int idx = 0; idx < local_k; ++idx) {
-      const int slot = first_atom_slot + idx;
-      if (slot < 1 || slot > icocc_dim) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-      const int atom = icocc[slot - 1];
-      if (atom < 1 || atom > numat) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-      const int atom_orbs = iorbs[atom - 1];
-      if (atom_orbs <= 0) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-      k_coeff_shift += atom_orbs;
-    }
-
-    const int j_start = coeff_base + j_coeff_shift;
-    const int k_start = coeff_base + k_coeff_shift;
-    if (j_start < 0 || j_start + nj > cocc_dim ||
-        k_start < 0 || k_start + nk > cocc_dim) {
-      atomicExch(ok_out, 0);
-      return;
-    }
-
-    const int block_base = nijbo[(atom_j - 1) + (atom_k - 1) * numat];
-    int terms = 0;
-    if (atom_j == atom_k) {
-      terms = (nj * (nj + 1)) / 2;
-      if (block_base < 0 || block_base + terms > mpack) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-    } else if (atom_j > atom_k && block_base >= 0) {
-      terms = nj * nk;
-      if (block_base + terms > mpack) {
-        atomicExch(ok_out, 0);
-        return;
-      }
-    }
-    if (terms > 0 && lmo_terms > 2147483647 - terms) {
-      atomicExch(ok_out, 0);
-      return;
-    }
-    lmo_terms += terms;
-  }
-
-  if (lmo_terms > 0) {
-    const int previous = atomicAdd(expected_terms, lmo_terms);
-    if (previous < 0 || previous > 2147483647 - lmo_terms) {
-      atomicExch(ok_out, 0);
-    }
-  }
 }
 
 __global__ void mozyme_setupk_mark_kernel(int natoms, int nocc, int icocc_dim,
@@ -6955,6 +6950,23 @@ bool upload_registered_state(MozymeScfContext &ctx) {
     if (!dev.tidy_orb_prefix.resize(lmo_count + 1)) return false;
     if (!dev.tidy_ic_scratch.resize(ic_max)) return false;
     if (!dev.tidy_c_scratch.resize(c_max)) return false;
+    if (!dev.density_atom_count.resize(numat_count)) return false;
+    if (!dev.density_atom_offsets.resize(numat_count + 1)) return false;
+    if (!dev.density_cursor.resize(numat_count)) return false;
+    if (!dev.density_entry_orb.resize(
+            static_cast<std::size_t>(std::max(1, ctx.state.icocc_dim)))) {
+      return false;
+    }
+    if (!dev.density_list_lmo.resize(
+            static_cast<std::size_t>(std::max(1, ctx.state.icocc_dim)))) {
+      return false;
+    }
+    if (!dev.density_list_coef.resize(
+            static_cast<std::size_t>(std::max(1, ctx.state.icocc_dim)))) {
+      return false;
+    }
+    if (!dev.density_pair_counter.resize(1)) return false;
+    dev.density_pair_count = -1;
   }
   if (!dev.final_reorth_ws.resize(norbs_count)) return false;
   if (!dev.final_reorth_sumtot.resize(1)) return false;
@@ -7667,6 +7679,46 @@ bool compute_addhb_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
   return ok;
 }
 
+// Packed (j >= k) atom-pair blocks with nijbo >= 0: geometry-only, so it is
+// built once per registered state (one host sync, outside the SCF loop).
+bool ensure_density_pair_list(MozymeScfContext &ctx) {
+  auto &dev = ctx.device;
+  if (dev.density_pair_count >= 0) return true;
+  const int numat = ctx.config.natoms;
+  if (numat <= 0 || !dev.nijbo.ptr) return false;
+  if (!cuda_context_ok(cudaMemset(dev.density_pair_counter.ptr, 0, sizeof(int)),
+                       "density pair counter reset")) {
+    return false;
+  }
+  const dim3 grid(numat, ceil_div(numat, kDiaggBlockThreads));
+  mozyme_density_pair_count_kernel<<<grid, kDiaggBlockThreads>>>(
+      numat, dev.nijbo.ptr, dev.density_pair_counter.ptr);
+  int count = 0;
+  if (!cuda_context_ok(cudaMemcpy(&count, dev.density_pair_counter.ptr,
+                                  sizeof(int), cudaMemcpyDeviceToHost),
+                       "density pair count copy")) {
+    return false;
+  }
+  if (count <= 0) return false;
+  const std::size_t pair_count = static_cast<std::size_t>(count);
+  if (!dev.density_pair_j.resize(pair_count) ||
+      !dev.density_pair_k.resize(pair_count)) {
+    return false;
+  }
+  if (!cuda_context_ok(cudaMemset(dev.density_pair_counter.ptr, 0, sizeof(int)),
+                       "density pair cursor reset")) {
+    return false;
+  }
+  mozyme_density_pair_fill_kernel<<<grid, kDiaggBlockThreads>>>(
+      numat, dev.nijbo.ptr, count, dev.density_pair_counter.ptr,
+      dev.density_pair_j.ptr, dev.density_pair_k.ptr);
+  if (!cuda_context_ok(cudaDeviceSynchronize(), "density pair fill")) {
+    return false;
+  }
+  dev.density_pair_count = count;
+  return true;
+}
+
 bool compute_density_on_gpu_impl(MozymeScfContext &ctx, int nclose, int mode,
                                  const double *input_partp, double *output_p,
                                  int *updated_terms, double *wall_ms) {
@@ -7699,21 +7751,65 @@ bool compute_density_on_gpu_impl(MozymeScfContext &ctx, int nclose, int mode,
 
     constexpr int kThreads = 256;
     const int matrix_blocks = ceil_div(mpack, kThreads);
+    if (!ensure_density_pair_list(ctx)) break;
     if (!begin_resident_stage_timing(ctx, time_stage,
                                      "resident density start event")) break;
     mozyme_density_init_kernel<<<matrix_blocks, kThreads>>>(
         mpack, mode, input_partp, output_p, dev.resident_control_ints.ptr);
-    mozyme_density_expected_kernel<<<nclose, kThreads>>>(
-        nclose, numat, mpack, ctx.state.icocc_dim, ctx.state.cocc_dim,
-        dev.ncf.ptr, dev.nncf.ptr, dev.ncocc.ptr, dev.icocc.ptr,
-        dev.iorbs.ptr, dev.nijbo.ptr, dev.density_updates.ptr + 2,
-        dev.density_updates.ptr + 1, dev.resident_control_ints.ptr);
-    mozyme_density_resident_kernel<<<nclose, kThreads>>>(
-        nclose, numat, mpack, ctx.state.icocc_dim, ctx.state.cocc_dim,
-        dev.ncf.ptr, dev.nncf.ptr, dev.ncocc.ptr, dev.icocc.ptr,
-        dev.iorbs.ptr, dev.nijbo.ptr, dev.cocc.ptr, output_p,
-        dev.density_updates.ptr, dev.density_updates.ptr + 1,
+    mozyme_density_expected_count_kernel<<<nclose, kThreads>>>(
+        nclose, numat, ctx.state.icocc_dim, dev.ncf.ptr, dev.nncf.ptr,
+        dev.icocc.ptr, dev.iorbs.ptr, dev.nijbo.ptr,
+        dev.density_updates.ptr + 2, dev.density_updates.ptr + 1,
         dev.resident_control_ints.ptr);
+    {
+      const std::size_t numat_count = static_cast<std::size_t>(numat);
+      const std::size_t icocc_count =
+          static_cast<std::size_t>(ctx.state.icocc_dim);
+      if (!device_buffer_ready(dev.density_atom_count, numat_count) ||
+          !device_buffer_ready(dev.density_atom_offsets, numat_count + 1) ||
+          !device_buffer_ready(dev.density_cursor, numat_count) ||
+          !device_buffer_ready(dev.density_entry_orb, icocc_count) ||
+          !device_buffer_ready(dev.density_list_lmo, icocc_count) ||
+          !device_buffer_ready(dev.density_list_coef, icocc_count)) {
+        break;
+      }
+      if (!cuda_context_ok(cudaMemsetAsync(dev.density_atom_count.ptr, 0,
+                                           numat_count * sizeof(int)),
+                           "density atom count reset") ||
+          !cuda_context_ok(cudaMemsetAsync(dev.density_cursor.ptr, 0,
+                                           numat_count * sizeof(int)),
+                           "density cursor reset")) {
+        break;
+      }
+      const int lmo_blocks = (nclose * 32 + kThreads - 1) / kThreads;
+      mozyme_density_index_count_kernel<<<lmo_blocks, kThreads>>>(
+          nclose, numat, ctx.state.icocc_dim, dev.ncf.ptr, dev.nncf.ptr,
+          dev.icocc.ptr, dev.iorbs.ptr, dev.density_atom_count.ptr,
+          dev.density_entry_orb.ptr, dev.density_updates.ptr + 1,
+          dev.resident_control_ints.ptr);
+      mozyme_exclusive_scan_kernel<<<1, 1024>>>(
+          numat, nullptr, dev.density_atom_count.ptr,
+          dev.density_atom_offsets.ptr, dev.resident_control_ints.ptr);
+      mozyme_density_index_fill_kernel<<<lmo_blocks, kThreads>>>(
+          nclose, numat, ctx.state.icocc_dim, dev.ncf.ptr, dev.nncf.ptr,
+          dev.ncocc.ptr, dev.icocc.ptr, dev.density_atom_offsets.ptr,
+          dev.density_entry_orb.ptr, dev.density_cursor.ptr,
+          dev.density_list_lmo.ptr, dev.density_list_coef.ptr,
+          dev.resident_control_ints.ptr);
+      mozyme_density_index_sort_kernel<<<numat, kThreads>>>(
+          numat, dev.density_atom_offsets.ptr, dev.density_list_lmo.ptr,
+          dev.density_list_coef.ptr, dev.density_updates.ptr + 1,
+          dev.resident_control_ints.ptr);
+      const int pair_blocks =
+          (dev.density_pair_count * 32 + kThreads - 1) / kThreads;
+      mozyme_density_pairs_kernel<<<pair_blocks, kThreads>>>(
+          dev.density_pair_count, numat, mpack, ctx.state.cocc_dim,
+          dev.density_pair_j.ptr, dev.density_pair_k.ptr, dev.iorbs.ptr,
+          dev.nijbo.ptr, dev.density_atom_offsets.ptr,
+          dev.density_list_lmo.ptr, dev.density_list_coef.ptr, dev.cocc.ptr,
+          output_p, dev.density_updates.ptr, dev.density_updates.ptr + 1,
+          dev.resident_control_ints.ptr);
+    }
     mozyme_update_status_finalize_kernel<<<1, 1>>>(
         dev.density_updates.ptr, 1, dev.resident_control_ints.ptr);
     mozyme_density_spin_scale_kernel<<<matrix_blocks, kThreads>>>(
