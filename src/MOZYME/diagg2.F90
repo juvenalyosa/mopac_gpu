@@ -31,6 +31,15 @@
     use common_arrays_C, only : eigs, nat
     use parameters_C, only: main_group
     use chanel_C, only: iw
+    use mozyme_diagg2_state, only: mozyme_diagg2_retry, &
+       mozyme_diagg2_set_rejections
+#ifdef GPU
+    use iso_c_binding, only: c_int, c_double
+    use mozyme_gpu_int_utils, only: mozyme_c_int_nonnegative_or_zero, &
+      mozyme_c_int_positive_or_zero
+    use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
+    use mod_vars_cuda, only: lgpu, mozyme_gpu
+#endif
     implicit none
     integer, intent (in) :: idiagg, nij, nocc, nvir
     logical, dimension (numat), intent (out) :: latoms
@@ -47,8 +56,55 @@
     double precision :: a, alpha, b, beta, biglim, c, d, e, sum
     double precision, save :: const, eps, eta, bigeps
     double precision, external :: reada
-    integer, dimension (2) :: nrejct
-    data nrejct / 2 * 0 /
+#ifdef GPU
+    logical :: rotprep_gpu_done
+    integer(c_int) :: gpu_code, gpu_active, gpu_nrej
+    integer :: gpu_alloc_stat
+    real(c_double) :: gpu_sumb, gpu_wall_ms
+    integer(c_int), allocatable :: rot_active(:)
+    double precision, allocatable :: rot_alpha(:)
+
+    interface
+      function mopac_cuda_mozyme_diagg2_rotate(nij_c, nocc_c, nvir_c, &
+          numat_c, norbs_c, icocc_dim_c, icvir_dim_c, cocc_dim_c, &
+          cvir_dim_c, ifmo_c, fmo_c, eigs_c, eigv_c, nncf_c, ncf_c, &
+          ncocc_c, icocc_c, nnce_c, nce_c, ncvir_c, icvir_c, iorbs_c, &
+          cocc_c, cvir_c, shift_c, rot_const_c, tiny_c, biglim_c, &
+          thresh_c, retry_c, sumb_c, nrej_c, wall_ms_c) &
+          bind(C,name='mopac_cuda_mozyme_diagg2_rotate') result(code)
+        import :: c_int, c_double
+        integer(c_int), value :: nij_c, nocc_c, nvir_c, numat_c, norbs_c
+        integer(c_int), value :: icocc_dim_c, icvir_dim_c
+        integer(c_int), value :: cocc_dim_c, cvir_dim_c
+        integer(c_int), intent(in) :: ifmo_c(*)
+        real(c_double), intent(in) :: fmo_c(*), eigs_c(*), eigv_c(*)
+        integer(c_int), intent(in) :: nncf_c(*), ncocc_c(*)
+        integer(c_int), intent(in) :: nnce_c(*), ncvir_c(*), iorbs_c(*)
+        integer(c_int) :: ncf_c(*), icocc_c(*), nce_c(*), icvir_c(*)
+        real(c_double) :: cocc_c(*), cvir_c(*)
+        real(c_double), value :: shift_c, rot_const_c, tiny_c, biglim_c
+        real(c_double), value :: thresh_c
+        integer(c_int), value :: retry_c
+        real(c_double) :: sumb_c, wall_ms_c
+        integer(c_int) :: nrej_c
+        integer(c_int) :: code
+      end function mopac_cuda_mozyme_diagg2_rotate
+
+      function mopac_cuda_mozyme_diagg2_rotprep(nij_c, nocc_c, nvir_c, &
+          ifmo_c, fmo_c, eigs_c, eigv_c, shift_c, rot_const_c, tiny_c, &
+          biglim_c, active_c, alpha_c, active_count_c, wall_ms_c) &
+          bind(C,name='mopac_cuda_mozyme_diagg2_rotprep') result(code)
+        import :: c_int, c_double
+        integer(c_int), value :: nij_c, nocc_c, nvir_c
+        integer(c_int), intent(in) :: ifmo_c(*)
+        real(c_double), intent(in) :: fmo_c(*), eigs_c(*), eigv_c(*)
+        real(c_double), value :: shift_c, rot_const_c, tiny_c, biglim_c
+        integer(c_int) :: active_c(*), active_count_c
+        real(c_double) :: alpha_c(*), wall_ms_c
+        integer(c_int) :: code
+      end function mopac_cuda_mozyme_diagg2_rotprep
+    end interface
+#endif
     if (numcal /= icalcn) then
       icalcn = numcal
       times = (Index (keywrd, " TIMES") /= 0)
@@ -84,7 +140,7 @@
    !         OCCUR NEAR THE END OF A SCF CALCULATION, WHEN ONLY A FEW
    !         LMOS ARE BADLY BEHAVED.
    !
-    retry = (nrejct(1) == nrejct(2) .and. nrejct(1) /= 0 .and. nrejct(1) < 20)
+    retry = mozyme_diagg2_retry()
     if (Mod(idiagg, 5) == 0 .or. idiagg <= 5) then
       tiny = -1.d0
       biglim = -1.d0
@@ -150,6 +206,81 @@
     sumb = 0.d0
     nrej = 0
     lij = 0
+#ifdef GPU
+    if (mozyme_diagg2_rotate_gpu_enabled()) then
+      gpu_sumb = 0.0_c_double
+      gpu_nrej = 0_c_int
+      gpu_wall_ms = 0.0_c_double
+      gpu_code = mopac_cuda_mozyme_diagg2_rotate( &
+        mozyme_c_int_nonnegative_or_zero(nij), &
+        mozyme_c_int_nonnegative_or_zero(nocc), &
+        mozyme_c_int_nonnegative_or_zero(nvir), &
+        mozyme_c_int_positive_or_zero(numat), &
+        mozyme_c_int_positive_or_zero(norbs), &
+        mozyme_c_int_positive_or_zero(icocc_dim), &
+        mozyme_c_int_positive_or_zero(icvir_dim), &
+        mozyme_c_int_positive_or_zero(cocc_dim), &
+        mozyme_c_int_positive_or_zero(cvir_dim), ifmo, fmo, eigs, eigv, &
+        nncf, ncf, ncocc, icocc, nnce, nce, ncvir, icvir, iorbs, cocc, &
+        cvir, shift, const, tiny, biglim, thresh, merge(1_c_int, 0_c_int, &
+        retry), gpu_sumb, gpu_nrej, gpu_wall_ms)
+      if (gpu_code == 0_c_int) then
+        sumb = gpu_sumb
+        nrej = int(gpu_nrej)
+        call mozyme_diagg2_set_rejections(nrej)
+        if (mozyme_diagg2_rotprep_trace()) then
+          write(iw,'(1x,a," success code=",i0," nrej=",i0," sumb=",es13.6," ms=",f12.6)') &
+            '[MOZYME GPU diagg2_rotate]', int(gpu_code), &
+            nrej, sumb, gpu_wall_ms
+          call flush(iw)
+        end if
+        if (times) then
+          call timer (" AFTER DIAGG2 IN ITER")
+        end if
+        return
+      else if (mozyme_diagg2_rotprep_trace()) then
+        write(iw,'(1x,a," fallback_cpu code=",i0)') &
+          '[MOZYME GPU diagg2_rotate]', int(gpu_code)
+        call flush(iw)
+      end if
+    end if
+    if (mozyme_gpu_scf_no_fallback_required()) then
+      write(iw,'(1x,a)') &
+        '[MOZYME GPU SCF] status=strict_abort reason=strict_diagg2_cpu_fallback'
+      call flush(iw)
+      error stop 'MOZYME GPU strict diagg2 abort'
+    end if
+    rotprep_gpu_done = .false.
+    if (mozyme_diagg2_rotprep_gpu_enabled() .and. nij > 0) then
+      allocate(rot_active(nij), rot_alpha(nij), stat=gpu_alloc_stat)
+      if (gpu_alloc_stat == 0) then
+        gpu_active = 0_c_int
+        gpu_wall_ms = 0.0_c_double
+        gpu_code = mopac_cuda_mozyme_diagg2_rotprep( &
+          mozyme_c_int_nonnegative_or_zero(nij), &
+          mozyme_c_int_nonnegative_or_zero(nocc), &
+          mozyme_c_int_nonnegative_or_zero(nvir), ifmo, fmo, eigs, eigv, shift, &
+          const, tiny, biglim, rot_active, rot_alpha, gpu_active, gpu_wall_ms)
+        if (gpu_code == 0_c_int) then
+          rotprep_gpu_done = .true.
+          if (mozyme_diagg2_rotprep_trace()) then
+            write(iw,'(1x,a," success code=",i0," active=",i0," ms=",f12.6)') &
+              '[MOZYME GPU diagg2_rotprep]', int(gpu_code), int(gpu_active), &
+              gpu_wall_ms
+            call flush(iw)
+          end if
+        else if (mozyme_diagg2_rotprep_trace()) then
+          write(iw,'(1x,a," fallback_cpu code=",i0)') &
+            '[MOZYME GPU diagg2_rotprep]', int(gpu_code)
+          call flush(iw)
+        end if
+      else if (mozyme_diagg2_rotprep_trace()) then
+        write(iw,'(1x,a," fallback_cpu code=",i0)') &
+          '[MOZYME GPU diagg2_rotprep]', -2
+        call flush(iw)
+      end if
+    end if
+#endif
     outer_loop: do ij = 1, nij
       i = ifmo(1, ij)
       j = ifmo(2, ij)
@@ -196,6 +327,11 @@
           lij = lij + 1
           e = Sign (Sqrt(4.d0*c*c+d*d), d)
           alpha = Sqrt (0.5d0*(1.d0+d/e))
+#ifdef GPU
+          if (rotprep_gpu_done) then
+            if (rot_active(ij) /= 0_c_int) alpha = rot_alpha(ij)
+          end if
+#endif
           do
             beta = -Sign (Sqrt(1.d0-alpha*alpha), c)
             sumb = sumb + Abs (beta)
@@ -351,9 +487,72 @@
         end if
       end if
     end do outer_loop
-    nrejct(2) = nrejct(1)
-    nrejct(1) = nrej
+    call mozyme_diagg2_set_rejections(nrej)
+#ifdef GPU
+    if (allocated(rot_active)) deallocate(rot_active)
+    if (allocated(rot_alpha)) deallocate(rot_alpha)
+#endif
     if (times) then
       call timer (" AFTER DIAGG2 IN ITER")
     end if
+#ifdef GPU
+contains
+  logical function mozyme_diagg2_rotate_gpu_enabled()
+    implicit none
+    integer :: env_len, env_status
+    character(len=16) :: env_value
+
+    mozyme_diagg2_rotate_gpu_enabled = .false.
+    if (.not. (lgpu .and. mozyme_gpu)) return
+    env_value = ' '
+    call get_environment_variable('MOPAC_MOZYME_DIAGG2_ROTATE_GPU', &
+      env_value, length=env_len, status=env_status)
+    if (env_status == 0 .and. env_len > 0) then
+      select case (trim(env_value))
+      case ('0', 'off', 'OFF', 'false', 'FALSE', 'no', 'NO')
+        mozyme_diagg2_rotate_gpu_enabled = .false.
+      case default
+        mozyme_diagg2_rotate_gpu_enabled = .true.
+      end select
+    end if
+  end function mozyme_diagg2_rotate_gpu_enabled
+
+  logical function mozyme_diagg2_rotprep_gpu_enabled()
+    implicit none
+    integer :: env_len, env_status
+    character(len=16) :: env_value
+
+    mozyme_diagg2_rotprep_gpu_enabled = lgpu .and. mozyme_gpu
+    if (.not. mozyme_diagg2_rotprep_gpu_enabled) return
+    env_value = ' '
+    call get_environment_variable('MOPAC_MOZYME_DIAGG2_ROTPREP_GPU', &
+      env_value, length=env_len, status=env_status)
+    if (env_status == 0 .and. env_len > 0) then
+      select case (trim(env_value))
+      case ('0', 'off', 'OFF', 'false', 'FALSE', 'no', 'NO')
+        mozyme_diagg2_rotprep_gpu_enabled = .false.
+      case default
+        mozyme_diagg2_rotprep_gpu_enabled = .true.
+      end select
+    end if
+  end function mozyme_diagg2_rotprep_gpu_enabled
+
+  logical function mozyme_diagg2_rotprep_trace()
+    implicit none
+    integer :: env_len, env_status
+    character(len=16) :: env_value
+
+    mozyme_diagg2_rotprep_trace = .false.
+    env_value = ' '
+    call get_environment_variable('MOPAC_GPU_PROFILE', env_value, &
+      length=env_len, status=env_status)
+    if (env_status == 0 .and. env_len > 0 .and. trim(env_value) /= '0') &
+      mozyme_diagg2_rotprep_trace = .true.
+    env_value = ' '
+    call get_environment_variable('MOPAC_GPU_VERBOSE', env_value, &
+      length=env_len, status=env_status)
+    if (env_status == 0 .and. env_len > 0 .and. trim(env_value) /= '0') &
+      mozyme_diagg2_rotprep_trace = .true.
+  end function mozyme_diagg2_rotprep_trace
+#endif
   end subroutine diagg2

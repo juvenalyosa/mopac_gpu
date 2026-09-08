@@ -14,6 +14,9 @@
 ! limitations under the License.
 
   subroutine fillij (count)
+#ifdef GPU
+      use iso_c_binding, only: c_int, c_double
+#endif
       use molkst_C, only: numat, natoms, cutofp, id, n2elec, l1u, l2u, l3u, keywrd, mpack, &
         ispd, line
       use common_arrays_C, only : tvec, coord
@@ -21,6 +24,7 @@
       use MOZYME_C, only : cutofs, direct, semidr, &
         nijbo, lijbo, iijj, iij, ij_dim, ijall, numij, morb, iorbs
       use overlaps_C, only : cutof1, cutof2
+      use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
 !
       implicit none
       !
@@ -37,8 +41,38 @@
       double precision :: r, rmin, rr, x1, x2, x3
       save :: ix
       logical :: first
+      logical, save :: strict_nijbo_marker_written = .false.
       double precision, dimension (3) :: xj
       double precision, external :: reada
+      external :: mozyme_gpu_strict_abort
+#ifdef GPU
+      integer(c_int) :: gpu_code, gpu_mpack, gpu_n2elec, gpu_ij_dim
+      interface
+        function mopac_cuda_mozyme_fillij_count(numat_c, id_c, l1u_c, l2u_c, l3u_c, ispd_c, &
+            direct_c, semidr_c, cutof1_c, cutof2_c, coord_c, tvec_c, iorbs_c, mpack_c, &
+            n2elec_c, ij_dim_c) bind(C,name='mopac_cuda_mozyme_fillij_count') result(code)
+          use iso_c_binding, only: c_int, c_double
+          integer(c_int), value :: numat_c, id_c, l1u_c, l2u_c, l3u_c, ispd_c
+          integer(c_int), value :: direct_c, semidr_c
+          real(c_double), value :: cutof1_c, cutof2_c
+          real(c_double) :: coord_c(3,*), tvec_c(3,*)
+          integer(c_int) :: iorbs_c(*), mpack_c, n2elec_c, ij_dim_c
+          integer(c_int) :: code
+        end function mopac_cuda_mozyme_fillij_count
+
+        function mopac_cuda_mozyme_fillij_nijbo(numat_c, id_c, l1u_c, l2u_c, l3u_c, ispd_c, &
+            direct_c, semidr_c, cutof1_c, cutof2_c, coord_c, tvec_c, iorbs_c, nijbo_c, &
+            mpack_c, n2elec_c, ij_dim_c) bind(C,name='mopac_cuda_mozyme_fillij_nijbo') result(code)
+          use iso_c_binding, only: c_int, c_double
+          integer(c_int), value :: numat_c, id_c, l1u_c, l2u_c, l3u_c, ispd_c
+          integer(c_int), value :: direct_c, semidr_c
+          real(c_double), value :: cutof1_c, cutof2_c
+          real(c_double) :: coord_c(3,*), tvec_c(3,*)
+          integer(c_int) :: iorbs_c(*), nijbo_c(numat_c,*), mpack_c, n2elec_c, ij_dim_c
+          integer(c_int) :: code
+        end function mopac_cuda_mozyme_fillij_nijbo
+      end interface
+#endif
 !
       if (.not. allocated(nijbo)) then
         ix = 0
@@ -72,6 +106,11 @@
 !  Array nijbo could not be created.  Therefore set lijbo false and
 !  create smaller, but more CPU intensive, arrays
 !
+            if (mozyme_gpu_scf_no_fallback_required()) then
+              call mozyme_gpu_strict_abort('strict_nijbo_alloc_failed', &
+                "MOZYME GPU strict resident SCF requires nijbo allocation")
+              return
+            end if
             lijbo = .false.
             allocate (iijj(ij_dim), ijall(ij_dim), iij(natoms), numij(natoms), &
                & stat = i)
@@ -87,6 +126,13 @@
         end if
       else
         lijbo = .true.
+      end if
+      if (mozyme_gpu_scf_no_fallback_required() .and. allocated(nijbo) .and. &
+          lijbo .and. .not. strict_nijbo_marker_written) then
+        write(iw,'(1x,a,1x,a,1x,i0)') &
+          '[MOZYME GPU SCF]', 'compact_index_route=0 use_nijbo=', 1
+        call flush(iw)
+        strict_nijbo_marker_written = .true.
       end if
       !
       !   Set CUTOF values  CUTOF2 = First cutoff (NDDO-dipolar)
@@ -143,6 +189,53 @@
         direct = .true.
         semidr = .true.
       end if
+#ifdef GPU
+      if (mozyme_gpu_scf_no_fallback_required()) then
+        gpu_mpack = 0_c_int
+        gpu_n2elec = 0_c_int
+        gpu_ij_dim = 0_c_int
+        if (count) then
+          gpu_code = mopac_cuda_mozyme_fillij_count( &
+            int(numat, c_int), int(id, c_int), int(l1u, c_int), &
+            int(l2u, c_int), int(l3u, c_int), int(ispd, c_int), &
+            merge(1_c_int, 0_c_int, direct), merge(1_c_int, 0_c_int, semidr), &
+            cutof1, cutof2, coord, tvec, iorbs, gpu_mpack, gpu_n2elec, gpu_ij_dim)
+        else
+          if (.not. allocated(nijbo) .or. .not. lijbo) then
+            call mozyme_gpu_strict_abort('strict_fillij_nijbo_missing', &
+              'MOZYME GPU strict resident SCF requires GPU fillij with nijbo')
+            return
+          end if
+          gpu_code = mopac_cuda_mozyme_fillij_nijbo( &
+            int(numat, c_int), int(id, c_int), int(l1u, c_int), &
+            int(l2u, c_int), int(l3u, c_int), int(ispd, c_int), &
+            merge(1_c_int, 0_c_int, direct), merge(1_c_int, 0_c_int, semidr), &
+            cutof1, cutof2, coord, tvec, iorbs, nijbo, gpu_mpack, gpu_n2elec, gpu_ij_dim)
+        end if
+        if (gpu_code /= 0_c_int) then
+          write(iw,'(1x,a,1x,a,1x,i0)') &
+            '[MOZYME GPU SCF]', 'fillij_gpu_failed code=', gpu_code
+          call flush(iw)
+          call mozyme_gpu_strict_abort('strict_fillij_gpu_failed', &
+            'MOZYME GPU strict resident SCF could not build fillij on GPU')
+          return
+        end if
+        mpack = int(gpu_mpack)
+        n2elec = int(gpu_n2elec)
+        if (count) ij_dim = int(gpu_ij_dim)
+        write(iw,'(1x,a,1x,a,1x,l1,1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0)') &
+          '[MOZYME GPU SCF]', 'fillij_gpu=1 count=', count, 'mpack=', mpack, &
+          'n2elec=', n2elec, 'ij_dim=', int(gpu_ij_dim)
+        call flush(iw)
+        return
+      end if
+#else
+      if (mozyme_gpu_scf_no_fallback_required()) then
+        call mozyme_gpu_strict_abort('strict_fillij_gpu_unavailable', &
+          'MOZYME GPU strict resident SCF requires a GPU fillij builder')
+        return
+      end if
+#endif
       !#aab - end
       !
       rmin = 100.d0

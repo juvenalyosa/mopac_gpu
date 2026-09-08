@@ -20,7 +20,7 @@
       use molkst_C, only : numcal, norbs, mpack, n2elec, id, numat_ref => numat, use_disk
 #ifdef GPU
       use mod_vars_cuda, only: lgpu, gpu_scf_stream_available
-      use gpu_fock_interfaces
+      use gpu_fock_interfaces, only: mopac_cuda_fock2_scf
       use gpu_scf_stream_driver, only: gpu_scf_stream_fock
       use gpu_scf_stream_trace, only: gpu_stream_trace_block
       use iso_c_binding, only: c_bool, c_int
@@ -66,6 +66,7 @@
       logical :: dump_fock_map
       integer :: dump_unit
       integer :: envs
+      integer :: kk_start
       character(len=8) :: line8
 #ifdef GPU
       ! GPU Fock path controls (new rewrite is gated behind an opt-in flag)
@@ -77,7 +78,6 @@
       logical :: stream_mode
       logical, save :: stream_unavailable_reported = .false.
       logical, save :: stream_failure_reported = .false.
-      integer :: kk_start
 #endif
 
       save ifact, i1fact, ione, lid, icalcn, jindex, ptot2
@@ -111,9 +111,10 @@
         call get_environment_variable('MOPAC_GPU_EXACT_SC', line8, status=envs)
         if (envs == 0) then
           line8 = adjustl(line8)
+          call upcase(line8, len_trim(line8))
           if (len_trim(line8) /= 0) then
-            select case (line8(1:1))
-            case ('0','n','N','f','F','o','O')
+            select case (trim(line8))
+            case ('0','N','NO','F','FALSE','OFF')
               allow_gpu = .false.
             case default
               allow_gpu = .true.

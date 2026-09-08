@@ -17,6 +17,7 @@ subroutine tidy (nmos_loc, nc, ic, n01, c, n02, nnc_loc, ncmo, ln, mn, mode)
     use MOZYME_C, only: iorbs, jopt, thresh, numred
     use molkst_C, only: numat, step_num, step_num0, norbs, moperr, keywrd, numcal, use_disk
     use chanel_C, only: iw
+    use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
     implicit none
     integer, intent (in) :: mode,  n02, nmos_loc
     integer, intent (inout) :: n01
@@ -35,7 +36,13 @@ subroutine tidy (nmos_loc, nc, ic, n01, c, n02, nnc_loc, ncmo, ln, mn, mode)
     double precision :: sum
     integer, dimension(:), allocatable :: iused, jused, kused, lused
     integer, dimension (2) :: imode
+    external :: mozyme_gpu_strict_abort
     data imode / 2 * 0 /
+    if (mozyme_gpu_scf_no_fallback_required()) then
+      call mozyme_gpu_strict_abort('strict_tidy_cpu_fallback', &
+        'MOZYME GPU strict resident SCF does not support CPU LMO tidy')
+      return
+    end if
     allocate (iused(norbs), jused(norbs), kused(norbs), lused(norbs), &
          & stat=alloc_stat)
     if (alloc_stat /= 0) then

@@ -49,6 +49,8 @@
 !
       use chanel_C, only : iw0, iw, iarc, ibrz, brillouin_fn, archive_fn, log
 !
+      use mozyme_gpu_scf_driver, only : mozyme_gpu_scf_no_fallback_required
+!
 #if MOPAC_F2003
       USE, INTRINSIC :: IEEE_ARITHMETIC
 #endif
@@ -63,12 +65,13 @@
       integer :: icalcn, i, loc11, loc21, nopn, j, k, l, m, kchrge, iwrite, mvar
       double precision :: q2(numat), degree, xreact, eionis, vol, tim, xi, sum, &
       dip, dumy(3), pKa_unsorted(numat), distortion, rms, gnorm_norm, escf_min
-      logical :: ci, lprtgra, still, bcc, opend, bigcycles
+      logical :: ci, lprtgra, still, bcc, opend, bigcycles, strict_mozyme_gpu_scf
       character  :: type(3)*11, idate*24, gtype*13, grtype*14, &
       flepo(19)*58, iter(2)*58, namfil*241, num*2
       character, allocatable :: old_arc_file(:)*1000
       double precision, external :: dipole, dipole_for_MOZYME, dot, meci, seconds, volume
       integer, external :: ijbo
+      external :: mozyme_gpu_strict_writmo_abort
       save type, flepo, iter, namfil, icalcn, i, bigcycles, escf_min
 !***********************************************************************
 !
@@ -122,6 +125,7 @@
       idate = ' '
       lprtgra = (index(keywrd,' GRAD') /= 0 .and. nvar > 0)
       ci = index(keywrd,' C.I.') /= 0
+      strict_mozyme_gpu_scf = mozyme .and. mozyme_gpu_scf_no_fallback_required()
       call fdate (idate)
       degree = 57.29577951308232D0
       gnorm = 0.D0
@@ -195,6 +199,10 @@
         distortion = 0.d0
         rms = 0.d0
         if (index(keywrd," PM7-TS") /= 0) then
+          if (strict_mozyme_gpu_scf) then
+            call mozyme_gpu_strict_writmo_abort("strict_writmo_pm7ts_host_compfg")
+            return
+          end if
           call PM7_TS
           return
         end if
@@ -392,6 +400,10 @@
 !
 !   WE NEED TO CALCULATE THE REACTION COORDINATE GRADIENT.
 !
+        if (strict_mozyme_gpu_scf) then
+          call mozyme_gpu_strict_writmo_abort("strict_writmo_deriv_host_output")
+          return
+        end if
         mvar = nvar
         loc11 = loc(1,1)
         loc21 = loc(2,1)
@@ -600,14 +612,23 @@
         end if
         if (mozyme) then
           if (index(keywrd," RE-LOC") /= 0) then
-            write(iw,"(10x,a,/)")"  LMOs being Re-Localized"
-            call local_for_MOZYME("OCCUPIED")
+            if (strict_mozyme_gpu_scf) then
+              write(iw,'(1x,a)') &
+                '[MOZYME GPU SCF] writmo_relocal_output=skipped resident_gpu=1'
+            else
+              write(iw,"(10x,a,/)")"  LMOs being Re-Localized"
+              call local_for_MOZYME("OCCUPIED")
 !
 !  Suppress re-localization of the virtual set.  Not of interest to users.
 !
-!            call local_for_MOZYME("VIRTUAL")
+!              call local_for_MOZYME("VIRTUAL")
+            end if
           end if
           if ((index(keywrd,' VEC') + index(keywrd,' ALLVEC'))*nelecs /= 0) then
+            if (strict_mozyme_gpu_scf) then
+              call mozyme_gpu_strict_writmo_abort("strict_writmo_vec_host_output")
+              return
+            end if
             if (index(keywrd, " EIGEN") /= 0) then
               call eigen(.false., .true.)
             else
@@ -651,7 +672,13 @@
 !   Correct density matrix, if necessary
 !
         if (nclose/=nopen .and. abs(fract - 2.d0) > 1.d-20 .and. &
-         fract > 1.d-20 .or. index(keywrd,' C.I.') /= 0 .and. .not. method_indo) call mecip ()
+         fract > 1.d-20 .or. index(keywrd,' C.I.') /= 0 .and. .not. method_indo) then
+          if (strict_mozyme_gpu_scf) then
+            call mozyme_gpu_strict_writmo_abort("strict_writmo_mecip_host_density")
+            return
+          end if
+          call mecip ()
+        end if
         if (prt_charges) then
           write (iw, '(2/13X,'' NET ATOMIC CHARGES AND DIPOLE CONTRIBUTIONS'',/)')
           i = 0
@@ -735,6 +762,10 @@
       end if
       if (norbs > 0) then
         if (index(keywrd,' FOCK') /= 0) then
+          if (strict_mozyme_gpu_scf) then
+            call mozyme_gpu_strict_writmo_abort("strict_writmo_fock_host_output")
+            return
+          end if
           write (iw, '('' FOCK MATRIX '')')
           call vecprt (f, norbs)
         end if
@@ -748,34 +779,43 @@
         end if
         if (nelecs /= 0) then
           if (index(keywrd,' DENS') /= 0) then
+            if (strict_mozyme_gpu_scf) then
+              call mozyme_gpu_strict_writmo_abort("strict_writmo_dens_host_output")
+              return
+            end if
             write (iw, '(2/,20X,'' DENSITY MATRIX IS '')')
             call vecprt (p, norbs)
           end if
           if (prt_pops) then
-            write (iw, '(2/10X,''ATOMIC ORBITAL ELECTRON POPULATIONS'' ,/)')
-            j = 0
-            do i = 1, numat
-              j = max(nlast(i) - nfirst(i), j)
-            end do
-            line = " "
-            if (maxtxt == 0) then
-              i = 2
-            else if (pdb_label) then
-              i = 16
+            if (strict_mozyme_gpu_scf) then
+              write(iw,'(1x,a)') &
+                '[MOZYME GPU SCF] writmo_pops_output=skipped resident_gpu=1'
             else
-              i = maxtxt/2 + 2
-            end if
-            if (j == 8) then
-                                            !12345678901234567890123456789012345678901234567890123456789012345678901234567890
-              write(iw,'(a)')line(:i)//"   Atom"//line(:i)//"  s        px        py        pz      x^2-y^2"// &
-              &"     xz        z^2       yz        xy"
-            else if (j == 3) then
-              write(iw,'(a)')line(:i)//"   Atom"//line(:i)//"  s        px        py        pz   "
-            else
-              write(iw,'(a)')line(:i)//"   Atom"//line(:i)//"  s   "
+              write (iw, '(2/10X,''ATOMIC ORBITAL ELECTRON POPULATIONS'' ,/)')
+              j = 0
+              do i = 1, numat
+                j = max(nlast(i) - nfirst(i), j)
+              end do
+              line = " "
+              if (maxtxt == 0) then
+                i = 2
+              else if (pdb_label) then
+                i = 16
+              else
+                i = maxtxt/2 + 2
+              end if
+              if (j == 8) then
+                                              !12345678901234567890123456789012345678901234567890123456789012345678901234567890
+                write(iw,'(a)')line(:i)//"   Atom"//line(:i)//"  s        px        py        pz      x^2-y^2"// &
+                &"     xz        z^2       yz        xy"
+              else if (j == 3) then
+                write(iw,'(a)')line(:i)//"   Atom"//line(:i)//"  s        px        py        pz   "
+              else
+                write(iw,'(a)')line(:i)//"   Atom"//line(:i)//"  s   "
+              end if
             end if
           end if
-          if (prt_pops) then
+          if (prt_pops .and. .not. strict_mozyme_gpu_scf) then
             if (mozyme) then
               l = 0
               do i = 1, numat
@@ -816,11 +856,19 @@
             end if
           end if
           if (index(keywrd,' PI') /= 0) then
+            if (strict_mozyme_gpu_scf) then
+              call mozyme_gpu_strict_writmo_abort("strict_writmo_pi_host_output")
+              return
+            end if
             write (iw, '(2/10X,''SIGMA-PI BOND-ORDER MATRIX'')')
             call denrot ()
           end if
         end if
         if (uhf) then
+          if (strict_mozyme_gpu_scf) then
+            call mozyme_gpu_strict_writmo_abort("strict_writmo_spin_host_output")
+            return
+          end if
           sz = (nalpha + (nalpha_open - nalpha)*fract - (nbeta + (nbeta_open - nbeta)*fract))*0.5D0
           ss2 = sz*sz
           l = 0
@@ -877,6 +925,10 @@
           pa = p - pb
         end if
         if (index(keywrd,' BONDS') + index(keywrd,' ALLBO') /= 0) then
+          if (mozyme .and. strict_mozyme_gpu_scf) then
+            call mozyme_gpu_strict_writmo_abort("strict_writmo_bonds_host_output")
+            return
+          end if
           if ( .not. mozyme) then
             if (nbeta == 0) then
               write (iw, '(/10X,''BONDING CONTRIBUTION OF EACH M.O.'',/)')
@@ -893,6 +945,10 @@
         call to_screen("To_file: Normal output")
         i = nclose + nalpha
         if (index(keywrd,' LOCAL') + index(keywrd,' RABBIT') + index(keywrd,' BANANA') /= 0) then
+          if (strict_mozyme_gpu_scf) then
+            call mozyme_gpu_strict_writmo_abort("strict_writmo_local_host_output")
+            return
+          end if
           call local (c, i, eigs, 1, "c ")
           if (nbeta /= 0) then
             write (iw, '(2/10X,'' LOCALIZED BETA MOLECULAR ORBITALS'')')
@@ -900,12 +956,28 @@
           end if
         end if
         if (index(keywrd,' 1ELE') /= 0) then
+          if (strict_mozyme_gpu_scf) then
+            call mozyme_gpu_strict_writmo_abort("strict_writmo_1ele_host_output")
+            return
+          end if
           write (iw, '('' FINAL ONE-ELECTRON MATRIX '')')
           call vecprt (h, norbs)
         end if
-        if (index(keywrd,' ENPART') /= 0) call enpart ()
+        if (index(keywrd,' ENPART') /= 0) then
+          if (strict_mozyme_gpu_scf) then
+            call mozyme_gpu_strict_writmo_abort("strict_writmo_enpart_host_output")
+            return
+          end if
+          call enpart ()
+        end if
       end if
-      if (seconds(2) - time0 > 1.d7 .or. index(keywrd,' DENOUT') /= 0) call den_in_out(1)
+      if (seconds(2) - time0 > 1.d7 .or. index(keywrd,' DENOUT') /= 0) then
+        if (strict_mozyme_gpu_scf .and. index(keywrd,' DENOUT') /= 0) then
+          call mozyme_gpu_strict_writmo_abort("strict_writmo_denout_host_output")
+          return
+        end if
+        call den_in_out(1)
+      end if
       if ((ci .or. nopen /= nclose .and. Abs(fract - 2.d0) > 1.d-20 .and. fract > 1.d-20 .or. &
         index(keywrd,' SIZE') /= 0) .and. index(keywrd,' MECI') + index(keywrd,' ESR')/=0) then
         write (iw, &
@@ -915,6 +987,10 @@
         if (moperr) return
       end if
       if (index(keywrd,' MULLIK') + index(keywrd,' GRAPH') /= 0) then
+        if (mozyme .and. strict_mozyme_gpu_scf) then
+          call mozyme_gpu_strict_writmo_abort("strict_writmo_mullik_host_output")
+          return
+        end if
         if (index(keywrd,' MULLIK') /= 0) write (iw, &
           '(/10X,'' MULLIKEN POPULATION ANALYSIS'')')
         if (mozyme) then
@@ -1239,6 +1315,16 @@
       nscf = 0
       return
       end subroutine writmo
+!
+      subroutine mozyme_gpu_strict_writmo_abort(reason)
+      use chanel_C, only : iw
+      implicit none
+      character(*), intent(in) :: reason
+      write(iw,'(1x,a,a)') '[MOZYME GPU SCF] status=strict_abort reason=', &
+        trim(reason)
+      call mopend(reason)
+      error stop 'MOZYME GPU strict writmo abort'
+      end subroutine mozyme_gpu_strict_writmo_abort
 !
       subroutine empiri ()
       use molkst_C, only : numat, formula

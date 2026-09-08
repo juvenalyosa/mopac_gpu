@@ -16,6 +16,14 @@
 subroutine cnvgz (pnew, p, p1, p2, p3, niter, idiag)
     use molkst_C, only: norbs, mpack
     use MOZYME_C, only : use_three_point_extrap, pmax
+#ifdef GPU
+    use iso_c_binding, only: c_int, c_double
+    use chanel_C, only: iw
+    use mozyme_gpu_int_utils, only: mozyme_c_int_nonnegative_or_zero, &
+      mozyme_c_int_positive_or_zero
+    use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
+    use mod_vars_cuda, only: lgpu, mozyme_gpu
+#endif
     implicit none
     integer, intent (in) :: niter
     integer, dimension (norbs), intent (in) :: idiag ! Pointers to diagonal elements
@@ -23,7 +31,52 @@ subroutine cnvgz (pnew, p, p1, p2, p3, niter, idiag)
     double precision, dimension (mpack), intent (inout) :: p, pnew
     integer :: i, j
     double precision :: damp, fac, faca, facb, sa
+#ifdef GPU
+    integer(c_int) :: gpu_code
+    real(c_double) :: gpu_pmax, gpu_rms, gpu_wall_ms
+
+    interface
+      function mopac_cuda_mozyme_cnvgz(mpack_c, norbs_c, use_three_point_c, &
+          niter_c, idiag_c, pnew_c, pold_c, p1_c, p2_c, p3_c, pmax_c, &
+          rms_c, wall_ms_c) bind(C,name='mopac_cuda_mozyme_cnvgz') result(code)
+        import :: c_int, c_double
+        integer(c_int), value :: mpack_c, norbs_c, use_three_point_c, niter_c
+        integer(c_int), intent(in) :: idiag_c(*)
+        real(c_double) :: pnew_c(*), pold_c(*), p1_c(*), p2_c(*), p3_c(*)
+        real(c_double) :: pmax_c, rms_c, wall_ms_c
+        integer(c_int) :: code
+      end function mopac_cuda_mozyme_cnvgz
+    end interface
+#endif
     intrinsic Abs, Max, Min, Mod, Sign, Sqrt
+#ifdef GPU
+    if (mozyme_cnvgz_gpu_enabled()) then
+      gpu_code = mopac_cuda_mozyme_cnvgz( &
+        mozyme_c_int_positive_or_zero(mpack), &
+        mozyme_c_int_positive_or_zero(norbs), &
+        merge(1_c_int, 0_c_int, use_three_point_extrap), &
+        mozyme_c_int_nonnegative_or_zero(niter), &
+        idiag, pnew, p, p1, p2, p3, gpu_pmax, gpu_rms, gpu_wall_ms)
+      if (gpu_code == 0_c_int) then
+        pmax = gpu_pmax
+        if (mozyme_cnvgz_trace()) then
+          write(iw,'(1x,a," success code=",i0," pmax=",es12.5," rms=",es12.5," ms=",f10.3)') &
+            '[MOZYME GPU cnvgz]', int(gpu_code), gpu_pmax, gpu_rms, gpu_wall_ms
+          call flush(iw)
+        end if
+        return
+      else if (mozyme_cnvgz_trace()) then
+        write(iw,'(1x,a," fallback_cpu code=",i0)') '[MOZYME GPU cnvgz]', int(gpu_code)
+        call flush(iw)
+      end if
+    end if
+    if (mozyme_gpu_scf_no_fallback_required()) then
+      write(iw,'(1x,a)') &
+        '[MOZYME GPU SCF] status=strict_abort reason=strict_cnvgz_cpu_fallback'
+      call flush(iw)
+      error stop 'MOZYME GPU strict cnvgz abort'
+    end if
+#endif
    !
    ! Save the diagonal of the current and previous density for later use
    !
@@ -82,4 +135,44 @@ subroutine cnvgz (pnew, p, p1, p2, p3, niter, idiag)
 !
     p1 = p2
     p = pnew
+#ifdef GPU
+contains
+  logical function mozyme_cnvgz_gpu_enabled()
+    implicit none
+    integer :: env_len, env_status
+    character(len=16) :: env_value
+
+    mozyme_cnvgz_gpu_enabled = lgpu .and. mozyme_gpu
+    if (.not. mozyme_cnvgz_gpu_enabled) return
+    env_value = ' '
+    call get_environment_variable('MOPAC_MOZYME_CNVGZ_GPU', env_value, &
+      length=env_len, status=env_status)
+    if (env_status == 0 .and. env_len > 0) then
+      select case (trim(env_value))
+      case ('0', 'off', 'OFF', 'false', 'FALSE', 'no', 'NO')
+        mozyme_cnvgz_gpu_enabled = .false.
+      case default
+        mozyme_cnvgz_gpu_enabled = .true.
+      end select
+    end if
+  end function mozyme_cnvgz_gpu_enabled
+
+  logical function mozyme_cnvgz_trace()
+    implicit none
+    integer :: env_len, env_status
+    character(len=16) :: env_value
+
+    mozyme_cnvgz_trace = .false.
+    env_value = ' '
+    call get_environment_variable('MOPAC_GPU_PROFILE', env_value, &
+      length=env_len, status=env_status)
+    if (env_status == 0 .and. env_len > 0 .and. trim(env_value) /= '0') &
+      mozyme_cnvgz_trace = .true.
+    env_value = ' '
+    call get_environment_variable('MOPAC_GPU_VERBOSE', env_value, &
+      length=env_len, status=env_status)
+    if (env_status == 0 .and. env_len > 0 .and. trim(env_value) /= '0') &
+      mozyme_cnvgz_trace = .true.
+  end function mozyme_cnvgz_trace
+#endif
 end subroutine cnvgz

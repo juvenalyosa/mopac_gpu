@@ -27,13 +27,13 @@
     double precision, dimension(107) :: betas = 0.d0, betap = 0.d0, betad = 0.d0
     double precision, dimension(107) :: uss = 0.d0, upp = 0.d0, udd = 0.d0
     double precision, dimension(107) :: gpp = 0.d0, gp2 = 0.d0, hsp = 0.d0, gss = 0.d0, gsp = 0.d0
-    double precision, dimension(107) :: am, ad, aq, dd, qq
+    double precision, dimension(107), target :: am, ad, aq, dd, qq
     double precision, dimension(107) :: dsd = 0.d0, dpd = 0.d0, ddd = 0.d0
     double precision, dimension(107) :: zs, zp, zd, zsn = 0.d0, zpn = 0.d0, zdn = 0.d0
     double precision, dimension(107) :: eisol, eheat
     double precision, dimension(57:71) ::  eheat_sparkles
     double precision, dimension(107) :: ams
-    double precision, dimension (107) :: tore, polvol, pocord, f0dd = 0.d0, f2dd = 0.d0, f4dd = 0.d0, &
+    double precision, dimension (107), target :: tore, polvol, pocord, f0dd = 0.d0, f2dd = 0.d0, f4dd = 0.d0, &
     f0sd = 0.d0, g2sd = 0.d0, f0pd = 0.d0, f2pd = 0.d0, g1pd = 0.d0, g3pd = 0.d0, CPE_Zeta = 0.d0, &
       CPE_Z0 = 0.d0, CPE_B = 0.d0, CPE_Xlo = 0.d0, CPE_Xhi = 0.d0
     double precision, dimension (107) :: f0sd_store(107) ! Used by PARAM, not used in MOPAC

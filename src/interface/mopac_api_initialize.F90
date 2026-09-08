@@ -403,33 +403,46 @@ contains
 
     call get_environment_variable('MOPAC_NOGPU', env, status=i)
     if (i == 0) then
-      if (trim(adjustl(env)) /= '') then
-        lgpu = .false.
-        return
+      env = adjustl(env)
+      if (len_trim(env) /= 0) then
+        call upcase(env, len_trim(env))
+        select case (trim(env))
+        case ('0','FALSE','F','NO','N','OFF')
+        case default
+          lgpu = .false.
+          return
+        end select
       end if
     end if
 
     call get_environment_variable('MOPAC_FORCEGPU', env, status=i)
     if (i == 0) then
-      if (trim(adjustl(env)) /= '') then
-        ! Force-enable if any suitable GPU exists
-        do j = 1, nDevices
-          if (major(j) >= 2 .and. hasDouble(j)) then
-            gpu_ok(j) = .true.
-          end if
-        end do
-        if (any(gpu_ok)) then
-          lgpu = .true.
-          ngpus = min(2, count(gpu_ok))
+      env = adjustl(env)
+      if (len_trim(env) /= 0) then
+        call upcase(env, len_trim(env))
+        select case (trim(env))
+        case ('0','FALSE','F','NO','N','OFF')
+          return
+        case default
+          ! Force-enable if any suitable GPU exists
           do j = 1, nDevices
-            if (gpu_ok(j)) then
-              gpu_id = j - 1
-              call setGPU(gpu_id, lstat)
-              exit
+            if (major(j) >= 2 .and. hasDouble(j)) then
+              gpu_ok(j) = .true.
             end if
           end do
-        end if
-        return
+          if (any(gpu_ok)) then
+            lgpu = .true.
+            ngpus = min(2, count(gpu_ok))
+            do j = 1, nDevices
+              if (gpu_ok(j)) then
+                gpu_id = j - 1
+                call setGPU(gpu_id, lstat)
+                exit
+              end if
+            end do
+          end if
+          return
+        end select
       end if
     end if
 

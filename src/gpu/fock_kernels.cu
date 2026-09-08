@@ -140,18 +140,34 @@ static long long prof_atoms = 0;
 static long long prof_ll_pairs = 0, prof_lh_pairs = 0, prof_hh_pairs = 0;
 static double prof_total_ms = 0.0, prof_ll_ms = 0.0, prof_lh_ms = 0.0, prof_hh_ms = 0.0;
 
+static inline bool env_token_ci(const char *value, char *out, std::size_t out_size) {
+  if (!value || !out || out_size == 0) return false;
+  while (*value && std::isspace(static_cast<unsigned char>(*value))) ++value;
+  std::size_t len = 0;
+  while (value[len] && !std::isspace(static_cast<unsigned char>(value[len])) &&
+         len + 1 < out_size) {
+    out[len] = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(value[len])));
+    ++len;
+  }
+  out[len] = '\0';
+  return len > 0;
+}
+
+static inline bool env_truthy_ci(const char *value) {
+  char token[16] = {};
+  if (!env_token_ci(value, token, sizeof(token))) return false;
+  return std::strcmp(token, "0") != 0 && std::strcmp(token, "f") != 0 &&
+         std::strcmp(token, "false") != 0 && std::strcmp(token, "n") != 0 &&
+         std::strcmp(token, "no") != 0 && std::strcmp(token, "off") != 0;
+}
+
 static bool resident_debug_enabled_local() {
   static int inited = 0;
   static bool enabled = false;
   if (!inited) {
     const char *s = std::getenv("MOPAC_GPU_RESIDENT_DEBUG");
-    if (s && *s) {
-      if (!(std::strcmp(s, "0") == 0 || std::strcmp(s, "off") == 0 ||
-            std::strcmp(s, "false") == 0 || std::strcmp(s, "n") == 0 ||
-            std::strcmp(s, "N") == 0)) {
-        enabled = true;
-      }
-    }
+    enabled = env_truthy_ci(s);
     inited = 1;
   }
   return enabled;
@@ -197,11 +213,7 @@ static inline void ensure_profile_collect() {
     const char* s = std::getenv("MOPAC_GPU_PROFILE");
     if (s && *s) {
       prof_env_requested = 1;
-      if (std::strcmp(s, "0") == 0 || std::strcmp(s, "off") == 0 || std::strcmp(s, "false") == 0) {
-        prof_collect = 0;
-      } else {
-        prof_collect = 1;
-      }
+      prof_collect = env_truthy_ci(s) ? 1 : 0;
     } else {
       prof_collect = 1;
     }
@@ -212,13 +224,7 @@ static inline void ensure_profile_collect() {
 static inline bool fock_verification_enabled() {
   if (!verify_fock_inited) {
     const char* s = std::getenv("MOPAC_GPU_VERIFY_FOCK");
-    if (s && *s) {
-      if (!(std::strcmp(s, "0") == 0 || std::strcmp(s, "off") == 0 ||
-            std::strcmp(s, "false") == 0 || std::strcmp(s, "n") == 0 ||
-            std::strcmp(s, "N") == 0)) {
-        verify_fock_enabled = 1;
-      }
-    }
+    verify_fock_enabled = env_truthy_ci(s) ? 1 : 0;
     verify_fock_inited = 1;
   }
   return verify_fock_enabled != 0;
@@ -1627,7 +1633,7 @@ bool mopac_cuda_fock2_scf(int norbs, int mpack, int numat,
     if (max_diff > 1.0e-9) {
       std::printf("[GPU FOCK verify] max diff=% .5e\n", max_diff);
       const char *pp_env = std::getenv("MOPAC_GPU_VERIFY_PER_PAIR");
-      if (pp_env && *pp_env) {
+      if (env_truthy_ci(pp_env)) {
         // One-pair device arrays
         int *d1_i=nullptr, *d1_j=nullptr, *d1_t=nullptr, *d1_wo=nullptr, *d1_wjo=nullptr, *d1_wko=nullptr;
         double *d_f_tmp=nullptr;

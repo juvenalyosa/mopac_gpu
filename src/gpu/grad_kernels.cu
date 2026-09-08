@@ -13,6 +13,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <cctype>
+#include <cstring>
 #include <vector>
 
 #include "grad_launch.h"
@@ -34,6 +36,24 @@ static int experimental_mode = -1;  // -1 unset, 0 disabled, 1 enabled
 
 constexpr double kCoulombKcalPerAng = 332.063712949;  // kcal/mol * Å / e^2
 
+static bool env_truthy(const char *env) {
+  if (!env) return false;
+  while (*env && std::isspace(static_cast<unsigned char>(*env))) ++env;
+  if (*env == '\0') return false;
+  char value[16] = {};
+  int len = 0;
+  while (env[len] && !std::isspace(static_cast<unsigned char>(env[len])) &&
+         len < static_cast<int>(sizeof(value)) - 1) {
+    value[len] = static_cast<char>(std::tolower(
+        static_cast<unsigned char>(env[len])));
+    ++len;
+  }
+  value[len] = '\0';
+  return std::strcmp(value, "0") != 0 && std::strcmp(value, "f") != 0 &&
+         std::strcmp(value, "false") != 0 && std::strcmp(value, "n") != 0 &&
+         std::strcmp(value, "no") != 0 && std::strcmp(value, "off") != 0;
+}
+
 // Atomic add for double that works on pre-6.0 architectures via CAS
 __device__ inline double atomicAdd_double(double* address, double val) {
 #if __CUDA_ARCH__ >= 600
@@ -53,7 +73,7 @@ __device__ inline double atomicAdd_double(double* address, double val) {
 static bool experimental_enabled() {
   if (experimental_mode >= 0) return experimental_mode == 1;
   const char *env = std::getenv("MOPAC_GPU_GRAD_EXPERIMENTAL");
-  if (env && env[0] != '\0' && env[0] != '0') {
+  if (env_truthy(env)) {
     experimental_mode = 1;
   } else {
     experimental_mode = 0;

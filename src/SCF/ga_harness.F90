@@ -103,8 +103,8 @@ contains
     deallocate(cand_pa, cand_pb)
   end subroutine ga_initial_guess
 
-  subroutine maybe_ga_refine_initial_guess(pa, pb, p, w, h, f, fb, norbs, mpack, numat, nfirst, nlast, &
-                                          uhf, na1el, nb1el, nclose, fract, id)
+  subroutine maybe_ga_refine_initial_guess(pa, pb, p, w, h, f, norbs, mpack, numat, nfirst, nlast, &
+                                          uhf, na1el, nb1el, nclose, fract, id, fb)
     implicit none
     integer, intent(in) :: norbs, mpack, numat, id
     integer, intent(in) :: nfirst(numat), nlast(numat)
@@ -112,11 +112,13 @@ contains
     logical, intent(in) :: uhf
     double precision, intent(in) :: fract
     double precision, intent(inout) :: pa(mpack), pb(mpack), p(mpack)
-    double precision, intent(inout) :: w(*), h(mpack), f(mpack), fb(mpack)
+    double precision, intent(inout) :: w(*), h(mpack), f(mpack)
+    double precision, intent(inout), optional :: fb(mpack)
     integer :: status
     character(len=8) :: env
     logical :: enabled
     double precision :: tmp_best
+    double precision, allocatable :: fb_work(:)
     enabled = .false.
     call get_environment_variable('MOPAC_GA_INIT', env, status=status)
     if (status == 0) then
@@ -125,8 +127,16 @@ contains
       end if
     end if
     if (.not. enabled) return
-    call ga_initial_guess(pa, pb, p, w, h, f, fb, norbs, mpack, numat, nfirst, nlast, &
-                          uhf, na1el, nb1el, nclose, fract, id, tmp_best)
+    if (present(fb)) then
+      call ga_initial_guess(pa, pb, p, w, h, f, fb, norbs, mpack, numat, nfirst, nlast, &
+                            uhf, na1el, nb1el, nclose, fract, id, tmp_best)
+    else
+      allocate(fb_work(mpack))
+      fb_work = 0.0d0
+      call ga_initial_guess(pa, pb, p, w, h, f, fb_work, norbs, mpack, numat, nfirst, nlast, &
+                            uhf, na1el, nb1el, nclose, fract, id, tmp_best)
+      deallocate(fb_work)
+    end if
   end subroutine maybe_ga_refine_initial_guess
 
   double precision function helect_quick(norbs, p, h, f)

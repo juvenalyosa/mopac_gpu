@@ -85,10 +85,6 @@ contains
       wk(i) = w(i)
     end do
 
-    print *, 'DEBUG ', trim(label), ' nfirst=', nfirst
-    print *, 'DEBUG ', trim(label), ' nlast =', nlast
-    print *, 'DEBUG ', trim(label), ' len_w =', len_w
-
     ia = nfirst(2)
     ib = nlast(2)
     ja = nfirst(1)

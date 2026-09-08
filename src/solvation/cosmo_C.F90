@@ -19,7 +19,7 @@ module cosmo_C
   integer :: nspa, nps, nps2, nden, lenabc, nppa = 1082, &
   amat_dim, isude_dim, nipc, ioldcv
   integer, dimension (2) :: n0
-  integer, dimension(:), allocatable :: &
+  integer, dimension(:), allocatable, target :: &
   & iatsp,   & !
   & nar_csm, & !
   & nsetf,i, & !  Watch out for the "i"
@@ -29,7 +29,7 @@ module cosmo_C
   integer, dimension(:,:), allocatable :: &
   & isude,   & !
   & nn
-  double precision ::&
+  double precision, target ::&
     fepsi,       & ! Dielectric factor =  (e-1)/(e+0.5), e = dielectric constant
                    !
     rds, disex2, &
@@ -48,14 +48,14 @@ module cosmo_C
   double precision, dimension(:), allocatable :: diagsl
   double precision, dimension(3,3,1082) :: tm
   double precision, dimension(4,1082) :: dirsm, dirvec
-  double precision, dimension(:), allocatable :: &
+  double precision, dimension(:), allocatable, target :: &
   & amat,    & !
   & gden,    & !
   & qscat,   & !
   & arat,    & !
   & srad,    & !
   & qden
-  double precision, dimension(:,:), allocatable :: &
+  double precision, dimension(:,:), allocatable, target :: &
   & bmat,    & !
   & phinet,  & !
   & qscnet,  & !

@@ -152,9 +152,10 @@
       call get_environment_variable('MOPAC_GPU_SCF_EXPERIMENTAL', env_gpu_scf, status=gpu_scf_env_stat)
       if (gpu_scf_env_stat == 0) then
         env_gpu_scf = adjustl(env_gpu_scf)
+        call upcase(env_gpu_scf, len_trim(env_gpu_scf))
         if (len_trim(env_gpu_scf) > 0) then
-          select case (env_gpu_scf(1:1))
-          case('0','n','N','f','F')
+          select case (trim(env_gpu_scf))
+          case('0','N','NO','F','FALSE','OFF')
             gpu_scf_enabled = .false.
           case default
             gpu_scf_enabled = .true.
@@ -222,9 +223,10 @@
         call get_environment_variable('MOPAC_SCF_HYBRID', line, status=i)
         if (i == 0) then
           line = adjustl(line)
+          call upcase(line, len_trim(line))
           if (len_trim(line) > 0) then
-            select case (line(1:1))
-            case('0','n','N','f','F')
+            select case (trim(line))
+            case('0','N','NO','F','FALSE','OFF')
               hybrid_enable = .false.
             case default
               hybrid_enable = .true.
@@ -365,8 +367,13 @@
             end if
           end if
           ! Optionally refine initial guess via a small GA harness
-          call maybe_ga_refine_initial_guess(pa, pb, p, w, h, f, fb, norbs, mpack, numat, nfirst, nlast, &
-                                             uhf, na1el, nb1el, nclose, fract, id)
+          if (uhf) then
+            call maybe_ga_refine_initial_guess(pa, pb, p, w, h, f, norbs, mpack, numat, nfirst, nlast, &
+                                               uhf, na1el, nb1el, nclose, fract, id, fb)
+          else
+            call maybe_ga_refine_initial_guess(pa, pb, p, w, h, f, norbs, mpack, numat, nfirst, nlast, &
+                                               uhf, na1el, nb1el, nclose, fract, id)
+          end if
           pold(1:mpack) = pa(1:mpack)
           if (uhf) then
             pbold(1:mpack) = pb(1:mpack)
@@ -1813,9 +1820,10 @@
         call get_environment_variable('MOPAC_GPU_RESIDENT_DEBUG', env, status=istat)
         if (istat == 0) then
           env = adjustl(env)
+          call upcase(env, len_trim(env))
           if (len_trim(env) > 0) then
-            select case (env(1:1))
-            case('0','n','N','f','F')
+            select case (trim(env))
+            case('0','N','NO','F','FALSE','OFF')
               flag = .false.
             case default
               flag = .true.

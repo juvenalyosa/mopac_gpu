@@ -14,7 +14,7 @@
 ! limitations under the License.
 
 subroutine iter_for_MOZYME (ee)
-    use molkst_C, only: norbs, step_num, numcal, numcal0, nscf, escf, &
+    use molkst_C, only: norbs, step_num, step_num0, numcal, numcal0, nscf, escf, &
        & numat,  enuclr, atheat, emin, keywrd, moperr, line, use_disk
 !
     use chanel_C, only: iw, iend, end_fn
@@ -29,12 +29,22 @@ subroutine iter_for_MOZYME (ee)
 !
     use funcon_C, only: fpc_9
 #ifdef GPU
-    use mod_vars_cuda, only: lgpu, mozyme_gpu
+    use mod_vars_cuda, only: lgpu, mozyme_gpu, mozyme_check_gpu
 #endif
     use common_arrays_C, only : f, p
     use iter_C, only : pold
     use cosmo_C, only: useps, lpka, solv_energy
     use linear_cosmo, only : c_proc
+    use mozyme_gpu_scf_driver, only : mozyme_gpu_scf_early_probe, &
+      mozyme_gpu_scf_force_final_reorth, &
+      mozyme_gpu_scf_requested, mozyme_gpu_scf_no_fallback_required, &
+      mozyme_gpu_scf_try
+    use mozyme_gpu_makvec, only : mozyme_gpu_makvec_try
+    use mozyme_gpu_relocalize, only : mozyme_gpu_relocalize_try
+    use mozyme_gpu_reorth, only : mozyme_gpu_reorth_try
+    use mozyme_gpu_tidy, only : mozyme_gpu_tidy_try
+    use mozyme_section_timers, only : mozyme_section_timer_begin, &
+      mozyme_section_timer_end, mozyme_section_timer_report_all
     implicit none
 !
     double precision, intent (out) :: ee
@@ -64,19 +74,42 @@ subroutine iter_for_MOZYME (ee)
     integer, save :: i, idnout, nocc1, nvir1, istabl, idiagg, nhb, itrmax, &
       niter, lno, iemax, iemin, lnv, mn, indi, j, k, l, nij = 0, re_local, &
       icalcn = 0, imol = 0, nmol = 0, lstart = 0, add_niter
+    integer :: resident_fock_mode
+    integer :: resident_tidy_code, resident_tidy_resize_status
+    integer, save :: resident_tidy_imode(2) = 0
     double precision, save :: selcon, eold,  sum
     integer, external :: ijbo
     logical, external :: PLS_faulty
     external :: check_gpu
+    external :: mozyme_gpu_strict_abort
     double precision, external :: helecz, reada
     integer, dimension (:), allocatable :: iwork
     double precision, dimension (:), allocatable :: rwork
     integer :: bad_occ, bad_virt, res_idx
     character(len=4) :: res_name
     logical :: gpu_error_occ, gpu_error_virt
+    logical :: resident_gpu_handled, resident_scf_complete
+    logical :: resident_isitsc_done, resident_isitsc_okscf
+    logical :: resident_loop_control_needed
+    logical :: resident_early_probe_handled
+    logical :: resident_strict_required
+    logical :: resident_pls_restart_needed
+    logical :: resident_density_current
+    logical :: resident_initial_setup_needed
+    logical :: resident_pre_tidy_attempt_needed
+    logical :: resident_final_reorth_due
+    logical :: resident_final_reorth_done
+    logical :: resident_tidy_done
+    logical :: resident_tidy_select_lmos
+    logical :: resident_tidy_mode_due
+    logical :: makvec_gpu_done
+    double precision :: mozyme_timer
     add_niter = 0
+    resident_strict_required = mozyme_gpu_scf_no_fallback_required()
+    resident_final_reorth_done = .false.
 !
         80  continue
+    resident_density_current = .false.
     if (nmol /= numcal) then
       !
       !  INITIALIZE
@@ -132,6 +165,9 @@ subroutine iter_for_MOZYME (ee)
       if (Index (keywrd, " OLDEN") == 0) then
         bigscf = .true.
       end if
+      if (resident_strict_required .and. Index (keywrd, " OLDEN") /= 0) then
+        bigscf = .true.
+      end if
       debug = (Index (keywrd, " DEBUG") /= 0)
       prtden = (Index (keywrd, " DENS") /= 0 .and. debug)
       prtfok = (Index (keywrd, " FOCK") /= 0 .and. debug)
@@ -139,20 +175,78 @@ subroutine iter_for_MOZYME (ee)
       idiagg = 0
       nocc1 = noccupied
       store_useps = useps
+      if (resident_strict_required) then
+        if (Index (keywrd, " DENOUT") /= 0) then
+          call mozyme_gpu_strict_abort('strict_denout_host_output', &
+            'MOZYME GPU strict resident SCF does not support DENOUT host density output')
+          return
+        end if
+        if (Index (keywrd, " OLDEN") /= 0) then
+          call mozyme_gpu_strict_abort('strict_olden_host_lmo_restore', &
+            'MOZYME GPU strict resident SCF does not support OLDEN host LMO restore')
+          return
+        end if
+        if (lpka) then
+          call mozyme_gpu_strict_abort('strict_solvent_fock', &
+            'MOZYME GPU strict resident SCF does not support LPKA solvent Fock')
+          return
+        end if
+        if (Index (keywrd, " PKA") /= 0) then
+          call mozyme_gpu_strict_abort('strict_pka_host_output', &
+            'MOZYME GPU strict resident SCF does not support PKA host pKa output')
+          return
+        end if
+      end if
       if (Index (keywrd, " LEWIS") /= 0) then
+        if (resident_strict_required) then
+          makvec_gpu_done = mozyme_gpu_makvec_try()
+          if (.not. makvec_gpu_done) then
+            call mozyme_gpu_strict_abort('strict_lewis_gpu_makvec_failed', &
+              'MOZYME GPU strict resident SCF could not complete LEWIS setup on GPU')
+          end if
+          return
+        end if
         call makvec()
         return
       end if
       if (Index (keywrd, " OLDEN") /= 0) then
+          call mozyme_section_timer_begin('iter_olden_load', mozyme_timer)
           if (use_disk) call pinout(0, (index(keywrd, "SILENT") == 0))
+          call mozyme_section_timer_end('iter_olden_load', mozyme_timer)
           if (add_niter /= 0)  call l_control("OLDEN", len_trim("OLDEN"), -1)
           if (add_niter /= 0)  call l_control("SILENT", len_trim("SILENT"), -1)
           if (moperr) return
-          call density_for_MOZYME (p, 0, noccupied, partp)
-          partp = p
+          if (resident_strict_required) then
+            write(iw,'(1x,a)') &
+              '[MOZYME GPU SCF] olden_setup=host_lmo_restore setup_only=1'
+            call flush(iw)
+          else
+            call mozyme_section_timer_begin('iter_density_olden', mozyme_timer)
+            call density_for_MOZYME (p, 0, noccupied, partp)
+            call mozyme_section_timer_end('iter_density_olden', mozyme_timer)
+            partp = p
+          end if
       else
         useps = .false.
-        if (index(keywrd, "OLD_SCF") == 0) call makvec()
+        if (index(keywrd, "OLD_SCF") /= 0) then
+          if (resident_strict_required) then
+            call mozyme_gpu_strict_abort('strict_old_scf_existing_lmo', &
+              'MOZYME GPU strict resident SCF does not accept OLD_SCF host-existing LMOs as makvec proof')
+            return
+          end if
+        else
+          makvec_gpu_done = mozyme_gpu_makvec_try()
+          if (.not. makvec_gpu_done) then
+            if (resident_strict_required) then
+              call mozyme_gpu_strict_abort('strict_cpu_makvec', &
+                'MOZYME GPU strict resident SCF does not support CPU makvec initial LMO construction')
+              return
+            end if
+            call mozyme_section_timer_begin('iter_makvec', mozyme_timer)
+            call makvec()
+            call mozyme_section_timer_end('iter_makvec', mozyme_timer)
+          end if
+        end if
       end if
       if (moperr) return
       !
@@ -167,9 +261,32 @@ subroutine iter_for_MOZYME (ee)
       nhb = 3
     end if
     if (mod(nscf + 1, re_local) == 0) then
-      write(iw,"(/10x,a,/)")"  LMOs being Re-Localized"
-      call local_for_MOZYME("OCCUPIED")
-      call local_for_MOZYME("VIRTUAL")
+      if (resident_strict_required) then
+        call mozyme_section_timer_begin('iter_reloc_occ', mozyme_timer)
+        if (.not. mozyme_gpu_relocalize_try("OCCUPIED")) then
+          call mozyme_section_timer_end('iter_reloc_occ', mozyme_timer)
+          call mozyme_gpu_strict_abort('strict_cpu_relocalization', &
+            'MOZYME GPU strict resident SCF could not complete occupied re-localization on GPU')
+          return
+        end if
+        call mozyme_section_timer_end('iter_reloc_occ', mozyme_timer)
+        call mozyme_section_timer_begin('iter_reloc_virt', mozyme_timer)
+        if (.not. mozyme_gpu_relocalize_try("VIRTUAL")) then
+          call mozyme_section_timer_end('iter_reloc_virt', mozyme_timer)
+          call mozyme_gpu_strict_abort('strict_cpu_relocalization', &
+            'MOZYME GPU strict resident SCF could not complete virtual re-localization on GPU')
+          return
+        end if
+        call mozyme_section_timer_end('iter_reloc_virt', mozyme_timer)
+      else
+        write(iw,"(/10x,a,/)")"  LMOs being Re-Localized"
+        call mozyme_section_timer_begin('iter_reloc_occ', mozyme_timer)
+        call local_for_MOZYME("OCCUPIED")
+        call mozyme_section_timer_end('iter_reloc_occ', mozyme_timer)
+        call mozyme_section_timer_begin('iter_reloc_virt', mozyme_timer)
+        call local_for_MOZYME("VIRTUAL")
+        call mozyme_section_timer_end('iter_reloc_virt', mozyme_timer)
+      end if
     end if
     useps = store_useps
     if (lpka) useps = .true.
@@ -204,6 +321,9 @@ subroutine iter_for_MOZYME (ee)
     pold = 0.d0
     p1 = 0.d0
     nscf = nscf + 1
+    resident_final_reorth_due = orthog .and. &
+      (Mod(nscf + 1, 10) == 1 .or. &
+      (resident_strict_required .and. mozyme_gpu_scf_force_final_reorth()))
    !
    !  Force IDIAGG to be even - this is to ensure that DIAGG1
    !  re-builds the interaction list, in case the temporary space
@@ -225,8 +345,149 @@ subroutine iter_for_MOZYME (ee)
 !***********************************************************
     do  !  Big loop to run the SCF
 !----------------
+      nocc1 = nelred / 2
+      nvir1 = norred - nocc1
+      resident_initial_setup_needed = (imol /= numcal .or. &
+        (icalcn /= step_num .and. numat > numred+1))
+      resident_loop_control_needed = (.not. bigscf .and. numcal == 1+numcal0)
+      resident_pre_tidy_attempt_needed = mozyme_gpu_scf_requested() .and. &
+        niter == 0 .and. resident_initial_setup_needed .and. &
+        nocc1 > 0 .and. nvir1 > 0 .and. &
+        itrmax > niter .and. .not. resident_loop_control_needed .and. &
+        .not. lpka
+      if (resident_pre_tidy_attempt_needed) then
+        resident_tidy_done = .false.
+        resident_early_probe_handled = mozyme_gpu_scf_early_probe(niter, &
+          nocc1, nvir1, itrmax, selcon)
+        if (resident_early_probe_handled) then
+          if (resident_strict_required) then
+            call mozyme_gpu_strict_abort('strict_early_probe_fallback', &
+              'MOZYME GPU strict resident SCF does not support early probe fallback')
+          end if
+          call mozyme_section_timer_report_all()
+          return
+        end if
+        if (resident_strict_required) then
+          if (nmol /= numcal) resident_tidy_imode = step_num
+          resident_tidy_mode_due = step_num > 1+step_num0 .and. &
+            step_num /= resident_tidy_imode(1)
+          resident_tidy_select_lmos = resident_tidy_mode_due .and. &
+            numat > numred+1
+            do
+              call mozyme_section_timer_begin('iter_tidy_occ', mozyme_timer)
+              if (mozyme_gpu_tidy_try(1, lno, mn, &
+                  use_selmos=resident_tidy_select_lmos, &
+                  error_code=resident_tidy_code)) then
+                if (resident_tidy_mode_due) resident_tidy_imode(1) = step_num
+                call mozyme_section_timer_end('iter_tidy_occ', mozyme_timer)
+                exit
+              end if
+              call mozyme_section_timer_end('iter_tidy_occ', mozyme_timer)
+              if (resident_tidy_code == -506) then
+                call mozyme_gpu_grow_lmo_storage(resident_tidy_resize_status)
+                if (resident_tidy_resize_status == 0) cycle
+                call mozyme_gpu_strict_abort('strict_resident_tidy_resize_failed', &
+                  'MOZYME GPU strict resident SCF could not grow LMO storage for occupied TIDY')
+                return
+              end if
+              call mozyme_gpu_strict_abort('strict_resident_tidy_failed', &
+                'MOZYME GPU strict resident SCF could not complete occupied TIDY on GPU')
+              return
+            end do
+            resident_tidy_mode_due = step_num > 1+step_num0 .and. &
+              step_num /= resident_tidy_imode(2)
+            resident_tidy_select_lmos = resident_tidy_mode_due .and. &
+              numat > numred+1
+            do
+              call mozyme_section_timer_begin('iter_tidy_virt', mozyme_timer)
+              if (mozyme_gpu_tidy_try(2, lnv, mn, &
+                  use_selmos=resident_tidy_select_lmos, &
+                  error_code=resident_tidy_code)) then
+                if (resident_tidy_mode_due) resident_tidy_imode(2) = step_num
+                call mozyme_section_timer_end('iter_tidy_virt', mozyme_timer)
+                exit
+              end if
+              call mozyme_section_timer_end('iter_tidy_virt', mozyme_timer)
+              if (resident_tidy_code == -506) then
+                call mozyme_gpu_grow_lmo_storage(resident_tidy_resize_status)
+                if (resident_tidy_resize_status == 0) cycle
+                call mozyme_gpu_strict_abort('strict_resident_tidy_resize_failed', &
+                  'MOZYME GPU strict resident SCF could not grow LMO storage for virtual TIDY')
+                return
+              end if
+              call mozyme_gpu_strict_abort('strict_resident_tidy_failed', &
+                'MOZYME GPU strict resident SCF could not complete virtual TIDY on GPU')
+              return
+            end do
+            resident_tidy_done = .true.
+            nocc1 = nelred / 2
+            nvir1 = norred - nocc1
+            if (nocc1 <= 0 .or. nvir1 <= 0) then
+              call mozyme_gpu_strict_abort('strict_resident_tidy_empty_space', &
+                'MOZYME GPU strict resident SCF produced empty selected TIDY space')
+              return
+            end if
+        end if
+        if (nmol == numcal .and. numat > numred+1) then
+          resident_fock_mode = 1
+        else
+          resident_fock_mode = 0
+        end if
+        ! The resident driver owns initial setup before CPU tidy/check/setup
+        ! bookends for full and selected partial-active-space paths.
+        ! Unsupported cases fall through to the existing CPU path unless the
+        ! strict resident proof contract is active.
+        call mozyme_section_timer_begin('iter_resident_scf_boundary', mozyme_timer)
+        resident_scf_complete = .false.
+        resident_isitsc_done = .false.
+        resident_isitsc_okscf = .false.
+        resident_gpu_handled = .false.
+        if (.not. resident_loop_control_needed) then
+          resident_gpu_handled = mozyme_gpu_scf_try(ee, niter, nocc1, nvir1, &
+            itrmax, selcon, resident_fock_mode, idiagg, nhb, resident_fock_mode, &
+            resident_scf_complete, eold, iemin, iemax, lstart, &
+            initial_setup=.true., block_on_failure=resident_strict_required, &
+            final_reorth=resident_strict_required .and. &
+              resident_final_reorth_due, &
+            final_reorth_done=resident_final_reorth_done, &
+            initial_tidy_done=resident_tidy_done)
+        end if
+        if (resident_gpu_handled) then
+          resident_isitsc_done = .true.
+          resident_isitsc_okscf = resident_scf_complete
+          escf = (ee+enuclr) * fpc_9 + atheat
+          if (useps) then
+                escf = escf + solv_energy * fpc_9
+          end if
+          if (resident_initial_setup_needed) then
+            icalcn = step_num
+            imol = numcal
+          end if
+          call mozyme_section_timer_end('iter_resident_scf_boundary', mozyme_timer)
+          if (resident_scf_complete) then
+            energy_diff = escf - eold
+            eold = escf
+            okscf = .true.
+            resident_density_current = .true.
+            exit
+          end if
+          goto 700
+        end if
+        call mozyme_section_timer_end('iter_resident_scf_boundary', mozyme_timer)
+        if (resident_strict_required) then
+          call mozyme_gpu_strict_abort('strict_pre_tidy_failed', &
+            'MOZYME GPU strict resident SCF failed before CPU tidy')
+          return
+        end if
+      else if (resident_strict_required) then
+        call mozyme_gpu_strict_abort('strict_pre_tidy_not_started', &
+          'MOZYME GPU strict resident SCF could not start before CPU tidy')
+        return
+      end if
       do
+        call mozyme_section_timer_begin('iter_tidy_occ', mozyme_timer)
         call tidy (noccupied, ncf, icocc, icocc_dim, cocc, cocc_dim, nncf, ncocc, lno, mn, 1)
+        call mozyme_section_timer_end('iter_tidy_occ', mozyme_timer)
         if (moperr) then
 !
 !  During a run of "tidy", the amount of expansion space for the LMO's to use had
@@ -331,7 +592,9 @@ subroutine iter_for_MOZYME (ee)
         end if
       end do
       do
+        call mozyme_section_timer_begin('iter_tidy_virt', mozyme_timer)
         call tidy (nvirtual, nce, icvir, icvir_dim, cvir, cvir_dim, nnce, ncvir, lnv, mn, 2)
+        call mozyme_section_timer_end('iter_tidy_virt', mozyme_timer)
         if (moperr) then
 !  Delete old memory
 !
@@ -435,6 +698,67 @@ subroutine iter_for_MOZYME (ee)
 !----------------
       nocc1 = nelred / 2
       nvir1 = norred - nocc1
+      resident_early_probe_handled = mozyme_gpu_scf_early_probe(niter, nocc1, &
+        nvir1, itrmax, selcon)
+      if (resident_early_probe_handled) then
+        if (resident_strict_required) then
+          call mozyme_gpu_strict_abort('strict_early_probe_fallback', &
+            'MOZYME GPU strict resident SCF does not support early probe fallback')
+        end if
+        call mozyme_section_timer_report_all()
+        return
+      end if
+      resident_initial_setup_needed = (imol /= numcal .or. &
+        (icalcn /= step_num .and. numat > numred+1))
+      if (resident_initial_setup_needed) then
+        if (nmol == numcal .and. numat > numred+1) then
+          resident_fock_mode = 1
+        else
+          resident_fock_mode = 0
+        end if
+        ! Fallback initial setup after CPU tidy if the pre-tidy resident
+        ! attempt did not handle the case.
+        resident_loop_control_needed = (.not. bigscf .and. numcal == 1+numcal0)
+        call mozyme_section_timer_begin('iter_resident_scf_boundary', mozyme_timer)
+        resident_scf_complete = .false.
+        resident_isitsc_done = .false.
+        resident_isitsc_okscf = .false.
+        resident_gpu_handled = .false.
+        if (.not. resident_loop_control_needed) then
+          resident_gpu_handled = mozyme_gpu_scf_try(ee, niter, nocc1, nvir1, &
+            itrmax, selcon, resident_fock_mode, idiagg, nhb, resident_fock_mode, &
+            resident_scf_complete, eold, iemin, iemax, lstart, &
+            initial_setup=.true., block_on_failure=.true., &
+            final_reorth=resident_strict_required .and. &
+              resident_final_reorth_due, &
+            final_reorth_done=resident_final_reorth_done)
+        end if
+        if (resident_gpu_handled) then
+          resident_isitsc_done = .true.
+          resident_isitsc_okscf = resident_scf_complete
+          escf = (ee+enuclr) * fpc_9 + atheat
+          if (useps) then
+                escf = escf + solv_energy * fpc_9
+          end if
+          icalcn = step_num
+          imol = numcal
+          call mozyme_section_timer_end('iter_resident_scf_boundary', mozyme_timer)
+          if (resident_scf_complete) then
+            energy_diff = escf - eold
+            eold = escf
+            okscf = .true.
+            resident_density_current = .true.
+            exit
+          end if
+          goto 700
+        end if
+        call mozyme_section_timer_end('iter_resident_scf_boundary', mozyme_timer)
+        if (resident_strict_required) then
+          call mozyme_gpu_strict_abort('strict_post_tidy_failed', &
+            'MOZYME GPU strict resident SCF failed after CPU tidy')
+          return
+        end if
+      end if
       !
       !   REMOVE ELECTRON DENSITY DUE TO LMO'S INVOLVED IN SCF FROM
       !   THE DENSITY MATRIX
@@ -444,31 +768,41 @@ subroutine iter_for_MOZYME (ee)
         !
         !   THIS PART IS ONLY RUN WHEN ICALCN IS INCREMENTED
         !
+        call mozyme_section_timer_begin('iter_density_initial', mozyme_timer)
         call density_for_MOZYME (p, 0, noccupied, partp) ! Build the whole density matrix
+        call mozyme_section_timer_end('iter_density_initial', mozyme_timer)
 !
         if (times) call timer (" After DENSIT")
         if (prtden) then
           write (iw, "(' DENSITY MATRIX TO GO INTO PARTP')")
           call vecprt_for_MOZYME (p, norbs)
         end if
+        call mozyme_section_timer_begin('iter_setupk', mozyme_timer)
         call setupk (nocc1) ! Work out the atom list to be used in the SCF
+        call mozyme_section_timer_end('iter_setupk', mozyme_timer)
         if (times) call timer (" After SETUPK")
         if (imol == numcal .and. numat > numred+1) then
+          call mozyme_section_timer_begin('iter_density_remove', mozyme_timer)
           call density_for_MOZYME (partp, -1, nocc1, p) ! Remove density due to atoms to be
                                                         ! used in the SCF
+          call mozyme_section_timer_end('iter_density_remove', mozyme_timer)
           if (prtden) then
             write (iw, "(' DENSITY MATRIX IN PARTP')")
             call vecprt_for_MOZYME (partp, norbs)
           end if
         end if
+        call mozyme_section_timer_begin('iter_buildf_initial', mozyme_timer)
         call buildf (f, partf, 0)
+        call mozyme_section_timer_end('iter_buildf_initial', mozyme_timer)
         if (prtfok) then
           write (iw, "(' FOCK MATRIX AT START OF ITER')")
           call vecprt_for_MOZYME (f, norbs)
         end if
         if (icalcn /= step_num) then
           if (times) call timer (" After BUILDF")
+          call mozyme_section_timer_begin('iter_helecz_initial', mozyme_timer)
           ee = helecz()
+          call mozyme_section_timer_end('iter_helecz_initial', mozyme_timer)
           if (times) call timer (" After HELEC")
           escf = (ee+enuclr) * fpc_9 + atheat
           if (useps) then
@@ -480,16 +814,70 @@ subroutine iter_for_MOZYME (ee)
             backspace (iw)
           end if
         end if
-        if (imol == numcal .and. numat > numred+1) call buildf (partf, f, -1)
+        if (imol == numcal .and. numat > numred+1) then
+          call mozyme_section_timer_begin('iter_buildf_partial', mozyme_timer)
+          call buildf (partf, f, -1)
+          call mozyme_section_timer_end('iter_buildf_partial', mozyme_timer)
+        end if
         icalcn = step_num
         imol = numcal
+      end if
+      if (.not. resident_initial_setup_needed .and. niter <= 10) then
+        resident_loop_control_needed = (.not. bigscf .and. numcal == 1+numcal0)
+        if (nmol == numcal .and. numat > numred+1) then
+          resident_fock_mode = 1
+        else
+          resident_fock_mode = 0
+        end if
+        call mozyme_section_timer_begin('iter_resident_scf_boundary', mozyme_timer)
+        resident_scf_complete = .false.
+        resident_isitsc_done = .false.
+        resident_isitsc_okscf = .false.
+        resident_gpu_handled = .false.
+        if (.not. resident_loop_control_needed) then
+          resident_gpu_handled = mozyme_gpu_scf_try(ee, niter, nocc1, nvir1, &
+            itrmax, selcon, resident_fock_mode, idiagg, nhb, resident_fock_mode, &
+            resident_scf_complete, eold, iemin, iemax, lstart, &
+            final_reorth=resident_strict_required .and. &
+              resident_final_reorth_due, &
+            final_reorth_done=resident_final_reorth_done)
+        end if
+        if (resident_gpu_handled) then
+          resident_isitsc_done = .true.
+          resident_isitsc_okscf = resident_scf_complete
+          escf = (ee+enuclr) * fpc_9 + atheat
+          if (useps) then
+                escf = escf + solv_energy * fpc_9
+          end if
+          call mozyme_section_timer_end('iter_resident_scf_boundary', mozyme_timer)
+          if (resident_scf_complete) then
+            energy_diff = escf - eold
+            eold = escf
+            okscf = .true.
+            resident_density_current = .true.
+            exit
+          end if
+          goto 700
+        end if
+        call mozyme_section_timer_end('iter_resident_scf_boundary', mozyme_timer)
+        if (resident_strict_required) then
+          call mozyme_gpu_strict_abort('strict_cpu_iteration_work', &
+            'MOZYME GPU strict resident SCF failed before CPU iteration work')
+          return
+        end if
       end if
 !
 !  Correct any small errors in normalization
 !
+      if (resident_strict_required) then
+        call mozyme_gpu_strict_abort('strict_cpu_lmo_check', &
+          'MOZYME GPU strict resident SCF does not support CPU LMO check')
+        return
+      end if
       bad_occ = 0
+      call mozyme_section_timer_begin('iter_check_occ', mozyme_timer)
 #ifdef GPU
-      if (mozyme_gpu .and. lgpu) then
+      if (mozyme_gpu .and. lgpu .and. mozyme_check_gpu) then
         gpu_error_occ = .false.
         call check_gpu(nocc1, nncf, ncf, icocc, icocc_dim, iorbs, ncocc, cocc, cocc_dim, gpu_error_occ, bad_occ)
         moperr = gpu_error_occ
@@ -499,9 +887,10 @@ subroutine iter_for_MOZYME (ee)
 #else
       call check(nocc1, nncf, ncf, icocc, icocc_dim, iorbs, ncocc, cocc, cocc_dim)
 #endif
+      call mozyme_section_timer_end('iter_check_occ', mozyme_timer)
 #ifdef GPU
       if (moperr) then
-        if (lgpu .and. mozyme_gpu) then
+        if (lgpu .and. mozyme_gpu .and. mozyme_check_gpu) then
           if (bad_occ >= 1 .and. bad_occ <= size(gpu_occ_enabled)) then
             gpu_occ_enabled(bad_occ) = .false.
             if (bad_occ >= 1 .and. bad_occ <= size(nncf)-1 .and. nncf(bad_occ)+1 <= size(icocc)) then
@@ -526,8 +915,9 @@ subroutine iter_for_MOZYME (ee)
 #endif
       if (moperr) return
       bad_virt = 0
+      call mozyme_section_timer_begin('iter_check_virt', mozyme_timer)
 #ifdef GPU
-      if (mozyme_gpu .and. lgpu) then
+      if (mozyme_gpu .and. lgpu .and. mozyme_check_gpu) then
         gpu_error_virt = .false.
         call check_gpu(nvir1, nnce, nce, icvir, icvir_dim, iorbs, ncvir, cvir, cvir_dim, gpu_error_virt, bad_virt)
         moperr = gpu_error_virt
@@ -537,9 +927,10 @@ subroutine iter_for_MOZYME (ee)
 #else
       call check(nvir1, nnce, nce, icvir, icvir_dim, iorbs, ncvir, cvir, cvir_dim)
 #endif
+      call mozyme_section_timer_end('iter_check_virt', mozyme_timer)
 #ifdef GPU
       if (moperr) then
-        if (lgpu .and. mozyme_gpu) then
+        if (lgpu .and. mozyme_gpu .and. mozyme_check_gpu) then
           if (bad_virt >= 1 .and. bad_virt <= size(gpu_virt_enabled)) then
             gpu_virt_enabled(bad_virt) = .false.
             if (bad_virt >= 1 .and. bad_virt <= size(nnce)-1 .and. nnce(bad_virt)+1 <= size(icvir)) then
@@ -563,23 +954,23 @@ subroutine iter_for_MOZYME (ee)
       end if
 #endif
       if (moperr) return
-      if (Mod(niter+1, idnout) == 0 .and. use_disk) then
-        write (iw, "(A)") " .den FILE TO BE WRITTEN OUT"
-        endfile (iw)
-        backspace (iw)
-        call pinout (1, .true.)
-        write (iw, "(A)") " .den FILE WRITTEN OUT"
-        endfile (iw)
-        backspace (iw)
-      end if
-      call eimp ()
-      if (nmol == numcal .and. numat > numred+1) then
-        indi = 1
-      else
-        indi = 0
-      end if
+      resident_loop_control_needed = .false.
+      resident_pls_restart_needed = .false.
       if (niter > 10 .and. add_niter == 0) then
-        if (PLS_faulty()) then
+        if (resident_strict_required) then
+          call mozyme_gpu_strict_abort('strict_cpu_pls_supervisor', &
+            'MOZYME GPU strict resident SCF does not support CPU PLS supervisor')
+          return
+        end if
+        call mozyme_section_timer_begin('iter_pls_faulty', mozyme_timer)
+        resident_pls_restart_needed = PLS_faulty()
+        if (resident_pls_restart_needed) then
+          call mozyme_section_timer_end('iter_pls_faulty', mozyme_timer)
+          if (resident_strict_required) then
+            call mozyme_gpu_strict_abort('strict_cpu_pls_restart', &
+              'MOZYME GPU strict resident SCF does not support CPU PLS restart')
+            return
+          end if
 !
 !  When some systems are run using MOZYME, the DIAGG1 - DIAGG2 combination fails to converge,
 !  and the ovmax converges to a non-zero minimum.  If the job is stopped and a <file>.den
@@ -597,12 +988,84 @@ subroutine iter_for_MOZYME (ee)
           nscf = nscf - 1
           goto 80
         end if
+        call mozyme_section_timer_end('iter_pls_faulty', mozyme_timer)
+      end if
+      if (.not. bigscf .and. numcal == 1+numcal0) then
+        resident_loop_control_needed = .true.
+        if (resident_strict_required) then
+          call mozyme_gpu_strict_abort('strict_cpu_loop_control', &
+            'MOZYME GPU strict resident SCF does not support CPU loop-control step')
+          return
+        end if
+      end if
+      ! Experimental resident-SCF boundary.  Strict resident mode resolves
+      ! PLS restart and ADDHB inside the CUDA resident-control contract.
+      if (nmol == numcal .and. numat > numred+1) then
+        resident_fock_mode = 1
+      else
+        resident_fock_mode = 0
+      end if
+      call mozyme_section_timer_begin('iter_resident_scf_boundary', mozyme_timer)
+      resident_scf_complete = .false.
+      resident_isitsc_done = .false.
+      resident_isitsc_okscf = .false.
+      resident_gpu_handled = .false.
+      if (.not. resident_loop_control_needed) then
+        resident_gpu_handled = mozyme_gpu_scf_try(ee, niter, nocc1, nvir1, &
+          itrmax, selcon, resident_fock_mode, idiagg, nhb, resident_fock_mode, &
+          resident_scf_complete, eold, iemin, iemax, lstart, &
+          final_reorth=resident_strict_required .and. resident_final_reorth_due, &
+          final_reorth_done=resident_final_reorth_done)
+      end if
+      if (resident_gpu_handled) then
+        resident_isitsc_done = .true.
+        resident_isitsc_okscf = resident_scf_complete
+        escf = (ee+enuclr) * fpc_9 + atheat
+        if (useps) then
+              escf = escf + solv_energy * fpc_9
+        end if
+        call mozyme_section_timer_end('iter_resident_scf_boundary', mozyme_timer)
+        if (resident_scf_complete) then
+          energy_diff = escf - eold
+          eold = escf
+          okscf = .true.
+          resident_density_current = .true.
+          exit
+        end if
+        goto 700
+      end if
+      call mozyme_section_timer_end('iter_resident_scf_boundary', mozyme_timer)
+      if (resident_strict_required) then
+        call mozyme_gpu_strict_abort('strict_cpu_scf_body', &
+          'MOZYME GPU strict resident SCF failed before CPU SCF body')
+        return
+      end if
+      if (Mod(niter+1, idnout) == 0 .and. use_disk) then
+        write (iw, "(A)") " .den FILE TO BE WRITTEN OUT"
+        endfile (iw)
+        backspace (iw)
+        call pinout (1, .true.)
+        write (iw, "(A)") " .den FILE WRITTEN OUT"
+        endfile (iw)
+        backspace (iw)
+      end if
+      call mozyme_section_timer_begin('iter_eimp', mozyme_timer)
+      call eimp ()
+      call mozyme_section_timer_end('iter_eimp', mozyme_timer)
+      if (nmol == numcal .and. numat > numred+1) then
+        indi = 1
+      else
+        indi = 0
       end if
       if (bigscf .or. numcal /= 1+numcal0) then
+          call mozyme_section_timer_begin('iter_diagg', mozyme_timer)
           call diagg (f, nocc1, nvir1,  idiagg,  partp, indi)
+          call mozyme_section_timer_end('iter_diagg', mozyme_timer)
         idiagg = idiagg + 1
       else
+        call mozyme_section_timer_begin('iter_density_iter', mozyme_timer)
         call density_for_MOZYME (p, mode, nocc1,  partp)
+        call mozyme_section_timer_end('iter_density_iter', mozyme_timer)
         bigscf = .true.
       end if
       niter = niter + 1
@@ -611,7 +1074,9 @@ subroutine iter_for_MOZYME (ee)
          !
          !   Check for missed hydrogen bonds and other unusual bonds
          !
+          call mozyme_section_timer_begin('iter_addhb', mozyme_timer)
           call addhb (nocc1, nvir1, idiagg, nij, nhb)
+          call mozyme_section_timer_end('iter_addhb', mozyme_timer)
          !
          !   If hydrogen bonds have been made, set IDIAGG even for DIAGG
          !   to make new interactions.
@@ -626,29 +1091,43 @@ subroutine iter_for_MOZYME (ee)
           call timer (" After DENSIT")
         end if
       end if
-      if (use_three_point_extrap) call cnvgz (p, pold, p1, p2, p3, niter, idiag)
+      if (use_three_point_extrap) then
+        call mozyme_section_timer_begin('iter_cnvgz', mozyme_timer)
+        call cnvgz (p, pold, p1, p2, p3, niter, idiag)
+        call mozyme_section_timer_end('iter_cnvgz', mozyme_timer)
+      end if
       if (times) call timer (" After CNVG")
       if (prtden) then
         write (iw, "(' DENSITY MATRIX ON ITERATION',I4)") niter
         call vecprt_for_MOZYME (p, norbs)
       end if
       if (nmol == numcal .and. numat > numred+1) then
+        call mozyme_section_timer_begin('iter_buildf_iter_partial', mozyme_timer)
         call buildf (f, partf, 1)  !
+        call mozyme_section_timer_end('iter_buildf_iter_partial', mozyme_timer)
       else
+        call mozyme_section_timer_begin('iter_buildf_iter_full', mozyme_timer)
         call buildf (f, partf, 0)
+        call mozyme_section_timer_end('iter_buildf_iter_full', mozyme_timer)
       end if
-      if (itrmax < 3) return
+      if (itrmax < 3) then
+        call mozyme_section_timer_report_all()
+        return
+      end if
       if (times) call timer (" After BUILDF")
       if (prtfok) then
         write (iw, "(' FOCK    MATRIX ON ITERATION',I4)") niter
         call vecprt_for_MOZYME (f, norbs)
       end if
+      call mozyme_section_timer_begin('iter_helecz_iter', mozyme_timer)
       ee = helecz()
+      call mozyme_section_timer_end('iter_helecz_iter', mozyme_timer)
       escf = (ee+enuclr) * fpc_9 + atheat
       if (times) call timer (" After HELEC")
       if (useps) then
             escf = escf + solv_energy * fpc_9
       end if
+700   continue
       energy_diff = escf - eold
       eold = escf
       if (Abs(ovmax) < 5.d0*selcon) then
@@ -688,7 +1167,13 @@ subroutine iter_for_MOZYME (ee)
         endfile (iw)
         backspace (iw)
       end if
-      call isitsc (escf, selcon, emin, iemin, iemax, okscf, niter, itrmax)
+      if (resident_isitsc_done) then
+        okscf = resident_isitsc_okscf
+      else
+        call mozyme_section_timer_begin('iter_isitsc', mozyme_timer)
+        call isitsc (escf, selcon, emin, iemin, iemax, okscf, niter, itrmax)
+        call mozyme_section_timer_end('iter_isitsc', mozyme_timer)
+      end if
       if ( .not. bigscf .and. numcal == 1+numcal0) then
         exit
       else if (okscf .and. niter > 1 .and. (emin /= 0.d0 .or. niter > 3)) then
@@ -747,25 +1232,123 @@ subroutine iter_for_MOZYME (ee)
     if (escf < emin .or. emin == 0.d0) then
       emin = escf
     end if
-    if (.not. scf1) then
+    if (resident_density_current) then
+      call mozyme_section_timer_begin('iter_density_final_resident', mozyme_timer)
+      write(iw,'(1x,a)') '[MOZYME GPU SCF] final_density=current_resident'
+      call flush(iw)
+      call mozyme_section_timer_end('iter_density_final_resident', mozyme_timer)
+    else if (resident_strict_required) then
+      call mozyme_gpu_strict_abort('strict_missing_final_density', &
+        'MOZYME GPU strict resident SCF ended without resident final density')
+      return
+    else if (.not. scf1) then
       if (numat > numred+1) then
+        call mozyme_section_timer_begin('iter_density_final_partial', mozyme_timer)
         call density_for_MOZYME (p, 1, nocc1, partp)
+        call mozyme_section_timer_end('iter_density_final_partial', mozyme_timer)
       else
+        call mozyme_section_timer_begin('iter_density_final_full', mozyme_timer)
         call density_for_MOZYME (p, 0, nocc1, partp)
+        call mozyme_section_timer_end('iter_density_final_full', mozyme_timer)
       end if
     end if
     icalcn = step_num
     imol = numcal
-    if (orthog .and. Mod (nscf + 1, 10) == 1) then
-      call reorth (ws)               !   Re-orthogonalize the LMO's
-      call density_for_MOZYME (p, 0, noccupied, partp)
-      call buildf (f, partf, 0)
-      ee = helecz ()
+    if (resident_final_reorth_due) then
+      if (resident_strict_required) then
+        if (.not. resident_final_reorth_done) then
+          call mozyme_gpu_strict_abort('strict_cpu_reorthogonalization', &
+            'MOZYME GPU strict resident SCF did not complete resident reorthogonalization')
+          return
+        end if
+      else
+        call mozyme_section_timer_begin('iter_reorth', mozyme_timer)
+        if (.not. mozyme_gpu_reorth_try()) then
+          call reorth (ws)             !   Re-orthogonalize the LMO's
+        end if
+        call mozyme_section_timer_end('iter_reorth', mozyme_timer)
+        call mozyme_section_timer_begin('iter_density_reorth', mozyme_timer)
+        call density_for_MOZYME (p, 0, noccupied, partp)
+        call mozyme_section_timer_end('iter_density_reorth', mozyme_timer)
+        call mozyme_section_timer_begin('iter_buildf_reorth', mozyme_timer)
+        call buildf (f, partf, 0)
+        call mozyme_section_timer_end('iter_buildf_reorth', mozyme_timer)
+        call mozyme_section_timer_begin('iter_helecz_reorth', mozyme_timer)
+        ee = helecz ()
+        call mozyme_section_timer_end('iter_helecz_reorth', mozyme_timer)
+      end if
       escf = (ee+enuclr) * fpc_9 + atheat
       if (useps) then
             escf = escf + solv_energy * fpc_9
       end if
     end if
     nmol = numcal
+    call mozyme_section_timer_report_all()
     return
     end subroutine iter_for_MOZYME
+
+subroutine mozyme_gpu_strict_fallback_marker(reason)
+  use chanel_C, only: iw
+  implicit none
+  character(len=*), intent(in) :: reason
+
+  write(iw,'(1x,a,a)') '[MOZYME GPU SCF] status=strict_abort reason=', &
+    trim(reason)
+  call flush(iw)
+end subroutine mozyme_gpu_strict_fallback_marker
+
+subroutine mozyme_gpu_strict_abort(reason, message)
+  use mozyme_section_timers, only : mozyme_section_timer_report_all
+  implicit none
+  character(len=*), intent(in) :: reason, message
+  external :: mopend, mozyme_gpu_strict_fallback_marker
+
+  call mozyme_gpu_strict_fallback_marker(reason)
+  call mopend(message)
+  call mozyme_section_timer_report_all()
+  error stop 'MOZYME GPU strict resident SCF abort'
+end subroutine mozyme_gpu_strict_abort
+
+subroutine mozyme_gpu_grow_lmo_storage(status)
+  use MOZYME_C, only : icocc, cocc, icvir, cvir, icocc_dim, cocc_dim, &
+    icvir_dim, cvir_dim
+  implicit none
+  integer, intent(out) :: status
+  integer :: new_icocc_dim, new_cocc_dim, new_icvir_dim, new_cvir_dim
+  integer, allocatable :: new_icocc(:), new_icvir(:)
+  double precision, allocatable :: new_cocc(:), new_cvir(:)
+
+  status = 0
+  if (.not. allocated(icocc) .or. .not. allocated(cocc) .or. &
+      .not. allocated(icvir) .or. .not. allocated(cvir)) then
+    status = 1
+    return
+  end if
+
+  new_icocc_dim = max(icocc_dim + 1, nint(dble(icocc_dim) * 1.6d0))
+  new_cocc_dim = max(cocc_dim + 1, nint(dble(cocc_dim) * 1.6d0))
+  new_icvir_dim = max(icvir_dim + 1, nint(dble(icvir_dim) * 1.6d0))
+  new_cvir_dim = max(cvir_dim + 1, nint(dble(cvir_dim) * 1.6d0))
+
+  allocate(new_icocc(new_icocc_dim), new_cocc(new_cocc_dim), &
+    new_icvir(new_icvir_dim), new_cvir(new_cvir_dim), stat=status)
+  if (status /= 0) return
+
+  new_icocc = 0
+  new_cocc = 0.0d0
+  new_icvir = 0
+  new_cvir = 0.0d0
+  new_icocc(:icocc_dim) = icocc(:icocc_dim)
+  new_cocc(:cocc_dim) = cocc(:cocc_dim)
+  new_icvir(:icvir_dim) = icvir(:icvir_dim)
+  new_cvir(:cvir_dim) = cvir(:cvir_dim)
+
+  call move_alloc(new_icocc, icocc)
+  call move_alloc(new_cocc, cocc)
+  call move_alloc(new_icvir, icvir)
+  call move_alloc(new_cvir, cvir)
+  icocc_dim = new_icocc_dim
+  cocc_dim = new_cocc_dim
+  icvir_dim = new_icvir_dim
+  cvir_dim = new_cvir_dim
+end subroutine mozyme_gpu_grow_lmo_storage

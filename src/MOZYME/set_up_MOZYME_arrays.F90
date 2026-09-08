@@ -14,6 +14,7 @@
 ! limitations under the License.
 
   subroutine set_up_MOZYME_arrays()
+    use mozyme_gpu_plan, only : apply_mozyme_gpu_early_plan, report_mozyme_gpu_plan
     use MOZYME_C, only : jopt, ncocc, ncvir, nncf, nnce, icocc, icvir, kopt, &
     noccupied, nvirtual, icocc_dim, icvir_dim, ncf, nce, cocc, cvir, &
     gpu_occ_enabled, gpu_virt_enabled, &
@@ -41,6 +42,7 @@
 
     end if
     iorbs = nlast - nfirst + 1
+  call apply_mozyme_gpu_early_plan()
 !
 ! The sizes of the arrays used by MOZYME must be evaluated by a call to fillij.
 ! Once the sizes are known, the arrays can be created.
@@ -135,6 +137,7 @@
 !
 
   call fillij(.false.)
+  call report_mozyme_gpu_plan()
 
   ifact(1) = 0
   do i = 1, norbs - 1

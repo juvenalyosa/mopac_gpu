@@ -1,5 +1,7 @@
-! Minimal CU-BLAS interfaces used by MOPAC GPU paths
+! Minimal production cuBLAS interfaces used by MOPAC GPU paths.
 ! Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
+! These bindings keep the chemistry-facing BLAS calls in FP64 and delegate
+! dense kernels to NVIDIA libraries instead of project-local CUDA math kernels.
 module mopac_cublas_interfaces
   use iso_c_binding
   implicit none

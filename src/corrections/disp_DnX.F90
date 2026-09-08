@@ -100,9 +100,10 @@ double precision function disp_DnX(l_grad)
       call get_environment_variable('MOPAC_DISP_GPU', env_disp, status=istat_env)
       if (istat_env == 0) then
         env_disp = adjustl(env_disp)
+        call upcase(env_disp, len_trim(env_disp))
         if (len_trim(env_disp) > 0) then
-          select case (env_disp(1:1))
-          case ('0','f','F','n','N','o','O')
+          select case (trim(env_disp))
+          case ('0','F','FALSE','N','NO','OFF')
             try_gpu = .false.
           case default
             try_gpu = .true.

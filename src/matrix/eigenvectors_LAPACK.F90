@@ -55,6 +55,7 @@
       logical, save :: mg_checked = .false., mg_available = .false., mg_warned = .false.
       ! Current device CC for auto policy
       integer(c_int) :: ccmaj, ccmin
+      logical :: use_partial_eig, use_mg_eig
       interface
         subroutine mopac_cuda_get_cc(maj, min) bind(C, name='get_current_device_cc')
           import :: c_int
@@ -114,13 +115,38 @@ end if
           mg_checked = .true.
         end if
         call get_environment_variable('MOPAC_FASTGPU', fast, status=stat_env)
-        if (stat_env == 0) fastgpu = (trim(adjustl(fast)) /= '')
+        if (stat_env == 0) then
+          fast = adjustl(fast)
+          call upcase(fast, len_trim(fast))
+          select case (trim(fast))
+          case ('1','T','TRUE','Y','YES','ON')
+            fastgpu = .true.
+          case default
+            fastgpu = .false.
+          end select
+        end if
         call get_environment_variable('MOPAC_EIG2HOST', fetch, status=stat_env)
-        if (stat_env == 0) fetch_eigs = (trim(adjustl(fetch)) /= '')
+        if (stat_env == 0) then
+          fetch = adjustl(fetch)
+          call upcase(fetch, len_trim(fetch))
+          select case (trim(fetch))
+          case ('1','T','TRUE','Y','YES','ON')
+            fetch_eigs = .true.
+          case default
+            fetch_eigs = .false.
+          end select
+        end if
         ! ORTHO on GPU: if env set, honor it; otherwise enable only on newer GPUs (CC >= 7.0)
         call get_environment_variable('MOPAC_ORTHO_GPU', ortho, status=stat_env)
         if (stat_env == 0) then
-          ortho_gpu = (trim(adjustl(ortho)) /= '')
+          ortho = adjustl(ortho)
+          call upcase(ortho, len_trim(ortho))
+          select case (trim(ortho))
+          case ('1','T','TRUE','Y','YES','ON')
+            ortho_gpu = .true.
+          case default
+            ortho_gpu = .false.
+          end select
         else
           if (lgpu) then
             ccmaj = 0 ; ccmin = 0
@@ -155,7 +181,18 @@ end if
         ! Optional: experimental partial eigensolve for RHF (smallest nclose eigenpairs)
         env = ''
         call get_environment_variable('MOPAC_PARTIAL_EIG', env, status=stat_env)
-        if (stat_env == 0 .and. trim(adjustl(env)) /= '') then
+        use_partial_eig = .false.
+        if (stat_env == 0) then
+          env = adjustl(env)
+          call upcase(env, len_trim(env))
+          select case (trim(env))
+          case ('1','T','TRUE','Y','YES','ON')
+            use_partial_eig = .true.
+          case default
+            use_partial_eig = .false.
+          end select
+        end if
+        if (use_partial_eig) then
           if (uhf) then
             if (current_spin == 1) then
               nocc = max(1, min(nclose + nalpha, ndim))
@@ -195,7 +232,18 @@ end if
           ! Optional: attempt multi-GPU eigensolver (cuSOLVERMg placeholder)
           env = ''
           call get_environment_variable('MOPAC_EIG_MG', env, status=stat_env)
-          if (ngpus > 1 .and. ndim >= thr_mg .and. stat_env == 0 .and. trim(adjustl(env)) /= '') then
+          use_mg_eig = .false.
+          if (stat_env == 0) then
+            env = adjustl(env)
+            call upcase(env, len_trim(env))
+            select case (trim(env))
+            case ('1','T','TRUE','Y','YES','ON')
+              use_mg_eig = .true.
+            case default
+              use_mg_eig = .false.
+            end select
+          end if
+          if (ngpus > 1 .and. ndim >= thr_mg .and. use_mg_eig) then
             if (mg_available) then
               allocate(Sfull(ndim,ndim), stat=i)
               if (i == 0) then

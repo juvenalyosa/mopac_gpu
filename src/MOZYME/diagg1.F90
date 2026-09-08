@@ -37,10 +37,22 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
    !
     use molkst_C, only: numat, norbs, mpack, numcal, keywrd
     use MOZYME_C, only : nvirtual, icocc_dim, &
-       & nfmo, lijbo, nijbo, &
+     & nfmo, lijbo, nijbo, &
        tiny, sumt, ijc, ovmax, ncf, nce, nncf, nnce, ncocc, ncvir, &
-     & iorbs, icocc, icvir, cocc, cvir
+     & iorbs, icocc, icvir, cocc, cvir, cocc_dim, cvir_dim, icvir_dim
     use common_arrays_C, only : eigs, nfirst, nlast, p
+    use mozyme_diagg1_state, only: nf => diagg1_nf, &
+     & icalcn => diagg1_icalcn, mydisp => diagg1_mydisp, &
+     & ij0 => diagg1_ij0, fref => diagg1_fref, &
+     & oldlim => diagg1_oldlim, safety => diagg1_safety
+#ifdef GPU
+    use iso_c_binding, only: c_int, c_double
+    use chanel_C, only: iw
+    use mozyme_gpu_int_utils, only: mozyme_c_int_checked, &
+      mozyme_c_int_nonnegative_or_zero, mozyme_c_int_positive_or_zero
+    use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
+    use mod_vars_cuda, only: lgpu, mozyme_gpu
+#endif
     implicit none
     integer, intent (in) :: idiagg, nocc, nvir, fmo_dim
     integer, intent (inout) :: nij
@@ -52,30 +64,200 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
     double precision, dimension (mpack), intent (in) :: fao
     double precision, dimension (nvirtual), intent (inout) :: eigv
     double precision, dimension (icocc_dim), intent (out) :: aocc
-    integer, save :: nf, icalcn = 0, mydisp = 0, ij0
     integer :: i, i1, i2, i4, ii, j, j1, j2, j4, &
          & jj, jl, jx, k, k1, kk, kl, l, loopi, loopj, kj, i1j1, &
          & i1j2, i2j1, i2j2, k1j1
     logical :: lij
     logical, save :: times
     double precision :: cutlim, flim
-    double precision, save :: fref, oldlim, safety
     double precision :: cutoff, sum, sum1
     integer, external :: ijbo
+#ifdef GPU
+    logical :: aocc_gpu_done, avir_gpu_done
+    integer(c_int) :: gpu_code, gpu_updates, gpu_nij, gpu_ijc, gpu_nf
+    integer :: gpu_alloc_stat
+    real(c_double) :: gpu_sumt, gpu_tiny, gpu_fref, gpu_oldlim
+    real(c_double) :: gpu_safety, gpu_wall_ms
+    double precision, allocatable :: avir_cache(:)
+
+    interface
+      function mopac_cuda_mozyme_diagg1_construct(nocc_c, nvir_c, numat_c, &
+          norbs_c, mpack_c, icocc_dim_c, icvir_dim_c, cocc_dim_c, &
+          cvir_dim_c, fmo_dim_c, idiagg_c, mydisp_c, fao_c, p_c, &
+          nfirst_c, nlast_c, ncf_c, nce_c, nncf_c, nnce_c, ncocc_c, &
+          ncvir_c, icocc_c, icvir_c, iorbs_c, nijbo_c, cocc_c, cvir_c, &
+          cutoff_c, flim_c, oldlim_c, safety_c, nf_c, eigs_c, eigv_c, &
+          nfmo_c, ifmo_c, fmo_c, nij_c, ijc_c, nf_out_c, sumt_c, tiny_c, &
+          fref_c, oldlim_out_c, safety_out_c, wall_ms_c) &
+          bind(C,name='mopac_cuda_mozyme_diagg1_construct') result(code)
+        import :: c_int, c_double
+        integer(c_int), value :: nocc_c, nvir_c, numat_c, norbs_c, mpack_c
+        integer(c_int), value :: icocc_dim_c, icvir_dim_c
+        integer(c_int), value :: cocc_dim_c, cvir_dim_c, fmo_dim_c
+        integer(c_int), value :: idiagg_c, mydisp_c, nf_c
+        real(c_double), intent(in) :: fao_c(*), p_c(*)
+        integer(c_int), intent(in) :: nfirst_c(*), nlast_c(*)
+        integer(c_int), intent(in) :: ncf_c(*), nce_c(*), nncf_c(*), nnce_c(*)
+        integer(c_int), intent(in) :: ncocc_c(*), ncvir_c(*)
+        integer(c_int), intent(in) :: icocc_c(*), icvir_c(*), iorbs_c(*)
+        integer(c_int), intent(in) :: nijbo_c(*)
+        real(c_double), intent(in) :: cocc_c(*), cvir_c(*)
+        real(c_double), value :: cutoff_c, flim_c, oldlim_c, safety_c
+        real(c_double) :: eigs_c(*), eigv_c(*), fmo_c(*)
+        integer(c_int) :: nfmo_c(*), ifmo_c(*)
+        integer(c_int) :: nij_c, ijc_c, nf_out_c
+        real(c_double) :: sumt_c, tiny_c, fref_c, oldlim_out_c
+        real(c_double) :: safety_out_c, wall_ms_c
+        integer(c_int) :: code
+      end function mopac_cuda_mozyme_diagg1_construct
+
+      function mopac_cuda_mozyme_diagg1_aocc(nocc_c, icocc_dim_c, cocc_dim_c, &
+          numat_c, ncf_c, nncf_c, ncocc_c, icocc_c, iorbs_c, cocc_c, aocc_c, &
+          updated_terms_c, wall_ms_c) bind(C,name='mopac_cuda_mozyme_diagg1_aocc') result(code)
+        import :: c_int, c_double
+        integer(c_int), value :: nocc_c, icocc_dim_c, cocc_dim_c, numat_c
+        integer(c_int), intent(in) :: ncf_c(*), nncf_c(*), ncocc_c(*), icocc_c(*), iorbs_c(*)
+        real(c_double), intent(in) :: cocc_c(*)
+        real(c_double) :: aocc_c(*), wall_ms_c
+        integer(c_int) :: updated_terms_c
+        integer(c_int) :: code
+      end function mopac_cuda_mozyme_diagg1_aocc
+
+      function mopac_cuda_mozyme_diagg1_avir(nvir_c, icvir_dim_c, cvir_dim_c, &
+          numat_c, nce_c, nnce_c, ncvir_c, icvir_c, iorbs_c, cvir_c, avir_cache_c, &
+          updated_terms_c, wall_ms_c) bind(C,name='mopac_cuda_mozyme_diagg1_avir') result(code)
+        import :: c_int, c_double
+        integer(c_int), value :: nvir_c, icvir_dim_c, cvir_dim_c, numat_c
+        integer(c_int), intent(in) :: nce_c(*), nnce_c(*), ncvir_c(*), icvir_c(*), iorbs_c(*)
+        real(c_double), intent(in) :: cvir_c(*)
+        real(c_double) :: avir_cache_c(*), wall_ms_c
+        integer(c_int) :: updated_terms_c
+        integer(c_int) :: code
+      end function mopac_cuda_mozyme_diagg1_avir
+    end interface
+#endif
+    times = (Index (keywrd, " TIMES") /= 0)
     if (numcal /= icalcn) then
       icalcn = numcal
       fref = 10.0d0
       safety = 1.0d0
       oldlim = 0.0d0
       nf = 0
-      times = (Index (keywrd, " TIMES") /= 0)
       if (Index (keywrd, " OLDENS") /= 0) then
         fref = 0.d0
       end if
     end if
     !
+    !    CUTLIM    PRECISION OF PL
+    !
+    !    1.D-6      0.004
+    !    1.D-7      0.00004
+    !
+    cutlim = 1.d-8
+    cutoff = Max (cutlim, tiny*10.d0*cutlim)
+    flim = Min (3.d0, fref*0.5d0)
+    fref = 0.d0
+    if (idiagg <= 5) then
+      cutoff = cutlim
+    end if
+#ifdef GPU
+    if (mozyme_diagg1_construct_gpu_enabled()) then
+      if (.not. lijbo) then
+        if (mozyme_diagg1_aocc_trace()) then
+          write(iw,'(1x,a," fallback_cpu code=",i0," reason=no_nijbo")') &
+            '[MOZYME GPU diagg1_construct]', -2
+          call flush(iw)
+        end if
+      else
+        gpu_nij = mozyme_c_int_nonnegative_or_zero(nij)
+        gpu_ijc = 0_c_int
+        gpu_nf = mozyme_c_int_nonnegative_or_zero(nf)
+        gpu_sumt = 0.0_c_double
+        gpu_tiny = 0.0_c_double
+        gpu_fref = 0.0_c_double
+        gpu_oldlim = oldlim
+        gpu_safety = safety
+        gpu_wall_ms = 0.0_c_double
+        gpu_code = mopac_cuda_mozyme_diagg1_construct( &
+          mozyme_c_int_nonnegative_or_zero(nocc), &
+          mozyme_c_int_nonnegative_or_zero(nvir), &
+          mozyme_c_int_positive_or_zero(numat), &
+          mozyme_c_int_positive_or_zero(norbs), &
+          mozyme_c_int_positive_or_zero(mpack), &
+          mozyme_c_int_positive_or_zero(icocc_dim), &
+          mozyme_c_int_positive_or_zero(icvir_dim), &
+          mozyme_c_int_positive_or_zero(cocc_dim), &
+          mozyme_c_int_positive_or_zero(cvir_dim), &
+          mozyme_c_int_positive_or_zero(fmo_dim), &
+          mozyme_c_int_checked(idiagg), mozyme_c_int_checked(mydisp), &
+          fao, p, nfirst, nlast, &
+          ncf, nce, nncf, nnce, ncocc, ncvir, icocc, icvir, iorbs, nijbo, &
+          cocc, cvir, cutoff, flim, oldlim, safety, &
+          mozyme_c_int_nonnegative_or_zero(nf), eigs, &
+          eigv, nfmo, ifmo, fmo, gpu_nij, gpu_ijc, gpu_nf, gpu_sumt, &
+          gpu_tiny, gpu_fref, gpu_oldlim, gpu_safety, gpu_wall_ms)
+        if (gpu_code == 0_c_int) then
+          nij = int(gpu_nij)
+          ijc = int(gpu_ijc)
+          nf = int(gpu_nf)
+          sumt = gpu_sumt
+          tiny = gpu_tiny
+          ovmax = tiny
+          fref = gpu_fref
+          oldlim = gpu_oldlim
+          safety = gpu_safety
+          if (mozyme_diagg1_aocc_trace()) then
+            write(iw,'(1x,a," success code=",i0," nij=",i0," sumt=",es13.6,&
+              &" tiny=",es13.6," ms=",f12.6)') &
+              '[MOZYME GPU diagg1_construct]', int(gpu_code), nij, sumt, &
+              tiny, gpu_wall_ms
+            call flush(iw)
+          end if
+          if (times) then
+            call timer (" AFTER DIAGG1 IN ITER")
+          end if
+          return
+        else if (mozyme_diagg1_aocc_trace()) then
+          write(iw,'(1x,a," fallback_cpu code=",i0)') &
+            '[MOZYME GPU diagg1_construct]', int(gpu_code)
+          call flush(iw)
+        end if
+      end if
+    end if
+    if (mozyme_gpu_scf_no_fallback_required()) then
+      write(iw,'(1x,a)') &
+        '[MOZYME GPU SCF] status=strict_abort reason=strict_diagg1_cpu_fallback'
+      call flush(iw)
+      error stop 'MOZYME GPU strict diagg1 abort'
+    end if
+#endif
+    !
     !
     aocc(:) = 0.d0
+#ifdef GPU
+    aocc_gpu_done = .false.
+    if (mozyme_diagg1_aocc_gpu_enabled()) then
+      gpu_updates = 0_c_int
+      gpu_code = mopac_cuda_mozyme_diagg1_aocc( &
+        mozyme_c_int_nonnegative_or_zero(nocc), &
+        mozyme_c_int_positive_or_zero(icocc_dim), &
+        mozyme_c_int_positive_or_zero(cocc_dim), &
+        mozyme_c_int_positive_or_zero(numat), ncf, nncf, ncocc, icocc, iorbs, &
+        cocc, aocc, gpu_updates, gpu_wall_ms)
+      if (gpu_code == 0_c_int) then
+        aocc_gpu_done = .true.
+        if (mozyme_diagg1_aocc_trace()) then
+          write(iw,'(1x,a," success code=",i0," terms=",i0," ms=",f10.3)') &
+            '[MOZYME GPU diagg1_aocc]', int(gpu_code), int(gpu_updates), gpu_wall_ms
+          call flush(iw)
+        end if
+      else if (mozyme_diagg1_aocc_trace()) then
+        write(iw,'(1x,a," fallback_cpu code=",i0)') '[MOZYME GPU diagg1_aocc]', int(gpu_code)
+        call flush(iw)
+      end if
+    end if
+    if (.not. aocc_gpu_done) then
+#endif
     !
     !   IF THE CONTRIBUTION OF AN ATOM IN AN OCCUPIED LMO IS VERY SMALL
     !   THEN DO NOT USE THAT ATOM IN CALCULATING THE OCCUPIED-VIRTUAL
@@ -100,20 +282,37 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
         end do
       !
     end do
-    !
-    !
-    !    CUTLIM    PRECISION OF PL
-    !
-    !    1.D-6      0.004
-    !    1.D-7      0.00004
-    !
-    cutlim = 1.d-8
-    cutoff = Max (cutlim, tiny*10.d0*cutlim)
-    flim = Min (3.d0, fref*0.5d0)
-    fref = 0.d0
-    if (idiagg <= 5) then
-      cutoff = cutlim
+#ifdef GPU
     end if
+    avir_gpu_done = .false.
+    if (mozyme_diagg1_avir_gpu_enabled()) then
+      allocate(avir_cache(max(1, icvir_dim)), stat=gpu_alloc_stat)
+      if (gpu_alloc_stat == 0) then
+        avir_cache(:) = 0.0d0
+        gpu_updates = 0_c_int
+        gpu_code = mopac_cuda_mozyme_diagg1_avir( &
+          mozyme_c_int_nonnegative_or_zero(nvir), &
+          mozyme_c_int_positive_or_zero(icvir_dim), &
+          mozyme_c_int_positive_or_zero(cvir_dim), &
+          mozyme_c_int_positive_or_zero(numat), nce, nnce, ncvir, icvir, iorbs, &
+          cvir, avir_cache, gpu_updates, gpu_wall_ms)
+        if (gpu_code == 0_c_int) then
+          avir_gpu_done = .true.
+          if (mozyme_diagg1_aocc_trace()) then
+            write(iw,'(1x,a," success code=",i0," terms=",i0," ms=",f10.3)') &
+              '[MOZYME GPU diagg1_avir]', int(gpu_code), int(gpu_updates), gpu_wall_ms
+            call flush(iw)
+          end if
+        else
+          if (mozyme_diagg1_aocc_trace()) then
+            write(iw,'(1x,a," fallback_cpu code=",i0)') '[MOZYME GPU diagg1_avir]', int(gpu_code)
+            call flush(iw)
+          end if
+          deallocate(avir_cache)
+        end if
+      end if
+    end if
+#endif
     sumt = 0.d0
     ijc = 0
     tiny = 0.d0
@@ -126,10 +325,18 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
       l = 0
       do j = nnce(i) + 1, nnce(i) + nce(i)
         j1 = icvir(j)
+#ifdef GPU
+        if (avir_gpu_done) then
+          sum = avir_cache(j)
+        else
+#endif
         sum = 0.d0
         do k = l + 1, l + iorbs(j1)
           sum = sum + cvir(k+loopi) ** 2
         end do
+#ifdef GPU
+        end if
+#endif
         l = l + iorbs(j1)
         !
         !   AVIR(J1) HOLDS THE SQUARE OF THE CONTRIBUTION OF THE ATOM J1
@@ -646,4 +853,87 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
     end if
 
     ovmax = tiny
+#ifdef GPU
+    if (avir_gpu_done) deallocate(avir_cache)
+#endif
+#ifdef GPU
+contains
+  logical function mozyme_diagg1_construct_gpu_enabled()
+    implicit none
+    integer :: env_len, env_status
+    character(len=16) :: env_value
+
+    mozyme_diagg1_construct_gpu_enabled = .false.
+    if (.not. (lgpu .and. mozyme_gpu)) return
+    env_value = ' '
+    call get_environment_variable('MOPAC_MOZYME_DIAGG1_CONSTRUCT_GPU', &
+      env_value, length=env_len, status=env_status)
+    if (env_status == 0 .and. env_len > 0) then
+      select case (trim(env_value))
+      case ('0', 'off', 'OFF', 'false', 'FALSE', 'no', 'NO')
+        mozyme_diagg1_construct_gpu_enabled = .false.
+      case default
+        mozyme_diagg1_construct_gpu_enabled = .true.
+      end select
+    end if
+  end function mozyme_diagg1_construct_gpu_enabled
+
+  logical function mozyme_diagg1_aocc_gpu_enabled()
+    implicit none
+    integer :: env_len, env_status
+    character(len=16) :: env_value
+
+    mozyme_diagg1_aocc_gpu_enabled = lgpu .and. mozyme_gpu
+    if (.not. mozyme_diagg1_aocc_gpu_enabled) return
+    env_value = ' '
+    call get_environment_variable('MOPAC_MOZYME_DIAGG1_AOCC_GPU', env_value, &
+      length=env_len, status=env_status)
+    if (env_status == 0 .and. env_len > 0) then
+      select case (trim(env_value))
+      case ('0', 'off', 'OFF', 'false', 'FALSE', 'no', 'NO')
+        mozyme_diagg1_aocc_gpu_enabled = .false.
+      case default
+        mozyme_diagg1_aocc_gpu_enabled = .true.
+      end select
+    end if
+  end function mozyme_diagg1_aocc_gpu_enabled
+
+  logical function mozyme_diagg1_avir_gpu_enabled()
+    implicit none
+    integer :: env_len, env_status
+    character(len=16) :: env_value
+
+    mozyme_diagg1_avir_gpu_enabled = lgpu .and. mozyme_gpu
+    if (.not. mozyme_diagg1_avir_gpu_enabled) return
+    env_value = ' '
+    call get_environment_variable('MOPAC_MOZYME_DIAGG1_AVIR_GPU', env_value, &
+      length=env_len, status=env_status)
+    if (env_status == 0 .and. env_len > 0) then
+      select case (trim(env_value))
+      case ('0', 'off', 'OFF', 'false', 'FALSE', 'no', 'NO')
+        mozyme_diagg1_avir_gpu_enabled = .false.
+      case default
+        mozyme_diagg1_avir_gpu_enabled = .true.
+      end select
+    end if
+  end function mozyme_diagg1_avir_gpu_enabled
+
+  logical function mozyme_diagg1_aocc_trace()
+    implicit none
+    integer :: env_len, env_status
+    character(len=16) :: env_value
+
+    mozyme_diagg1_aocc_trace = .false.
+    env_value = ' '
+    call get_environment_variable('MOPAC_GPU_PROFILE', env_value, &
+      length=env_len, status=env_status)
+    if (env_status == 0 .and. env_len > 0 .and. trim(env_value) /= '0') &
+      mozyme_diagg1_aocc_trace = .true.
+    env_value = ' '
+    call get_environment_variable('MOPAC_GPU_VERBOSE', env_value, &
+      length=env_len, status=env_status)
+    if (env_status == 0 .and. env_len > 0 .and. trim(env_value) /= '0') &
+      mozyme_diagg1_aocc_trace = .true.
+  end function mozyme_diagg1_aocc_trace
+#endif
 end subroutine diagg1

@@ -21,7 +21,7 @@
       use molkst_C, only : numcal, norbs, mpack
 
 #ifdef GPU
-      use mod_vars_cuda, only: lgpu, mozyme_gpu, mozyme_f2_gpu
+      use mod_vars_cuda, only: lgpu, mozyme_gpu, mozyme_fock_gpu, mozyme_f2_gpu
       use gpu_fock_interfaces, only: mopac_cuda_mozyme_dfock2
       use iso_c_binding, only: c_bool
 #endif
@@ -145,7 +145,7 @@
           jb = nlast(jj)
           if (ib - ia < 0 .or. jb - ja < 0) cycle ! One atom is a sparkle
 #ifdef GPU
-          if (lgpu .and. mozyme_gpu .and. mozyme_f2_gpu) then
+          if (lgpu .and. mozyme_gpu .and. mozyme_fock_gpu .and. mozyme_f2_gpu) then
             ig = ib - ia + 1
             jg = jb - ja + 1
             n_ij_gpu = ig * (ig + 1) / 2

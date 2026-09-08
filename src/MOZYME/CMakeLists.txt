@@ -15,11 +15,11 @@
 #===============================================
 # Create a list of source files (src_list) with the .F90 extension
 set(src_list
-    mbonds fillij check hbonds buildf add_more_interactions
-    isitsc setupk chrge_for_MOZYME reorth set_up_MOZYME_arrays
+    mozyme_gpu_int_utils mozyme_section_timers mozyme_diagg1_state mozyme_diagg2_state mozyme_isitsc_state mozyme_resident_fock mozyme_gpu_makvec mozyme_gpu_relocalize mozyme_gpu_reorth mozyme_gpu_tidy mozyme_gpu_scf_driver mbonds fillij check hbonds buildf add_more_interactions
+    isitsc setupk chrge_for_MOZYME reorth mozyme_gpu_plan set_up_MOZYME_arrays
     eimp vecprt_for_MOZYME outer2 compct cnvgz diagg
     kab_for_MOZYME bonds_for_MOZYME prtlmo density_for_MOZYME
-    addhb dipole_for_MOZYME local_for_MOZYME fock2z local2
+    addhb dipole_for_MOZYME local_for_MOZYME mozyme_fock1_batch mozyme_fock2_4x1_batch fock2z local2
     helecz scfcri MOZYME_C epseta iter_for_MOZYME pinout
     denrot_for_MOZYME fock1_for_MOZYME jab_for_MOZYME hybrid
     hcore_for_MOZYME tidy makvec selmos diagg2 mlmo

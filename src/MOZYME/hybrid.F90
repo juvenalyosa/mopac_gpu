@@ -35,6 +35,7 @@ subroutine hybrid (catom)
     double precision, dimension (145) :: c
     character :: element*13
     integer, external :: ijbo
+    external :: mopend
     data nf_loc / 1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 /
     data nl_loc / 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 /
    !
@@ -179,7 +180,8 @@ subroutine hybrid (catom)
       element(:12) = element(2:)
     end do
     write (iw, "(A,I4,A,I8)") " For atom", ii, ", a "//trim(element)//", number of bonds:", nb
-    stop
+    call mopend ("HYBRID failed: atom has too many bonds")
+    return
 end subroutine hybrid
 subroutine minloc (vecs, nvec, n)
    !***********************************************************************

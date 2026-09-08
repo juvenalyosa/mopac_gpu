@@ -26,7 +26,7 @@ module Common_arrays_C
 !  The data-type for each quantity is given at the start of the statement
 !
   implicit none
-  integer, dimension (:), allocatable :: &
+  integer, dimension (:), allocatable, target :: &
   &  labels,     & !  Term          Atomic numbers (all atoms, real, dummy, Tv)
                    !  Units         None
                    !  Min inclusive 0

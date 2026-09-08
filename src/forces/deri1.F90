@@ -44,6 +44,7 @@
       double precision :: const, step, enucl2, gse, sum
       logical :: debug
       logical :: use_gpu_grad
+      logical :: force_gpu_grad
       character(len=32) :: line
       double precision, external :: ddot, helect
       save debug, icalcn, const
@@ -119,29 +120,37 @@
         use_gpu_grad = .true.
         call get_environment_variable('MOPAC_NO_GPU_GRAD', line, status=i)
         if (i == 0) then
-          if (trim(adjustl(line)) /= '') use_gpu_grad = .false.
+          line = adjustl(line)
+          call upcase(line, len_trim(line))
+          select case (trim(line))
+          case ('1','T','TRUE','Y','YES','ON')
+            use_gpu_grad = .false.
+          case default
+            continue
+          end select
         end if
         ! Respect CI mode: force GPU-only gradient if MOPAC_FORCE_GPU_GRAD is set
         call get_environment_variable('MOPAC_FORCE_GPU_GRAD', line, status=i)
         ! Also allow a keyword: GPU-GRAD-ONLY or FORCEGPU-GRAD
+        force_gpu_grad = .false.
         if (i /= 0) then
           if (index(keywrd,' GPU-GRAD-ONLY') /= 0 .or. index(keywrd,' FORCEGPU-GRAD') /= 0) then
-            i = 0
-            line = '1'
+            force_gpu_grad = .true.
           end if
+        else
+          line = adjustl(line)
+          call upcase(line, len_trim(line))
+          select case (trim(line))
+          case ('1','T','TRUE','Y','YES','ON')
+            force_gpu_grad = .true.
+          case default
+            force_gpu_grad = .false.
+          end select
         end if
-        if (i == 0) then
-          if (index(adjustl(line),'0')==0 .and. index(adjustl(line),'off')==0 .and. len_trim(line)>0) then
-            if (use_gpu_grad .and. .not. mopac_cuda_fock2_keep(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati)) then
-              call mopend('GPU gradient path failed under MOPAC_FORCE_GPU_GRAD')
-              return
-            end if
-          else
-            if (use_gpu_grad .and. .not. mopac_cuda_fock2_keep(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati)) then
-              if (.not. mopac_cuda_fock2(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati, fmat)) then
-                call dfock2 (fmat, p, pa, wmat, numat, nfirst, nlast, nati)
-              end if
-            end if
+        if (force_gpu_grad) then
+          if (use_gpu_grad .and. .not. mopac_cuda_fock2_keep(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati)) then
+            call mopend('GPU gradient path failed under MOPAC_FORCE_GPU_GRAD')
+            return
           end if
         else
           if (use_gpu_grad .and. .not. mopac_cuda_fock2_keep(norbs, mpack, numat, nfirst, nlast, p, pa, wmat, nati)) then

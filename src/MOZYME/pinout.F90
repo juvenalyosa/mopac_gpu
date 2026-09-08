@@ -30,15 +30,30 @@ subroutine pinout (mode, l_use_disk)
        & icvir_dim, cocc_dim, cvir_dim, icocc, icvir, cocc, cvir
     use chanel_C, only: iw, iden, density_fn
     use common_arrays_C, only : nbonds, ibonds
+    use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
+    use mozyme_section_timers, only: mozyme_section_timers_enabled
     implicit none
     integer, intent (in) :: mode
     logical, intent (in) :: l_use_disk
+    external :: mozyme_gpu_strict_abort
 !
     logical :: opend, exists
     integer :: i, j, k, l, nocc, nvir
 !
     nocc = nelecs / 2
     nvir = norbs - nocc
+    if (mozyme_section_timers_enabled() .or. &
+        mozyme_gpu_scf_no_fallback_required()) then
+      write(iw,'(1x,a,1x,a,i0,1x,a,l1,1x,a,a)') &
+        '[MOZYME CPU pinout]', 'mode=', mode, 'use_disk=', l_use_disk, &
+        'file=', trim(density_fn)
+      call flush(iw)
+    end if
+    if (mozyme_gpu_scf_no_fallback_required()) then
+      call mozyme_gpu_strict_abort('strict_pinout_cpu_fallback', &
+        'MOZYME GPU strict resident SCF does not support CPU pinout')
+      return
+    end if
     inquire (unit=iden, opened=opend)
     if (opend) then
       if (l_use_disk) then

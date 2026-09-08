@@ -17,12 +17,23 @@ subroutine fock2z (f, q, qe, wj, wk, ptot2, mode, ione)
     use molkst_C, only: numat, mpack
     use MOZYME_C, only: lijbo, iorbs, kopt
     use common_arrays_C, only: coordinates => coord, p, nat, ifact
+    use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
+    use mozyme_section_timers, only: mozyme_section_timer_begin, &
+      mozyme_section_timer_end, mozyme_section_timer_report
     implicit none
     integer, intent (in) :: ione, mode
     double precision :: f(mpack)
     double precision, dimension (numat), intent (out) :: q, qe
     double precision, dimension (*), intent (in) :: wj, wk
     double precision, dimension (numat, 81), intent (out) :: ptot2
+    double precision :: profile_token
+    external :: mozyme_gpu_strict_abort
+    if (mozyme_gpu_scf_no_fallback_required()) then
+      call mozyme_gpu_strict_abort('strict_fock2z_cpu_fallback', &
+        'MOZYME GPU strict resident SCF does not support CPU Fock construction')
+      return
+    end if
+    call mozyme_section_timer_begin('fock2z', profile_token)
       if (lijbo) then
       call fz2n (f, p, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
            & kopt, ione, coordinates)
@@ -30,6 +41,8 @@ subroutine fock2z (f, q, qe, wj, wk, ptot2, mode, ione)
       call fz2 (f, p, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
            & kopt, ione, coordinates)
     end if
+    call mozyme_section_timer_end('fock2z', profile_token)
+    call mozyme_section_timer_report('fock2z')
 end subroutine fock2z
 !
 subroutine fz2 (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, kopt, &
@@ -39,6 +52,15 @@ subroutine fz2 (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, kopt, &
     use parameters_C, only: am, dd, ad, tore
     use funcon_C, only: ev, a0
     use MOZYME_C, only : direct, semidr
+    use mozyme_fock1_batch, only: mozyme_fock1_batch_begin, &
+      mozyme_fock1_batch_record_or_run, mozyme_fock1_batch_flush
+    use mozyme_fock2_4x1_batch, only: mozyme_fock2_4x1_batch_begin, &
+      mozyme_fock2_4x1_batch_record, mozyme_fock2_4x1_batch_flush
+    use mozyme_resident_fock, only: mozyme_resident_fock_try, mozyme_resident_pair_supported, &
+      mozyme_resident_point_supported, mozyme_point_charge_advance_kr, resident_strict_requested, &
+      strict_resident_fock_abort
+    use mozyme_section_timers, only: mozyme_section_timer_begin, &
+      mozyme_section_timer_end, mozyme_section_timer_report
     implicit none
    !***********************************************************************
    !
@@ -60,19 +82,22 @@ subroutine fz2 (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, kopt, &
     double precision, dimension (numat, 81), intent (inout) :: ptot2
    !
    !.. Local Scalars ..
-    logical :: calci, calcj
+    logical :: calci, calcj, batched_4x1, resident_fock_done
     integer, save :: icalcn = 0, krinc = 0
     integer :: i, i1, iab, ii, iim1, ij, ilim, ired, j, j1, jba, ji, jj, jk, &
    & jred, k, kj, kl, kr, l, li, lii, lij, lj, ljj, lk, m, ni, nj
     double precision :: sum, sumdia, sumoff, ade, aee, da, dx, dy, dz, r, r2, &
    & ri2, ri5, rm, rp, w1, w2, w3, w4, w5, w6, w7, enuc, point, const
+    double precision :: profile_token
     integer, dimension (256), save :: jindex
-    double precision, dimension (16) :: pja, pjb
+    double precision, dimension (16) :: pja, pjb, wk4x1
+    double precision, dimension (10) :: wj4x1
     double precision, dimension (45) :: e1b, e2a
     double precision, dimension (171) :: fdummy = 0.d0
     double precision, dimension (2025) :: wjloc = 0.d0
     integer, external :: ijbo
    !
+    call mozyme_section_timer_begin('fz2', profile_token)
     dx = 0.d0
     dy = 0.d0
     dz = 0.d0
@@ -114,6 +139,13 @@ subroutine fz2 (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, kopt, &
    !  Put P(A,A) density into array PTOT2
    !
     call chrge_for_MOZYME (ptot, qe)
+    resident_fock_done = mozyme_resident_fock_try(f, ptot, qe, iorbs, nat, ifact, &
+      wj, wk, mode, kopt, ione, coord, .false.)
+    if (.not. resident_fock_done .and. resident_strict_requested()) then
+      call strict_resident_fock_abort('strict_resident_fock_cpu_fallback', &
+        'MOZYME GPU strict resident Fock did not complete before CPU Fock')
+      return
+    end if
    !
    !   MODE=1:   ADD TO EXISTING FOCK MATRIX
    !   MODE=0:   CALCULATE FOCK MATRIX STARTING WITH H MATRIX
@@ -140,6 +172,8 @@ subroutine fz2 (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, kopt, &
 
    !
     kr = 0
+    call mozyme_fock1_batch_begin(numat)
+    call mozyme_fock2_4x1_batch_begin(max(1, numat * min(numat, 64)))
     ired = 1
     do ii = 1, numat
       calci = (kopt(ired) == ii)
@@ -162,6 +196,16 @@ subroutine fz2 (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, kopt, &
             end if
             jba = iorbs(jj)
             if (ijbo(ii, jj) >= 0) then
+              if (resident_fock_done .and. mozyme_resident_pair_supported(iab, jba)) then
+                if (.not. direct) then
+                  if ((iab == 4 .and. jba == 1) .or. (iab == 1 .and. jba == 4)) then
+                    kr = kr + 10
+                  else
+                    kr = kr + ((iab*(iab+1)) / 2) * ((jba*(jba+1)) / 2)
+                  end if
+                end if
+                cycle
+              end if
               if (direct .and. (calci .or. calcj)) then
                 call rotate(nat(ii), nat(jj), coord(1, ii), coord(1, jj), wjloc, kr, e1b, e2a, enuc)
               end if
@@ -239,6 +283,27 @@ subroutine fz2 (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, kopt, &
 
               else if (iab >= 3 .and. jba == 1) then
                 if (calci .or. calcj) then
+                  batched_4x1 = .false.
+                  if (iab == 4 .and. jba == 1) then
+                    if (direct) then
+                      do m = 1, 10
+                        wj4x1(m) = wjloc(m)
+                      end do
+                      do m = 1, 16
+                        wk4x1(m) = wjloc(jindex(m))
+                      end do
+                    else
+                      do m = 1, 10
+                        wj4x1(m) = wj(kr + m)
+                      end do
+                      do m = 1, 16
+                        wk4x1(m) = wk(kr + jindex(m))
+                      end do
+                    end if
+                    batched_4x1 = mozyme_fock2_4x1_batch_record(f, ptot, &
+                      ijbo(ii, ii) + 1, ijbo(jj, jj) + 1, ijbo(ii, jj) + 1, wj4x1, wk4x1)
+                  end if
+                  if (.not. batched_4x1) then
                   !
                   !                         LIGHT-ATOM  - HEAVY-ATOM
                   !
@@ -316,6 +381,7 @@ subroutine fz2 (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, kopt, &
                       f(l+i) = f(l+i) - sum * 0.5d0
                     end do
                   end if
+                  end if
                 end if
 
 
@@ -326,6 +392,27 @@ subroutine fz2 (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, kopt, &
 
               else if (jba >= 3 .and. iab == 1) then
                 if (calci .or. calcj) then
+                  batched_4x1 = .false.
+                  if (jba == 4 .and. iab == 1) then
+                    if (direct) then
+                      do m = 1, 10
+                        wj4x1(m) = wjloc(m)
+                      end do
+                      do m = 1, 16
+                        wk4x1(m) = wjloc(jindex(m))
+                      end do
+                    else
+                      do m = 1, 10
+                        wj4x1(m) = wj(kr + m)
+                      end do
+                      do m = 1, 16
+                        wk4x1(m) = wk(kr + jindex(m))
+                      end do
+                    end if
+                    batched_4x1 = mozyme_fock2_4x1_batch_record(f, ptot, &
+                      ijbo(jj, jj) + 1, ijbo(ii, ii) + 1, ijbo(ii, jj) + 1, wj4x1, wk4x1)
+                  end if
+                  if (.not. batched_4x1) then
                   !
                   !                         HEAVY-ATOM - LIGHT-ATOM
                   !
@@ -402,6 +489,7 @@ subroutine fz2 (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, kopt, &
                       f(l+i) = f(l+i) - sum * 0.5d0
                     end do
                   end if
+                  end if
                 end if
 
                 if ( .not. direct) then
@@ -441,6 +529,11 @@ subroutine fz2 (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, kopt, &
               !
               !   Use point-charge approximation
               !
+              if (resident_fock_done .and. &
+                  mozyme_resident_point_supported(iab, jba, ijbo(ii, jj))) then
+                call mozyme_point_charge_advance_kr(iab, jba, ijbo(ii, jj), kr)
+                cycle
+              end if
               i1 = ijbo (ii, ii)
               j1 = ijbo (jj, jj)
 
@@ -633,27 +726,33 @@ subroutine fz2 (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, kopt, &
               end if
             end if
           end do
-          if (.not. direct) then
+          if (.not. direct .and. .not. resident_fock_done) then
             i = ijbo (ii, ii) + 1
             ilim = (iab*(iab+1)) / 2
-            call fock1_for_MOZYME (f(i), ptot(i), wj(kr+1), kr, iab, ilim)
+            call mozyme_fock1_batch_record_or_run(f, ptot, wj, kr, i, kr+1, iab, ilim)
           end if
         end if
     end do
+    call mozyme_fock2_4x1_batch_flush(f, ptot)
+    if (.not. direct) then
+      call mozyme_fock1_batch_flush(f, ptot, wj)
+    end if
 
 
 
-    if (direct) then
+    if (direct .and. .not. resident_fock_done) then
       kr = 0
+      call mozyme_fock1_batch_begin(numat)
       ired = 1
       do ii = 1, numat
         iab = iorbs(ii)
           if (iab /= 0) then
             i = ijbo (ii, ii) + 1
             ilim = (iab*(iab+1)) / 2
-            call fock1_for_MOZYME (f(i), ptot(i), wj(kr+1), kr, iab, ilim)
+            call mozyme_fock1_batch_record_or_run(f, ptot, wj, kr, i, kr+1, iab, ilim)
           end if
       end do
+      call mozyme_fock1_batch_flush(f, ptot, wj)
     end if
 
    !
@@ -664,6 +763,8 @@ subroutine fz2 (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, kopt, &
   !    call addfck_for_MOZYME(f, ptot, iatsp, phinet, qscnet, qdenet, &
   !   & ipiden, gden, qscat)
     end if
+    call mozyme_section_timer_end('fz2', profile_token)
+    call mozyme_section_timer_report('fz2')
 end subroutine fz2
 !
 subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
@@ -671,6 +772,15 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
     use molkst_C, only: numat, norbs, mpack, numcal, l_feather
     use MOZYME_C, only : nijbo, &
        & direct, semidr
+    use mozyme_fock1_batch, only: mozyme_fock1_batch_begin, &
+      mozyme_fock1_batch_record_or_run, mozyme_fock1_batch_flush
+    use mozyme_fock2_4x1_batch, only: mozyme_fock2_4x1_batch_begin, &
+      mozyme_fock2_4x1_batch_record, mozyme_fock2_4x1_batch_flush
+    use mozyme_resident_fock, only: mozyme_resident_fock_try, mozyme_resident_pair_supported, &
+      mozyme_resident_point_supported, mozyme_point_charge_advance_kr, resident_strict_requested, &
+      strict_resident_fock_abort
+    use mozyme_section_timers, only: mozyme_section_timer_begin, &
+      mozyme_section_timer_end, mozyme_section_timer_report
     use parameters_C, only: am, dd, ad, tore
     use cosmo_C, only: useps
     use funcon_C, only: ev, a0
@@ -700,18 +810,21 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
     double precision, dimension (numat, 81), intent (inout) :: ptot2
    !
    !.. Local Scalars ..
-    logical :: calci, calcj
+    logical :: calci, calcj, batched_4x1, resident_fock_done
     integer, save :: icalcn = 0, krinc = 0
     integer :: i, i1, iab, ii, iim1, ij, ilim, ired, j, j1, jba, ji, jj, jk, &
    & jred, k, kj, kl, kr, l, li, lii, lij, lj, ljj, lk, m, ni, nj
     double precision :: sum, sumdia, sumoff, ade, aee, da, dx, dy, dz, r, r2, &
    & ri2, ri5, rm, rp, w1, w2, w3, w4, w5, w6, w7, enuc, rij, point, const
+    double precision :: profile_token
     integer, dimension (256), save :: jindex
-    double precision, dimension (16) :: pja, pjb
+    double precision, dimension (16) :: pja, pjb, wk4x1
+    double precision, dimension (10) :: wj4x1
     double precision, dimension (45) :: e1b, e2a
     double precision, dimension (171) :: fdummy = 0.d0
     double precision, dimension (2025) :: wjloc = 0.d0
    !
+    call mozyme_section_timer_begin('fz2n', profile_token)
     dx = 0.d0
     dy = 0.d0
     dz = 0.d0
@@ -752,6 +865,13 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
    !  Put P(A,A) density into array PTOT2
    !
     call chrge_for_MOZYME (ptot, qe)
+    resident_fock_done = mozyme_resident_fock_try(f, ptot, qe, iorbs, nat, ifact, &
+      wj, wk, mode, kopt, ione, coord, .true.)
+    if (.not. resident_fock_done .and. resident_strict_requested()) then
+      call strict_resident_fock_abort('strict_resident_fock_cpu_fallback', &
+        'MOZYME GPU strict resident Fock did not complete before CPU Fock')
+      return
+    end if
    !
    !   MODE=1:   ADD TO EXISTING FOCK MATRIX
    !   MODE=0:   CALCULATE FOCK MATRIX STARTING WITH H MATRIX
@@ -776,6 +896,8 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
       end do
     end do
     kr = 0
+    call mozyme_fock1_batch_begin(numat)
+    call mozyme_fock2_4x1_batch_begin(max(1, numat * min(numat, 64)))
     ired = 1
     do ii = 1, numat
       calci = (kopt(ired) == ii)
@@ -799,6 +921,16 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
             end if
             jba = iorbs(jj)
             if (nijbo(ii, jj) >= 0) then
+              if (resident_fock_done .and. mozyme_resident_pair_supported(iab, jba)) then
+                if (.not. direct) then
+                  if ((iab == 4 .and. jba == 1) .or. (iab == 1 .and. jba == 4)) then
+                    kr = kr + 10
+                  else
+                    kr = kr + ((iab*(iab+1)) / 2) * ((jba*(jba+1)) / 2)
+                  end if
+                end if
+                cycle
+              end if
               if (direct .and. (calci .or. calcj)) then
                 call rotate(nat(ii), nat(jj), coord(1, ii), coord(1, jj), wjloc, kr, e1b, e2a, enuc)
               end if
@@ -876,6 +1008,27 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
 
               else if (iab >= 3 .and. jba == 1) then
                 if (calci .or. calcj) then
+                  batched_4x1 = .false.
+                  if (iab == 4 .and. jba == 1) then
+                    if (direct) then
+                      do m = 1, 10
+                        wj4x1(m) = wjloc(m)
+                      end do
+                      do m = 1, 16
+                        wk4x1(m) = wjloc(jindex(m))
+                      end do
+                    else
+                      do m = 1, 10
+                        wj4x1(m) = wj(kr + m)
+                      end do
+                      do m = 1, 16
+                        wk4x1(m) = wk(kr + jindex(m))
+                      end do
+                    end if
+                    batched_4x1 = mozyme_fock2_4x1_batch_record(f, ptot, &
+                      nijbo(ii, ii) + 1, nijbo(jj, jj) + 1, nijbo(ii, jj) + 1, wj4x1, wk4x1)
+                  end if
+                  if (.not. batched_4x1) then
                   !
                   !                         LIGHT-ATOM  - HEAVY-ATOM
                   !
@@ -953,6 +1106,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
                       f(l+i) = f(l+i) - sum * 0.5d0
                     end do
                   end if
+                  end if
                 end if
 
 
@@ -963,6 +1117,27 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
 
               else if (jba >= 3 .and. iab == 1) then
                 if (calci .or. calcj) then
+                  batched_4x1 = .false.
+                  if (jba == 4 .and. iab == 1) then
+                    if (direct) then
+                      do m = 1, 10
+                        wj4x1(m) = wjloc(m)
+                      end do
+                      do m = 1, 16
+                        wk4x1(m) = wjloc(jindex(m))
+                      end do
+                    else
+                      do m = 1, 10
+                        wj4x1(m) = wj(kr + m)
+                      end do
+                      do m = 1, 16
+                        wk4x1(m) = wk(kr + jindex(m))
+                      end do
+                    end if
+                    batched_4x1 = mozyme_fock2_4x1_batch_record(f, ptot, &
+                      nijbo(jj, jj) + 1, nijbo(ii, ii) + 1, nijbo(ii, jj) + 1, wj4x1, wk4x1)
+                  end if
+                  if (.not. batched_4x1) then
                   !
                   !                         HEAVY-ATOM - LIGHT-ATOM
                   !
@@ -1037,6 +1212,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
                       f(l+i) = f(l+i) - sum * 0.5d0
                     end do
                   end if
+                  end if
                 end if
 
                 if ( .not. direct) then
@@ -1076,6 +1252,11 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
               !
               !   Use point-charge approximation
               !
+              if (resident_fock_done .and. &
+                  mozyme_resident_point_supported(iab, jba, nijbo(ii, jj))) then
+                call mozyme_point_charge_advance_kr(iab, jba, nijbo(ii, jj), kr)
+                cycle
+              end if
               i1 = nijbo (ii, ii)
               j1 = nijbo (jj, jj)
 
@@ -1267,40 +1448,62 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
               end if
             end if
           end do
-          if (.not. direct) then
+          if (.not. direct .and. .not. resident_fock_done) then
             i = nijbo (ii, ii) + 1
             ilim = (iab*(iab+1)) / 2
-            call fock1_for_MOZYME (f(i), ptot(i), wj(kr+1), kr, iab, ilim)
+            call mozyme_fock1_batch_record_or_run(f, ptot, wj, kr, i, kr+1, iab, ilim)
           end if
         end if
     end do
-    if (direct) then
+    call mozyme_fock2_4x1_batch_flush(f, ptot)
+    if (.not. direct) then
+      call mozyme_fock1_batch_flush(f, ptot, wj)
+    end if
+    if (direct .and. .not. resident_fock_done) then
       kr = 0
+      call mozyme_fock1_batch_begin(numat)
       ired = 1
       do ii = 1, numat
           iab = iorbs(ii)
           if (iab /= 0) then
             i = nijbo (ii, ii) + 1
             ilim = (iab*(iab+1)) / 2
-            call fock1_for_MOZYME (f(i), ptot(i), wj(kr+1), kr, iab, ilim)
+            call mozyme_fock1_batch_record_or_run(f, ptot, wj, kr, i, kr+1, iab, ilim)
           end if
       end do
+      call mozyme_fock1_batch_flush(f, ptot, wj)
     end if
    !
     if (mode == -1) f = -f
    ! The following routine adds the dielectric correction to F.
     if (useps .and. mode == 0) call addfckz()
+    call mozyme_section_timer_end('fz2n', profile_token)
+    call mozyme_section_timer_report('fz2n')
 end subroutine fz2n
 subroutine focd2z (iab, jba, fii, fjj, fij, pii, pjj, pij, wj, wk, &
      & diagonal, kr)
 #ifdef GPU
-   use mod_vars_cuda, only: lgpu, mozyme_gpu, mozyme_f2_gpu
-   use gpu_fock_interfaces, only: mopac_cuda_mozyme_fock2
-   use iso_c_binding, only: c_bool
+   use mod_vars_cuda, only: lgpu, mozyme_gpu, mozyme_fock_gpu, mozyme_f2_gpu
+   use iso_c_binding, only: c_bool, c_int, c_double
+   use chanel_C, only: iw
+   use mozyme_resident_fock, only: resident_strict_requested, &
+     strict_resident_fock_abort
 #endif
    !
    !.. Implicit Declarations ..
     implicit none
+#ifdef GPU
+    interface
+      function mopac_cuda_mozyme_fock2(iab, jba, diagonal, pii, pjj, pij, fii, fjj, fij, wj, wk) &
+          bind(C,name='mopac_cuda_mozyme_fock2') result(code)
+        use iso_c_binding, only: c_bool, c_int, c_double
+        integer(c_int), value :: iab, jba
+        logical(c_bool), value :: diagonal
+        real(c_double) :: pii(*), pjj(*), pij(*), fii(*), fjj(*), fij(*), wj(*), wk(*)
+        integer(c_int) :: code
+      end function mopac_cuda_mozyme_fock2
+    end interface
+#endif
    !
    !.. Formal Arguments ..
     logical, intent (in) :: diagonal
@@ -1318,7 +1521,12 @@ subroutine focd2z (iab, jba, fii, fjj, fij, pii, pjj, pij, wj, wk, &
     integer :: i, ij, ik, il, j, jk, jl, k, ka, kc, kl, l, loop
 #ifdef GPU
     integer :: gpu_code
+    integer :: env_len, env_status
     logical(c_bool) :: diag_flag
+    logical :: trace_gpu
+    logical, save :: printed_gpu_success = .false.
+    logical, save :: printed_gpu_fallback = .false.
+    character(len=16) :: gpu_profile_env, gpu_verbose_env
 #endif
     double precision :: a, aa, bb
    !***********************************************************************
@@ -1334,12 +1542,60 @@ subroutine focd2z (iab, jba, fii, fjj, fij, pii, pjj, pij, wj, wk, &
     loop = 0
     if (iab <= 0 .or. jba <= 0) return
 #ifdef GPU
-    if (lgpu .and. mozyme_gpu .and. mozyme_f2_gpu) then
+    if (lgpu .and. mozyme_gpu .and. mozyme_fock_gpu .and. mozyme_f2_gpu) then
       diag_flag = diagonal
+      if (.not. printed_gpu_success .and. .not. printed_gpu_fallback) then
+        trace_gpu = .false.
+        gpu_profile_env = ' '
+        gpu_verbose_env = ' '
+        call get_environment_variable('MOPAC_GPU_PROFILE', gpu_profile_env, length=env_len, status=env_status)
+        if (env_status == 0 .and. env_len > 0 .and. trim(gpu_profile_env) /= '0') trace_gpu = .true.
+        call get_environment_variable('MOPAC_GPU_VERBOSE', gpu_verbose_env, length=env_len, status=env_status)
+        if (env_status == 0 .and. env_len > 0 .and. trim(gpu_verbose_env) /= '0') trace_gpu = .true.
+        if (trace_gpu) then
+          write(iw,'(1x,a,1x,a,1x,i0,1x,a,1x,i0)') &
+            '[MOZYME GPU fock2]', 'attempt iab=', iab, 'jba=', jba
+          call flush(iw)
+        end if
+      end if
       gpu_code = mopac_cuda_mozyme_fock2(iab, jba, diag_flag, pii, pjj, pij, fii, fjj, fij, wj, wk)
       if (gpu_code == 0) then
+        if (.not. printed_gpu_success) then
+          trace_gpu = .false.
+          gpu_profile_env = ' '
+          gpu_verbose_env = ' '
+          call get_environment_variable('MOPAC_GPU_PROFILE', gpu_profile_env, length=env_len, status=env_status)
+          if (env_status == 0 .and. env_len > 0 .and. trim(gpu_profile_env) /= '0') trace_gpu = .true.
+          call get_environment_variable('MOPAC_GPU_VERBOSE', gpu_verbose_env, length=env_len, status=env_status)
+          if (env_status == 0 .and. env_len > 0 .and. trim(gpu_verbose_env) /= '0') trace_gpu = .true.
+          if (trace_gpu) then
+            write(iw,'(1x,a,1x,a,1x,i0,1x,a,1x,i0)') &
+              '[MOZYME GPU fock2]', 'success iab=', iab, 'jba=', jba
+          end if
+          printed_gpu_success = .true.
+        end if
         kr = kr + (iab*(iab+1))/2 * (jba*(jba+1))/2
         return
+      else
+        if (resident_strict_requested()) then
+          call strict_resident_fock_abort('strict_legacy_fock2_failed', &
+            'MOZYME GPU strict legacy Fock2 failed')
+          return
+        end if
+        if (.not. printed_gpu_fallback) then
+          trace_gpu = .false.
+          gpu_profile_env = ' '
+          gpu_verbose_env = ' '
+          call get_environment_variable('MOPAC_GPU_PROFILE', gpu_profile_env, length=env_len, status=env_status)
+          if (env_status == 0 .and. env_len > 0 .and. trim(gpu_profile_env) /= '0') trace_gpu = .true.
+          call get_environment_variable('MOPAC_GPU_VERBOSE', gpu_verbose_env, length=env_len, status=env_status)
+          if (env_status == 0 .and. env_len > 0 .and. trim(gpu_verbose_env) /= '0') trace_gpu = .true.
+          if (trace_gpu) then
+            write(iw,'(1x,a,1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0)') &
+              '[MOZYME GPU fock2]', 'fallback code=', gpu_code, 'iab=', iab, 'jba=', jba
+          end if
+          printed_gpu_fallback = .true.
+        end if
       end if
     end if
 #endif

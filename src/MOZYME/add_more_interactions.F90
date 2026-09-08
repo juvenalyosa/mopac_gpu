@@ -35,6 +35,7 @@ subroutine add_more_interactions()
     rapid
 !
   use iter_C, only : pold
+  use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
 !
   implicit none
   double precision, dimension (:), allocatable :: temp_store
@@ -43,6 +44,7 @@ subroutine add_more_interactions()
 !
   integer :: i, j, alloc_stat, imol = 0
   save imol
+  external :: mozyme_gpu_strict_abort
 !
 !  Method is limited to direct SCF
 !
@@ -50,6 +52,11 @@ subroutine add_more_interactions()
   if (imol /= numcal) then
     imol = numcal
     return  !  First time add_more_interactions is called, do nothing
+  end if
+  if (mozyme_gpu_scf_no_fallback_required()) then
+    call mozyme_gpu_strict_abort('strict_add_more_interactions_cpu_fallback', &
+      'MOZYME GPU strict resident SCF does not support CPU interaction promotion')
+    return
   end if
   i = mpack
   call fillij (.false.)

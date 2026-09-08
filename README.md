@@ -256,7 +256,15 @@ For diagonalization and density formation, the device path mirrors the CPU algeb
 To guarantee numerical parity, Barranquilla separates compact cases (LL/HL/HH) from general cases. LL/HL/HH use small fixed tables and delicate index maps historically; they are accumulated on the CPU where the legacy mappings are exact. “General” two‑center blocks — which make up the dominant work share — are offloaded to the GPU and accumulate into the same packed‑lower Fock array. Optional verification hooks (disabled by default) can compare GPU and CPU contributions pair‑by‑pair without impacting production runs.
 
 MOZYME (proteins)
-In MOZYME, localized orbitals yield block‑sparse density/Fock operators with strictly local interactions. Barranquilla offloads the localized pair kernels (F2/DF2) to the GPU whenever the localized block exceeds a minimum threshold (set by `MOZYME_MINBLK`), leaving very small blocks on the CPU to avoid launch overhead. The pair kernels operate on reduced‑dimension blocks (torsional neighborhoods) and are batched across atom groups; this pattern maps well to single‑GPU and can be extended to multi‑GPU when beneficial. On older GPUs with limited double‑precision throughput, the default policy is conservative and can be overridden via environment.
+MOZYME GPU support is split between production sparse Fock/stage offloads and
+an opt-in strict resident-SCF proof path. The production resident sparse Fock
+path covers one-center, `4x1`/`1x4`, optimized `4x4`, generic exact pairs up to
+the current MOZYME `1..9` basis-block range, and point-charge/dipole Fock work.
+Positive-orbital real pairs outside device coverage are reported as CPU
+fallback; inactive zero-orbital pairs are reported separately as no-op coverage.
+A complete MOZYME SCF GPU claim is valid only when the strict resident-SCF
+readiness contract reports `full_scf_gpu_status=complete` and
+`full_scf_gpu_ready=1`; see `docs/GPU_GUIDE.md`.
 
 HMTR (geometry optimization)
 HMTR evaluates many candidate geometries per outer iteration and uses a trust‑region micro‑solver to refine them. Barranquilla batches the energy/gradient calls across the candidate set and assigns them to GPU(s) in round‑robin fashion, using one CUDA stream per host thread. The trust‑region algebra (model assembly, radius adaptation, BFGS updates) remains on the host, while the dominant cost — the electronic energy and gradient at each candidate geometry — is evaluated on device. This division leverages GPU throughput where it counts without complicating the optimizer math.
@@ -349,7 +357,7 @@ The driver builds an expected block list over all `1 ≤ jj < ii ≤ numat`, com
   HH: span_i=4, span_j=4,    len=100          (legacy W)
   d‑containing: any span≥7,   len=pair_i×pair_j (legacy W)
   periodic general:           len=pair_i×pair_j (split WJ/WK)
-  fallback general:           len=pair_i×pair_j (legacy W)
+  molecular general:          len=pair_i×pair_j (legacy W)
 ```
 Offsets (`kk`) are advanced by `len` per published block. On the device, only a small staging buffer for `W` (or `WJ/WK`) and the packed Fock exist; densities (`P`, `P_tot`) and `nfirst/nlast` are uploaded once per SCF iteration.
 
@@ -368,7 +376,8 @@ At startup Barranquilla MOPAC measures the system and GPU and applies:
 - Small SCF (very small AO basis): GPU off (CPU is faster). Default threshold `norbs < 30`.
 - Medium SCF: GPU on for general J/K; resident SCF on; streaming not forced.
 - Large SCF: GPU on + streaming (fast NVMe TMPDIR recommended).
-- MOZYME: GPU pair kernels enabled on newer GPUs; can be forced via env on older ones.
+- MOZYME: production sparse Fock/stage offloads can be enabled; complete-SCF GPU
+  claims require the strict resident-SCF readiness contract.
 
 These are printed in the run header when `MOPAC_GPU_DEBUG=1` is set.
 
@@ -378,7 +387,9 @@ These are printed in the run header when `MOPAC_GPU_DEBUG=1` is set.
 
 Key ideas
 - Conventional SCF (no MOZYME) offloads the dominant two‑center J/K build to GPU and shows the clearest speedups.
-- MOZYME accelerates density (batched SYRK/GEMM) on GPU for large localized blocks; current pair kernels primarily benefit d‑orbital cases, while protein s/p pair work remains CPU‑side.
+- MOZYME has production sparse Fock/stage GPU offloads and an opt-in strict
+  resident-SCF path; do not claim complete MOZYME SCF GPU execution unless the
+  readiness contract passes.
 - Resident vs. streaming is automatic by size; both can be overridden with environment flags.
 
 Build configuration
@@ -397,7 +408,10 @@ Common environment flags
 
 MOZYME (localized) flags
 - Enable/disable: keyword `MOZYME_GPU`, or env `MOZYME_GPU_FORCE=1` / `MOZYME_GPU_OFF=1`
-- Pair kernels (F2/DF2): `MOPAC_MOZYME_F2_GPU=1` (on). Current kernels mainly benefit d‑orbital cases.
+- Resident sparse Fock: `MOPAC_MOZYME_RESIDENT_FOCK_GPU=1` enables the
+  production sparse Fock and point-charge/dipole device path.
+- Legacy F2/DF2 wrappers: `MOPAC_MOZYME_FOCK_GPU=1 MOPAC_MOZYME_F2_GPU=1`
+  for development profiling only.
 - Block threshold: `MOZYME_MINBLK=<n>` (2–4 for big blocks; 1 to be aggressive)
 - Two GPUs: `MOZYME_GPUPAIR=a,b` (1‑based)
 
@@ -405,20 +419,24 @@ Recommended profiles by GPU
 - Maxwell sm_52 (TITAN X):
   - Build with `-DCUDA_ARCHS=52`.
   - Conventional SCF: `MOPAC_FORCEGPU=1 MOPAC_RESIDENT_SCF=1` (visible speedups on large cases).
-  - MOZYME proteins: prefer CPU density (`MOZYME_GPU_OFF=1`) and use threaded BLAS.
+  - MOZYME proteins: use the default/auto policy and require the strict readiness
+    report before making a complete-SCF GPU claim.
 
 - Volta V100 / Ampere A100 / Hopper H100 (strong FP64):
   - Build with `-DCUDA_ARCHS=70|80|90`.
   - Conventional SCF: `MOPAC_GPU_SCFTASK=gpu MOPAC_GPU_SCF_EXPERIMENTAL=1`.
-  - MOZYME: `MOZYME_GPU MOZYME_MINBLK=2–4` and `MOPAC_MOZYME_F2_GPU=1`; multi‑GPU via `MOZYME_GPUPAIR`.
+  - MOZYME: `MOZYME_GPU MOPAC_MOZYME_RESIDENT_FOCK_GPU=1`; use the strict
+    resident-SCF flags only for proof runs.
 
 - RTX 30/40 (sm_86/89, limited FP64):
-  - Conventional SCF still helps for large systems; MOZYME density offload helps on bigger blocks; s/p pair work remains CPU.
+  - Conventional SCF still helps for large systems; verify MOZYME sparse
+    Fock/stage offloads with profiling on the target deck.
 
 Quick recipes
 - Conventional SCF (GPU, medium): `MOPAC_FORCEGPU=1 MOPAC_RESIDENT_SCF=1`
 - Conventional SCF (GPU, very large/streaming): add `MOPAC_GPU_PROFILE=2`
-- MOZYME (proteins) density on GPU: `MOZYME_GPU MOZYME_MINBLK=2–4` and `MOPAC_MOZYME_F2_GPU=1`
+- MOZYME production sparse Fock: `MOZYME_GPU MOPAC_MOZYME_RESIDENT_FOCK_GPU=1`
+- MOZYME strict SCF proof: add `MOPAC_MOZYME_SCF_EXPERIMENTAL=1 MOPAC_MOZYME_RESIDENT_SCF=1 MOPAC_MOZYME_SCF_STRICT_RESIDENT=1` and require `full_scf_gpu_ready=1`.
 
 ## GPU Configuration Matrix (Scenarios → Settings)
 

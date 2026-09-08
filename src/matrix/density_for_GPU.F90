@@ -87,13 +87,14 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       end if
       call get_environment_variable('MOPAC_GPU_EXACT_SC', env_cpu, status=istat_env)
       if (istat_env == 0) then
-        env_cpu = adjustl(env_cpu)
-        if (len_trim(env_cpu) /= 0) then
-          select case (env_cpu(1:1))
-          case ('0','n','N','f','F','o','O')
-            allow_gpu = .false.
-          case default
-            allow_gpu = .true.
+          env_cpu = adjustl(env_cpu)
+          call upcase(env_cpu, len_trim(env_cpu))
+          if (len_trim(env_cpu) /= 0) then
+            select case (trim(env_cpu))
+            case ('0','N','NO','F','FALSE','OFF')
+              allow_gpu = .false.
+            case default
+              allow_gpu = .true.
           end select
         end if
       end if
@@ -118,15 +119,13 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       if (istat_env == 0) then
         env_resident = adjustl(env_resident)
         if (len_trim(env_resident) > 0) then
-          select case (env_resident(1:1))
-          case ('0','n','N','f','F','o','O')
+          call upcase(env_resident, len_trim(env_resident))
+          select case (trim(env_resident))
+          case ('0','N','NO','F','FALSE','OFF')
             use_resident = .false.
           case default
             use_resident = allow_gpu
           end select
-          if (len_trim(env_resident) >= 3) then
-            if (env_resident(1:3) == 'off' .or. env_resident(1:3) == 'OFF') use_resident = .false.
-          end if
         end if
       end if
       if (.not. allow_gpu) use_resident = .false.

@@ -1,0 +1,148 @@
+! Molecular Orbital PACkage (MOPAC)
+! Copyright 2021 Virginia Polytechnic Institute and State University
+!
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
+!
+!    http://www.apache.org/licenses/LICENSE-2.0
+!
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
+
+module mozyme_gpu_reorth
+  use iso_c_binding, only: c_int, c_double
+  implicit none
+  private
+  public :: mozyme_gpu_reorth_try
+
+contains
+
+  logical function mozyme_gpu_reorth_try() result(done)
+    use chanel_C, only: iw
+#ifdef GPU
+    use common_arrays_C, only: nfirst
+    use molkst_C, only: norbs, numat
+    use MOZYME_C, only: cocc, cocc_dim, cvir, cvir_dim, icocc, &
+      icocc_dim, icvir, icvir_dim, iorbs, ncocc, ncvir, nce, ncf, &
+      noccupied, nvirtual, nnce, nncf, thresh
+    use mozyme_gpu_int_utils, only: mozyme_c_int_nonnegative_or_zero, &
+      mozyme_c_int_positive_or_zero
+    use mod_vars_cuda, only: lgpu, mozyme_gpu_requested, &
+      mozyme_resident_fock_gpu
+#endif
+    implicit none
+#ifdef GPU
+    interface
+      function mopac_cuda_mozyme_reorth(natoms_c, norbs_c, nocc_c, &
+          nvir_c, cocc_dim_c, icocc_dim_c, cvir_dim_c, icvir_dim_c, &
+          thresh_c, cocc_c, icocc_c, ncf_c, nncf_c, ncocc_c, cvir_c, &
+          icvir_c, nce_c, nnce_c, ncvir_c, iorbs_c, nfirst_c, &
+          sumtot_c, wall_ms_c) bind(C,name='mopac_cuda_mozyme_reorth') &
+          result(code)
+        use iso_c_binding, only: c_int, c_double
+        integer(c_int), value :: natoms_c, norbs_c, nocc_c, nvir_c
+        integer(c_int), value :: cocc_dim_c, icocc_dim_c
+        integer(c_int), value :: cvir_dim_c, icvir_dim_c
+        real(c_double), value :: thresh_c
+        real(c_double) :: cocc_c(*), cvir_c(*)
+        integer(c_int) :: icocc_c(*), ncf_c(*), nncf_c(*), ncocc_c(*)
+        integer(c_int) :: icvir_c(*), nce_c(*), nnce_c(*), ncvir_c(*)
+        integer(c_int) :: iorbs_c(*), nfirst_c(*)
+        real(c_double) :: sumtot_c, wall_ms_c
+        integer(c_int) :: code
+      end function mopac_cuda_mozyme_reorth
+    end interface
+    integer(c_int) :: code
+    real(c_double) :: sumtot
+    real(c_double) :: wall_ms
+#endif
+    logical :: trace_requested
+
+    done = .false.
+    trace_requested = env_is_one('MOPAC_MOZYME_SCF_STRICT_RESIDENT') .or. &
+      env_is_one('MOPAC_MOZYME_SCF_GPU') .or. &
+      env_is_one('MOPAC_MOZYME_GPU_STRICT') .or. &
+      env_is_one('MOPAC_MOZYME_FULL_SCF_GPU') .or. &
+      env_is_one('MOPAC_MOZYME_RESIDENT_SCF') .or. &
+      env_is_one('MOPAC_MOZYME_REORTH_GPU')
+#ifdef GPU
+    if (.not. trace_requested) return
+    if (storage_size(0) /= storage_size(0_c_int) .or. &
+        storage_size(0.0d0) /= storage_size(0.0_c_double)) then
+      call reorth_trace_fallback(iw, 'kind_mismatch')
+      return
+    end if
+    if (.not. (lgpu .or. mozyme_resident_fock_gpu)) then
+      call reorth_trace_fallback(iw, 'gpu_disabled')
+      return
+    end if
+    if (.not. mozyme_gpu_requested) then
+      call reorth_trace_fallback(iw, 'not_requested')
+      return
+    end if
+
+    sumtot = 0.0_c_double
+    wall_ms = 0.0_c_double
+    code = mopac_cuda_mozyme_reorth(mozyme_c_int_positive_or_zero(numat), &
+      mozyme_c_int_positive_or_zero(norbs), &
+      mozyme_c_int_nonnegative_or_zero(noccupied), &
+      mozyme_c_int_nonnegative_or_zero(nvirtual), &
+      mozyme_c_int_positive_or_zero(cocc_dim), &
+      mozyme_c_int_positive_or_zero(icocc_dim), &
+      mozyme_c_int_positive_or_zero(cvir_dim), &
+      mozyme_c_int_positive_or_zero(icvir_dim), &
+      real(thresh, c_double), cocc, icocc, ncf, nncf, ncocc, cvir, icvir, &
+      nce, nnce, ncvir, iorbs, nfirst, sumtot, wall_ms)
+
+    done = code == 0_c_int
+    if (done) then
+      write(iw,'(1x,a," status=success sumtot=",es13.5," wall_ms=",f10.3)') &
+        '[MOZYME GPU reorth]', sumtot, max(wall_ms, 0.001_c_double)
+    else
+      write(iw,'(1x,a," status=fallback_cpu code=",i0)') &
+        '[MOZYME GPU reorth]', int(code)
+    end if
+    call flush(iw)
+#else
+    if (trace_requested) call reorth_trace_fallback(iw, 'not_gpu_build')
+#endif
+  end function mozyme_gpu_reorth_try
+
+  subroutine reorth_trace_fallback(iw, reason)
+    implicit none
+    integer, intent(in) :: iw
+    character(len=*), intent(in) :: reason
+
+    write(iw,'(1x,a," status=fallback_cpu reason=",a)') &
+      '[MOZYME GPU reorth]', trim(reason)
+    call flush(iw)
+  end subroutine reorth_trace_fallback
+
+  logical function env_is_one(var_name)
+    implicit none
+    character(len=*), intent(in) :: var_name
+
+    integer :: env_len, env_status
+    character(len=32) :: env_value
+    character(len=32) :: value
+
+    env_value = ' '
+    call get_environment_variable(var_name, env_value, length=env_len, &
+      status=env_status)
+    env_is_one = .false.
+    if (env_status /= 0 .or. env_len <= 0) return
+    value = adjustl(env_value)
+    call upcase(value, len_trim(value))
+    select case (trim(value))
+    case ('', '0', 'FALSE', 'F', 'NO', 'N', 'OFF')
+      env_is_one = .false.
+    case default
+      env_is_one = .true.
+    end select
+  end function env_is_one
+
+end module mozyme_gpu_reorth

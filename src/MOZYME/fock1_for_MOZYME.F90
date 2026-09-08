@@ -14,9 +14,11 @@
 ! limitations under the License.
 
 subroutine fock1_for_MOZYME (f, ptot, w, kr, iab, ilim)
+    use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
 #ifdef GPU
-    use mod_vars_cuda, only: lgpu, mozyme_gpu
+    use mod_vars_cuda, only: lgpu, mozyme_gpu, mozyme_fock_gpu
     use gpu_fock_interfaces, only: mopac_cuda_mozyme_fock1
+    use chanel_C, only: iw
 #endif
     implicit none
     integer, intent (in) :: iab, ilim
@@ -24,10 +26,16 @@ subroutine fock1_for_MOZYME (f, ptot, w, kr, iab, ilim)
     double precision, dimension ((iab*(iab+1))/2), intent (in) :: ptot
     double precision, dimension ((iab*(iab+1))/2), intent (inout) :: f
     double precision, dimension (ilim, ilim), intent (in) :: w
+    external :: mozyme_gpu_strict_abort
 !
     integer :: i, ij, ijp, ijw, ikw, im, ip, j, jlw, jm, jp, k, klw, l
 #ifdef GPU
     integer :: gpu_info
+    integer :: env_len, env_status
+    logical :: trace_gpu
+    logical, save :: printed_gpu_success = .false.
+    logical, save :: printed_gpu_fallback = .false.
+    character(len=16) :: gpu_profile_env, gpu_verbose_env
 #endif
     double precision :: sum
    ! *********************************************************************
@@ -36,17 +44,63 @@ subroutine fock1_for_MOZYME (f, ptot, w, kr, iab, ilim)
    !
    ! *********************************************************************
    !
-   !   One-center coulomb and exchange terms for atom II.
+!   One-center coulomb and exchange terms for atom II.
    !
    !  F(i,j)=F(i,j)+sum(k,l)((PA(k,l)+PB(k,l))*<i,j|k,l>
-   !                        -(PA(k,l)        )*<i,k|j,l>), k,l on atom II.
-   !
+!                        -(PA(k,l)        )*<i,k|j,l>), k,l on atom II.
+    !
+    if (mozyme_gpu_scf_no_fallback_required()) then
+      call mozyme_gpu_strict_abort('strict_fock1_cpu_fallback', &
+        'MOZYME GPU strict resident SCF does not support CPU one-center Fock construction')
+      return
+    end if
 #ifdef GPU
-    if (lgpu .and. mozyme_gpu) then
+    if (lgpu .and. mozyme_gpu .and. mozyme_fock_gpu) then
+      if (.not. printed_gpu_success .and. .not. printed_gpu_fallback) then
+        trace_gpu = .false.
+        gpu_profile_env = ' '
+        gpu_verbose_env = ' '
+        call get_environment_variable('MOPAC_GPU_PROFILE', gpu_profile_env, length=env_len, status=env_status)
+        if (env_status == 0 .and. env_len > 0 .and. trim(gpu_profile_env) /= '0') trace_gpu = .true.
+        call get_environment_variable('MOPAC_GPU_VERBOSE', gpu_verbose_env, length=env_len, status=env_status)
+        if (env_status == 0 .and. env_len > 0 .and. trim(gpu_verbose_env) /= '0') trace_gpu = .true.
+        if (trace_gpu) then
+          write(iw,'(1x,a,1x,a,1x,i0,1x,a,1x,i0)') &
+            '[MOZYME GPU fock1]', 'attempt iab=', iab, 'ilim=', ilim
+          call flush(iw)
+        end if
+      end if
       gpu_info = mopac_cuda_mozyme_fock1(iab, ilim, ptot, f, w)
       if (gpu_info == 0) then
+        if (.not. printed_gpu_success) then
+          trace_gpu = .false.
+          gpu_profile_env = ' '
+          gpu_verbose_env = ' '
+          call get_environment_variable('MOPAC_GPU_PROFILE', gpu_profile_env, length=env_len, status=env_status)
+          if (env_status == 0 .and. env_len > 0 .and. trim(gpu_profile_env) /= '0') trace_gpu = .true.
+          call get_environment_variable('MOPAC_GPU_VERBOSE', gpu_verbose_env, length=env_len, status=env_status)
+          if (env_status == 0 .and. env_len > 0 .and. trim(gpu_verbose_env) /= '0') trace_gpu = .true.
+          if (trace_gpu) then
+            write(iw,'(1x,a,1x,a,1x,i0,1x,a,1x,i0)') &
+              '[MOZYME GPU fock1]', 'success iab=', iab, 'ilim=', ilim
+          end if
+          printed_gpu_success = .true.
+        end if
         kr = kr + ilim ** 2
         return
+      else if (.not. printed_gpu_fallback) then
+        trace_gpu = .false.
+        gpu_profile_env = ' '
+        gpu_verbose_env = ' '
+        call get_environment_variable('MOPAC_GPU_PROFILE', gpu_profile_env, length=env_len, status=env_status)
+        if (env_status == 0 .and. env_len > 0 .and. trim(gpu_profile_env) /= '0') trace_gpu = .true.
+        call get_environment_variable('MOPAC_GPU_VERBOSE', gpu_verbose_env, length=env_len, status=env_status)
+        if (env_status == 0 .and. env_len > 0 .and. trim(gpu_verbose_env) /= '0') trace_gpu = .true.
+        if (trace_gpu) then
+          write(iw,'(1x,a,1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0)') &
+            '[MOZYME GPU fock1]', 'fallback code=', gpu_info, 'iab=', iab, 'ilim=', ilim
+        end if
+        printed_gpu_fallback = .true.
       end if
     end if
 #endif

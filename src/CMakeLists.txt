@@ -69,7 +69,9 @@ if(GPU)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_scf_stream_interfaces.F90)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_scf_stream_driver.F90)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_scf_stream_trace.F90)
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_mozyme_scf_interfaces.F90)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/scf_driver.cu)
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/mozyme_scf_context.cu)
     # CUDA Fock kernels (scaffold)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/fock_kernels.cu)
     # CUDA SCF gradient kernels (experimental scaffold)
@@ -93,6 +95,7 @@ if(GPU)
     set_source_files_properties(
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/cuda_wrappers.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/scf_driver.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/gpu/mozyme_scf_context.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/fock_kernels.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/grad_kernels.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hmtr_optimizer.cu

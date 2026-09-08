@@ -42,6 +42,9 @@
 !
       USE funcon_C, only : fpc_9
 !
+      use mozyme_gpu_scf_driver, only : mozyme_gpu_scf_no_fallback_required, &
+        mozyme_gpu_scf_reset_request_state
+!
       USE maps_C, only : latom, react, rxn_coord
 !
       use symmetry_C, only : state_Irred_Rep, name
@@ -63,9 +66,14 @@
 #endif
 #ifdef GPU
       use iso_c_binding
-      use mod_vars_cuda, only: lgpu, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu, &
-     &                         mozyme_f2_gpu, resident_scf, gpu_scf_stream_available
+     use mod_vars_cuda, only: lgpu, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu, &
+     &                         mozyme_gpu_requested, mozyme_gpu_plan_ready, mozyme_gpu_enabled, &
+     &                         mozyme_gpu_disable_reason, mozyme_fock1_batch_gpu, mozyme_fock2_4x1_batch_gpu, &
+     &                         mozyme_resident_fock_gpu, &
+     &                         mozyme_fock_gpu, mozyme_f2_gpu, mozyme_check_gpu, resident_scf, gpu_scf_stream_available
       use mod_vars_cuda, only: gpu_scf_task_mode, GPU_SCF_TASK_AUTO, GPU_SCF_TASK_CPU, GPU_SCF_TASK_GPU
+      use mod_vars_cuda, only: MOZYME_GPU_REASON_NONE, MOZYME_GPU_REASON_NOT_REQUESTED, &
+     &                         MOZYME_GPU_REASON_NO_DEVICE, MOZYME_GPU_REASON_DEVICE_POLICY
       use gpu_info
       use settingGPUcard
       use gpu_runtime_interfaces
@@ -74,7 +82,7 @@
       implicit none
       integer ::  i, j, k, l
       double precision :: eat,  tim, store_fepsi
-      logical :: exists, opend, l_OLDDEN
+      logical :: exists, opend, l_OLDDEN, strict_mozyme_scf
       double precision, external :: C_triple_bond_C, reada, seconds
       character :: nokey(20)*10
 #ifdef GPU
@@ -106,6 +114,9 @@
       character(len=64) :: env
       character(len=32) :: mg_grid_str, mg_bs_str, mg_thr_str
       double precision :: min_cc
+      logical :: mozyme_gpu_off_requested
+      logical :: mozyme_resident_fock_explicit_disable
+      logical :: strict_full_gpu_required
 #endif
 #ifdef BUILD_MDI
       if (close_mdi) goto 100
@@ -124,12 +135,12 @@
 #else
           write(*,"(a)") "MOPAC version "//trim(verson)
 #endif
-          stop
+          return
         end if
 #ifndef BUILD_MDI
         if (jobnam == '-mdi' .OR. jobnam == '--mdi') then
           write(*,*) "This MOPAC executable was not compiled with MDI support"
-          stop
+          return
         end if
 #endif
       end do
@@ -274,6 +285,35 @@
 !
       i = numcal
       call readmo
+      call mozyme_gpu_scf_reset_request_state()
+      strict_mozyme_scf = mozyme .and. mozyme_gpu_scf_no_fallback_required()
+#ifdef GPU
+      if (numcal > 1+numcal0) then
+        strict_full_gpu_required = strict_mozyme_scf
+        if (strict_full_gpu_required .and. lgpu_ref) lgpu = .true.
+        if (mozyme .and. strict_full_gpu_required .and. lgpu) then
+          mozyme_gpu_requested = .true.
+          mozyme_gpu = .true.
+          mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NONE
+          if (.not. mozyme_resident_fock_explicit_disable) then
+            mozyme_resident_fock_gpu = .true.
+          end if
+        end if
+        if (strict_full_gpu_required .and. .not. lgpu) then
+          write(iw,'(1x,a)') '[MOZYME GPU SCF] status=strict_abort reason=strict_no_gpu_device'
+          call flush(iw)
+          call mopend('Strict MOZYME full-SCF GPU was requested, but no usable GPU device is available')
+          goto 101
+        end if
+      end if
+#else
+      if (strict_mozyme_scf) then
+        write(iw,'(1x,a)') '[MOZYME GPU SCF] status=strict_abort reason=strict_not_gpu_build'
+        call flush(iw)
+        call mopend('Strict MOZYME full-SCF GPU was requested, but this MOPAC build has no GPU support')
+        goto 101
+      end if
+#endif
 !
 ! Check to see if an old density matrix exists
 !
@@ -283,7 +323,11 @@
         j = index(line(i - 4:), ".")
         if (j /= 0) i = i - 6 + j
       end if
-      inquire(file=line(:i)//".den", exist=l_OLDDEN)
+      if (strict_mozyme_scf) then
+        l_OLDDEN = .true.
+      else
+        inquire(file=line(:i)//".den", exist=l_OLDDEN)
+      end if
 90      if (moperr .and. numcal == 1+numcal0 .and. natoms > 1) goto 101
       if (moperr .and. numcal == 1+numcal0 .and. index(keywrd_txt," GEO_DAT") == 0) goto 100
       if (moperr) goto 101
@@ -298,14 +342,82 @@
         call mkl_set_num_threads(num_threads)
 #endif
 #ifdef GPU
+        j = 0
         gpuName(1:6) = '' ; name_size(1:6) = 0 ; totalMem(1:6) = 0 ; clockRate(1:6) = 0
         hasDouble(1:6) = .false. ; gpu_ok(1:6) = .false.
         clockRate(1:6) = 0 ; major(1:6) = 0 ; minor(1:6) = 0; on_off(1:6) = 'OFF'
         call gpuInfo(hasGpu, hasDouble, nDevices, gpuName,name_size, totalMem, &
                   & clockRate, major, minor)
         lgpu = .false.
+        mozyme_gpu = .false.
+        mozyme_gpu_requested = .false.
+        mozyme_gpu_plan_ready = .false.
+        mozyme_gpu_enabled = .false.
+        mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NOT_REQUESTED
+        mozyme_force_2gpu = .false.
+        mozyme_fock1_batch_gpu = .false.
+        mozyme_fock2_4x1_batch_gpu = .false.
+        mozyme_resident_fock_gpu = .false.
+        mozyme_gpu_off_requested = .false.
+        mozyme_resident_fock_explicit_disable = .false.
+        strict_full_gpu_required = .false.
+        call get_environment_variable('MOPAC_MOZYME_SCF_STRICT_RESIDENT', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','FALSE','F','NO','N','OFF')
+            case default
+              strict_full_gpu_required = .true.
+            end select
+          end if
+        end if
+        call get_environment_variable('MOPAC_MOZYME_SCF_GPU', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','FALSE','F','NO','N','OFF')
+            case default
+              strict_full_gpu_required = .true.
+            end select
+          end if
+        end if
+        call get_environment_variable('MOPAC_MOZYME_GPU_STRICT', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','FALSE','F','NO','N','OFF')
+            case default
+              strict_full_gpu_required = .true.
+            end select
+          end if
+        end if
+        call get_environment_variable('MOPAC_MOZYME_FULL_SCF_GPU', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','FALSE','F','NO','N','OFF')
+            case default
+              strict_full_gpu_required = .true.
+            end select
+          end if
+        end if
+        strict_full_gpu_required = mozyme .and. strict_full_gpu_required
         lgpu_ref = hasGPU
         if (lgpu_ref) lgpu_ref = (index(keywrd, ' NOGPU') == 0)
+        if (strict_full_gpu_required .and. index(keywrd, ' NOGPU') /= 0) then
+          write(iw,'(1x,a)') '[MOZYME GPU SCF] status=strict_abort reason=strict_gpu_disabled_by_nogpu_keyword'
+          call flush(iw)
+          call mopend('Strict MOZYME full-SCF GPU was requested, but keyword NOGPU disables GPU execution')
+          goto 101
+        end if
         ! Parse optional ignore list: MOZYME_GPUIGNORE=a,b,c (1-based)
         ignore = .false.
         i = index(keywrd, ' MOZYME_GPUIGNORE=')
@@ -323,11 +435,14 @@
             do ll0 = 1, len_trim(list)
               if (list(ll0:ll0) == ',' .or. list(ll0:ll0) == ':' .or. list(ll0:ll0) == ';') list(ll0:ll0) = ' '
             end do
-            read(list,*,err=77) ii0, jj0, kk0, ll0
-            if (ii0>0 .and. ii0<=6) ignore(ii0) = .true.
-            if (jj0>0 .and. jj0<=6) ignore(jj0) = .true.
-            if (kk0>0 .and. kk0<=6) ignore(kk0) = .true.
-            if (ll0>0 .and. ll0<=6) ignore(ll0) = .true.
+            ii0 = 0 ; jj0 = 0 ; kk0 = 0 ; ll0 = 0
+            read(list,*,iostat=stat_env) ii0, jj0, kk0, ll0
+            if (stat_env <= 0) then
+              if (ii0>0 .and. ii0<=6) ignore(ii0) = .true.
+              if (jj0>0 .and. jj0<=6) ignore(jj0) = .true.
+              if (kk0>0 .and. kk0<=6) ignore(kk0) = .true.
+              if (ll0>0 .and. ll0<=6) ignore(ll0) = .true.
+            end if
           end if
         end if
 77      continue
@@ -371,42 +486,83 @@
               on_off(gpu_id) = 'ON '
               call setGPU(gpu_id - 1, lstat)
               if (.not. lstat) then
-                write (6,*) 'Problem to set GPU card ID = ', gpu_id
-                stop
+                write (iw,*) 'Problem to set GPU card ID = ', gpu_id
+                call flush(iw)
+                on_off(gpu_id) = 'OFF'
+                gpu_ok(gpu_id) = .false.
+                l = 0
               end if
             end if
           end if
           if (l == 0) then   ! Select GPU automatically (skip ignored)
+            k = 0
             do i = 1, nDevices
               if (gpu_ok(i)) then
                 on_off(i) = 'ON '
                 gpu_id = i - 1
                 call setGPU(gpu_id, lstat)
                 if (.not. lstat) then
-                  write (6,*) 'Problem to set GPU card ID = ', gpu_id
-                  stop
+                  write (iw,*) 'Problem to set GPU card ID = ', gpu_id
+                  call flush(iw)
+                  on_off(i) = 'OFF'
+                  gpu_ok(i) = .false.
+                  cycle
                 end if
+                k = 1
                 exit
               end if
             end do
+            if (k == 0) then
+              lgpu_ref = .false.
+              ngpus = 0
+            end if
           end if
         else
           nDevices = 0
           ngpus = 0
         end if
+        if (strict_full_gpu_required .and. .not. lgpu_ref) then
+          write(iw,'(1x,a)') '[MOZYME GPU SCF] status=strict_abort reason=strict_no_gpu_device'
+          call flush(iw)
+          call mopend('Strict MOZYME full-SCF GPU was requested, but no usable GPU device is available')
+          goto 101
+        end if
 !
 !  For small systems, using a GPU takes longer than not using a GPU,
 !  so do not use a GPU for small systems.  The lower limit, 100, is just a guess.
 !
-        lgpu = (lgpu_ref .and. natoms > 100) ! Default: avoid GPU for very small systems
+        lgpu = (lgpu_ref .and. (natoms > 100 .or. strict_full_gpu_required))
+        ! Default: avoid GPU for very small systems unless strict resident SCF is requested.
         ! Optional overrides via environment variables (advanced users)
         call get_environment_variable('MOPAC_NOGPU', line, status=i)
         if (i == 0) then
-          if (trim(adjustl(line)) /= '') lgpu = .false.
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','FALSE','F','NO','N','OFF')
+            case default
+              if (strict_full_gpu_required) then
+                write(iw,'(1x,a)') '[MOZYME GPU SCF] status=strict_abort reason=strict_gpu_disabled_by_mopac_nogpu'
+                call flush(iw)
+                call mopend('Strict MOZYME full-SCF GPU was requested, but MOPAC_NOGPU disables GPU execution')
+                goto 101
+              end if
+              lgpu = .false.
+            end select
+          end if
         end if
         call get_environment_variable('MOPAC_FORCEGPU', line, status=i)
         if (i == 0) then
-          if (trim(adjustl(line)) /= '') lgpu = .true.
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','FALSE','F','NO','N','OFF')
+            case default
+              lgpu = .true.
+            end select
+          end if
         end if
         call get_environment_variable('MOPAC_GPU_SCFTASK', line, status=i)
         if (i == 0) then
@@ -414,6 +570,12 @@
           if (len_trim(line) /= 0) then
             select case (line(1:1))
             case('c','C')
+              if (strict_full_gpu_required) then
+                write(iw,'(1x,a)') '[MOZYME GPU SCF] status=strict_abort reason=strict_gpu_disabled_by_scftask_cpu'
+                call flush(iw)
+                call mopend('Strict MOZYME full-SCF GPU was requested, but MOPAC_GPU_SCFTASK=cpu disables GPU SCF')
+                goto 101
+              end if
               gpu_scf_task_mode = GPU_SCF_TASK_CPU
               lgpu = .false.
             case('g','G')
@@ -431,51 +593,202 @@
         ! Optional MOZYME GPU override via environment variable
         call get_environment_variable('MOZYME_GPU', line, status=i)
         if (i == 0) then
-          if (trim(adjustl(line)) /= '') mozyme_gpu = .true.
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','FALSE','F','NO','N','OFF')
+            case default
+              mozyme_gpu_requested = .true.
+              mozyme_gpu = lgpu
+              mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NONE
+            end select
+          end if
         end if
-        ! If MOZYME is active and GPU is enabled, default to MOZYME GPU unless explicitly disabled
-        if (mozyme .and. lgpu) then
-          if (.not. mozyme_gpu) mozyme_gpu = .true.
+        ! Preserve ordinary MOZYME behavior unless GPU execution was requested
+        ! explicitly or strict full-SCF proof requires it.
+        if (mozyme .and. strict_full_gpu_required .and. lgpu) then
+          mozyme_gpu_requested = .true.
+          mozyme_gpu = .true.
+          mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NONE
         end if
         ! Allow disabling MOZYME GPU explicitly
         call get_environment_variable('MOZYME_GPU_OFF', line, status=i)
         if (i == 0) then
-          if (trim(adjustl(line)) /= '') mozyme_gpu = .false.
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','FALSE','F','NO','N','OFF')
+            case default
+              if (strict_full_gpu_required) then
+                write(iw,'(1x,a)') '[MOZYME GPU SCF] status=strict_abort reason=strict_gpu_disabled_by_mozyme_gpu_off'
+                call flush(iw)
+                call mopend('Strict MOZYME full-SCF GPU was requested, but MOZYME_GPU_OFF disables MOZYME GPU execution')
+                goto 101
+              end if
+              mozyme_gpu_off_requested = .true.
+              mozyme_gpu_requested = .false.
+              mozyme_gpu = .false.
+              mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NOT_REQUESTED
+            end select
+          end if
         end if
         ! Auto-policy: disable MOZYME GPU on older GPUs unless user forces it
         if (mozyme .and. lgpu) then
           call get_environment_variable('MOZYME_GPU_FORCE', line, status=i)
           if (i == 0) then
-            if (trim(adjustl(line)) /= '') then
-              mozyme_gpu = .true.
+            line = adjustl(line)
+            if (len_trim(line) /= 0) then
+              call upcase(line, len_trim(line))
+              select case (trim(line))
+              case ('0','FALSE','F','NO','N','OFF')
+              case default
+                mozyme_gpu_requested = .true.
+                mozyme_gpu = .true.
+                mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NONE
+              end select
             end if
-          else
+          else if (.not. strict_full_gpu_required) then
             if (nDevices > 0) then
               j = gpu_id + 1
               if (j >= 1 .and. j <= nDevices) then
-                if (major(j) < 6) mozyme_gpu = .false.
+                if (major(j) < 6) then
+                  mozyme_gpu = .false.
+                  mozyme_gpu_disable_reason = MOZYME_GPU_REASON_DEVICE_POLICY
+                end if
               end if
             end if
           end if
         end if
+        if (mozyme_gpu_requested .and. .not. lgpu) then
+          mozyme_gpu = .false.
+          mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NO_DEVICE
+        end if
 
-        ! Determine default policy for MOZYME pair kernel (F2)
-        mozyme_f2_gpu = mozyme_gpu
-        call get_environment_variable('MOPAC_MOZYME_F2_GPU', line, status=i)
+        ! Production MOZYME GPU work is limited to kernels that can amortize
+        ! launch and transfer overhead.  The one-center Fock batch is
+        ! intentionally opt-in because it is too fine-grained for end-to-end
+        ! MOZYME speedups on current molecule benchmarks.
+        mozyme_resident_fock_gpu = mozyme_gpu .and. lgpu
+        mozyme_fock1_batch_gpu = .false.
+        mozyme_fock2_4x1_batch_gpu = .false.
+        mozyme_fock_gpu = .false.
+        mozyme_f2_gpu = .false.
+        mozyme_check_gpu = .false.
+        call get_environment_variable('MOPAC_MOZYME_RESIDENT_FOCK_GPU', line, status=i)
         if (i == 0) then
-          if (trim(adjustl(line)) /= '') then
-            select case (line(1:1))
-            case ('0','f','F','n','N','o','O')
-              mozyme_f2_gpu = .false.
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','F','FALSE','N','NO','OFF')
+              if (strict_full_gpu_required) then
+                write(iw,'(1x,a)') '[MOZYME GPU SCF] status=strict_abort reason=strict_resident_fock_gpu_disabled'
+                call flush(iw)
+                call mopend('Strict MOZYME full-SCF GPU was requested, but MOPAC_MOZYME_RESIDENT_FOCK_GPU disables resident Fock')
+                goto 101
+              end if
+              mozyme_resident_fock_gpu = .false.
+              mozyme_resident_fock_explicit_disable = .true.
             case default
-              mozyme_f2_gpu = .true.
+              mozyme_gpu_requested = .true.
+              if (lgpu) then
+                mozyme_gpu = .true.
+                mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NONE
+              end if
+              mozyme_resident_fock_gpu = mozyme_gpu .and. lgpu
             end select
           end if
-        else if (mozyme .and. lgpu .and. mozyme_f2_gpu) then
+        end if
+        call get_environment_variable('MOPAC_MOZYME_FOCK1_BATCH_GPU', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','F','FALSE','N','NO','OFF')
+              mozyme_fock1_batch_gpu = .false.
+            case default
+              mozyme_gpu_requested = .true.
+              if (lgpu) then
+                mozyme_gpu = .true.
+                mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NONE
+              end if
+              mozyme_fock1_batch_gpu = mozyme_gpu .and. lgpu
+            end select
+          end if
+        end if
+        call get_environment_variable('MOPAC_MOZYME_FOCK2_4X1_BATCH_GPU', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','F','FALSE','N','NO','OFF')
+              mozyme_fock2_4x1_batch_gpu = .false.
+            case default
+              mozyme_gpu_requested = .true.
+              if (lgpu) then
+                mozyme_gpu = .true.
+                mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NONE
+              end if
+              mozyme_fock2_4x1_batch_gpu = mozyme_gpu .and. lgpu
+            end select
+          end if
+        end if
+        call get_environment_variable('MOPAC_MOZYME_FOCK_GPU', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','F','FALSE','N','NO','OFF')
+              mozyme_fock_gpu = .false.
+              mozyme_f2_gpu = .false.
+            case default
+              mozyme_fock_gpu = mozyme_gpu .and. lgpu
+              mozyme_f2_gpu = mozyme_fock_gpu
+            end select
+          end if
+        end if
+        call get_environment_variable('MOPAC_MOZYME_F2_GPU', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','F','FALSE','N','NO','OFF')
+              mozyme_f2_gpu = .false.
+            case default
+              if (mozyme_fock_gpu) mozyme_f2_gpu = .true.
+            end select
+          end if
+        end if
+        if (mozyme .and. lgpu .and. mozyme_fock_gpu) then
           if (nDevices > 0) then
             j = gpu_id + 1
             if (j < 1 .or. j > nDevices) j = 1
-            if (major(j) < 6) mozyme_f2_gpu = .false.
+            if (major(j) < 6) then
+              mozyme_fock_gpu = .false.
+              mozyme_f2_gpu = .false.
+            end if
+          end if
+        end if
+        if (mozyme .and. mozyme_f2_gpu .and. .not. mozyme_fock_gpu) then
+          mozyme_f2_gpu = .false.
+        end if
+        call get_environment_variable('MOPAC_MOZYME_CHECK_GPU', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','F','FALSE','N','NO','OFF')
+              mozyme_check_gpu = .false.
+            case default
+              mozyme_check_gpu = mozyme_gpu .and. lgpu
+            end select
           end if
         end if
 
@@ -513,7 +826,14 @@
           write(iw,'(1x,a)') '[PROFILE] pair split: compact (LL/HL/HH)=CPU, general=GPU'
           if (mozyme) then
             write(iw,'(1x,a,1x,l1,1x,a,1x,i0)') '[PROFILE] MOZYME_GPU=', mozyme_gpu, 'minblk=', mozyme_gpu_min_block
+            write(iw,'(1x,a,1x,l1,1x,a,1x,i0)') '[PROFILE] MOZYME_GPU_REQUESTED=', &
+     &        mozyme_gpu_requested, 'disable_reason=', mozyme_gpu_disable_reason
+            write(iw,'(1x,a,1x,l1)') '[PROFILE] MOZYME_RESIDENT_FOCK_GPU=', mozyme_resident_fock_gpu
+            write(iw,'(1x,a,1x,l1)') '[PROFILE] MOZYME_FOCK1_BATCH_GPU=', mozyme_fock1_batch_gpu
+            write(iw,'(1x,a,1x,l1)') '[PROFILE] MOZYME_FOCK2_4X1_BATCH_GPU=', mozyme_fock2_4x1_batch_gpu
+            write(iw,'(1x,a,1x,l1)') '[PROFILE] MOZYME_FOCK_GPU=', mozyme_fock_gpu
             write(iw,'(1x,a,1x,l1)') '[PROFILE] MOZYME_F2_GPU=', mozyme_f2_gpu
+            write(iw,'(1x,a,1x,l1)') '[PROFILE] MOZYME_CHECK_GPU=', mozyme_check_gpu
           end if
         end block
         ! Auto policy: adjust resident_scf and streaming based on problem size and device
@@ -530,7 +850,14 @@
           env_auto = '' ; i = 1
           call get_environment_variable('MOPAC_GPU_AUTOPOLICY_OFF', env_auto, status=i)
           if (i == 0) then
-            if (trim(adjustl(env_auto)) /= '') auto_policy = .false.
+            env_auto = adjustl(env_auto)
+            call upcase(env_auto, len_trim(env_auto))
+            select case (trim(env_auto))
+            case ('1','T','TRUE','Y','YES','ON')
+              auto_policy = .false.
+            case default
+              auto_policy = .true.
+            end select
           end if
           if (auto_policy .and. lgpu) then
             jdev = gpu_id + 1
@@ -541,10 +868,13 @@
               cc_minor = minor(jdev)
             end if
             if (norbs < small_thr) then
-              ! Very small: prefer CPU
+              ! Very small dense-SCF jobs should stay on CPU.  MOZYME inputs can
+              ! still have norbs unset at this early policy point, so keep lgpu
+              ! available for the MOZYME-specific kernels and only disable the
+              ! dense resident/streaming SCF path here.
               resident_scf = .false.
               gpu_scf_stream_available = .false.
-              lgpu = .false.
+              if (.not. mozyme) lgpu = .false.
             else if (norbs < medium_thr) then
               ! Medium: enable resident SCF, avoid streaming
               resident_scf = .true.
@@ -556,12 +886,37 @@
                 gpu_scf_stream_available = .true.
               end if
             end if
-            ! MOZYME policy: on older GPUs (CC<6), leave F2 on CPU unless forced
+            ! MOZYME policy: on older GPUs (CC<6), leave legacy Fock GPU off.
             if (mozyme .and. cc_major < 6) then
+              mozyme_fock1_batch_gpu = .false.
+              mozyme_fock2_4x1_batch_gpu = .false.
+              mozyme_fock_gpu = .false.
               mozyme_f2_gpu = .false.
+              mozyme_check_gpu = .false.
             end if
           end if
         end block
+
+        if (mozyme) then
+          if (.not. mozyme_gpu_requested) then
+            mozyme_gpu = .false.
+            mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NOT_REQUESTED
+          else if (.not. lgpu) then
+            mozyme_gpu = .false.
+            mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NO_DEVICE
+          else if (mozyme_gpu) then
+            mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NONE
+          else if (mozyme_gpu_disable_reason == MOZYME_GPU_REASON_NONE) then
+            mozyme_gpu_disable_reason = MOZYME_GPU_REASON_DEVICE_POLICY
+          end if
+          mozyme_gpu_enabled = mozyme_resident_fock_gpu .or. mozyme_fock1_batch_gpu .or. mozyme_fock2_4x1_batch_gpu .or. &
+            (mozyme_gpu .and. lgpu)
+          if (.not. mozyme_gpu_enabled) then
+            mozyme_resident_fock_gpu = .false.
+            mozyme_fock1_batch_gpu = .false.
+            mozyme_fock2_4x1_batch_gpu = .false.
+          end if
+        end if
 
         ! Optional debug summary
         call get_environment_variable('MOPAC_GPU_DEBUG', line, status=i)
@@ -576,8 +931,16 @@
               write(iw,'(6x,a,1x,i0,a,i0)') 'CC', major(j), '.', minor(j)
             end do
             write(iw,'(3x,a,1x,l1,3x,a,1x,i0)') 'mozyme_gpu=', mozyme_gpu, 'mozyme_minblk=', mozyme_gpu_min_block
+            write(iw,'(3x,a,1x,l1,3x,a,1x,i0)') &
+     &        'mozyme_gpu_requested=', mozyme_gpu_requested, 'disable_reason=', mozyme_gpu_disable_reason
+            write(iw,'(3x,a,1x,l1)') 'mozyme_gpu_plan_ready=', mozyme_gpu_plan_ready
             write(iw,'(3x,a,1x,l1)') 'mozyme_2gpu=', mozyme_force_2gpu
+            write(iw,'(3x,a,1x,l1)') 'mozyme_resident_fock_gpu=', mozyme_resident_fock_gpu
+            write(iw,'(3x,a,1x,l1)') 'mozyme_fock1_batch_gpu=', mozyme_fock1_batch_gpu
+            write(iw,'(3x,a,1x,l1)') 'mozyme_fock2_4x1_batch_gpu=', mozyme_fock2_4x1_batch_gpu
+            write(iw,'(3x,a,1x,l1)') 'mozyme_fock_gpu=', mozyme_fock_gpu
             write(iw,'(3x,a,1x,l1)') 'mozyme_f2_gpu=', mozyme_f2_gpu
+            write(iw,'(3x,a,1x,l1)') 'mozyme_check_gpu=', mozyme_check_gpu
             write(iw,'(3x,a,1x,l1)') 'resident_scf=', resident_scf
             write(iw,'(3x,a,1x,l1)') 'gpu_scf_stream_available=', gpu_scf_stream_available
 
@@ -642,7 +1005,7 @@
         write(0,'(5x,a)')"  If there is an extra line, delete it and re-submit.)"
         inquire(unit=ir, opened=opend)
         if (opend) close(ir, status = 'delete', err = 999)
-        stop
+        goto 101
       end if
       if (numat > 46000) then
         write(line,'(a,i5,a)')"Data set '"//trim(jobnam)//"' exists, but at ",numat," atoms is too large to run."
@@ -731,7 +1094,7 @@
         end do
         refkey(1) = trim(refkey(1))//' SETUP'
         call geout (iarc)
-        stop
+        goto 100
       end if
       if (index(keywrd,' 0SCF') + index(keywrd, " RESEQ") /= 0 ) then
         inquire(unit=iarc, opened=opend)
@@ -778,7 +1141,7 @@
           "(Before using PDBOUT, either add keyword RESIDUES or run a job using keyword RESIDUES to add PDB atom labels.)"
           write(iw,'(10x,a)') &
           "(Keyword RESIDUES can only be used when one of MOZYME, LEWIS, CHARGES, or RESEQ is also present)"
-          return
+          goto 101
         end if
       end if
       if (mozyme) then
@@ -788,7 +1151,11 @@
         end if
         ! Experimental: enable GPU assist in MOZYME when requested
 #ifdef GPU
-        mozyme_gpu = (index(keywrd, ' MOZYME_GPU') /= 0)
+        if (.not. mozyme_gpu_off_requested .and. index(keywrd, ' MOZYME_GPU') /= 0) then
+          mozyme_gpu_requested = .true.
+          mozyme_gpu = lgpu
+          if (mozyme_gpu) mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NONE
+        end if
         ! Uppercase a scratch copy for robust parsing
         keyup = keywrd
         call upcase(keyup, len_trim(keyup))
@@ -812,8 +1179,9 @@
               pos = pos + 1
             end do
             if (pos <= len_trim(keyup)) then
-              read(keyup(pos:),*,err=901) kk0
-              mozyme_gpu_min_block = max(1, kk0)
+              kk0 = 0
+              read(keyup(pos:),*,iostat=stat_env) kk0
+              if (stat_env <= 0) mozyme_gpu_min_block = max(1, kk0)
             end if
           end if
         end if
@@ -838,14 +1206,17 @@
               do kk0 = 1, len_trim(pair)
                 if (pair(kk0:kk0) == ',' .or. pair(kk0:kk0) == ':' .or. pair(kk0:kk0) == ';') pair(kk0:kk0) = ' '
               end do
-              read(pair,*,err=901) d0_pair, d1_pair
-              if (d0_pair > 0 .and. d1_pair > 0 .and. d0_pair /= d1_pair) then
-                if (d0_pair <= nDevices .and. d1_pair <= nDevices) then
-                  if (gpu_ok(d0_pair) .and. gpu_ok(d1_pair)) then
-                    call setMGpuPair(d0_pair-1, d1_pair-1)
-                    mozyme_force_2gpu = .true.
-                    ngpus = 2
-                    lgpu = .true.
+              d0_pair = 0 ; d1_pair = 0
+              read(pair,*,iostat=stat_env) d0_pair, d1_pair
+              if (stat_env <= 0) then
+                if (d0_pair > 0 .and. d1_pair > 0 .and. d0_pair /= d1_pair) then
+                  if (d0_pair <= nDevices .and. d1_pair <= nDevices) then
+                    if (gpu_ok(d0_pair) .and. gpu_ok(d1_pair)) then
+                      call setMGpuPair(d0_pair-1, d1_pair-1)
+                      mozyme_force_2gpu = .true.
+                      ngpus = 2
+                      lgpu = .true.
+                    end if
                   end if
                 end if
               end if
@@ -853,21 +1224,13 @@
           end if
         end if
 901     continue
-#endif
-        ! Handle MOZYME-specific GPU tuning keywords
-#ifdef GPU
-        ! Force 2-GPU mode for MOZYME density if requested and at least two GPUs are suitable
-        if (index(keywrd, ' MOZYME_2GPU') /= 0) then
-          mozyme_force_2gpu = .true.
-          if (j >= 2) then
-            ngpus = 2
-            lgpu = .true.
+        if (mozyme_gpu_requested .and. lgpu .and. .not. mozyme_gpu_off_requested .and. &
+            mozyme_gpu_disable_reason /= MOZYME_GPU_REASON_DEVICE_POLICY) then
+          mozyme_gpu = .true.
+          mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NONE
+          if (.not. mozyme_resident_fock_explicit_disable) then
+            mozyme_resident_fock_gpu = .true.
           end if
-        end if
-        ! Tune the minimum block size for MOZYME GPU offloads (rank-1 GEMM/SYRK)
-        i = index(keywrd, ' MOZYME_MINBLK')
-        if (i /= 0) then
-          mozyme_gpu_min_block = max(1, nint(reada(keywrd, i)))
         end if
 #endif
       end if
@@ -890,6 +1253,13 @@
         if (prt_coords) write (iw, '(A)') trim(line)
 !        xparam(1) = -1.D0
         if (index(keywrd," OLDEN") /= 0 .and. index(keywrd, " 0SCF") == 0) then
+          if (strict_mozyme_scf) then
+            write(iw,'(1x,a)') &
+              '[MOZYME GPU SCF] status=strict_abort reason=strict_run_mopac_olden_host_restore'
+            call flush(iw)
+            call mopend("MOZYME GPU strict resident SCF does not support OLDEN/OLDENS host restore")
+            goto 101
+          end if
 !
 ! read in density so that charges can be calculated
 !
@@ -902,8 +1272,11 @@
             allocate(p(mpack), pa(mpack), pb(mpack))
           end if
           call den_in_out(0)
-          if (moperr) return
-          if (mozyme) call density_for_MOZYME (p, 0, nelecs/2, pa)
+          if (moperr) goto 101
+          if (mozyme) then
+            if (.not. mozyme_gpu_scf_no_fallback_required()) &
+              call density_for_MOZYME (p, 0, nelecs/2, pa)
+          end if
         end if
         if (prt_coords) call geout (iw)
         if (index(keywrd,' AIGOUT') /= 0) then
@@ -1242,7 +1615,7 @@
           if (index(keywrd, " LOCATE-TS(SET") == 0) then
             write(line,'(a)')" LOCATE-TS requires GEO_REF to be used"
             call mopend(trim(line))
-            return
+            goto 101
           end if
         end if
         call Locate_TS
@@ -1374,7 +1747,8 @@
 !
 ! Delete density matrix if it was made by MOZYME
 !
-      if (.not. l_OLDDEN .and. index(keywrd, " NEWDEN") == 0) then
+      if (.not. strict_mozyme_scf .and. .not. l_OLDDEN .and. &
+          index(keywrd, " NEWDEN") == 0) then
         j = len_trim(end_fn)
         inquire (file = end_fn(:j - 3)//"den", exist = exists)
         if (exists) then

@@ -19,6 +19,8 @@ subroutine local_for_MOZYME (type)
        & cvir_dim, icvir_dim, cocc, icocc, ncf, ncocc, iorbs, nncf, &
        & cvir, icvir, nce, ncvir, nnce
     use chanel_C, only: iw
+    use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
+    use mozyme_gpu_relocalize, only: mozyme_gpu_relocalize_try
     implicit none
     character (len=*), intent (in) :: type
     integer :: i, nocc, nvir, alloc_stat
@@ -26,6 +28,13 @@ subroutine local_for_MOZYME (type)
     double precision, dimension(:), allocatable :: psi1, psi2, axiiii
     integer, dimension(:), allocatable :: nf, nl
     integer, dimension(:,:), allocatable :: ioc
+    external :: mozyme_gpu_strict_abort
+    if (mozyme_gpu_relocalize_try(type)) return
+    if (mozyme_gpu_scf_no_fallback_required()) then
+      call mozyme_gpu_strict_abort('strict_cpu_relocalization', &
+        'MOZYME GPU strict resident SCF does not support CPU re-localization')
+      return
+    end if
     allocate (psi1(norbs), psi2(norbs), axiiii(norbs), nf(numat), &
          & nl(numat), ioc(2,numat), stat=alloc_stat)
     if (alloc_stat /= 0) then

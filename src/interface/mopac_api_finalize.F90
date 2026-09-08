@@ -138,7 +138,7 @@ contains
     properties%stress = voigt
     natom_move = nvar/3
     nlattice_move = 0
-    do i=nvar/3-id, nvar/3
+    do i=max(1, nvar/3-id), nvar/3
       if (nat(loc(1,3*i)) == 107) then
         natom_move = natom_move - 1
         nlattice_move = nlattice_move + 1

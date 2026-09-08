@@ -31,20 +31,22 @@
 !  is necessary for debugging only.  The data here can be monitored by a debugger.
 !  The other data in linear_cosmo cannot be monitored.
 !
-    logical :: new_surface, new_iteration
+    logical :: new_surface = .true., new_iteration = .true.
     double precision, dimension(:, :), allocatable :: a_block
-    double precision, dimension(:), allocatable :: r_vec, p_vec, &
+    double precision, dimension(:), allocatable, target :: r_vec, p_vec, &
        & q_vec, z_vec, a_diag, m_vec, a_part
     double precision, dimension(:, :, :), allocatable :: tm
-    integer, dimension(:), allocatable :: iblock_pos
+    integer, dimension(:), allocatable, target :: iblock_pos
   end module cosmo_mini
   module linear_cosmo
   use afmm_C
   use cosmo_mini, only : new_surface, new_iteration, a_block, tm, &
   r_vec, p_vec, q_vec, z_vec, a_diag, m_vec, a_part, iblock_pos
+  use iso_c_binding, only : c_int, c_ptr, c_loc, c_null_ptr
   implicit none
 
-  public :: ini_linear_cosmo, coscavz, addnucz, addfckz, am1dft_solve
+  public :: ini_linear_cosmo, coscavz, addnucz, addfckz, am1dft_solve, &
+    mozyme_cosmo_prepare_gpu_state, mozyme_cosmo_gpu_state
   double precision, public :: c_proc
 
 
@@ -70,10 +72,11 @@
 
   integer, dimension(:), allocatable :: nipsrs
   integer, dimension(:), allocatable :: nset
-  integer, dimension(:), allocatable :: npoints
+  integer, dimension(:), allocatable, target :: npoints
+  integer, dimension(:), allocatable, target :: a_part_i, a_part_j
   integer, dimension(:), allocatable :: iatom_pos
 
-  integer, dimension(:), allocatable :: ijbo_diag
+  integer, dimension(:), allocatable, target :: ijbo_diag
 
 
 
@@ -127,6 +130,177 @@ contains
     call afmm_ini
 
   end subroutine ini_linear_cosmo
+
+  subroutine mozyme_cosmo_prepare_gpu_state(ok)
+    use molkst_C, only : numat
+    use common_arrays_C, only : coord
+    use cosmo_C, only : cosurf, iatsp, ioldcv, lenabc, nar_csm, nps, &
+      nsetf, srad
+    implicit none
+    logical, intent(out) :: ok
+    integer :: ierr, maxrs, npos
+    logical :: precondition_ok
+
+    ok = .false.
+    if (numat <= 0 .or. nps <= 0) return
+    if (.not. allocated(npoints)) return
+    if (.not. allocated(a_diag)) return
+    if (.not. allocated(m_vec)) return
+    if (.not. allocated(iblock_pos)) return
+    if (.not. allocated(cosurf)) return
+    if (.not. allocated(iatsp)) return
+    if (.not. allocated(nar_csm)) return
+    if (.not. allocated(nsetf)) return
+    if (.not. allocated(nset)) return
+    if (.not. allocated(rsc)) return
+    if (.not. allocated(nipsrs)) return
+    if (.not. allocated(tm)) return
+    if (.not. allocated(srad)) return
+    if (compute_a_part .and. .not. allocated(a_part)) return
+
+    maxrs = 60 * numat
+    call amat_diag(coord, srad, numat, cosurf, nps, nar_csm, nsetf, &
+      nset, rsc, nipsrs, iatsp, tm, ioldcv, maxrs, lenabc, a_diag)
+
+    if (compute_a_part) then
+      if (nps > na2max .or. nps > na1max) then
+        call set_tesselation(surface_handle, ierr)
+        if (ierr /= 0) return
+        call mozyme_cosmo_allocate_a_part_pairs(ierr)
+        if (ierr /= 0) return
+        npos = count_short_ints(cosurf, 4, simulate_aq_dir_int, .true.)
+        if (npos /= size(a_part)) return
+      else
+        call simulate_aq_vec(coord, srad, numat, cosurf, nps, nar_csm, &
+          nsetf, nset, rsc, nipsrs, iatsp, tm, ioldcv, maxrs, lenabc, &
+          .true., npos)
+        if (npos /= size(a_part)) return
+        call mozyme_cosmo_build_a_part_pairs(ierr)
+        if (ierr /= 0) return
+      end if
+    end if
+
+    call precondition(cosurf, nps, iatsp, numat, a_diag, m_vec, &
+      precondition_ok)
+    if (.not. precondition_ok) return
+    ok = .true.
+  end subroutine mozyme_cosmo_prepare_gpu_state
+
+  subroutine mozyme_cosmo_allocate_a_part_pairs(ierr)
+    implicit none
+    integer, intent(out) :: ierr
+    integer :: alloc_stat
+
+    ierr = 1
+    if (.not. allocated(a_part)) return
+    if (allocated(a_part_i)) deallocate(a_part_i, a_part_j)
+    allocate(a_part_i(size(a_part)), a_part_j(size(a_part)), &
+      stat=alloc_stat)
+    if (alloc_stat /= 0) return
+    a_part_i = 0
+    a_part_j = 0
+    ierr = 0
+  end subroutine mozyme_cosmo_allocate_a_part_pairs
+
+  subroutine mozyme_cosmo_build_a_part_pairs(ierr)
+    use cosmo_C, only : cosurf, disex2, nps
+    implicit none
+    integer, intent(out) :: ierr
+    integer :: ii, jj, npos
+    double precision :: d2
+
+    call mozyme_cosmo_allocate_a_part_pairs(ierr)
+    if (ierr /= 0) return
+
+    npos = 0
+    do ii = 1, nps
+      do jj = 1, ii - 1
+        d2 = (cosurf(1,jj)-cosurf(1,ii))**2 + &
+          (cosurf(2,jj)-cosurf(2,ii))**2 + &
+          (cosurf(3,jj)-cosurf(3,ii))**2
+        if (d2 <= disex2) then
+          npos = npos + 1
+          if (npos > size(a_part)) return
+          a_part_i(npos) = ii
+          a_part_j(npos) = jj
+        end if
+      end do
+    end do
+    if (npos /= size(a_part)) return
+    ierr = 0
+  end subroutine mozyme_cosmo_build_a_part_pairs
+
+  subroutine mozyme_cosmo_gpu_state(npoints_dim, a_diag_dim, a_part_dim, &
+       & m_vec_dim, iblock_pos_dim, new_surface_flag, npoints_ptr, &
+       & a_diag_ptr, a_part_ptr, a_part_i_ptr, a_part_j_ptr, m_vec_ptr, &
+       & iblock_pos_ptr)
+    implicit none
+    integer(c_int), intent(out) :: npoints_dim, a_diag_dim, a_part_dim
+    integer(c_int), intent(out) :: m_vec_dim, iblock_pos_dim
+    integer(c_int), intent(out) :: new_surface_flag
+    type(c_ptr), intent(out) :: npoints_ptr, a_diag_ptr, a_part_ptr
+    type(c_ptr), intent(out) :: a_part_i_ptr, a_part_j_ptr
+    type(c_ptr), intent(out) :: m_vec_ptr, iblock_pos_ptr
+
+    npoints_dim = 0_c_int
+    a_diag_dim = 0_c_int
+    a_part_dim = 0_c_int
+    m_vec_dim = 0_c_int
+    iblock_pos_dim = 0_c_int
+    new_surface_flag = merge(1_c_int, 0_c_int, new_surface)
+    npoints_ptr = c_null_ptr
+    a_diag_ptr = c_null_ptr
+    a_part_ptr = c_null_ptr
+    a_part_i_ptr = c_null_ptr
+    a_part_j_ptr = c_null_ptr
+    m_vec_ptr = c_null_ptr
+    iblock_pos_ptr = c_null_ptr
+
+    if (allocated(npoints)) then
+      if (size(npoints) > 0) then
+        if (size(npoints) <= huge(npoints_dim)) then
+          npoints_dim = int(size(npoints), c_int)
+          npoints_ptr = c_loc(npoints(1))
+        end if
+      end if
+    end if
+    if (allocated(a_diag)) then
+      if (size(a_diag) > 0) then
+        if (size(a_diag) <= huge(a_diag_dim)) then
+          a_diag_dim = int(size(a_diag), c_int)
+          a_diag_ptr = c_loc(a_diag(1))
+        end if
+      end if
+    end if
+    if (allocated(a_part)) then
+      if (size(a_part) > 0) then
+        if (size(a_part) <= huge(a_part_dim)) then
+          a_part_dim = int(size(a_part), c_int)
+          a_part_ptr = c_loc(a_part(1))
+          if (allocated(a_part_i) .and. allocated(a_part_j)) then
+            a_part_i_ptr = c_loc(a_part_i(1))
+            a_part_j_ptr = c_loc(a_part_j(1))
+          end if
+        end if
+      end if
+    end if
+    if (allocated(m_vec)) then
+      if (size(m_vec) > 0) then
+        if (size(m_vec) <= huge(m_vec_dim)) then
+          m_vec_dim = int(size(m_vec), c_int)
+          m_vec_ptr = c_loc(m_vec(1))
+        end if
+      end if
+    end if
+    if (allocated(iblock_pos)) then
+      if (size(iblock_pos) > 0) then
+        if (size(iblock_pos) <= huge(iblock_pos_dim)) then
+          iblock_pos_dim = int(size(iblock_pos), c_int)
+          iblock_pos_ptr = c_loc(iblock_pos(1))
+        end if
+      end if
+    end if
+  end subroutine mozyme_cosmo_gpu_state
 
   subroutine bpnew_vec (v)
     !
@@ -1357,6 +1531,7 @@ contains
 
             aa = aa / (cosurf(4, ii) * cosurf(4, jj))
 
+            if (.not. allocated(a_part) .or. npos > size(a_part)) return
             a_part(npos) = aa
           end if
         end if
@@ -1568,6 +1743,12 @@ contains
           if (d2 <= disex2) then
             npos = npos +1
             if (compute) then
+              if (.not. allocated(a_part) .or. npos > size(a_part)) return
+              if (allocated(a_part_i) .and. allocated(a_part_j) .and. &
+                  npos <= size(a_part_i) .and. npos <= size(a_part_j)) then
+                a_part_i(npos) = ii
+                a_part_j(npos) = jj
+              end if
               rj = srad(j)
               call mfinel (jj, 2, finel, nar_csm, nsetf, &
                  & nset, rsc, nipsrs, dirvec, &
@@ -1620,6 +1801,12 @@ contains
             npos = npos +1
 
             if (compute) then
+              if (.not. allocated(a_part) .or. npos > size(a_part)) return
+              if (allocated(a_part_i) .and. allocated(a_part_j) .and. &
+                  npos <= size(a_part_i) .and. npos <= size(a_part_j)) then
+                a_part_i(npos) = ii
+                a_part_j(npos) = jj
+              end if
               rj = srad(j)
               call mfinel (jj, 2, finel, nar_csm, nsetf, &
                  & nset, rsc, nipsrs, dirvec, &
@@ -2280,7 +2467,7 @@ contains
 
   end function some_norm
 
-  subroutine precondition (cosurf, nps, iatsp, numat, a_diag, m)
+  subroutine precondition (cosurf, nps, iatsp, numat, a_diag, m, ok)
 
     use cosmo_C, only : disex2
     use chanel_C, only : iw
@@ -2296,6 +2483,7 @@ contains
     double precision, dimension(nps), intent(in) :: a_diag
 
     double precision, dimension(*), intent(out) :: m
+    logical, intent(out), optional :: ok
     !
     !.. Local Scalars ..
     integer :: i, j, ii, jj, ijpos, ips, jps, ierr
@@ -2308,8 +2496,11 @@ contains
     ! ... Executable Statements ...
 
 
+    if (present(ok)) ok = .false.
+
     if (.not. use_a_blocks) then
       m(1:nps) = 1.d0 / a_diag(1:nps)
+      if (present(ok)) ok = .true.
       return
     end if
 
@@ -2384,6 +2575,10 @@ contains
          end do
 
          call dpotrf ('U', ii, a_block, max_block_size, ierr)
+         if (ierr /= 0 .and. present(ok)) then
+           write(iw,*) ' Error in Matrix decomposition ', i, ' = ', ierr
+           return
+         end if
       !   if (ierr /= 0) then
       !     write(iw,*) ' Error in decomposition of atom ', i, ' = ', ierr
       !     call mopend(' Internal error')
@@ -2393,6 +2588,7 @@ contains
          call dpotri ('U', ii, a_block, max_block_size, ierr)
          if (ierr /= 0) then
            write(iw,*) ' Error in Matrix invert ', i, ' = ', ierr
+           if (present(ok)) return
            call mopend(' Internal error')
            return
          end if
@@ -2439,6 +2635,7 @@ contains
        end if
      end do
 
+    if (present(ok)) ok = .true.
   end subroutine precondition
 
   subroutine amat_diag (coord, srad, numat, cosurf, nps, nar_csm, nsetf, &

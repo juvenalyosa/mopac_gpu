@@ -1,0 +1,2 @@
+PM7 GEO_DAT="protein_ubiquitin_1ubq_hydrogenated.pdb" 1SCF MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 NEWPDB PDB GEO-OK NOCOMMENTS
+Publication benchmark compute deck for protein_ubiquitin_1ubq

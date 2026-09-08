@@ -14,7 +14,7 @@
 ! limitations under the License.
 
       module iter_C
-      double precision, dimension(:), allocatable :: pold, pold2, pold3, pbold, &
+      double precision, dimension(:), allocatable, target :: pold, pold2, pold3, pbold, &
       pbold2, pbold3,  pgasa, pgasb, psona, psonb
 !
 ! Arrays used in interp.F90

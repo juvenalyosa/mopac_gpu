@@ -129,19 +129,64 @@
       if (use_gpu_diis) then
         env = '' ; istat_env = 1
         call get_environment_variable('MOPAC_DIIS_GEN', env, status=istat_env)
-        if (istat_env == 0) use_gen_resid = (trim(adjustl(env)) /= '')
+        if (istat_env == 0) then
+          env = adjustl(env)
+          call upcase(env, len_trim(env))
+          select case (trim(env))
+          case ('1','T','TRUE','Y','YES','ON')
+            use_gen_resid = .true.
+          case default
+            use_gen_resid = .false.
+          end select
+        end if
         env = '' ; istat_env = 1
         call get_environment_variable('MOPAC_DIIS_GPU_BUF', env, status=istat_env)
-        if (istat_env == 0) use_gpu_buffer = (trim(adjustl(env)) /= '')
+        if (istat_env == 0) then
+          env = adjustl(env)
+          call upcase(env, len_trim(env))
+          select case (trim(env))
+          case ('1','T','TRUE','Y','YES','ON')
+            use_gpu_buffer = .true.
+          case default
+            use_gpu_buffer = .false.
+          end select
+        end if
         env = '' ; istat_env = 1
         call get_environment_variable('MOPAC_DIIS_GPU_BFULL', env, status=istat_env)
-        if (istat_env == 0) use_gpu_bfull = (trim(adjustl(env)) /= '')
+        if (istat_env == 0) then
+          env = adjustl(env)
+          call upcase(env, len_trim(env))
+          select case (trim(env))
+          case ('1','T','TRUE','Y','YES','ON')
+            use_gpu_bfull = .true.
+          case default
+            use_gpu_bfull = .false.
+          end select
+        end if
         env = '' ; istat_env = 1
         call get_environment_variable('MOPAC_DIIS_GPU_BMAT', env, status=istat_env)
-        if (istat_env == 0) use_gpu_bcol = (trim(adjustl(env)) /= '')
+        if (istat_env == 0) then
+          env = adjustl(env)
+          call upcase(env, len_trim(env))
+          select case (trim(env))
+          case ('1','T','TRUE','Y','YES','ON')
+            use_gpu_bcol = .true.
+          case default
+            use_gpu_bcol = .false.
+          end select
+        end if
         env = '' ; istat_env = 1
         call get_environment_variable('MOPAC_DIIS_GPU', env, status=istat_env)
-        if (istat_env == 0) use_gpu_solve = (trim(adjustl(env)) /= '')
+        if (istat_env == 0) then
+          env = adjustl(env)
+          call upcase(env, len_trim(env))
+          select case (trim(env))
+          case ('1','T','TRUE','Y','YES','ON')
+            use_gpu_solve = .true.
+          case default
+            use_gpu_solve = .false.
+          end select
+        end if
         if (use_gpu_bfull) use_gpu_bcol = .false.
         resident_active = resident_scf .and. mopac_cuda_get_resident_mode() /= 0
         if (resident_active) then

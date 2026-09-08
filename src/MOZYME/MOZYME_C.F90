@@ -36,7 +36,7 @@ module MOZYME_C
 !
 !                              Data on atoms
 !
-  integer, allocatable, dimension (:) :: &
+  integer, allocatable, target, dimension (:) :: &
     iorbs,       &
     jopt
 !
@@ -54,7 +54,7 @@ module MOZYME_C
     iij,         &
     numij,       &
     ijall          !
-  integer, allocatable, dimension (:,:) :: &
+  integer, allocatable, target, dimension (:,:) :: &
     nijbo          ! If it exists, nijbo holds the statring address of array elements
                    ! for atoms i and j in otomic orbital arrays such as P, H, F, etc.
 !
@@ -120,13 +120,13 @@ module MOZYME_C
   integer ::     &
     cocc_dim,    & ! Size of the array cocc
     icocc_dim      ! Size of the array icocc
-  integer, dimension (:), allocatable :: &
+  integer, dimension (:), allocatable, target :: &
     ncf,         & ! Number of atoms involved in the LMO
     nncf,        & !  Starting address of the atom numbers of the atoms in the LMO
                    !  nncf(1) = 0
     icocc,       & ! Atom numbers of the atoms in the LMO's
     ncocc          ! Starting address of te atomic orbital coefficients in each LMO
-  double precision, dimension (:), allocatable :: &
+  double precision, dimension (:), allocatable, target :: &
     cocc           ! Atomic orbital coefficients of the LMO's
   logical, dimension(:), allocatable :: &
     gpu_occ_enabled
@@ -136,26 +136,26 @@ module MOZYME_C
   integer ::     &
     cvir_dim,    & ! Size of the array cvir
     icvir_dim      ! Size of the array icvir
-  integer, dimension (:), allocatable :: &
+  integer, dimension (:), allocatable, target :: &
     nce,         & ! Number of atoms involved in the LMO
     nnce,        & ! Starting address of the atom numbers of the atoms in the LMO
                    ! nncf(1) = 0
     icvir,       & ! Atom numbers of the atoms in the LMO's
     ncvir          ! Starting address of te atomic orbital coefficients in each LMO
-  double precision, dimension (:), allocatable :: &
+  double precision, dimension (:), allocatable, target :: &
     cvir           ! Atomic orbital coefficients of the LMO's
   logical, dimension(:), allocatable :: &
     gpu_virt_enabled
 !
 !                            Data for SCF and diagonalization
 !
-  integer, dimension (:,:), allocatable :: &
+  integer, dimension (:,:), allocatable, target :: &
     ifmo           !
-  integer, dimension (:), allocatable :: &
+  integer, dimension (:), allocatable, target :: &
     idiag,       & !
 
     nfmo           ! Number of filled LMO's that interact with a virtual LMO
-  double precision, dimension (:), allocatable :: &
+  double precision, dimension (:), allocatable, target :: &
     partf,       & !
     p1,          & !
     p2,          & !
@@ -211,7 +211,7 @@ module MOZYME_C
       lredop,      &
       semidr
 
-    integer, allocatable, dimension (:) :: &
+    integer, allocatable, target, dimension (:) :: &
       isort,       &
       kopt,        &
       iopt

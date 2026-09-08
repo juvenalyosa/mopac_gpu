@@ -30,6 +30,7 @@ subroutine makvec ()
 !
     use common_arrays_C, only : nfirst, nlast, pdiag, f, p
     use molkst_C, only: numat, norbs, keywrd, moperr, mpack
+    use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
     implicit none
     logical :: lok, times
     integer :: i, ii, j, jj, k, locc, lvir, m, m1, ne, nf_loc, ni, nj, &
@@ -38,6 +39,12 @@ subroutine makvec ()
     integer, dimension(:), allocatable :: iz, ib
     logical, dimension (:), allocatable :: u
     integer, external :: ijbo
+    external :: mozyme_gpu_strict_abort
+    if (mozyme_gpu_scf_no_fallback_required()) then
+      call mozyme_gpu_strict_abort('strict_cpu_makvec_direct', &
+        'MOZYME GPU strict resident SCF does not support direct CPU makvec')
+      return
+    end if
     times = (Index (keywrd, " TIMES") /= 0)
     !***************************************************************
     !

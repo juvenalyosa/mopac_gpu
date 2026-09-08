@@ -164,7 +164,14 @@
       env_grad = '' ; env_stat = 1
       call get_environment_variable('MOPAC_GPU_GRAD', env_grad, status=env_stat)
       if (env_stat == 0) then
-        if (trim(adjustl(env_grad)) /= '') use_gpu_grad = .true.
+        env_grad = adjustl(env_grad)
+        call upcase(env_grad, len_trim(env_grad))
+        select case (trim(env_grad))
+        case ('1','T','TRUE','Y','YES','ON')
+          use_gpu_grad = .true.
+        case default
+          use_gpu_grad = .false.
+        end select
       end if
       if (use_gpu_grad .and. resident_scf) then
         coord_ptr = c_loc(coord)

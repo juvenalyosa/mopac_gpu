@@ -26,6 +26,7 @@ subroutine check (nvec, nnc, nc, icvec, ic_dim, iorbs, ncvec, cvec, c_dim)
     use molkst_C, only: numat
     use chanel_C, only: iw
     use MOZYME_C, only : ws
+    use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
    !
    !.. Implicit Declarations ..
     implicit none
@@ -40,12 +41,18 @@ subroutine check (nvec, nnc, nc, icvec, ic_dim, iorbs, ncvec, cvec, c_dim)
    !.. Local Scalars ..
     integer :: i, j, k, l, m, mm, n
     double precision :: error, sum
+    external :: mozyme_gpu_strict_abort
    !
    !.. Intrinsic Functions ..
     intrinsic Abs, Sqrt
    !
    ! ... Executable Statements ...
    !
+    if (mozyme_gpu_scf_no_fallback_required()) then
+      call mozyme_gpu_strict_abort('strict_check_cpu_fallback', &
+        'MOZYME GPU strict resident SCF does not support CPU LMO normalization check')
+      return
+    end if
     error = 0.d0
    !
    !   RENORMALIZE L.M.O.s
@@ -115,6 +122,7 @@ end subroutine check
 subroutine check_gpu(nvec, nnc, nc, icvec, ic_dim, iorbs, ncvec, cvec, c_dim, gpu_error, bad_index)
    use molkst_C, only: numat
    use MOZYME_C, only : ws
+   use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
    implicit none
    integer, intent (in) :: ic_dim, c_dim, nvec
    integer, dimension (ic_dim), intent (in) :: icvec
@@ -125,6 +133,13 @@ subroutine check_gpu(nvec, nnc, nc, icvec, ic_dim, iorbs, ncvec, cvec, c_dim, gp
    integer, intent(out) :: bad_index
    integer :: i, j, k, l, m, mm, n
    double precision :: error, sum
+   external :: mozyme_gpu_strict_abort
+
+   if (mozyme_gpu_scf_no_fallback_required()) then
+      call mozyme_gpu_strict_abort('strict_check_gpu_host_fallback', &
+        'MOZYME GPU strict resident SCF does not support host LMO normalization check')
+      return
+   end if
 
    error = 0.d0
    do i = 1, nvec

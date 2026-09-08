@@ -113,6 +113,22 @@ bool gpu_logging_enabled() {
   return !(std::strcmp(env, "0") == 0 || std::strcmp(env, "off") == 0 || std::strcmp(env, "false") == 0);
 }
 
+bool env_enabled_ci(const char *name) {
+  const char *env = std::getenv(name);
+  if (!env || *env == '\0') return false;
+  return !(std::strcmp(env, "0") == 0 || std::strcmp(env, "off") == 0 ||
+           std::strcmp(env, "OFF") == 0 || std::strcmp(env, "false") == 0 ||
+           std::strcmp(env, "FALSE") == 0 || std::strcmp(env, "no") == 0 ||
+           std::strcmp(env, "NO") == 0);
+}
+
+bool strict_resident_stream_required() {
+  return env_enabled_ci("MOPAC_MOZYME_SCF_STRICT_RESIDENT") ||
+         env_enabled_ci("MOPAC_MOZYME_SCF_GPU") ||
+         env_enabled_ci("MOPAC_MOZYME_GPU_STRICT") ||
+         env_enabled_ci("MOPAC_MOZYME_FULL_SCF_GPU");
+}
+
 inline size_t packed_length(int n) {
   return static_cast<size_t>(n) * static_cast<size_t>(n + 1) / 2;
 }
@@ -1064,10 +1080,17 @@ extern "C" void mopac_cuda_scf_stream_finalize(void *cookie_ptr, int *status) {
     if (resident) {
       mopac_cuda_register_fock_device(session.mpack, session.f_host, session.d_f);
       if (!mopac_cuda_fetch_fock(session.f_host, static_cast<size_t>(session.mpack))) {
-        cudaError_t err = cudaMemcpy(session.f_host, session.d_f, bytes, cudaMemcpyDeviceToHost);
-        if (err != cudaSuccess) {
-          set_stream_error(session, cuda_error_message("cudaMemcpy fock resident fallback", err), STREAM_STATUS_COPY_FAILED);
+        if (strict_resident_stream_required()) {
+          set_stream_error(session,
+                           "GPU SCF stream finalize: strict resident Fock cache miss",
+                           STREAM_STATUS_NOT_READY);
           rc = session.error_code;
+        } else {
+          cudaError_t err = cudaMemcpy(session.f_host, session.d_f, bytes, cudaMemcpyDeviceToHost);
+          if (err != cudaSuccess) {
+            set_stream_error(session, cuda_error_message("cudaMemcpy fock resident fallback", err), STREAM_STATUS_COPY_FAILED);
+            rc = session.error_code;
+          }
         }
       }
     } else {

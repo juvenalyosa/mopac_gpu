@@ -53,18 +53,9 @@ message(STATUS "Build type is ${CMAKE_BUILD_TYPE}")
 
 # Specify project name & programming languages
 project(openmopac VERSION ${CMAKE_MATCH_1} LANGUAGES Fortran C)
-
-# Default CUDA architectures (fat binary) for broad GPU support
-# Covers Kepler (35) through Ada/Hopper (89/90). Users can override by setting
-# CMAKE_CUDA_ARCHITECTURES explicitly, or pass -DCMAKE_CUDA_ARCHITECTURES=native.
-if(GPU)
-  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
-    set(CMAKE_CUDA_ARCHITECTURES
-        35;50;52;60;61;70;75;80;86;89;90
-        CACHE STRING "CUDA SM architectures to compile" FORCE)
-    message(STATUS "Defaulting CMAKE_CUDA_ARCHITECTURES to ${CMAKE_CUDA_ARCHITECTURES}")
-  endif()
-endif()
+option(GPU "GPU build flag" OFF)
+option(TESTS "Enable tests (needs Python3 and Numpy)" ON)
+option(ENABLE_GPU_TESTS "Enable GPU verification tests/targets" OFF)
 
 # Enable C language support for MKL?  (C is only needed for auto-detection of MKL by find_package)
 option(ENABLE_MKL "Turn on C language support for MKL" ON)
@@ -264,14 +255,60 @@ if(MDI)
   endif()
 endif()
 
-# Add list of source files from src directory
-add_subdirectory(src)
-
 # Optional cuSOLVERMg (multi-GPU eigensolver) support flag
 option(USE_CUSOLVER_MG "Enable cuSOLVERMg-based multi-GPU eigensolver (experimental)" OFF)
-if (USE_CUSOLVER_MG AND GPU)
-  target_compile_definitions(mopac-core PRIVATE HAVE_CUSOLVER_MG)
+
+# GPU functionality (cuBLAS/cuSOLVER-based offloads: eigensolver, density, MOZYME, Fock)
+if(GPU)
+  add_definitions(-DGPU)
+  # Allow users to control CUDA architectures flexibly across different GPUs
+  # Options:
+  #  -DCUDA_ARCHS=native     (use local GPU at build time)
+  #  -DCUDA_ARCHS=all        (fatbin for common SMs)
+  #  -DCUDA_ARCHS=61;70;75;80;86;89;90 (explicit list)
+  # CMAKE_CUDA_ARCHITECTURES has priority when users pass it directly.
+  set(CUDA_ARCHS "" CACHE STRING "Optional semicolon-separated CUDA SM list (e.g. 61;70;75;80;86;89;90), or 'native'/'all'")
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
+    if("${CUDA_ARCHS}" STREQUAL "" OR CUDA_ARCHS STREQUAL "all")
+      set(CMAKE_CUDA_ARCHITECTURES 61;70;75;80;86;89;90 CACHE STRING "CUDA SM architectures to compile" FORCE)
+    elseif(CUDA_ARCHS)
+      set(CMAKE_CUDA_ARCHITECTURES ${CUDA_ARCHS} CACHE STRING "CUDA SM architectures to compile" FORCE)
+    endif()
+  elseif(CUDA_ARCHS)
+    message(STATUS "Ignoring CUDA_ARCHS=${CUDA_ARCHS}; CMAKE_CUDA_ARCHITECTURES is already set")
+  endif()
+  message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+  # Enable CUDA before adding src so .cu sources are attached after the CUDA
+  # language and architecture policy are known.
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  if(CMAKE_CUDA_ARCHITECTURES)
+    set_property(TARGET mopac-core PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+  endif()
+  set_target_properties(mopac-core PROPERTIES
+    CUDA_STANDARD 14
+    CUDA_STANDARD_REQUIRED ON
+  )
+  target_link_libraries(mopac-core PUBLIC CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
+  option(ENABLE_CUSOLVER_MG "Enable cuSOLVERMg detection and stubs" ON)
+  if(ENABLE_CUSOLVER_MG)
+    find_library(CUSOLVERMG_LIBRARY NAMES cusolverMg PATHS $ENV{CUDA_HOME}/lib64 $ENV{CUDA_HOME}/lib $ENV{CUDAToolkit_ROOT}/lib64)
+    if(CUSOLVERMG_LIBRARY)
+      message(STATUS "Found cuSOLVERMg: ${CUSOLVERMG_LIBRARY}")
+      target_link_libraries(mopac-core PUBLIC ${CUSOLVERMG_LIBRARY})
+      target_compile_definitions(mopac-core PRIVATE HAVE_CUSOLVER_MG=1)
+    else()
+      message(STATUS "cuSOLVERMg not found; multi-GPU eigensolver remains a placeholder")
+    endif()
+  endif()
+  if(USE_CUSOLVER_MG)
+    target_compile_definitions(mopac-core PRIVATE HAVE_CUSOLVER_MG)
+  endif()
+  set_target_properties(mopac-core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
+
+# Add list of source files from src directory
+add_subdirectory(src)
 
 # Set up code coverage
 set(GCOV_PROGRAM_NAME gcov CACHE STRING "Name of GNU code coverage analysis tool.")
@@ -293,49 +330,24 @@ if(ENABLE_COVERAGE)
   configure_file("cmake/CTestCustom.cmake" "${CMAKE_BINARY_DIR}/CTestCustom.cmake")
 endif()
 
-# GPU functionality (cuBLAS/cuSOLVER-based offloads: eigensolver, density, MOZYME, Fock)
-option(GPU "GPU build flag" OFF)
+# GPU publication/verification targets. CUDA language and libraries are already
+# configured before src/ is added so CUDA sources compile deterministically.
 if(GPU)
-  add_definitions(-DGPU)
-  # Allow users to control CUDA architectures flexibly across different GPUs
-  # Options:
-  #  -DCUDA_ARCHS=native     (use local GPU at build time)
-  #  -DCUDA_ARCHS=all        (fatbin for common SMs)
-  #  -DCUDA_ARCHS=61;70;75;80;86;89;90 (explicit list)
-  # Default to a broad fatbin so binaries run from RTX 4060 (SM 89) up to current datacenter parts
-  set(CUDA_ARCHS "all" CACHE STRING "Semicolon-separated CUDA SM list (e.g. 61;70;75;80;86;89;90), or 'native'/'all'")
-  if(CUDA_ARCHS STREQUAL "all")
-    set(CMAKE_CUDA_ARCHITECTURES 61;70;75;80;86;89;90)
-  elseif(CUDA_ARCHS)
-    set(CMAKE_CUDA_ARCHITECTURES ${CUDA_ARCHS})
+  # Lightweight GPU performance driver used by the Colab/publication workflow.
+  # Keep this outside TESTS so production GPU builds can use -DTESTS=OFF and
+  # still compile the benchmark binary without requiring Python/NumPy.
+  if(NOT TARGET mopac-gpu-bench)
+    add_executable(mopac-gpu-bench tests/gpu_bench.F90)
+    target_link_libraries(mopac-gpu-bench mopac-core)
+    add_dependencies(mopac-gpu-bench mopac-core)
   endif()
-  message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
-  # Ensure targets pick up architectures even if created before enabling CUDA
-  if(CMAKE_CUDA_ARCHITECTURES)
-    set_property(TARGET mopac-core PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+  if(NOT TARGET mopac-gpu-resident-fock-pair-compare)
+    add_executable(mopac-gpu-resident-fock-pair-compare tests/gpu_resident_fock_pair_compare.F90)
+    target_link_libraries(mopac-gpu-resident-fock-pair-compare mopac-core)
+    add_dependencies(mopac-gpu-resident-fock-pair-compare mopac-core)
   endif()
-  # Enable CUDA language support after architectures are set
-  enable_language(CUDA)
-  find_package(CUDAToolkit REQUIRED)
-  # Link CUDA runtime and math libraries needed by wrappers
-  target_link_libraries(mopac-core PUBLIC CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
-  # Optional: cuSOLVERMg detection for experimental multi-GPU eigensolver stub
-  option(ENABLE_CUSOLVER_MG "Enable cuSOLVERMg detection and stubs" ON)
-  if(ENABLE_CUSOLVER_MG)
-    find_library(CUSOLVERMG_LIBRARY NAMES cusolverMg PATHS $ENV{CUDA_HOME}/lib64 $ENV{CUDA_HOME}/lib $ENV{CUDAToolkit_ROOT}/lib64)
-    if(CUSOLVERMG_LIBRARY)
-      message(STATUS "Found cuSOLVERMg: ${CUSOLVERMG_LIBRARY}")
-      target_link_libraries(mopac-core PUBLIC ${CUSOLVERMG_LIBRARY})
-      target_compile_definitions(mopac-core PRIVATE HAVE_CUSOLVER_MG=1)
-    else()
-      message(STATUS "cuSOLVERMg not found; multi-GPU eigensolver remains a placeholder")
-    endif()
-  endif()
-  # Ensure position independent code for shared targets
-  set_target_properties(mopac-core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
   # Optional GPU verification tooling (disabled by default)
-  option(ENABLE_GPU_TESTS "Enable GPU verification tests/targets" OFF)
   option(ENABLE_GPU_VERIFY "Enable local GPU verify custom target" OFF)
   set(GPU_VERIFY_PAIR "" CACHE STRING "Optional GPU pair to use for verification (format: 1,2)")
   set(GPU_VERIFY_TOL "1e-4" CACHE STRING "Verification tolerance for energy deltas")
@@ -352,7 +364,7 @@ if(GPU)
       COMMENT "Running MOZYME GPU verification script"
     )
   endif()
-  if(ENABLE_GPU_TESTS)
+  if(TESTS AND ENABLE_GPU_TESTS)
     enable_testing()
     add_test(NAME mozyme_gpu_verify
       COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/test_mozyme_gpu.sh 
@@ -372,7 +384,6 @@ if(GPU)
 endif()
 
 # Add tests
-option(TESTS "Enable tests (needs Python3 and Numpy)" ON)
 if(TESTS)
   find_package (Python3 COMPONENTS Interpreter NumPy)
   if(NOT Python3_FOUND)
@@ -410,13 +421,6 @@ if(TESTS)
     endif()
     # scf-compare targets are defined in tests/CMakeLists.txt; avoid duplicates here
 
-    # Simple performance bench for cached GPU wrappers
-    if(NOT TARGET mopac-gpu-bench)
-      add_executable(mopac-gpu-bench tests/gpu_bench.F90)
-      target_link_libraries(mopac-gpu-bench mopac-core)
-      add_dependencies(mopac-gpu-bench mopac-core)
-    endif()
-
     # Optional: register 2-GPU rotation verification with ctest
     if(ENABLE_GPU_TESTS)
       add_test(NAME gpu_rot_verify
@@ -431,9 +435,6 @@ if(TESTS)
         COMMAND $<TARGET_FILE:mopac-gpu-density-verify>)
       set_tests_properties(gpu_density_verify PROPERTIES LABELS "gpu" ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
 
-      add_test(NAME gpu_scf_compare
-        COMMAND $<TARGET_FILE:mopac-gpu-scf-compare>)
-      set_tests_properties(gpu_scf_compare PROPERTIES LABELS "gpu" ENVIRONMENT "CUDA_VISIBLE_DEVICES=0;MOPAC_FORCEGPU=1")
       if(NOT TARGET mopac-mg-stub-smoke)
         add_executable(mopac-mg-stub-smoke tests/mg_stub_smoke.F90)
         target_link_libraries(mopac-mg-stub-smoke mopac-core)

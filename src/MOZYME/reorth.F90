@@ -19,6 +19,7 @@ subroutine reorth (ws)
        & icvir_dim, cocc_dim, cvir_dim, ncf, nce, nncf, nnce, ncocc, ncvir, iorbs, &
        & icocc, icvir, cocc, cvir
     use common_arrays_C, only : nfirst
+    use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
     implicit none
     double precision, dimension (norbs) :: ws
 !
@@ -26,6 +27,12 @@ subroutine reorth (ws)
     double precision :: sum, sumtot
     logical, dimension (:), allocatable :: latom_loc
     integer, dimension (:), allocatable :: iused
+    external :: mozyme_gpu_strict_abort
+    if (mozyme_gpu_scf_no_fallback_required()) then
+      call mozyme_gpu_strict_abort('strict_reorth_cpu_fallback', &
+        'MOZYME GPU strict resident SCF does not support CPU reorthogonalization')
+      return
+    end if
 !
     allocate (latom_loc(numat), iused(numat), stat=alloc_stat)
     if (alloc_stat /= 0) then

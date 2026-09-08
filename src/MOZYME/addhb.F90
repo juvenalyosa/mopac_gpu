@@ -28,6 +28,7 @@ subroutine addhb (nocc1, nvir1,  idiagg, nij, nhb)
    !**********************************************************************
     use molkst_C, only : numat, norbs
     use common_arrays_C, only: eigs, f
+    use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
     implicit none
     integer, intent (in) :: idiagg, nhb, nocc1, nvir1
     integer, intent (out) :: nij
@@ -36,7 +37,13 @@ subroutine addhb (nocc1, nvir1,  idiagg, nij, nhb)
     double precision, dimension(:), allocatable :: storei, storej
     integer, allocatable, dimension(:) :: iused
     double precision, dimension (4) :: hblims
+    external :: mozyme_gpu_strict_abort
     data hblims / 1.d0, 0.1d0, 0.01d0, 0.001d0 /
+    if (mozyme_gpu_scf_no_fallback_required()) then
+      call mozyme_gpu_strict_abort('strict_addhb_cpu_fallback', &
+        'MOZYME GPU strict resident SCF does not support CPU ADDHB')
+      return
+    end if
     allocate (latom_loc(numat), iused(Max (norbs, numat)), &
          & storei(norbs), storej(norbs), &
          & stat=alloc_stat)
