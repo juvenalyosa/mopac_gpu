@@ -25,6 +25,7 @@
       USE chanel_C, only : iw, ir, job_fn
       use funcon_C, only : pi
       use derivs_C, only : aidref, work2
+      use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
 !***********************************************************************
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
@@ -48,6 +49,7 @@
 
 
       double precision :: grlim, sum, gnorm, step, press
+      double precision :: deriv_timer
       double precision, dimension(3,3) :: tderiv
       double precision, external :: dot, volume
       logical :: scf1, halfe, slow, aifrst, debug, precis, intn, geochk, ci, &
@@ -223,7 +225,9 @@
         if (moperr) return
       else
         if (debug) write (iw, '(10x,a)') 'DOING VARIATIONALLY OPTIMIZED DERIVATIVES'
+        call mozyme_section_timer_begin('deriv_dcart', deriv_timer)
         call dcart (coord, dxyz)
+        call mozyme_section_timer_end('deriv_dcart', deriv_timer)
       end if
       if (l_redo_bonds .and. mod(nscf,10) == 4 .and. nscf /= 0 .and. id == 0) then
 !
@@ -231,13 +235,19 @@
 !  or a gradient minimization.  To allow for this, the bonds array should be updated every
 !  few SCF calculations. The values in the mod test are "intelligent guesses"
 !
+        call mozyme_section_timer_begin('deriv_lewis', deriv_timer)
         call lewis (.true.)
+        call mozyme_section_timer_end('deriv_lewis', deriv_timer)
         if (moperr) then
            write (iw, '(/10x,A,/)') ' Geometry at the point this error was detected'
           call geout(iw)
         end if
       end if
-      if (DH_correction) call post_scf_corrections(sum, .true.)
+      if (DH_correction) then
+        call mozyme_section_timer_begin('deriv_post_scf_corrections', deriv_timer)
+        call post_scf_corrections(sum, .true.)
+        call mozyme_section_timer_end('deriv_post_scf_corrections', deriv_timer)
+      end if
 !
 !   THE CARTESIAN DERIVATIVES ARE IN DXYZ
 !

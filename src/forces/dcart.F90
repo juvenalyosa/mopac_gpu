@@ -141,7 +141,11 @@
       refeps = useps
       useps = .false.
 #ifdef GPU
-      if (resident_scf) call sync_resident_density()
+      if (resident_scf) then
+        call mozyme_section_timer_begin('dcart_sync_resident_density', dcart_timer)
+        call sync_resident_density()
+        call mozyme_section_timer_end('dcart_sync_resident_density', dcart_timer)
+      end if
 #endif
       if (mozyme) then
    !
@@ -155,7 +159,9 @@
         else if (mode ==-1) then
           dxyz(1:3, 1:numtot) = -dxyz(1:3, 1:numtot)
         end if
+        call mozyme_section_timer_begin('dcart_chrge', dcart_timer)
         call chrge_for_MOZYME(p, q)
+        call mozyme_section_timer_end('dcart_chrge', dcart_timer)
       else
         dxyz(:,:numtot) = 0.D0
         call chrge(p, q)
@@ -215,6 +221,7 @@
 #ifdef GPU
       end if
 #endif
+      call mozyme_section_timer_begin('dcart_tail', dcart_timer)
       if (nnhco /= 0) then
 !
 !   NOW ADD IN MOLECULAR-MECHANICS CORRECTION TO THE H-N-C=O TORSION
@@ -325,6 +332,7 @@
           end do
         end do
       end if
+      call mozyme_section_timer_end('dcart_tail', dcart_timer)
       if (.not.debug) return
       if (l123 == 1) then
         write (iw, '(I6,4x,a2,F13.6,2F13.6)') (i,elemnt(nat(i)),(dxyz(j,i),j=1,3),i=1,numtot)
