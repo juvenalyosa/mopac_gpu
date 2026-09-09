@@ -4717,6 +4717,413 @@ __global__ void mozyme_resident_fock_pack_plan_kernel(
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Parallel direct-mode plan packing.  Rows (atoms ii) are classified in
+// parallel, the per-row counts are scanned into task and integral offsets,
+// descriptors are written per row, and the two-centre integrals are
+// evaluated one task per thread.  The serial kernels above remain in use for
+// the non-direct (host integral array) source path.
+//
+// Row count slots: 0 pair, 1 pair4, 2 point, 3 pair_w, 4 one_sup,
+// 5 one_w_sup (destination), 6 one_w_all (source offset into wj).
+static constexpr int kMzParRowSlots = 7;
+static constexpr int kMzParScratchSlots = 1024;
+static constexpr int kMzParThreads = 128;
+
+__device__ __forceinline__ void mozyme_resident_increment_fallback_basis_atomic_dev(
+    int iab, int jba, int *fallback_basis) {
+  const int ib = mozyme_resident_fallback_basis_bin_dev(iab);
+  const int jb = mozyme_resident_fallback_basis_bin_dev(jba);
+  atomicAdd(fallback_basis + ib + jb * kMozymeResidentFallbackBasisBins, 1);
+}
+
+__global__ void mozyme_resident_calc_flags_kernel(int numat, int mode,
+                                                  const int *kopt, int *calc) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  int ired = 1;
+  for (int ii = 1; ii <= numat; ++ii) {
+    bool c = true;
+    if (mode != 0) {
+      c = (kopt[ired - 1] == ii);
+      if (c && ired < numat) ++ired;
+    }
+    calc[ii - 1] = c ? 1 : 0;
+  }
+}
+
+__global__ void mozyme_resident_row_count_kernel(
+    int numat, int ione, int direct_flag, const int *iorbs, const int *calc,
+    const int *nijbo, int *row_counts, int *out, int *fallback_basis) {
+  const int ii = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  if (ii > numat) return;
+  int pair = 0, pair4 = 0, point = 0, pairw = 0;
+  int real_pair = 0, real_gpu = 0, real_cpu = 0, real_inactive = 0;
+  int real_basis = 0, real_other = 0;
+  int ppair = 0, pgpu = 0, pcpu = 0, pbasis = 0, pother = 0;
+  const int iab = iorbs[ii - 1];
+  const bool calci = calc[ii - 1] != 0;
+  if (iab != 0) {
+    for (int jj = 1; jj <= ii - ione; ++jj) {
+      const bool calcj = calc[jj - 1] != 0;
+      const int jba = iorbs[jj - 1];
+      const int addr = mozyme_resident_nijbo_at(numat, nijbo, ii, jj);
+      if (addr >= 0) {
+        if (calci || calcj) {
+          ++real_pair;
+          if (mozyme_resident_pair_supported_for_direct_dev(iab, jba,
+                                                            direct_flag)) {
+            ++real_gpu;
+            if ((iab == 4 && jba == 1) || (iab == 1 && jba == 4)) {
+              ++pair4;
+            } else {
+              ++pair;
+              pairw += mozyme_resident_pair_integral_count_dev(iab, jba);
+            }
+          } else if (!mozyme_resident_pair_noop_dev(iab, jba)) {
+            ++real_cpu;
+            if (iab > 9 || jba > 9) ++real_basis; else ++real_other;
+            mozyme_resident_increment_fallback_basis_atomic_dev(iab, jba,
+                                                               fallback_basis);
+          }
+        } else {
+          ++real_inactive;
+        }
+      } else if ((calci || calcj) && iab * jba > 0) {
+        ++ppair;
+        if (mozyme_resident_point_supported_for_direct_dev(iab, jba, addr,
+                                                           direct_flag)) {
+          ++pgpu;
+          ++point;
+        } else {
+          ++pcpu;
+          if (iab > 9 || jba > 9) ++pbasis; else ++pother;
+          mozyme_resident_increment_fallback_basis_atomic_dev(iab, jba,
+                                                             fallback_basis);
+        }
+      }
+    }
+  }
+  int one_sup = 0, one_w_sup = 0, one_w_all = 0, one_cpu = 0;
+  if (iab != 0) {
+    const int tri = mozyme_resident_tri_dev(iab);
+    one_w_all = tri * tri;
+    if (mozyme_resident_basis_supported_dev(iab)) {
+      one_sup = 1;
+      one_w_sup = tri * tri;
+    } else {
+      one_cpu = 1;
+      mozyme_resident_increment_fallback_basis_atomic_dev(iab, iab,
+                                                         fallback_basis);
+    }
+  }
+  row_counts[0 * numat + ii - 1] = pair;
+  row_counts[1 * numat + ii - 1] = pair4;
+  row_counts[2 * numat + ii - 1] = point;
+  row_counts[3 * numat + ii - 1] = pairw;
+  row_counts[4 * numat + ii - 1] = one_sup;
+  row_counts[5 * numat + ii - 1] = one_w_sup;
+  row_counts[6 * numat + ii - 1] = one_w_all;
+  if (real_pair) atomicAdd(out + 6, real_pair);
+  if (real_gpu) atomicAdd(out + 7, real_gpu);
+  if (real_cpu) atomicAdd(out + 8, real_cpu);
+  if (real_inactive) atomicAdd(out + 9, real_inactive);
+  if (real_basis) atomicAdd(out + 10, real_basis);
+  if (real_other) atomicAdd(out + 11, real_other);
+  if (ppair) atomicAdd(out + 12, ppair);
+  if (pgpu) atomicAdd(out + 13, pgpu);
+  if (pcpu) atomicAdd(out + 14, pcpu);
+  if (pbasis) atomicAdd(out + 15, pbasis);
+  if (pother) atomicAdd(out + 16, pother);
+  if (one_cpu) atomicAdd(out + 17, one_cpu);
+}
+
+// Single block: exclusive scans of the row-count slots into row_bases and
+// the totals into the count/status words.
+__global__ void mozyme_resident_row_scan_kernel(int numat, const int *row_counts,
+                                                int *row_bases, int *out,
+                                                int *status) {
+  __shared__ int warp_sums[32];
+  __shared__ int carry;
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const int warps = blockDim.x >> 5;
+  int totals[kMzParRowSlots];
+  for (int slot = 0; slot < kMzParRowSlots; ++slot) {
+    if (threadIdx.x == 0) carry = 0;
+    __syncthreads();
+    const int *src = row_counts + slot * numat;
+    int *dst = row_bases + slot * numat;
+    for (int chunk = 0; chunk < numat; chunk += blockDim.x) {
+      const int i = chunk + threadIdx.x;
+      int v = i < numat ? src[i] : 0;
+      int incl = v;
+      for (int off = 1; off < 32; off <<= 1) {
+        const int n = __shfl_up_sync(0xffffffffu, incl, off);
+        if (lane >= off) incl += n;
+      }
+      if (lane == 31) warp_sums[warp] = incl;
+      __syncthreads();
+      if (warp == 0) {
+        int ws = lane < warps ? warp_sums[lane] : 0;
+        __syncwarp();
+        for (int off = 1; off < 32; off <<= 1) {
+          const int n = __shfl_up_sync(0xffffffffu, ws, off);
+          if (lane >= off) ws += n;
+        }
+        if (lane < warps) warp_sums[lane] = ws;
+      }
+      __syncthreads();
+      const int prefix = (warp > 0 ? warp_sums[warp - 1] : 0) + incl - v;
+      const int total = warp_sums[warps - 1];
+      if (i < numat) dst[i] = carry + prefix;
+      __syncthreads();
+      if (threadIdx.x == 0) carry += total;
+      __syncthreads();
+    }
+    totals[slot] = carry;
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) {
+    out[0] = totals[4];
+    out[1] = totals[0];
+    out[2] = totals[1];
+    out[3] = totals[2];
+    out[4] = totals[5];
+    out[5] = totals[3];
+    out[18] = 0;
+    if (status) {
+      status[1] = totals[4];
+      status[2] = totals[0];
+      status[3] = totals[1];
+      status[4] = totals[2];
+      status[5] = totals[5];
+      status[6] = totals[3];
+      status[9] = 0;
+      status[10] = totals[6];
+    }
+  }
+}
+
+__global__ void mozyme_resident_row_pack_kernel(
+    int numat, int mpack, int ione, int direct_flag, int w_count,
+    const int *iorbs, const int *calc, const int *nijbo, const double *wj,
+    const int *row_bases, int *one_f, int *one_w, int *one_iab, int *one_ilim,
+    double *one_w_values, int *pair_iab, int *pair_jba, int *pair_i,
+    int *pair_j, int *pair_cross, int *pair_diag, int *pair_w, int *task_ii,
+    int *task_jj, int *pair4_heavy, int *pair4_light, int *pair4_cross,
+    int *task4_ii, int *task4_jj, int *point_iab, int *point_jba,
+    int *point_i_atom, int *point_j_atom, int *point_i, int *point_j,
+    int *point_addr, int *status) {
+  const int ii = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  if (ii > numat) return;
+  const int iab = iorbs[ii - 1];
+  if (iab == 0) return;
+  const bool calci = calc[ii - 1] != 0;
+  int pair_pos = row_bases[0 * numat + ii - 1];
+  int pair4_pos = row_bases[1 * numat + ii - 1];
+  int point_pos = row_bases[2 * numat + ii - 1];
+  int pair_w_pos = row_bases[3 * numat + ii - 1];
+  const int ioff = mozyme_resident_nijbo_at(numat, nijbo, ii, ii) + 1;
+  for (int jj = 1; jj <= ii - ione; ++jj) {
+    const bool calcj = calc[jj - 1] != 0;
+    const int jba = iorbs[jj - 1];
+    const int addr = mozyme_resident_nijbo_at(numat, nijbo, ii, jj);
+    if (addr >= 0) {
+      if (!(calci || calcj) ||
+          !mozyme_resident_pair_supported_for_direct_dev(iab, jba, direct_flag)) {
+        continue;
+      }
+      const int joff = mozyme_resident_nijbo_at(numat, nijbo, jj, jj) + 1;
+      const int coff = addr + 1;
+      if ((iab == 4 && jba == 1) || (iab == 1 && jba == 4)) {
+        const bool heavy_i = (iab == 4);
+        if (!mozyme_resident_valid_plan_range_dev(heavy_i ? ioff : joff, 10, mpack) ||
+            !mozyme_resident_valid_plan_range_dev(heavy_i ? joff : ioff, 1, mpack) ||
+            !mozyme_resident_valid_plan_range_dev(coff, 4, mpack)) {
+          atomicMax(status, 3);
+          return;
+        }
+        pair4_heavy[pair4_pos] = heavy_i ? ioff : joff;
+        pair4_light[pair4_pos] = heavy_i ? joff : ioff;
+        pair4_cross[pair4_pos] = coff;
+        task4_ii[pair4_pos] = ii;
+        task4_jj[pair4_pos] = jj;
+        ++pair4_pos;
+      } else {
+        const int ni = mozyme_resident_tri_dev(iab);
+        const int nj = mozyme_resident_tri_dev(jba);
+        const int total = ni * nj;
+        if (total > mozyme_resident_pair_integral_count_dev(iab, jba) ||
+            !mozyme_resident_valid_plan_range_dev(ioff, ni, mpack) ||
+            !mozyme_resident_valid_plan_range_dev(joff, nj, mpack) ||
+            (ii != jj &&
+             !mozyme_resident_valid_plan_range_dev(coff, iab * jba, mpack)) ||
+            (ii == jj && coff < 1)) {
+          atomicMax(status, 4);
+          return;
+        }
+        pair_iab[pair_pos] = iab;
+        pair_jba[pair_pos] = jba;
+        pair_i[pair_pos] = ioff;
+        pair_j[pair_pos] = joff;
+        pair_cross[pair_pos] = coff;
+        pair_diag[pair_pos] = (ii == jj) ? 1 : 0;
+        pair_w[pair_pos] = pair_w_pos + 1;
+        task_ii[pair_pos] = ii;
+        task_jj[pair_pos] = jj;
+        pair_w_pos += total;
+        ++pair_pos;
+      }
+    } else if ((calci || calcj) &&
+               mozyme_resident_point_supported_for_direct_dev(iab, jba, addr,
+                                                              direct_flag)) {
+      const int joff = mozyme_resident_nijbo_at(numat, nijbo, jj, jj) + 1;
+      const int ni = mozyme_resident_tri_dev(iab);
+      const int nj = mozyme_resident_tri_dev(jba);
+      if (!mozyme_resident_valid_plan_range_dev(ioff, ni, mpack) ||
+          !mozyme_resident_valid_plan_range_dev(joff, nj, mpack)) {
+        atomicMax(status, 5);
+        return;
+      }
+      point_iab[point_pos] = iab;
+      point_jba[point_pos] = jba;
+      point_i_atom[point_pos] = ii;
+      point_j_atom[point_pos] = jj;
+      point_i[point_pos] = ioff;
+      point_j[point_pos] = joff;
+      point_addr[point_pos] = addr;
+      ++point_pos;
+    }
+  }
+  if (mozyme_resident_basis_supported_dev(iab)) {
+    const int ilim = mozyme_resident_tri_dev(iab);
+    const int one_total = ilim * ilim;
+    const int one_pos = row_bases[4 * numat + ii - 1];
+    const int one_w_pos = row_bases[5 * numat + ii - 1];
+    const int source_kr = row_bases[6 * numat + ii - 1];
+    if (!mozyme_resident_valid_plan_range_dev(ioff, ilim, mpack) ||
+        !mozyme_resident_valid_source_range_dev(source_kr, one_total, w_count)) {
+      atomicMax(status, 7);
+      return;
+    }
+    one_f[one_pos] = ioff;
+    one_w[one_pos] = one_w_pos + 1;
+    one_iab[one_pos] = iab;
+    one_ilim[one_pos] = ilim;
+    for (int m = 0; m < one_total; ++m) {
+      one_w_values[one_w_pos + m] = wj[source_kr + m];
+    }
+  }
+}
+
+// One thread per pair task; each thread owns a scratch slot (grid-stride).
+__global__ void mozyme_resident_pair_integrals_kernel(
+    int pair_count, int l_feather_flag, int method_pm7_flag, double ev,
+    double a0, double trunc_1, double trunc_2, const int *nat,
+    const double *coord, const double *am, const double *ad, const double *aq,
+    const double *dd, const double *qq, const double *po, const double *ddp,
+    const int *iod, double *scratch, const int *pair_iab, const int *pair_jba,
+    const int *task_ii, const int *task_jj, const int *pair_w,
+    double *pair_wj, double *pair_wk, int *status) {
+  const int slot = blockIdx.x * blockDim.x + threadIdx.x;
+  const int stride = gridDim.x * blockDim.x;
+  double *direct_w = scratch +
+      static_cast<size_t>(slot) * kMozymeResidentDirectPackScratchDoubles;
+  double *spd_scratch = direct_w + kMozymeDirectMaxW;
+  for (int t = slot; t < pair_count; t += stride) {
+    const int iab = pair_iab[t];
+    const int jba = pair_jba[t];
+    const int ii = task_ii[t];
+    const int jj = task_jj[t];
+    const int direct_total = mozyme_resident_pair_integral_count_dev(iab, jba);
+    const bool ok =
+        (iab == 9 || jba == 9)
+            ? mozyme_direct_spd_w_dev(iab, jba, nat[ii - 1], nat[jj - 1], ii,
+                                      jj, l_feather_flag, method_pm7_flag, ev,
+                                      a0, trunc_1, trunc_2, coord, am, ad, aq,
+                                      dd, qq, po, ddp, iod, spd_scratch,
+                                      direct_w, direct_total)
+            : mozyme_direct_sp_w_dev(iab, jba, nat[ii - 1], nat[jj - 1], ii,
+                                     jj, l_feather_flag, ev, a0, trunc_1,
+                                     trunc_2, coord, am, ad, aq, dd, qq,
+                                     spd_scratch, direct_w, direct_total);
+    if (!ok) {
+      atomicMax(status, 9);
+      continue;
+    }
+    const int total = mozyme_resident_tri_dev(iab) * mozyme_resident_tri_dev(jba);
+    const int wpos = pair_w[t] - 1;
+    for (int m = 0; m < total; ++m) {
+      pair_wj[wpos + m] = direct_w[m];
+      pair_wk[wpos + m] = direct_w[m];
+    }
+  }
+}
+
+__global__ void mozyme_resident_pair4_integrals_kernel(
+    int pair4_count, int l_feather_flag, double ev, double a0,
+    double trunc_1, double trunc_2, const int *nat, const double *coord,
+    const double *am, const double *ad, const double *aq, const double *dd,
+    const double *qq, const int *iorbs, const int *jindex, double *scratch,
+    const int *task4_ii, const int *task4_jj, double *pair4_wj,
+    double *pair4_wk, int *status) {
+  const int slot = blockIdx.x * blockDim.x + threadIdx.x;
+  const int stride = gridDim.x * blockDim.x;
+  double *direct_w = scratch +
+      static_cast<size_t>(slot) * kMozymeResidentDirectPackScratchDoubles;
+  double *sp_scratch = direct_w + kMozymeDirectMaxW;
+  for (int t = slot; t < pair4_count; t += stride) {
+    const int ii = task4_ii[t];
+    const int jj = task4_jj[t];
+    const int iab = iorbs[ii - 1];
+    const int jba = iorbs[jj - 1];
+    const int direct_total = 10;
+    if (!mozyme_direct_sp_w_dev(iab, jba, nat[ii - 1], nat[jj - 1], ii, jj,
+                                l_feather_flag, ev, a0, trunc_1, trunc_2,
+                                coord, am, ad, aq, dd, qq, sp_scratch,
+                                direct_w, direct_total)) {
+      atomicMax(status, 9);
+      continue;
+    }
+    for (int m = 0; m < 10; ++m) pair4_wj[t * 10 + m] = direct_w[m];
+    for (int m = 0; m < 16; ++m) {
+      const int idx = jindex[m] - 1;
+      if (idx < 0 || idx >= direct_total) {
+        atomicMax(status, 2);
+        break;
+      }
+      pair4_wk[t * 16 + m] = direct_w[idx];
+    }
+  }
+}
+
+__global__ void mozyme_resident_point_weights_kernel(
+    int point_count, int direct_flag, int semidr_flag, int l_feather_flag,
+    double ev, double a0, double trunc_1, double trunc_2, int w_count,
+    const int *nat, const double *coord, const double *wj, const double *am,
+    const double *ad, const double *dd, const int *point_iab,
+    const int *point_jba, const int *point_i_atom, const int *point_j_atom,
+    const int *point_addr, double *point_w, int *status) {
+  const int t = blockIdx.x * blockDim.x + threadIdx.x;
+  if (t >= point_count) return;
+  const int iab = point_iab[t];
+  const int jba = point_jba[t];
+  const int addr = point_addr[t];
+  if (!mozyme_resident_pack_point_weights_dev(
+          iab, jba, addr, 0, point_i_atom[t], point_j_atom[t], direct_flag,
+          semidr_flag, l_feather_flag, ev, a0, trunc_1, trunc_2, w_count, nat,
+          coord, wj, am, ad, dd, point_w + static_cast<size_t>(t) * 7u)) {
+    atomicMax(status, 6);
+    return;
+  }
+  if (addr == -2) atomicAdd(status + 7, 1); else atomicAdd(status + 8, 1);
+}
+
+static DevBuf<int> g_mz_par_calc, g_mz_par_rows, g_mz_par_bases;
+static DevBuf<int> g_mz_par_task_ii, g_mz_par_task_jj, g_mz_par_task4_ii, g_mz_par_task4_jj;
+static DevBuf<double> g_mz_par_scratch;
+
 extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
     int plan_id, int mpack, int natoms, int mode, int ione, int direct_flag,
     int semidr_flag, int l_feather_flag, double ev, double a0, double trunc_1,
@@ -4839,10 +5246,38 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
                    "resident fock pack copy iod");
   if (code != 0) return code;
 
-  mozyme_resident_fock_count_kernel<<<1, 1, 0, s>>>(
-      natoms, mode, ione, direct_flag != 0 ? 1 : 0, 1, g_mz_res_count_iorbs.ptr,
-      mode != 0 ? g_mz_res_count_kopt.ptr : nullptr, g_mz_res_count_nijbo.ptr,
-      g_mz_res_count_out.ptr, g_mz_res_count_fallback.ptr);
+  const bool parallel_pack = direct_flag != 0;
+  const size_t row_bytes = sizeof(int) * static_cast<size_t>(natoms);
+  if (parallel_pack) {
+    if (!g_mz_par_calc.ensure(row_bytes) ||
+        !g_mz_par_rows.ensure(row_bytes * kMzParRowSlots) ||
+        !g_mz_par_bases.ensure(row_bytes * kMzParRowSlots)) {
+      return 2;
+    }
+    if (cudaMemsetAsync(g_mz_res_count_out.ptr, 0, sizeof(int) * 19u, s) != cudaSuccess ||
+        cudaMemsetAsync(g_mz_res_count_fallback.ptr, 0,
+                        sizeof(int) * kMozymeResidentFallbackBasisBins *
+                            kMozymeResidentFallbackBasisBins, s) != cudaSuccess ||
+        cudaMemsetAsync(g_mz_res_pack_status.ptr, 0, sizeof(int) * 12u, s) != cudaSuccess) {
+      return 2;
+    }
+    mozyme_resident_calc_flags_kernel<<<1, 1, 0, s>>>(
+        natoms, mode, mode != 0 ? g_mz_res_count_kopt.ptr : nullptr,
+        g_mz_par_calc.ptr);
+    const int row_blocks = (natoms + kMzParThreads - 1) / kMzParThreads;
+    mozyme_resident_row_count_kernel<<<row_blocks, kMzParThreads, 0, s>>>(
+        natoms, ione, 1, g_mz_res_count_iorbs.ptr, g_mz_par_calc.ptr,
+        g_mz_res_count_nijbo.ptr, g_mz_par_rows.ptr, g_mz_res_count_out.ptr,
+        g_mz_res_count_fallback.ptr);
+    mozyme_resident_row_scan_kernel<<<1, 1024, 0, s>>>(
+        natoms, g_mz_par_rows.ptr, g_mz_par_bases.ptr, g_mz_res_count_out.ptr,
+        g_mz_res_pack_status.ptr);
+  } else {
+    mozyme_resident_fock_count_kernel<<<1, 1, 0, s>>>(
+        natoms, mode, ione, direct_flag != 0 ? 1 : 0, 1, g_mz_res_count_iorbs.ptr,
+        mode != 0 ? g_mz_res_count_kopt.ptr : nullptr, g_mz_res_count_nijbo.ptr,
+        g_mz_res_count_out.ptr, g_mz_res_count_fallback.ptr);
+  }
   cudaError_t status = cudaGetLastError();
   if (status != cudaSuccess) {
     report_cuda_error("resident fock pack count kernel launch", status);
@@ -4918,6 +5353,64 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
       !ensure_double_count(plan->point_w, point_count * 7)) {
     return 2;
   }
+  if (parallel_pack) {
+    const size_t task_bytes = sizeof(int) * static_cast<size_t>(std::max(pair_count, 1));
+    const size_t task4_bytes = sizeof(int) * static_cast<size_t>(std::max(pair4_count, 1));
+    const size_t scratch_bytes = sizeof(double) *
+        static_cast<size_t>(kMzParScratchSlots) *
+        static_cast<size_t>(kMozymeResidentDirectPackScratchDoubles);
+    if (!g_mz_par_task_ii.ensure(task_bytes) || !g_mz_par_task_jj.ensure(task_bytes) ||
+        !g_mz_par_task4_ii.ensure(task4_bytes) || !g_mz_par_task4_jj.ensure(task4_bytes) ||
+        !g_mz_par_scratch.ensure(scratch_bytes)) {
+      return 2;
+    }
+    const int row_blocks = (natoms + kMzParThreads - 1) / kMzParThreads;
+    mozyme_resident_row_pack_kernel<<<row_blocks, kMzParThreads, 0, s>>>(
+        natoms, mpack, ione, 1, w_count, g_mz_res_count_iorbs.ptr,
+        g_mz_par_calc.ptr, g_mz_res_count_nijbo.ptr, g_mz_res_pack_wj.ptr,
+        g_mz_par_bases.ptr, plan->one_f.ptr, plan->one_w.ptr,
+        plan->one_iab.ptr, plan->one_ilim.ptr, plan->one_w_values.ptr,
+        plan->pair_iab.ptr, plan->pair_jba.ptr, plan->pair_i.ptr,
+        plan->pair_j.ptr, plan->pair_cross.ptr, plan->pair_diag.ptr,
+        plan->pair_w.ptr, g_mz_par_task_ii.ptr, g_mz_par_task_jj.ptr,
+        plan->pair4_heavy.ptr, plan->pair4_light.ptr, plan->pair4_cross.ptr,
+        g_mz_par_task4_ii.ptr, g_mz_par_task4_jj.ptr, plan->point_iab.ptr,
+        plan->point_jba.ptr, plan->point_i_atom.ptr, plan->point_j_atom.ptr,
+        plan->point_i.ptr, plan->point_j.ptr, plan->point_addr.ptr,
+        g_mz_res_pack_status.ptr);
+    const int slot_blocks = kMzParScratchSlots / kMzParThreads;
+    if (pair_count > 0) {
+      mozyme_resident_pair_integrals_kernel<<<slot_blocks, kMzParThreads, 0, s>>>(
+          pair_count, l_feather_flag, method_pm7_flag, ev, a0, trunc_1, trunc_2,
+          g_mz_res_pack_nat.ptr, g_mz_res_pack_coord.ptr, g_mz_res_pack_am.ptr,
+          g_mz_res_pack_ad.ptr, g_mz_res_pack_aq.ptr, g_mz_res_pack_dd.ptr,
+          g_mz_res_pack_qq.ptr, g_mz_res_pack_po.ptr, g_mz_res_pack_ddp.ptr,
+          g_mz_res_pack_iod.ptr, g_mz_par_scratch.ptr, plan->pair_iab.ptr,
+          plan->pair_jba.ptr, g_mz_par_task_ii.ptr, g_mz_par_task_jj.ptr,
+          plan->pair_w.ptr, plan->pair_wj.ptr, plan->pair_wk.ptr,
+          g_mz_res_pack_status.ptr);
+    }
+    if (pair4_count > 0) {
+      mozyme_resident_pair4_integrals_kernel<<<slot_blocks, kMzParThreads, 0, s>>>(
+          pair4_count, l_feather_flag, ev, a0, trunc_1, trunc_2,
+          g_mz_res_pack_nat.ptr, g_mz_res_pack_coord.ptr, g_mz_res_pack_am.ptr,
+          g_mz_res_pack_ad.ptr, g_mz_res_pack_aq.ptr, g_mz_res_pack_dd.ptr,
+          g_mz_res_pack_qq.ptr, g_mz_res_count_iorbs.ptr,
+          g_mz_res_pack_jindex.ptr, g_mz_par_scratch.ptr,
+          g_mz_par_task4_ii.ptr, g_mz_par_task4_jj.ptr, plan->pair4_wj.ptr,
+          plan->pair4_wk.ptr, g_mz_res_pack_status.ptr);
+    }
+    if (point_count > 0) {
+      const int point_blocks = (point_count + kMzParThreads - 1) / kMzParThreads;
+      mozyme_resident_point_weights_kernel<<<point_blocks, kMzParThreads, 0, s>>>(
+          point_count, 1, semidr_flag, l_feather_flag, ev, a0, trunc_1,
+          trunc_2, w_count, g_mz_res_pack_nat.ptr, g_mz_res_pack_coord.ptr,
+          g_mz_res_pack_wj.ptr, g_mz_res_pack_am.ptr, g_mz_res_pack_ad.ptr,
+          g_mz_res_pack_dd.ptr, plan->point_iab.ptr, plan->point_jba.ptr,
+          plan->point_i_atom.ptr, plan->point_j_atom.ptr, plan->point_addr.ptr,
+          plan->point_w.ptr, g_mz_res_pack_status.ptr);
+    }
+  } else {
   status = cudaMemsetAsync(g_mz_res_pack_status.ptr, 0, sizeof(int) * 12u, s);
   if (status != cudaSuccess) {
     report_cuda_error("resident fock pack clear status", status);
@@ -4945,6 +5438,7 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
       plan->point_jba.ptr, plan->point_i_atom.ptr, plan->point_j_atom.ptr,
       plan->point_i.ptr, plan->point_j.ptr, plan->point_addr.ptr,
       plan->point_w.ptr, g_mz_res_pack_status.ptr);
+  }
   status = cudaGetLastError();
   if (status != cudaSuccess) {
     report_cuda_error("resident fock pack kernel launch", status);
@@ -6773,6 +7267,9 @@ extern "C" void mopac_cuda_destroy_resources() {
   g_mz_res_pack_aq.release(); g_mz_res_pack_qq.release(); g_mz_res_pack_tore.release();
   g_mz_res_pack_po.release(); g_mz_res_pack_ddp.release();
   g_mz_res_pack_direct_scratch.release(); g_mz_res_pack_iod.release();
+  g_mz_par_calc.release(); g_mz_par_rows.release(); g_mz_par_bases.release();
+  g_mz_par_task_ii.release(); g_mz_par_task_jj.release(); g_mz_par_task4_ii.release();
+  g_mz_par_task4_jj.release(); g_mz_par_scratch.release();
   for (auto &plan : g_mz_res_plans) plan.release();
   g_mz_fock2_pii.release(); g_mz_fock2_pjj.release(); g_mz_fock2_pij.release();
   g_mz_fock2_wj.release(); g_mz_fock2_wk.release();
