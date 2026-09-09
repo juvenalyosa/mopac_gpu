@@ -26,8 +26,19 @@ subroutine hcore_for_MOZYME ()
   use MOZYME_C, only : semidr, direct, cutofs, parth, &
     iorbs, jopt, mode, numred, refnuc
   use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
+  use mozyme_gpu_gradient, only : mozyme_gpu_hcore_enabled, mozyme_gpu_hcore_check_enabled, &
+    mozyme_gpu_hcore_run, mozyme_gpu_sp_pair
   implicit none
   double precision :: hcore_timer
+  ! GPU evaluation of the sp-sp block pairs (h1elec + rotate); the CPU loop
+  ! below skips them when gpu_block_pairs is true and the device adds them
+  ! afterwards.  gpu_check keeps a CPU reference for those pairs and reports
+  ! the difference.
+  logical :: gpu_block_pairs, gpu_check, gpu_verbose
+  double precision, allocatable :: h_ref(:)
+  double precision :: gpu_enuc, gpu_ms, enuc_ref, h_diff
+  integer :: gpu_code, gpu_pairs, gpu_d_pairs, env_stat
+  character(len=8) :: env_dbg
 !
   character (len=248) :: tmpkey
   logical :: calci, calcij, calcj, fldon
@@ -124,6 +135,8 @@ subroutine hcore_for_MOZYME ()
     !
     h(1:mpack) = 0.d0
   end if
+  gpu_block_pairs = (id == 0 .and. mode == 0 .and. .not. fldon .and. mozyme_gpu_hcore_enabled())
+  gpu_check = gpu_block_pairs .and. mozyme_gpu_hcore_check_enabled()
   call mozyme_section_timer_begin('hcore_pair_loop', hcore_timer)
   do i = 1, numat
 
@@ -190,7 +203,12 @@ subroutine hcore_for_MOZYME ()
         !   Molecular system
         !
         if (ijbo(i, j) >= 0) then
-          if (calcij) then
+          if (calcij .and. gpu_block_pairs .and. mozyme_gpu_sp_pair(iorbs(i), iorbs(j))) then
+            ! Evaluated on the device after the loop (kr is not advanced for
+            ! block pairs, so nothing else changes here).
+            e1b(1:10) = 0.d0
+            e2a(1:10) = 0.d0
+          else if (calcij) then
             call h1elec (ni, nj, coord(1, i), coord(1, j), di)
             ii = ijbo (i, j)
             if (i == j) then
@@ -395,6 +413,41 @@ subroutine hcore_for_MOZYME ()
     end if
   end do
   call mozyme_section_timer_end('hcore_pair_loop', hcore_timer)
+  if (gpu_block_pairs) then
+    env_dbg = ' '
+    call get_environment_variable('MOPAC_GPU_DEBUG', env_dbg, status=env_stat)
+    gpu_verbose = (env_stat == 0 .and. len_trim(env_dbg) > 0 .and. env_dbg(1:1) /= '0')
+    if (gpu_check) then
+      allocate(h_ref(mpack))
+      h_ref(1:mpack) = h(1:mpack)
+      call cpu_sp_block_pairs(h_ref, enuc_ref)
+    end if
+    call mozyme_section_timer_begin('hcore_gpu_pairs', hcore_timer)
+    call mozyme_gpu_hcore_run(numat, coord, h, gpu_enuc, gpu_code, gpu_ms, gpu_pairs, gpu_d_pairs)
+    call mozyme_section_timer_end('hcore_gpu_pairs', hcore_timer)
+    if (gpu_code == 0) then
+      enuclr = enuclr + gpu_enuc
+      if (gpu_check) then
+        h_diff = maxval(abs(h(1:mpack) - h_ref(1:mpack)))
+        write (iw, '(1x,a,i0,a,i0,a,f10.3,a,es12.4,a,es12.4,a)') '[MOZYME GPU hcore] check pairs=', &
+          gpu_pairs, ' d_pairs_cpu=', gpu_d_pairs, ' ms=', gpu_ms, ' max_abs_dh=', h_diff, &
+          ' denuc=', gpu_enuc - enuc_ref, ' eV'
+        call flush(iw)
+      else if (gpu_verbose) then
+        write (iw, '(1x,a,i0,a,i0,a,f10.3)') '[MOZYME GPU hcore] success pairs=', gpu_pairs, &
+          ' d_pairs_cpu=', gpu_d_pairs, ' ms=', gpu_ms
+        call flush(iw)
+      end if
+    else
+      if (gpu_verbose) then
+        write (iw, '(1x,a,i0)') '[MOZYME GPU hcore] fallback_cpu code=', gpu_code
+        call flush(iw)
+      end if
+      call cpu_sp_block_pairs(h, enuc_ref)
+      enuclr = enuclr + enuc_ref
+    end if
+    if (allocated(h_ref)) deallocate(h_ref)
+  end if
  !
  !
   if (mode == -1) then
@@ -435,4 +488,46 @@ subroutine hcore_for_MOZYME ()
       write (iw, 10000) (wk(i), i=1, j)
     end if
   end if
+contains
+
+  ! CPU reference / fallback for the sp-sp block pairs skipped in the main loop
+  ! (mode == 0, id == 0): h1elec into the off-diagonal block, rotate's e1b/e2a
+  ! into the diagonal blocks, enuc summed into enuc_sum.
+  subroutine cpu_sp_block_pairs(hh, enuc_sum)
+    implicit none
+    double precision, intent(inout) :: hh(*)
+    double precision, intent(out) :: enuc_sum
+    integer :: ia, ja, na, nb, ka, i1, j1, kdum
+    double precision :: e1b_l(45), e2a_l(45), enuc_l, di_l(9, 9), w_l(2025)
+    enuc_sum = 0.d0
+    do ia = 2, numat
+      if (iorbs(ia) /= 1 .and. iorbs(ia) /= 4) cycle
+      na = nat(ia)
+      do ja = 1, ia - 1
+        if (.not. mozyme_gpu_sp_pair(iorbs(ia), iorbs(ja))) cycle
+        ka = ijbo(ia, ja)
+        if (ka < 0) cycle
+        nb = nat(ja)
+        call h1elec (na, nb, coord(1, ia), coord(1, ja), di_l)
+        do i1 = 1, iorbs(ia)
+          do j1 = 1, iorbs(ja)
+            ka = ka + 1
+            hh(ka) = hh(ka) + di_l(i1, j1)
+          end do
+        end do
+        kdum = 1
+        call rotate (na, nb, coord(1, ia), coord(1, ja), w_l, kdum, e1b_l, e2a_l, enuc_l)
+        enuc_sum = enuc_sum + enuc_l
+        ka = ijbo(ia, ia)
+        do i1 = 1, (iorbs(ia)*(iorbs(ia)+1))/2
+          hh(ka + i1) = hh(ka + i1) + e1b_l(i1)
+        end do
+        ka = ijbo(ja, ja)
+        do i1 = 1, (iorbs(ja)*(iorbs(ja)+1))/2
+          hh(ka + i1) = hh(ka + i1) + e2a_l(i1)
+        end do
+      end do
+    end do
+  end subroutine cpu_sp_block_pairs
+
 end subroutine hcore_for_MOZYME
