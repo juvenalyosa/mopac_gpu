@@ -567,7 +567,9 @@
           jl = nlast(jj)
           ndi(1) = nat(jj)
           if (only_d) then
-            if (iorbs(ii) <= 4 .and. iorbs(jj) <= 4) cycle
+            ! The device kernel handles exactly the pairs whose two atoms have 1 or 4
+            ! orbitals; everything else (d shells, sparkles) is done here.
+            if ((iorbs(ii) == 1 .or. iorbs(ii) == 4) .and. (iorbs(jj) == 1 .or. iorbs(jj) == 4)) cycle
             if (ijbo(ii, jj) < 0) cycle
           end if
           if (mozyme) then
