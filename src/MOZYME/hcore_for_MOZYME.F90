@@ -25,7 +25,9 @@ subroutine hcore_for_MOZYME ()
   use common_arrays_C, only: h, coord, nat, w, wj => w, wk, uspd, tvec
   use MOZYME_C, only : semidr, direct, cutofs, parth, &
     iorbs, jopt, mode, numred, refnuc
+  use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
   implicit none
+  double precision :: hcore_timer
 !
   character (len=248) :: tmpkey
   logical :: calci, calcij, calcj, fldon
@@ -42,7 +44,9 @@ subroutine hcore_for_MOZYME ()
   fldcon = 0.d0
   fnuc = 0.d0
   debug = (Index (keywrd, " HCORE") /= 0)
+  call mozyme_section_timer_begin('hcore_add_more_interactions', hcore_timer)
   call add_more_interactions()
+  call mozyme_section_timer_end('hcore_add_more_interactions', hcore_timer)
   if (moperr) return
   if (imol /= numcal) then
     if (index(keywrd, " SILENT") == 0 .and. (debug .or. id /= 0)) then
@@ -120,6 +124,7 @@ subroutine hcore_for_MOZYME ()
     !
     h(1:mpack) = 0.d0
   end if
+  call mozyme_section_timer_begin('hcore_pair_loop', hcore_timer)
   do i = 1, numat
 
     calci = (jopt(ired) == i)
@@ -389,6 +394,7 @@ subroutine hcore_for_MOZYME ()
       call wstore (w(kr), kr, ni, ii)
     end if
   end do
+  call mozyme_section_timer_end('hcore_pair_loop', hcore_timer)
  !
  !
   if (mode == -1) then

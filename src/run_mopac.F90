@@ -39,6 +39,7 @@
 !
 !
       use cosmo_C, only : iseps, useps, lpka, solv_energy, area, fepsi, ediel
+      use mozyme_section_timers, only : mozyme_section_timer_report_all
 !
       USE funcon_C, only : fpc_9
 !
@@ -1782,6 +1783,9 @@
 !
   101 call setup_mopac_arrays(0,0)
       call delete_MOZYME_arrays()
+      ! Final cumulative section report (covers the gradient of the last geometry step,
+      ! which finishes after the last SCF-time report).
+      call mozyme_section_timer_report_all()
       call summary(" ",1)
       if (tim > 1.d7) tim = tim - 1.d7
       write (iw, '(3/,'' TOTAL JOB TIME: '',F16.2,'' SECONDS'')') tim

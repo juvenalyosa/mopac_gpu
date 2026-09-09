@@ -44,6 +44,7 @@
       use reimers_C, only: x, y, z, xz, zcore, beta, gamma, s, betao, ibf, &
       & natm, r, nbf, nbt, nprn, iat, natt, zcorea, betaa, matind, n, &
       & nprin, vnn, dm, ef, dd, ff, cc0, aa, dtmp, nb2, ppg, pg, nsym
+      use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
 !
 !***********************************************************************
 !-----------------------------------------------
@@ -65,6 +66,7 @@
       integer :: icalcn, i, j, k, l
       double precision, dimension(3) :: degree
       double precision :: angle, atheat_store, sum, store_e_disp
+      double precision :: compfg_timer, compfg_total_timer
       double precision, external ::  nsp2_correction, Si_O_H_correction
       double precision, external :: helecz
       logical :: debug, print, large, usedci, force, times, aider, &
@@ -207,7 +209,11 @@
       if (times) call timer ('BEFORE HCORE')
       if (mozyme) then
         if (iseps) useps = .true.
-        if (l_locate_ts .or. int) call hcore_for_MOZYME ()
+        if (l_locate_ts .or. int) then
+          call mozyme_section_timer_begin('compfg_hcore', compfg_timer)
+          call hcore_for_MOZYME ()
+          call mozyme_section_timer_end('compfg_hcore', compfg_timer)
+        end if
         if (moperr) return
       else if (method_indo) then
 ! Set up Reimers data
@@ -399,7 +405,9 @@
       if (int) then
         if (norbs > 0 .and. nelecs > 0) then
           if (mozyme) then
+            call mozyme_section_timer_begin('compfg_iter', compfg_timer)
             call iter_for_MOZYME (elect)
+            call mozyme_section_timer_end('compfg_iter', compfg_timer)
           else
             call iter (elect, fulscf, .TRUE.)
           end if
@@ -457,7 +465,11 @@
       if (lgrad) then
         store_e_disp = e_disp
         if (times) call timer ('Before DERIV')
-        if (nelecs > 0) call deriv (geo, grad)
+        if (nelecs > 0) then
+          call mozyme_section_timer_begin('compfg_deriv', compfg_timer)
+          call deriv (geo, grad)
+          call mozyme_section_timer_end('compfg_deriv', compfg_timer)
+        end if
         if (moperr) return
         if (times) call timer ('AFTER  DERIV')
         e_disp = store_e_disp
