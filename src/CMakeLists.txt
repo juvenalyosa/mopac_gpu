@@ -76,6 +76,8 @@ if(GPU)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/fock_kernels.cu)
     # CUDA SCF gradient kernels (experimental scaffold)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/grad_kernels.cu)
+    # CUDA MOZYME pair gradient (finite-difference diatomic energies on device)
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/mozyme_pair_gradient.cu)
     # CUDA HMTR optimizer kernels
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hmtr_optimizer.cu)
 endif()
@@ -98,6 +100,7 @@ if(GPU)
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/mozyme_scf_context.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/fock_kernels.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/grad_kernels.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/gpu/mozyme_pair_gradient.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hmtr_optimizer.cu
         PROPERTIES LANGUAGE CUDA
     )

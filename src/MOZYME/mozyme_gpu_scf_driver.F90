@@ -123,6 +123,7 @@ contains
     code = mopac_setenv_default('MOPAC_MOZYME_RESIDENT_FOCK_GPU'//c_null_char, '1'//c_null_char)
     code = mopac_setenv_default('MOPAC_MOZYME_MAKVEC_GPU'//c_null_char, '1'//c_null_char)
     code = mopac_setenv_default('MOPAC_MOZYME_SCF_EARLY_PROBE'//c_null_char, '0'//c_null_char)
+    code = mopac_setenv_default('MOPAC_MOZYME_GRAD_GPU'//c_null_char, '1'//c_null_char)
     call mozyme_gpu_scf_reset_request_state()
     applied = (code == 0_c_int)
 #else

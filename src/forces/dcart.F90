@@ -21,6 +21,8 @@
       use common_arrays_C, only : nfirst, nlast, nat, p, pa, pb, tvec, &
       nbonds, ibonds, geoa, geo
       use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
+      use mozyme_gpu_gradient, only : mozyme_gpu_gradient_enabled, mozyme_gpu_gradient_check_enabled, &
+      mozyme_gpu_gradient_run
 !
       USE molkst_C, only : numat, numcal, keywrd, id, l1u, l2u, l3u, l123, mpack, &
       use_ref_geo, cutofp, method_pm6, method_PM7, mozyme, density, N_3_present, &
@@ -199,12 +201,16 @@
         if (allocated(near_pairs)) deallocate(near_pairs)
         if (allocated(far_pairs)) deallocate(far_pairs)
       end if
+      if (.not. used_gpu .and. mozyme .and. l123 == 1 .and. mode == 0 .and. &
+          mozyme_gpu_gradient_enabled()) then
+        call run_mozyme_gpu_gradient(used_gpu)
+      end if
       if (.not. used_gpu) then
         if (use_gpu_grad) call sync_resident_density()
 #endif
         call mozyme_section_timer_begin('dcart_gradient_cpu', dcart_timer)
         call dcart_build_scf_gradient_cpu(numat, l123, coord, dxyz, qbld, chnge, chnge2, &
-             const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
+             const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat, .false.)
         call mozyme_section_timer_end('dcart_gradient_cpu', dcart_timer)
 #ifdef GPU
       end if
@@ -409,6 +415,89 @@
           end if
           ! If fetch fails, proceed without synchronisation; CPU path will still execute.
         end subroutine sync_resident_density
+        !
+        !  MOZYME pair gradient on the GPU.  With MOPAC_GPU_GRAD_CHECK=1 both
+        !  the CPU and the GPU gradients are evaluated and compared (the CPU
+        !  result is kept); otherwise the GPU result is used when the device
+        !  path succeeds and the CPU loop runs only as a fallback.
+        !
+        subroutine run_mozyme_gpu_gradient(done)
+          implicit none
+          logical, intent(inout) :: done
+          double precision, allocatable :: dxyz_ref(:,:), dxyz_cpu(:,:)
+          double precision :: gpu_ms, max_diff, rms_diff, diff
+          integer :: gpu_code, gpu_pairs, gpu_d_pairs, ia, ka
+          logical :: verbose
+          character(len=8) :: env_dbg
+          integer :: env_dbg_stat
+          done = .false.
+          env_dbg = ' '
+          call get_environment_variable('MOPAC_GPU_DEBUG', env_dbg, status=env_dbg_stat)
+          verbose = (env_dbg_stat == 0 .and. len_trim(env_dbg) > 0 .and. env_dbg(1:1) /= '0')
+          if (mozyme_gpu_gradient_check_enabled()) then
+            allocate(dxyz_ref(3, numtot), dxyz_cpu(3, numtot))
+            dxyz_ref = dxyz(1:3, 1:numtot)
+            call mozyme_section_timer_begin('dcart_gradient_cpu', dcart_timer)
+            call dcart_build_scf_gradient_cpu(numat, l123, coord, dxyz, qbld, chnge, chnge2, &
+                 const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat, .false.)
+            call mozyme_section_timer_end('dcart_gradient_cpu', dcart_timer)
+            dxyz_cpu = dxyz(1:3, 1:numtot)
+            dxyz(1:3, 1:numtot) = dxyz_ref
+            call mozyme_section_timer_begin('dcart_gradient_gpu', dcart_timer)
+            call mozyme_gpu_gradient_run(numat, coord, dxyz, force, chnge, const, gpu_code, gpu_ms, gpu_pairs, &
+              gpu_d_pairs)
+            call mozyme_section_timer_end('dcart_gradient_gpu', dcart_timer)
+            if (gpu_code == 0 .and. gpu_d_pairs > 0) call add_d_pairs_cpu()
+            if (gpu_code == 0) then
+              max_diff = 0.d0
+              rms_diff = 0.d0
+              do ia = 1, numtot
+                do ka = 1, 3
+                  diff = dxyz(ka, ia) - dxyz_cpu(ka, ia)
+                  max_diff = max(max_diff, abs(diff))
+                  rms_diff = rms_diff + diff * diff
+                end do
+              end do
+              rms_diff = sqrt(rms_diff / dble(3 * numtot))
+              write(iw, '(1x,a,i0,a,i0,a,f10.3,a,es12.4,a,es12.4,a)') '[MOZYME GPU gradient] check pairs=', &
+                gpu_pairs, ' d_pairs_cpu=', gpu_d_pairs, ' ms=', gpu_ms, ' max_abs_diff=', max_diff, &
+                ' rms_diff=', rms_diff, ' kcal/mol/A (CPU result kept)'
+            else
+              write(iw, '(1x,a,i0)') '[MOZYME GPU gradient] check: device path unavailable, code=', gpu_code
+            end if
+            call flush(iw)
+            dxyz(1:3, 1:numtot) = dxyz_cpu
+            deallocate(dxyz_ref, dxyz_cpu)
+            done = .true.
+            return
+          end if
+          call mozyme_section_timer_begin('dcart_gradient_gpu', dcart_timer)
+          call mozyme_gpu_gradient_run(numat, coord, dxyz, force, chnge, const, gpu_code, gpu_ms, gpu_pairs, &
+            gpu_d_pairs)
+          call mozyme_section_timer_end('dcart_gradient_gpu', dcart_timer)
+          if (gpu_code == 0) then
+            if (gpu_d_pairs > 0) call add_d_pairs_cpu()
+            done = .true.
+            if (verbose) then
+              write(iw, '(1x,a,i0,a,i0,a,f10.3)') '[MOZYME GPU gradient] success pairs=', gpu_pairs, &
+                ' d_pairs_cpu=', gpu_d_pairs, ' ms=', gpu_ms
+              call flush(iw)
+            end if
+          else if (verbose) then
+            write(iw, '(1x,a,i0)') '[MOZYME GPU gradient] fallback_cpu code=', gpu_code
+            call flush(iw)
+          end if
+        end subroutine run_mozyme_gpu_gradient
+
+        ! Pairs involving d-orbital atoms (S, P, ... in PM6/PM7) are not
+        ! handled by the device kernel; evaluate just those on the CPU.
+        subroutine add_d_pairs_cpu()
+          implicit none
+          call mozyme_section_timer_begin('dcart_gradient_cpu_dpairs', dcart_timer)
+          call dcart_build_scf_gradient_cpu(numat, l123, coord, dxyz, qbld, chnge, chnge2, &
+               const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat, .true.)
+          call mozyme_section_timer_end('dcart_gradient_cpu_dpairs', dcart_timer)
+        end subroutine add_d_pairs_cpu
 #else
         subroutine sync_resident_density()
         end subroutine sync_resident_density
@@ -417,7 +506,7 @@
       end subroutine dcart
 
       subroutine dcart_build_scf_gradient_cpu(numat_in, l123_in, coord, dxyz, q, chnge, chnge2, &
-           const, numtot_in, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
+           const, numtot_in, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat, d_pairs_only)
       use funcon_C, only : fpc_9, a0, ev
       use common_arrays_C, only : nfirst, nlast, nat, p, pa, pb, tvec
       use molkst_C, only : mozyme, id, cutofp, l1u, l2u, l3u
@@ -433,13 +522,17 @@
       double precision, intent(inout) :: cdi(3,2)
       integer, intent(inout) :: ndi(2)
       double precision, intent(inout) :: dstat(3)
+      ! When true, only the MOZYME pairs that involve an atom with d orbitals
+      ! are evaluated (the GPU pair kernel handles the sp pairs).
+      logical, intent(in) :: d_pairs_only
       double precision, external :: derp
       integer, external :: ijbo
       integer :: i2, j2, ii, jj, iii, jjj, im1, jf, jl, if, il
       integer :: ij, i, j, k, l, ik, jk, kl, kkkk
       double precision :: half, rij, deriv, aa, ee
-      logical :: point
+      logical :: point, only_d
 
+      only_d = d_pairs_only .and. mozyme
       i2 = 1
       do ii = 1, numat_in
         if (mozyme) then
@@ -473,6 +566,10 @@
           jf = nfirst(jj)
           jl = nlast(jj)
           ndi(1) = nat(jj)
+          if (only_d) then
+            if (iorbs(ii) <= 4 .and. iorbs(jj) <= 4) cycle
+            if (ijbo(ii, jj) < 0) cycle
+          end if
           if (mozyme) then
             if (ijbo(ii, jj) >= 0) then
               k = ijbo (jj, jj)
@@ -709,7 +806,7 @@
         dstat(:) = 0.0d0
 
         call dcart_build_scf_gradient_cpu(numat_in, l123_in, coord, grad, qbld, chnge, chnge2, &
-             const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
+             const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat, .false.)
         ok = .true._c_bool
       end function mopac_gpu_cart_gradient_cpu
 #endif
