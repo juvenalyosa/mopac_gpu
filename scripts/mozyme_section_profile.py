@@ -47,10 +47,12 @@ MODES: dict[str, dict[str, str | None]] = {
         "MOPAC_MOZYME_SCF_GPU": "1",
         "MOPAC_MOZYME_RESIDENT_FOCK_GPU": "1",
         "MOPAC_MOZYME_MAKVEC_GPU": "1",
-        "MOPAC_MOZYME_SCF_STRICT_RESIDENT": "1",
+        "MOPAC_MOZYME_SCF_STRICT_RESIDENT": None,
         "MOPAC_MOZYME_SCF_EARLY_PROBE": "0",
     },
 }
+# Strict proof variant: aborts instead of running any setup/bookend on CPU.
+MODES["resident-strict"] = dict(MODES["resident"], MOPAC_MOZYME_SCF_STRICT_RESIDENT="1")
 
 HEAT_RE = re.compile(r"FINAL HEAT OF FORMATION\s*=\s*([+\-0-9.EeDd]+)")
 SCF_STATUS_RE = re.compile(r"\[MOZYME GPU SCF\]\s+status=(\S+)(?:.*?reason=(\S+))?")
@@ -173,7 +175,7 @@ def main() -> None:
     parser.add_argument(
         "--modes",
         default="cpu,gpu-diagg,resident",
-        help="Comma-separated subset of: cpu,gpu,gpu-diagg,resident",
+        help="Comma-separated subset of: cpu,gpu,gpu-diagg,resident,resident-strict",
     )
     parser.add_argument("--out-dir", default="mozyme_section_profile")
     parser.add_argument("--timeout", type=float, default=7200.0)

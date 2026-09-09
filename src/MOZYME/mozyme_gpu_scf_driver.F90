@@ -2076,7 +2076,11 @@ contains
     resident_requested = env_is_one('MOPAC_MOZYME_RESIDENT_SCF')
     request_present = resident_requested .or. full_scf_requested .or. &
       strict_requested
-    no_fallback_required = strict_requested .or. full_scf_requested
+    ! Only the explicit strict/proof variables forbid CPU setup and bookend
+    ! work; MOPAC_MOZYME_SCF_GPU runs the resident SCF loop on the device but
+    ! lets per-geometry host routines (hcore, add_more_interactions, tidy,
+    ! OLD_SCF warm starts) proceed, which optimization and MD steps need.
+    no_fallback_required = strict_requested
     request_enabled = .false.
     request_reason = 'not_requested'
 
