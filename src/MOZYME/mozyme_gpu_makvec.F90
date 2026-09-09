@@ -22,6 +22,7 @@ module mozyme_gpu_makvec
 contains
 
   logical function mozyme_gpu_makvec_try() result(done)
+    use mozyme_section_timers, only: mozyme_section_timer_begin, mozyme_section_timer_end
     use chanel_C, only: iw
 #ifdef GPU
     use common_arrays_C, only: h, p, f, pdiag, nfirst, nlast, nat, &
@@ -68,6 +69,7 @@ contains
     double precision :: wall_ms
 #endif
     logical :: trace_requested
+    double precision :: makvec_timer
 
     done = .false.
     trace_requested = env_is_one('MOPAC_MOZYME_SCF_STRICT_RESIDENT') .or. &
@@ -111,6 +113,7 @@ contains
 
     resident_plan_ione = 0
     if (id == 0) resident_plan_ione = 1
+    call mozyme_section_timer_begin('makvec_gpu_plan', makvec_timer)
     if (id == 0) then
       done = mozyme_resident_fock_prepare_plan(resident_fock_plan_full, &
         iorbs, nat, ifact, w, w, 0, kopt, resident_plan_ione, coord, .true.)
@@ -118,6 +121,7 @@ contains
       done = mozyme_resident_fock_prepare_plan(resident_fock_plan_full, &
         iorbs, nat, ifact, w, wk, 0, kopt, resident_plan_ione, coord, .true.)
     end if
+    call mozyme_section_timer_end('makvec_gpu_plan', makvec_timer)
     if (.not. done) then
       write(iw,'(1x,a)') '[MOZYME GPU makvec] status=fallback_cpu reason=resident_fock_setup'
       call flush(iw)
@@ -131,6 +135,7 @@ contains
     end if
 
     wall_ms = 0.0d0
+    call mozyme_section_timer_begin('makvec_gpu_kernel', makvec_timer)
     code = mopac_cuda_mozyme_makvec( &
       mozyme_c_int_positive_or_zero(numat), &
       mozyme_c_int_positive_or_zero(norbs), &
@@ -149,6 +154,7 @@ contains
       iorbs, nfirst, nlast, nijbo, nbonds, ibonds, &
       Lewis_elem, ncf, nncf, ncocc, icocc, cocc, nce, nnce, ncvir, &
       icvir, cvir, wall_ms)
+    call mozyme_section_timer_end('makvec_gpu_kernel', makvec_timer)
     done = (code == 0_c_int)
     if (done) then
       write(iw,'(1x,a,1x,f0.3)') '[MOZYME GPU makvec] status=success wall_ms=', wall_ms

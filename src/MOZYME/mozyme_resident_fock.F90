@@ -254,6 +254,7 @@ contains
 #ifdef GPU
   logical function mozyme_resident_fock_prepare_plan(plan_id, iorbs, nat, ifact, wj, wk, mode, kopt, ione, coord, use_nijbo)
     use chanel_C, only: iw
+    use mozyme_section_timers, only: mozyme_section_timer_begin, mozyme_section_timer_end
     use molkst_C, only: numat, mpack, n2elec, l_feather, trunc_1, trunc_2, method_PM7
     use MOZYME_C, only: direct, semidr, nijbo
     use parameters_C, only: am, ad, aq, dd, qq, po, ddp, tore, iod
@@ -342,6 +343,7 @@ contains
     logical :: plan_counts_ok
     logical :: gpu_pack_counts_ok
     integer(c_int64_t) :: signature
+    double precision :: plan_timer
 
     mozyme_resident_fock_prepare_plan = .false.
     if (plan_id < 0 .or. plan_id >= resident_fock_plan_count) return
@@ -353,8 +355,10 @@ contains
         signature = last_signature(plan_id) + 1_c_int64_t
       end if
     else
+      call mozyme_section_timer_begin('fock_plan_signature', plan_timer)
       signature = mozyme_resident_signature(iorbs, nat, ifact, wj, wk, &
         kopt, mode, ione, coord, use_nijbo)
+      call mozyme_section_timer_end('fock_plan_signature', plan_timer)
     end if
     if (resident_ready(plan_id) .and. signature == last_signature(plan_id)) then
       gpu_plan_ready = mopac_cuda_mozyme_sparse_fock_plan_ready( &
@@ -388,6 +392,7 @@ contains
 	        gpu_pack_counts = 0_c_int
 	        gpu_pack_fallback_basis = 0_c_int
 	        gpu_pack_full_coverage = 0_c_int
+	        call mozyme_section_timer_begin('fock_plan_gpu_pack', plan_timer)
 	        gpu_pack_code = mopac_cuda_mozyme_resident_fock_pack_plan( &
 	          mozyme_c_int_checked(plan_id), mozyme_c_int_positive_or_zero(mpack), &
 	          mozyme_c_int_positive_or_zero(numat), mozyme_c_int_checked(mode), &
@@ -397,6 +402,7 @@ contains
 	          gpu_jindex, coord, wj, wk, am, ad, aq, dd, qq, gpu_pack_counts, &
 	          gpu_pack_fallback_basis, po, ddp, tore, iod, merge(1_c_int, 0_c_int, method_PM7), &
 	          signature, gpu_pack_full_coverage)
+	        call mozyme_section_timer_end('fock_plan_gpu_pack', plan_timer)
 	        if (gpu_pack_code == 0_c_int) then
           if (resident_strict_requested()) then
             resident_ready(plan_id) = .true.
@@ -510,6 +516,7 @@ contains
 	        return
 	      end if
 
+	      call mozyme_section_timer_begin('fock_plan_build_host', plan_timer)
 	      call build_resident_plan(iorbs, nat, ifact, wj, wk, mode, kopt, ione, coord, use_nijbo, &
 	        one_count, one_center_cpu_count, one_f_offsets, one_w_offsets, one_iabs, one_ilims, one_w_count, one_w_values, &
         pair_count, pair_iabs, pair_jbas, pair_i_offsets, pair_j_offsets, pair_cross_offsets, &
@@ -521,6 +528,7 @@ contains
         real_pair_other_count, point_pair_count, point_pair_gpu_count, point_pair_cpu_count, &
         point_pair_basis_limit_count, point_pair_direct_basis_count, point_pair_other_count, &
         fallback_basis, plan_counts_ok)
+	      call mozyme_section_timer_end('fock_plan_build_host', plan_timer)
 
       if (.not. plan_counts_ok) then
         resident_ready(plan_id) = .false.
@@ -535,6 +543,7 @@ contains
       resident_gpu_pack_ready(plan_id) = .false.
       coverage_complete = merge(1_c_int, 0_c_int, resident_full_coverage(plan_id))
 
+      call mozyme_section_timer_begin('fock_plan_device_setup', plan_timer)
       code = mopac_cuda_mozyme_sparse_fock_setup_plan( &
         mozyme_c_int_checked(plan_id), &
         mozyme_c_int_positive_or_zero(mpack), &
@@ -551,6 +560,7 @@ contains
         mozyme_c_int_nonnegative_or_zero(point_count), &
 	        point_iabs, point_jbas, point_i_atoms, point_j_atoms, point_i_offsets, point_j_offsets, point_addr_flags, &
 	        point_w_values, signature, coverage_complete)
+      call mozyme_section_timer_end('fock_plan_device_setup', plan_timer)
       resident_ready(plan_id) = (code == 0)
       if (.not. resident_ready(plan_id)) then
         resident_full_coverage(plan_id) = .false.
