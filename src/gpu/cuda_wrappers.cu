@@ -416,6 +416,17 @@ void getGPUInfo(bool *hasGpu,
 }
 
 // Query compute capability of current CUDA device (simple helper for policy decisions)
+// Set an environment default without overriding a value the user provided.
+extern "C" int mopac_setenv_default(const char *name, const char *value) {
+#ifdef _WIN32
+  (void)name;
+  (void)value;
+  return -1;
+#else
+  return setenv(name, value, 0);
+#endif
+}
+
 void get_current_device_cc(int *major, int *minor) {
   int dev = -1;
   if (major) *major = 0;

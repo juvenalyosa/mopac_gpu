@@ -53,6 +53,7 @@ module mozyme_gpu_scf_driver
   public :: mozyme_gpu_scf_strict_resident
   public :: mozyme_gpu_scf_no_fallback_required
   public :: mozyme_gpu_scf_reset_request_state
+  public :: mozyme_gpu_apply_default_environment
   public :: mozyme_gpu_scf_force_final_reorth
   public :: mozyme_gpu_scf_early_probe
   public :: mozyme_gpu_scf_try
@@ -93,6 +94,42 @@ contains
     request_reason = 'not_requested'
     blocked_nscf = -1
   end subroutine mozyme_gpu_scf_reset_request_state
+
+  ! Production default: a MOZYME job on a capable GPU runs the resident SCF
+  ! (device loop, GPU makvec and sparse Fock) without any environment setup.
+  ! Only variables the user left unset are filled in.
+  subroutine mozyme_gpu_apply_default_environment(cc_major, applied)
+    use iso_c_binding, only: c_int, c_char, c_null_char
+    implicit none
+    integer, intent(in) :: cc_major
+    logical, intent(out) :: applied
+#ifdef GPU
+    interface
+      function mopac_setenv_default(name, value) bind(C, name='mopac_setenv_default') result(code)
+        import :: c_int, c_char
+        character(kind=c_char), intent(in) :: name(*), value(*)
+        integer(c_int) :: code
+      end function mopac_setenv_default
+    end interface
+    integer(c_int) :: code
+
+    applied = .false.
+    if (cc_major < 7) return
+    if (env_enabled('MOPAC_NOGPU') .or. env_enabled('MOZYME_GPU_OFF')) return
+    code = mopac_setenv_default('MOZYME_GPU_FORCE'//c_null_char, '1'//c_null_char)
+    code = mopac_setenv_default('MOPAC_MOZYME_SCF_EXPERIMENTAL'//c_null_char, '1'//c_null_char)
+    code = mopac_setenv_default('MOPAC_MOZYME_RESIDENT_SCF'//c_null_char, '1'//c_null_char)
+    code = mopac_setenv_default('MOPAC_MOZYME_SCF_GPU'//c_null_char, '1'//c_null_char)
+    code = mopac_setenv_default('MOPAC_MOZYME_RESIDENT_FOCK_GPU'//c_null_char, '1'//c_null_char)
+    code = mopac_setenv_default('MOPAC_MOZYME_MAKVEC_GPU'//c_null_char, '1'//c_null_char)
+    code = mopac_setenv_default('MOPAC_MOZYME_SCF_EARLY_PROBE'//c_null_char, '0'//c_null_char)
+    call mozyme_gpu_scf_reset_request_state()
+    applied = (code == 0_c_int)
+#else
+    applied = .false.
+    if (cc_major < 0) applied = .false.
+#endif
+  end subroutine mozyme_gpu_apply_default_environment
 
   logical function mozyme_gpu_scf_force_final_reorth()
     implicit none

@@ -43,7 +43,7 @@
       USE funcon_C, only : fpc_9
 !
       use mozyme_gpu_scf_driver, only : mozyme_gpu_scf_no_fallback_required, &
-        mozyme_gpu_scf_reset_request_state
+        mozyme_gpu_scf_reset_request_state, mozyme_gpu_apply_default_environment
 !
       USE maps_C, only : latom, react, rxn_coord
 !
@@ -590,6 +590,26 @@
         else
           gpu_scf_task_mode = GPU_SCF_TASK_AUTO
         end if
+        ! Production default: MOZYME on a capable GPU runs the resident SCF
+        ! unless NOGPU / MOPAC_NOGPU / MOZYME_GPU_OFF say otherwise.
+#ifdef GPU
+        if (mozyme .and. lgpu .and. index(keywrd, ' NOGPU') == 0) then
+          block
+            integer :: cc_major
+            logical :: defaults_applied
+            cc_major = 0
+            if (nDevices > 0) then
+              j = gpu_id + 1
+              if (j >= 1 .and. j <= nDevices) cc_major = major(j)
+            end if
+            call mozyme_gpu_apply_default_environment(cc_major, defaults_applied)
+            if (defaults_applied) then
+              write(iw,'(1x,a)') '[MOZYME GPU] resident SCF enabled by default (disable with NOGPU or MOPAC_NOGPU=1)'
+              call flush(iw)
+            end if
+          end block
+        end if
+#endif
         ! Optional MOZYME GPU override via environment variable
         call get_environment_variable('MOZYME_GPU', line, status=i)
         if (i == 0) then

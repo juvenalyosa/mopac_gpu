@@ -14,6 +14,11 @@ Minimal examples
   - `cmake --build build -j`
 - GPU‑only build dir: `build-gpu` is fine; the source tree supports multiple build dirs.
 
+MOZYME Resident SCF (production default)
+- A `MOZYME` job on a GPU with compute capability >= 7.0 (Volta or newer) runs the resident SCF by default: the SCF loop (tidy, check, eimp, parallel diagg1/diagg2, density by atom-pair blocks, sparse Fock, cnvgz, helecz, isitsc) executes on the device, initial LMOs come from the GPU makvec and the Fock plan is packed in parallel. Per-geometry host routines (hcore, add_more_interactions, tidy/check bookends, OLD_SCF warm starts, gradients) still run on the CPU, so single points and geometry optimizations work without any environment setup. Measured on Colab (T4-class): crambin 1SCF 3.2 s vs 29 s CPU, ubiquitin 4.7 s vs 43 s, 3-cycle crambin optimization 8 s vs 47 s, heats within 0.01 kcal/mol.
+- Disable with the `NOGPU` keyword or `MOPAC_NOGPU=1` / `MOZYME_GPU_OFF=1`; the defaults only fill in `MOPAC_MOZYME_*` variables the user left unset, so explicit settings still win. `MOPAC_MOZYME_SCF_STRICT_RESIDENT=1` keeps the old fail-closed proof mode, which aborts on any CPU setup work.
+- Profile with `scripts/mozyme_section_profile.py <mopac> <deck.mop> --modes cpu,resident`; see "Verbose/Profiling" below.
+
 Device Selection and Enablement
 - Default behavior (CLI run):
   - GPU is enabled automatically when at least one suitable GPU is present and the system is not tiny (heuristic `natoms > 100`).

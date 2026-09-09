@@ -53,6 +53,8 @@ MODES: dict[str, dict[str, str | None]] = {
 }
 # Strict proof variant: aborts instead of running any setup/bookend on CPU.
 MODES["resident-strict"] = dict(MODES["resident"], MOPAC_MOZYME_SCF_STRICT_RESIDENT="1")
+# No overrides at all: exercises the production defaults MOPAC applies itself.
+MODES["default"] = {key: None for key in MODES["resident"]}
 
 HEAT_RE = re.compile(r"FINAL HEAT OF FORMATION\s*=\s*([+\-0-9.EeDd]+)")
 SCF_STATUS_RE = re.compile(r"\[MOZYME GPU SCF\]\s+status=(\S+)(?:.*?reason=(\S+))?")
