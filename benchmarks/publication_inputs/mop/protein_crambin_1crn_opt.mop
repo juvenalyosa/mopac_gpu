@@ -1,0 +1,2 @@
+PM7 GEO_DAT="protein_crambin_1crn_hydrogenated.pdb" MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 CYCLES=3 GEO-OK NOCOMMENTS
+Geometry optimization benchmark (3 cycles): crambin, PDB 1CRN, hydrogenated

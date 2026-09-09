@@ -20,6 +20,7 @@
 !
       use common_arrays_C, only : nfirst, nlast, nat, p, pa, pb, tvec, &
       nbonds, ibonds, geoa, geo
+      use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
 !
       USE molkst_C, only : numat, numcal, keywrd, id, l1u, l2u, l3u, l123, mpack, &
       use_ref_geo, cutofp, method_pm6, method_PM7, mozyme, density, N_3_present, &
@@ -51,6 +52,7 @@
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
       implicit none
+      double precision :: dcart_timer
 !-----------------------------------------------
 !   G l o b a l   P a r a m e t e r s
 !-----------------------------------------------
@@ -200,8 +202,10 @@
       if (.not. used_gpu) then
         if (use_gpu_grad) call sync_resident_density()
 #endif
+        call mozyme_section_timer_begin('dcart_gradient_cpu', dcart_timer)
         call dcart_build_scf_gradient_cpu(numat, l123, coord, dxyz, qbld, chnge, chnge2, &
              const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat)
+        call mozyme_section_timer_end('dcart_gradient_cpu', dcart_timer)
 #ifdef GPU
       end if
 #endif
