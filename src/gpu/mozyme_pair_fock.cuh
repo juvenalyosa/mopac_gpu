@@ -32,6 +32,9 @@ namespace mozyme_pair {
 constexpr int kMaxOrbitals = 8;                                   // sp + sp
 constexpr int kMaxLinear = kMaxOrbitals * (kMaxOrbitals + 1) / 2; // 36
 constexpr int kMaxW = 100;
+constexpr int kMaxOrbitalsD = 18;                                    // spd + spd
+constexpr int kMaxLinearD = kMaxOrbitalsD * (kMaxOrbitalsD + 1) / 2; // 171
+constexpr int kMaxWD = 2025;
 
 __device__ __forceinline__ int tri1(int i) { return (i * (i - 1)) / 2; }
 
@@ -98,18 +101,21 @@ __device__ __forceinline__ double helect_packed(int n, const double *pa,
 //   w     : two-electron integrals in rotate order (see header comment).
 //   pdi   : packed total density of the diatomic system (atom 1 first).
 // Returns 2*helect + enuc, i.e. dhc()'s dener for RHF.
-__device__ __forceinline__ double diatomic_energy_sp(int n1, int n2,
-                                                     const double *smat,
-                                                     const double *e_at1,
-                                                     const double *e_at2,
-                                                     const double *w,
-                                                     double enuc,
-                                                     const double *pdi) {
+// Generic version: h, f, pa are caller-provided scratch of >= linear entries.
+// Valid for any orbital counts as long as w follows rotate()'s ordering
+// (fock2's general branch is basis-independent; for d atoms it is the path
+// the periodic code takes instead of fockdorbs).
+__device__ __forceinline__ double diatomic_energy_generic(int n1, int n2,
+                                                          const double *smat,
+                                                          const double *e_at1,
+                                                          const double *e_at2,
+                                                          const double *w,
+                                                          double enuc,
+                                                          const double *pdi,
+                                                          double *h, double *f,
+                                                          double *pa) {
   const int n = n1 + n2;
   const int linear = tri1(n) + n;
-  double h[kMaxLinear];
-  double f[kMaxLinear];
-  double pa[kMaxLinear];
   for (int i = 0; i < linear; ++i) {
     h[i] = 0.0;
     pa[i] = 0.5 * pdi[i];
@@ -138,6 +144,19 @@ __device__ __forceinline__ double diatomic_energy_sp(int n1, int n2,
   fock2_diatomic_sp(n1, n2, w, pdi, pa, f);
   const double ee = helect_packed(n, pa, h, f);
   return 2.0 * ee + enuc;
+}
+
+__device__ __forceinline__ double diatomic_energy_sp(int n1, int n2,
+                                                     const double *smat,
+                                                     const double *e_at1,
+                                                     const double *e_at2,
+                                                     const double *w,
+                                                     double enuc,
+                                                     const double *pdi) {
+  double h[kMaxLinear];
+  double f[kMaxLinear];
+  double pa[kMaxLinear];
+  return diatomic_energy_generic(n1, n2, smat, e_at1, e_at2, w, enuc, pdi, h, f, pa);
 }
 
 }  // namespace mozyme_pair

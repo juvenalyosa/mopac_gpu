@@ -16,12 +16,15 @@
 // mozyme_pair_overlap.cuh
 // -----------------------
 // Self-contained CUDA device port of MOPAC's one-electron two-centre matrix
-// h1elec() (src/integrals/h1elec.F90) for s/p-only atom pairs, including the
-// routines it calls:
+// h1elec() (src/integrals/h1elec.F90), including the routines it calls:
 //   diat(), diat2(), ss()          src/integrals/diat.F90
 //   set(), aintgs(), bintgs()      src/integrals/set.F90
 //   bfn()                          src/integrals/bfn.F90
 //   coe()                          src/integrals/coe.F90
+//
+// Two entry points:
+//   mozyme_pair_h1elec_sp_dev  - s/p-only pairs (natorb <= 4 on both atoms)
+//   mozyme_pair_h1elec_dev     - general s/p/d pairs (natorb <= 9)
 //
 // Numerics are double precision and every expression is transcribed with the
 // same association order as the Fortran (gfortran):
@@ -105,9 +108,8 @@ struct MozymePairOverlapParams {
   const double *zp;
   const double *zd;
   // parameters_C::betas, betap, betad(107) - resonance parameters (used by
-  //   h1elec for the (bi+bj) scaling).  betad only scales orbitals 5..9 and
-  //   is never read on the sp path (natorb <= 4); kept so that the struct
-  //   mirrors h1elec's use list exactly.
+  //   h1elec for the (bi+bj) scaling).  betad scales orbitals 5..9 and is
+  //   only read through mozyme_pair_h1elec_dev for atoms with natorb = 9.
   const double *betas;
   const double *betap;
   const double *betad;
@@ -576,14 +578,20 @@ MPO_DEV double mpo_ss(int na, int nb, int la1, int lb1, int m1,
 // ---------------------------------------------------------------------------
 // coe(x2, y2, z2, norbi, norbj, c, r): rotation coefficients.  c is the
 // 75-element c(3,5,5) array; r receives sqrt(x2^2 + y2^2 + z2^2).
-// Only the s/p block (nij <= 4) is implemented; the nij >= 5 (d) block of the
-// Fortran is unreachable for natorb <= 4.
+// The s/p block is filled for nij >= 2 and the d block for nij >= 5 (only
+// reached through mozyme_pair_h1elec_dev; for natorb <= 4 the branch is
+// never taken, so the sp entry point executes exactly the same operations
+// as before the d block was added).
 // ---------------------------------------------------------------------------
 #define MPO_C(i, k, l) c[((i) - 1) + 3 * ((k) - 1) + 15 * ((l) - 1)]
 
 MPO_DEV void mpo_coe(double x2, double y2, double z2, int norbi, int norbj,
                      double *c, double &r)
 {
+  // coe: data rt34/ 0.86602540378444D0/, rt13/ 0.57735026918963D0/
+  // (truncated literals, reproduced verbatim - NOT sqrt(3)/2, 1/sqrt(3))
+  const double rt34 = 0.86602540378444;
+  const double rt13 = 0.57735026918963;
   double xy = x2 * x2 + y2 * y2;
   r = sqrt(xy + z2 * z2);
   xy = sqrt(xy);
@@ -624,7 +632,35 @@ MPO_DEV void mpo_coe(double x2, double y2, double z2, int norbi, int norbj,
     MPO_C(2, 2, 4) = sa * cb;    // c(50)
     MPO_C(2, 2, 3) = sa * sb;    // c(35)
     MPO_C(2, 2, 2) = ca;         // c(20)
-    // nij >= 5 (d orbital) block intentionally omitted (natorb <= 4 only).
+    if (nij >= 5) {
+      const double c2a = 2.0 * ca * ca - 1.0;
+      const double c2b = 2.0 * cb * cb - 1.0;
+      const double s2a = 2.0 * sa * ca;
+      const double s2b = 2.0 * sb * cb;
+      MPO_C(3, 5, 5) = c2a * cb * cb + 0.5 * c2a * sb * sb;   // c(75)
+      MPO_C(3, 5, 4) = 0.5 * c2a * s2b;                       // c(60)
+      MPO_C(3, 5, 3) = rt34 * c2a * sb * sb;                  // c(45)
+      MPO_C(3, 5, 2) = -s2a * sb;                             // c(30)
+      MPO_C(3, 5, 1) = -s2a * cb;                             // c(15)
+      MPO_C(3, 4, 5) = -0.5 * ca * s2b;                       // c(72)
+      MPO_C(3, 4, 4) = ca * c2b;                              // c(57)
+      MPO_C(3, 4, 3) = rt34 * ca * s2b;                       // c(42)
+      MPO_C(3, 4, 2) = -sa * cb;                              // c(27)
+      MPO_C(3, 4, 1) = sa * sb;                               // c(12)
+      MPO_C(3, 3, 5) = rt13 * sb * sb * 1.5;                  // c(69)
+      MPO_C(3, 3, 4) = -rt34 * s2b;                           // c(54)
+      MPO_C(3, 3, 3) = cb * cb - 0.5 * sb * sb;               // c(39)
+      MPO_C(3, 2, 5) = -0.5 * sa * s2b;                       // c(66)
+      MPO_C(3, 2, 4) = sa * c2b;                              // c(51)
+      MPO_C(3, 2, 3) = rt34 * sa * s2b;                       // c(36)
+      MPO_C(3, 2, 2) = ca * cb;                               // c(21)
+      MPO_C(3, 2, 1) = -ca * sb;                              // c(6)
+      MPO_C(3, 1, 5) = s2a * cb * cb + 0.5 * s2a * sb * sb;   // c(63)
+      MPO_C(3, 1, 4) = 0.5 * s2a * s2b;                       // c(48)
+      MPO_C(3, 1, 3) = rt34 * s2a * sb * sb;                  // c(33)
+      MPO_C(3, 1, 2) = c2a * sb;                              // c(18)
+      MPO_C(3, 1, 1) = c2a * cb;                              // c(3)
+    }
   }
 }
 
@@ -733,27 +769,19 @@ MPO_DEV void mpo_diat(int ni, int nj, const double *xj, double *di,
 #undef MPO_S
 
 // ---------------------------------------------------------------------------
-// h1elec(ni, nj, xi, xj, smat) for s/p-only pairs.
-//
-// Returns false (smat untouched) if ni/nj are out of range or either atom has
-// more than 4 orbitals; this test is made before the distance cutoffs so the
-// result is independent of geometry.  Returns true otherwise, including the
-// early exit that zeroes smat when the pair is beyond the cutoffs.
+// h1elec(ni, nj, xi, xj, smat) body, shared by both entry points below.
+// Callers have already validated ni, nj and the orbital counts.
 //
 // smat is 9x9 column-major like the Fortran smat(9,9): smat[(i-1) + 9*(j-1)].
 // Exactly as in h1elec, only the natorb(ni) x natorb(nj) block is scaled by
 // (bi(i)+bj(j)); the remaining entries hold the raw diat() output (zero for
-// diat2 pairs; for pairs handled by ss() the l=3 rows/columns 5..9 may carry
-// unscaled overlap values, which callers never read).
+// diat2 pairs; for sp pairs handled by ss() the l=3 rows/columns 5..9 may
+// carry unscaled overlap values, which callers never read).
 // ---------------------------------------------------------------------------
-__device__ __forceinline__ bool mozyme_pair_h1elec_sp_dev(
-    int ni, int nj, const double *xi, const double *xj,
-    const MozymePairOverlapParams &prm, double *smat)
+MPO_DEV bool mpo_h1elec_body(int ni, int nj, int norbi, int norbj,
+                             const double *xi, const double *xj,
+                             const MozymePairOverlapParams &prm, double *smat)
 {
-  if (ni < 1 || ni > 107 || nj < 1 || nj > 107) return false;
-  const int norbi = prm.natorb[ni - 1];
-  const int norbj = prm.natorb[nj - 1];
-  if (norbi > 4 || norbj > 4) return false;
   const double dx = xi[0] - xj[0];
   const double dy = xi[1] - xj[1];
   const double dz = xi[2] - xj[2];
@@ -792,6 +820,47 @@ __device__ __forceinline__ bool mozyme_pair_h1elec_sp_dev(
     }
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// h1elec(ni, nj, xi, xj, smat) for s/p-only pairs (natorb <= 4 on both atoms).
+//
+// Returns false (smat untouched) if ni/nj are out of range or either atom has
+// more than 4 orbitals; this test is made before the distance cutoffs so the
+// result is independent of geometry.  Returns true otherwise, including the
+// early exit that zeroes smat when the pair is beyond the cutoffs.
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ bool mozyme_pair_h1elec_sp_dev(
+    int ni, int nj, const double *xi, const double *xj,
+    const MozymePairOverlapParams &prm, double *smat)
+{
+  if (ni < 1 || ni > 107 || nj < 1 || nj > 107) return false;
+  const int norbi = prm.natorb[ni - 1];
+  const int norbj = prm.natorb[nj - 1];
+  if (norbi > 4 || norbj > 4) return false;
+  return mpo_h1elec_body(ni, nj, norbi, norbj, xi, xj, prm, smat);
+}
+
+// ---------------------------------------------------------------------------
+// h1elec(ni, nj, xi, xj, smat) for any pair with natorb <= 9 (s, p and d
+// orbitals).  For natorb <= 4 on both atoms this is bit-identical to
+// mozyme_pair_h1elec_sp_dev.  Pairs involving a d atom always take diat's
+// ss() path (use_diat2 requires natorb < 5), with the l = 3 exponent
+// max(zd(n), 0.3), principal quantum number npq(n,3), coe's d block and the
+// betad scaling of rows/columns 5..9.
+//
+// Returns false (smat untouched) if ni/nj are out of range or either atom has
+// more than 9 orbitals; true otherwise (including the cutoff early exit).
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ bool mozyme_pair_h1elec_dev(
+    int ni, int nj, const double *xi, const double *xj,
+    const MozymePairOverlapParams &prm, double *smat)
+{
+  if (ni < 1 || ni > 107 || nj < 1 || nj > 107) return false;
+  const int norbi = prm.natorb[ni - 1];
+  const int norbj = prm.natorb[nj - 1];
+  if (norbi > 9 || norbj > 9) return false;
+  return mpo_h1elec_body(ni, nj, norbi, norbj, xi, xj, prm, smat);
 }
 
 #undef MPO_DEV

@@ -1290,4 +1290,836 @@ static __device__ __forceinline__ bool mozyme_pair_core_sp_dev(
   return true;
 }
 
+
+// ===========================================================================
+//                     Extension to atoms with d orbitals
+// ===========================================================================
+//
+// mozyme_pair_core_dev() reproduces rotate() for any natorb <= 9.  It is a
+// separate entry point; mozyme_pair_core_sp_dev() above is untouched.
+//
+// Additional pieces of the rotatd path reproduced here:
+//   fordd    : constant index tables indexd/indx (by formula) and ind2, isym,
+//              ch, inddd, inddp (dumped from the Fortran after fordd and
+//              embedded below as device constants; they contain no
+//              parameter dependence)
+//   rotmat   : d(5,5) block, sd, dp(15,5,3), d_d(15,5,5)
+//   rijkl    : point-charge multipole interactions (charg) using
+//              po(1..9,ni), ddp(1..6,ni) and ch
+//   reppd2   : rep(35..491) d integrals + cored(5..10,1..2)
+//   tx/rotatd: full two-step rotation into ww(2025), PM7 iod block complete
+//   elenuc   : s/p/d blocks
+// dorbs(ni) is taken as natorb(ni) == 9 (moldat sets natorb = 9 exactly when
+// dorbs is true).
+//
+#ifdef __CUDACC__
+#define MPC_TABLE static __constant__
+#else
+#define MPC_TABLE static const
+#endif
+// ind2, Fortran column-major order (ind2(45,45): ind2(ij,kl) -> [(ij-1) + 45*(kl-1)])
+MPC_TABLE int mpc_ind2_tab[2025] = {1, 6, 0, 0, 124, 0, 0, 0, 0, 11, 0, 0, 138, 0, 0, 0, 0, 20, 0, 0, 206, 0, 0, 0, 30, 0, 0, 284, 0, 0, 172, 0, 0, 0, 0, 240, 0, 0, 0, 318, 0, 0, 402, 0, 478, 2, 7, 0, 0, 125, 0, 0, 0, 0, 12, 0, 0, 139, 0, 0, 0, 0, 21, 0, 0, 207, 0, 0, 0, 31, 0, 0, 285, 0, 0, 173, 0, 0, 0, 0, 241, 0, 0, 0, 319, 0, 0, 403, 0, 479, 0, 0, 16, 0, 0, 186, 0, 0, 0, 0, 18, 0, 0, 196, 0, 0, 0, 0, 0, 152, 0, 0, 353, 0, 0, 0, 0, 0, 0, 440, 0, 230, 0, 0, 0, 0, 0, 382, 0, 0, 0, 467, 0, 0, 0, 0, 0, 0, 25, 0, 0, 257, 0, 0, 0, 0, 27, 0, 0, 267, 0, 0, 0, 0, 0, 0, 0, 0, 430, 0, 162, 0, 0, 363, 0, 0, 0, 301, 0, 0, 0, 0, 0, 457, 0, 392, 0, 0, 0, 0, 35, 44, 0, 0, 129, 0, 0, 0, 0, 53, 0, 0, 143, 0, 0, 0, 0, 78, 0, 0, 211, 0, 0, 0, 112, 0, 0, 289, 0, 0, 177, 0, 0, 0, 0, 245, 0, 0, 0, 323, 0, 0, 407, 0, 483, 0, 0, 63, 0, 0, 189, 0, 0, 0, 0, 71, 0, 0, 199, 0, 0, 0, 0, 0, 155, 0, 0, 356, 0, 0, 0, 0, 0, 0, 443, 0, 233, 0, 0, 0, 0, 0, 385, 0, 0, 0, 470, 0, 0, 0, 0, 0, 0, 91, 0, 0, 260, 0, 0, 0, 0, 99, 0, 0, 270, 0, 0, 0, 0, 0, 0, 0, 0, 433, 0, 165, 0, 0, 366, 0, 0, 0, 304, 0, 0, 0, 0, 0, 460, 0, 395, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 341, 0, 0, 0, 0, 0, 0, 0, 350, 0, 85, 0, 0, 218, 0, 0, 0, 119, 0, 0, 296, 0, 0, 0, 0, 0, 379, 0, 252, 0, 0, 0, 330, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 420, 0, 0, 0, 0, 0, 0, 0, 427, 0, 109, 0, 0, 281, 0, 0, 0, 0, 227, 0, 0, 0, 0, 0, 0, 0, 454, 0, 315, 0, 0, 0, 0, 0, 0, 0, 0, 3, 8, 0, 0, 126, 0, 0, 0, 0, 13, 0, 0, 140, 0, 0, 0, 0, 22, 0, 0, 208, 0, 0, 0, 32, 0, 0, 286, 0, 0, 174, 0, 0, 0, 0, 242, 0, 0, 0, 320, 0, 0, 404, 0, 480, 0, 0, 17, 0, 0, 187, 0, 0, 0, 0, 19, 0, 0, 197, 0, 0, 0, 0, 0, 153, 0, 0, 354, 0, 0, 0, 0, 0, 0, 441, 0, 231, 0, 0, 0, 0, 0, 383, 0, 0, 0, 468, 0, 0, 0, 0, 0, 0, 26, 0, 0, 258, 0, 0, 0, 0, 28, 0, 0, 268, 0, 0, 0, 0, 0, 0, 0, 0, 431, 0, 163, 0, 0, 364, 0, 0, 0, 302, 0, 0, 0, 0, 0, 458, 0, 393, 0, 0, 0, 0, 36, 45, 0, 0, 130, 0, 0, 0, 0, 54, 0, 0, 144, 0, 0, 0, 0, 79, 0, 0, 212, 0, 0, 0, 113, 0, 0, 290, 0, 0, 178, 0, 0, 0, 0, 246, 0, 0, 0, 324, 0, 0, 408, 0, 484, 0, 0, 64, 0, 0, 190, 0, 0, 0, 0, 72, 0, 0, 200, 0, 0, 0, 0, 0, 156, 0, 0, 357, 0, 0, 0, 0, 0, 0, 444, 0, 234, 0, 0, 0, 0, 0, 386, 0, 0, 0, 471, 0, 0, 0, 0, 0, 0, 92, 0, 0, 261, 0, 0, 0, 0, 100, 0, 0, 271, 0, 0, 0, 0, 0, 0, 0, 0, 434, 0, 166, 0, 0, 367, 0, 0, 0, 305, 0, 0, 0, 0, 0, 461, 0, 396, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 342, 0, 0, 0, 0, 0, 0, 0, 351, 0, 86, 0, 0, 219, 0, 0, 0, 120, 0, 0, 297, 0, 0, 0, 0, 0, 380, 0, 253, 0, 0, 0, 331, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 421, 0, 0, 0, 0, 0, 0, 0, 428, 0, 110, 0, 0, 282, 0, 0, 0, 0, 228, 0, 0, 0, 0, 0, 0, 0, 455, 0, 316, 0, 0, 0, 0, 0, 0, 0, 0, 4, 9, 0, 0, 127, 0, 0, 335, 0, 14, 0, 0, 141, 0, 0, 344, 0, 23, 0, 0, 209, 0, 0, 0, 33, 0, 0, 287, 0, 0, 175, 0, 0, 373, 0, 243, 0, 0, 0, 321, 0, 0, 405, 0, 481, 0, 0, 0, 0, 0, 0, 0, 0, 416, 0, 0, 0, 0, 0, 0, 0, 423, 0, 29, 0, 0, 277, 0, 0, 0, 0, 223, 0, 0, 0, 0, 0, 0, 0, 450, 0, 311, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 62, 0, 0, 188, 0, 0, 0, 0, 70, 0, 0, 198, 0, 0, 0, 0, 0, 154, 0, 0, 355, 0, 0, 0, 0, 0, 0, 442, 0, 232, 0, 0, 0, 0, 0, 384, 0, 0, 0, 469, 0, 0, 0, 38, 47, 0, 0, 132, 0, 0, 337, 0, 56, 0, 0, 146, 0, 0, 346, 0, 81, 0, 0, 214, 0, 0, 0, 115, 0, 0, 292, 0, 0, 180, 0, 0, 375, 0, 248, 0, 0, 0, 326, 0, 0, 410, 0, 486, 0, 0, 0, 0, 0, 0, 0, 0, 418, 0, 0, 0, 0, 0, 0, 0, 425, 0, 107, 0, 0, 279, 0, 0, 0, 0, 225, 0, 0, 0, 0, 0, 0, 0, 452, 0, 313, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 66, 0, 0, 192, 0, 0, 0, 0, 74, 0, 0, 202, 0, 0, 0, 0, 0, 158, 0, 0, 359, 0, 0, 0, 0, 0, 0, 446, 0, 236, 0, 0, 0, 0, 0, 388, 0, 0, 0, 473, 0, 0, 0, 0, 0, 0, 96, 0, 0, 265, 0, 0, 0, 0, 104, 0, 0, 275, 0, 0, 0, 0, 0, 0, 0, 0, 438, 0, 170, 0, 0, 371, 0, 0, 0, 309, 0, 0, 0, 0, 0, 465, 0, 400, 0, 0, 0, 0, 5, 10, 0, 0, 128, 0, 0, 336, 0, 15, 0, 0, 142, 0, 0, 345, 0, 24, 0, 0, 210, 0, 0, 0, 34, 0, 0, 288, 0, 0, 176, 0, 0, 374, 0, 244, 0, 0, 0, 322, 0, 0, 406, 0, 482, 0, 0, 0, 90, 0, 0, 259, 0, 0, 0, 0, 98, 0, 0, 269, 0, 0, 0, 0, 0, 0, 0, 0, 432, 0, 164, 0, 0, 365, 0, 0, 0, 303, 0, 0, 0, 0, 0, 459, 0, 394, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 417, 0, 0, 0, 0, 0, 0, 0, 424, 0, 106, 0, 0, 278, 0, 0, 0, 0, 224, 0, 0, 0, 0, 0, 0, 0, 451, 0, 312, 0, 0, 0, 0, 0, 0, 0, 0, 40, 49, 0, 0, 134, 0, 0, 339, 0, 58, 0, 0, 148, 0, 0, 348, 0, 83, 0, 0, 216, 0, 0, 0, 117, 0, 0, 294, 0, 0, 182, 0, 0, 377, 0, 250, 0, 0, 0, 328, 0, 0, 412, 0, 488, 0, 0, 0, 94, 0, 0, 263, 0, 0, 0, 0, 102, 0, 0, 273, 0, 0, 0, 0, 0, 0, 0, 0, 436, 0, 168, 0, 0, 369, 0, 0, 0, 307, 0, 0, 0, 0, 0, 463, 0, 398, 0, 0, 0, 0, 0, 0, 68, 0, 0, 194, 0, 0, 0, 0, 76, 0, 0, 204, 0, 0, 0, 0, 0, 160, 0, 0, 361, 0, 0, 0, 0, 0, 0, 448, 0, 238, 0, 0, 0, 0, 0, 390, 0, 0, 0, 475, 0, 0, 0, 37, 46, 0, 0, 131, 0, 0, 0, 0, 55, 0, 0, 145, 0, 0, 0, 0, 80, 0, 0, 213, 0, 0, 0, 114, 0, 0, 291, 0, 0, 179, 0, 0, 0, 0, 247, 0, 0, 0, 325, 0, 0, 409, 0, 485, 0, 0, 65, 0, 0, 191, 0, 0, 0, 0, 73, 0, 0, 201, 0, 0, 0, 0, 0, 157, 0, 0, 358, 0, 0, 0, 0, 0, 0, 445, 0, 235, 0, 0, 0, 0, 0, 387, 0, 0, 0, 472, 0, 0, 0, 0, 0, 0, 93, 0, 0, 262, 0, 0, 0, 0, 101, 0, 0, 272, 0, 0, 0, 0, 0, 0, 0, 0, 435, 0, 167, 0, 0, 368, 0, 0, 0, 306, 0, 0, 0, 0, 0, 462, 0, 397, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 343, 0, 0, 0, 0, 0, 0, 0, 352, 0, 87, 0, 0, 220, 0, 0, 0, 121, 0, 0, 298, 0, 0, 0, 0, 0, 381, 0, 254, 0, 0, 0, 332, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 422, 0, 0, 0, 0, 0, 0, 0, 429, 0, 111, 0, 0, 283, 0, 0, 0, 0, 229, 0, 0, 0, 0, 0, 0, 0, 456, 0, 317, 0, 0, 0, 0, 0, 0, 0, 0, 39, 48, 0, 0, 133, 0, 0, 338, 0, 57, 0, 0, 147, 0, 0, 347, 0, 82, 0, 0, 215, 0, 0, 0, 116, 0, 0, 293, 0, 0, 181, 0, 0, 376, 0, 249, 0, 0, 0, 327, 0, 0, 411, 0, 487, 0, 0, 0, 0, 0, 0, 0, 0, 419, 0, 0, 0, 0, 0, 0, 0, 426, 0, 108, 0, 0, 280, 0, 0, 0, 0, 226, 0, 0, 0, 0, 0, 0, 0, 453, 0, 314, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 67, 0, 0, 193, 0, 0, 0, 0, 75, 0, 0, 203, 0, 0, 0, 0, 0, 159, 0, 0, 360, 0, 0, 0, 0, 0, 0, 447, 0, 237, 0, 0, 0, 0, 0, 389, 0, 0, 0, 474, 0, 0, 0, 0, 0, 0, 97, 0, 0, 266, 0, 0, 0, 0, 105, 0, 0, 276, 0, 0, 0, 0, 0, 0, 0, 0, 439, 0, 171, 0, 0, 372, 0, 0, 0, 310, 0, 0, 0, 0, 0, 466, 0, 401, 0, 0, 0, 0, 41, 50, 0, 0, 135, 0, 0, 340, 0, 59, 0, 0, 149, 0, 0, 349, 0, 84, 0, 0, 217, 0, 0, 0, 118, 0, 0, 295, 0, 0, 183, 0, 0, 378, 0, 251, 0, 0, 0, 329, 0, 0, 413, 0, 489, 0, 0, 0, 95, 0, 0, 264, 0, 0, 0, 0, 103, 0, 0, 274, 0, 0, 0, 0, 0, 0, 0, 0, 437, 0, 169, 0, 0, 370, 0, 0, 0, 308, 0, 0, 0, 0, 0, 464, 0, 399, 0, 0, 0, 0, 0, 0, 69, 0, 0, 195, 0, 0, 0, 0, 77, 0, 0, 205, 0, 0, 0, 0, 0, 161, 0, 0, 362, 0, 0, 0, 0, 0, 0, 449, 0, 239, 0, 0, 0, 0, 0, 391, 0, 0, 0, 476, 0, 0, 0, 42, 51, 0, 0, 136, 0, 0, 0, 0, 60, 0, 0, 150, 0, 0, 0, 0, 88, 0, 0, 221, 0, 0, 0, 122, 0, 0, 299, 0, 0, 184, 0, 0, 0, 0, 255, 0, 0, 0, 333, 0, 0, 414, 0, 490, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 477, 0, 43, 52, 0, 0, 137, 0, 0, 0, 0, 61, 0, 0, 151, 0, 0, 0, 0, 89, 0, 0, 222, 0, 0, 0, 123, 0, 0, 300, 0, 0, 185, 0, 0, 0, 0, 256, 0, 0, 0, 334, 0, 0, 415, 0, 491};
+// isym, Fortran column-major order (isym(491): isym(n) -> [n-1])
+MPC_TABLE int mpc_isym_tab[491] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 38, 39, 0, 42, 0, 0, 0, 0, 0, 47, 48, 0, 51, 0, 0, 0, 0, 0, 56, 57, 0, 60, 0, 0, 0, 0, 0, 0, 66, 67, 0, 0, 0, 0, 0, 0, 74, 75, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 88, 62, 63, 64, 65, -66, -67, 66, 67, 70, 71, 72, 73, -74, -75, 74, 75, 86, 86, 0, 85, 86, 87, 78, 79, 80, 83, 84, 81, 82, -85, -86, -87, 88, 88, 0, 0, 0, 0, 127, 0, 0, 0, 0, 0, 132, 133, 0, 136, 0, 0, 0, 0, 141, 0, 0, 0, 0, 0, 146, 147, 0, 150, 0, 0, 0, 0, 0, 0, 0, 0, 158, 159, 152, 153, 154, 155, 156, 157, -158, -159, 158, 159, 0, 0, 0, 0, 175, 0, 0, 0, 0, 0, 180, 181, 0, 184, 0, 0, 0, 0, 0, 0, 0, 0, 192, 193, 0, 0, 0, 0, 0, 0, 0, 0, 202, 203, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 221, 0, 219, 219, 0, 218, 219, 220, 0, 0, 0, 0, 0, 0, 0, 0, 236, 237, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 186, 187, 188, 189, 190, 191, -192, -193, 192, 193, 196, 197, 198, 199, 200, 201, -202, -203, 202, 203, 223, 219, 219, 226, 218, 219, 220, 206, 207, 208, 210, 209, 211, 212, 213, 216, 217, 214, 215, -218, -219, -220, 221, 221, 230, 231, 232, 233, 234, 235, -236, -237, 236, 237, 0, 253, 253, 0, 252, 253, 254, 240, 241, 242, 244, 243, 245, 246, 247, 250, 251, 248, 249, -252, -253, -254, 255, 255, 0, -335, 0, 0, -337, -338, 0, 337, 0, 223, -223, 219, 226, -219, -226, 218, 219, 220, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -353, -354, -355, -356, -357, -358, 359, 360, -361, -362, 0, -373, 0, 0, -375, -376, 0, 375, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -382, -383, -384, -385, -386, -387, 388, 389, -390, -391, 0, 0, 0, 0, 405, 0, 0, 0, 0, 0, 410, 411, 0, 0, 335, 337, 337, 338, 341, 337, 343, 223, 219, 219, 226, 218, 219, 220, 353, 354, 355, 356, 357, 358, -361, -362, 359, 360, 353, 354, 355, 356, 357, 358, 361, 362, 359, 360, 373, 375, 375, 376, 379, 375, 381, 382, 383, 384, 385, 386, 387, -390, -391, 388, 389, 382, 383, 384, 385, 386, 387, 390, 391, 388, 389, 0, 402, 403, 404, 405, 405, 407, 408, 409, 410, 411, 410, 411, 415, 414};
+// inddd, Fortran column-major order (inddd(5,5): inddd(i,j) -> [(i-1) + 5*(j-1)])
+MPC_TABLE int mpc_inddd_tab[25] = {1, 6, 7, 9, 12, 6, 2, 8, 10, 13, 7, 8, 3, 11, 14, 9, 10, 11, 4, 15, 12, 13, 14, 15, 5};
+// inddp, Fortran column-major order (inddp(5,3): inddp(i,j) -> [(i-1) + 5*(j-1)])
+MPC_TABLE int mpc_inddp_tab[15] = {1, 4, 7, 10, 13, 2, 5, 8, 11, 14, 3, 6, 9, 12, 15};
+// ch(45,0:2,-2:2): ch(ij,l,m) -> [(ij-1) + 45*l + 135*(m+2)]
+MPC_TABLE double mpc_ch_tab[675] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.15470054, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -0.57735027, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.57735027, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.15470054, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.15470054, 0.0, 0.0, 0.0, 0.0, 1.33333333, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.66666667, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.66666667, 0.0, 0.0, 0.0, 0.0, 0.0, 1.33333333, 0.0, 0.0, 0.0, 0.0, 0.66666667, 0.0, 0.0, 0.0, 0.66666667, 0.0, 0.0, -1.33333333, 0.0, -1.33333333, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.57735027, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.57735027, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.15470054, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+#undef MPC_TABLE
+// NOTE: static __constant__ replicates the ~15.6 KB of tables per translation
+// unit that includes this header.  If it is included from several .cu files
+// under -rdc=true, or constant-cache broadcast is not applicable (one thread
+// per pair reads different entries), change MPC_TABLE to `static __device__`.
+
+// indexd(i,j) = -(j(j-1))/2 + i + 9(j-1) for i >= j, symmetric (fordd)
+static __device__ __forceinline__ int mpc_indexd(int i, int j) {
+  if (i < j) {
+    const int t = i;
+    i = j;
+    j = t;
+  }
+  return (-(j * (j - 1)) / 2) + i + 9 * (j - 1);
+}
+// indx(i,j) = i(i-1)/2 + j for i >= j, symmetric (fordd)
+static __device__ __forceinline__ int mpc_indx(int i, int j) {
+  if (i < j) {
+    const int t = i;
+    i = j;
+    j = t;
+  }
+  return (i * (i - 1)) / 2 + j;
+}
+static __device__ __forceinline__ int mpc_ind2(int ij, int kl) {
+  return mpc_ind2_tab[(ij - 1) + 45 * (kl - 1)];
+}
+static __device__ __forceinline__ int mpc_isym(int n) { return mpc_isym_tab[n - 1]; }
+static __device__ __forceinline__ double mpc_ch(int ij, int l, int m) {
+  return mpc_ch_tab[(ij - 1) + 45 * l + 135 * (m + 2)];
+}
+static __device__ __forceinline__ int mpc_inddd(int i, int j) {
+  return mpc_inddd_tab[(i - 1) + 5 * (j - 1)];
+}
+static __device__ __forceinline__ int mpc_inddp(int i, int j) {
+  return mpc_inddp_tab[(i - 1) + 5 * (j - 1)];
+}
+static __device__ __forceinline__ int mpc_iabs(int x) { return x < 0 ? -x : x; }
+
+// ---------------------------------------------------------------------------
+// charg (mndod.F90): interaction between two point-charge configurations.
+// r in Bohr.  Expression order follows the Fortran source line by line.
+// ---------------------------------------------------------------------------
+static __device__ __forceinline__ double mpc_charg(double r, int l1, int l2, int m, double da,
+                                                   double db, double add) {
+  double c = 0.0;
+  if (l1 == 0 && l2 == 0) {
+    c = 1.0 / sqrt(r * r + add);
+  } else if (l1 == 1 && l2 == 0) {
+    c = (-1.0 / sqrt(mpc_sq(r + da) + add)) + 1.0 / sqrt(mpc_sq(r - da) + add);
+    c = c / 2.0;
+  } else if (l1 == 0 && l2 == 1) {
+    c = 1.0 / sqrt(mpc_sq(r + db) + add) - 1.0 / sqrt(mpc_sq(r - db) + add);
+    c = c / 2.0;
+  } else if (l1 == 1 && l2 == 1 && m == 0) {
+    const double dzdz = 1.0 / sqrt(mpc_sq(r + da - db) + add) + 1.0 / sqrt(mpc_sq(r - da + db) + add) -
+                        1.0 / sqrt(mpc_sq(r - da - db) + add) - 1.0 / sqrt(mpc_sq(r + da + db) + add);
+    c = dzdz / 4.0;
+  } else if (l1 == 1 && l2 == 1 && m == 1) {
+    const double dxdx = 2.0 / sqrt(r * r + mpc_sq(da - db) + add) - 2.0 / sqrt(r * r + mpc_sq(da + db) + add);
+    c = dxdx * 0.25;
+  } else if (l1 == 0 && l2 == 2) {
+    const double qqzz = 1.0 / sqrt(mpc_sq(r - db) + add) - 2.0 / sqrt(r * r + db * db + add) +
+                        1.0 / sqrt(mpc_sq(r + db) + add);
+    c = qqzz / 4.0;
+  } else if (l1 == 2 && l2 == 0) {
+    const double qzzq = 1.0 / sqrt(mpc_sq(r - da) + add) - 2.0 / sqrt(r * r + da * da + add) +
+                        1.0 / sqrt(mpc_sq(r + da) + add);
+    c = qzzq / 4.0;
+  } else if (l1 == 1 && l2 == 2 && m == 0) {
+    const double dzqzz = 1.0 / sqrt(mpc_sq(r - da - db) + add) - 2.0 / sqrt(mpc_sq(r - da) + db * db + add) +
+                         1.0 / sqrt(mpc_sq(r + db - da) + add) - 1.0 / sqrt(mpc_sq(r - db + da) + add) +
+                         2.0 / sqrt(mpc_sq(r + da) + db * db + add) - 1.0 / sqrt(mpc_sq(r + da + db) + add);
+    c = dzqzz / 8.0;
+  } else if (l1 == 2 && l2 == 1 && m == 0) {
+    const double qzzdz = (-1.0 / sqrt(mpc_sq(r - da - db) + add)) + 2.0 / sqrt(mpc_sq(r - db) + da * da + add) -
+                         1.0 / sqrt(mpc_sq(r + da - db) + add) + 1.0 / sqrt(mpc_sq(r - da + db) + add) -
+                         2.0 / sqrt(mpc_sq(r + db) + da * da + add) + 1.0 / sqrt(mpc_sq(r + da + db) + add);
+    c = qzzdz / 8.0;
+  } else if (l1 == 2 && l2 == 2 && m == 0) {
+    const double zzzz = 1.0 / sqrt(mpc_sq(r - da - db) + add) + 1.0 / sqrt(mpc_sq(r + da + db) + add) +
+                        1.0 / sqrt(mpc_sq(r - da + db) + add) + 1.0 / sqrt(mpc_sq(r + da - db) + add) -
+                        2.0 / sqrt(mpc_sq(r - da) + db * db + add) - 2.0 / sqrt(mpc_sq(r - db) + da * da + add) -
+                        2.0 / sqrt(mpc_sq(r + da) + db * db + add) - 2.0 / sqrt(mpc_sq(r + db) + da * da + add) +
+                        2.0 / sqrt(r * r + mpc_sq(da - db) + add) + 2.0 / sqrt(r * r + mpc_sq(da + db) + add);
+    const double xyxy = 4.0 / sqrt(r * r + mpc_sq(da - db) + add) + 4.0 / sqrt(r * r + mpc_sq(da + db) + add) -
+                        8.0 / sqrt(r * r + da * da + db * db + add);
+    c = zzzz / 16.0 - xyxy / 64.0;
+  } else if (l1 == 1 && l2 == 2 && m == 1) {
+    const double ab = db / sqrt(2.0);
+    const double dxqxz = (-2.0 / sqrt(mpc_sq(r - ab) + mpc_sq(da - ab) + add)) +
+                         2.0 / sqrt(mpc_sq(r + ab) + mpc_sq(da - ab) + add) +
+                         2.0 / sqrt(mpc_sq(r - ab) + mpc_sq(da + ab) + add) -
+                         2.0 / sqrt(mpc_sq(r + ab) + mpc_sq(da + ab) + add);
+    c = dxqxz / 8.0;
+  } else if (l1 == 2 && l2 == 1 && m == 1) {
+    const double aa = da / sqrt(2.0);
+    const double qxzdx = (-2.0 / sqrt(mpc_sq(r + aa) + mpc_sq(aa - db) + add)) +
+                         2.0 / sqrt(mpc_sq(r - aa) + mpc_sq(aa - db) + add) +
+                         2.0 / sqrt(mpc_sq(r + aa) + mpc_sq(aa + db) + add) -
+                         2.0 / sqrt(mpc_sq(r - aa) + mpc_sq(aa + db) + add);
+    c = qxzdx / 8.0;
+  } else if (l1 == 2 && l2 == 2 && m == 1) {
+    const double aa = da / sqrt(2.0);
+    const double ab = db / sqrt(2.0);
+    const double qxzqxz = 2.0 / sqrt(mpc_sq(r + aa - ab) + mpc_sq(aa - ab) + add) -
+                          2.0 / sqrt(mpc_sq(r + aa + ab) + mpc_sq(aa - ab) + add) -
+                          2.0 / sqrt(mpc_sq(r - aa - ab) + mpc_sq(aa - ab) + add) +
+                          2.0 / sqrt(mpc_sq(r - aa + ab) + mpc_sq(aa - ab) + add) -
+                          2.0 / sqrt(mpc_sq(r + aa - ab) + mpc_sq(aa + ab) + add) +
+                          2.0 / sqrt(mpc_sq(r + aa + ab) + mpc_sq(aa + ab) + add) +
+                          2.0 / sqrt(mpc_sq(r - aa - ab) + mpc_sq(aa + ab) + add) -
+                          2.0 / sqrt(mpc_sq(r - aa + ab) + mpc_sq(aa + ab) + add);
+    c = qxzqxz / 16.0;
+  } else if (l1 == 2 && l2 == 2 && m == 2) {
+    const double xyxy = 4.0 / sqrt(r * r + mpc_sq(da - db) + add) + 4.0 / sqrt(r * r + mpc_sq(da + db) + add) -
+                        8.0 / sqrt(r * r + da * da + db * db + add);
+    c = xyxy / 16.0;
+  }
+  return c;
+}
+
+// ---------------------------------------------------------------------------
+// rijkl (mndod.F90): two-center integral over local multipoles.
+// ij, kl are indexd pair indices; li..ll the l quantum numbers; ic selects
+// the core (po(9,·)) exponent for the monopole of atom 1 (ic=1) or 2 (ic=2).
+// r in Bohr.
+// ---------------------------------------------------------------------------
+static __device__ __forceinline__ double mpc_rijkl(const MozymePairCoreParams &prm, int ni, int nj,
+                                                   int ij, int kl, int li, int lj, int lk, int ll,
+                                                   int ic, double r) {
+  double pij = 0.0, pkl = 0.0, dij = 0.0, dkl = 0.0;
+  int l1min = mpc_iabs(li - lj);
+  int l1max = li + lj;
+  const int lij = mpc_indx(li + 1, lj + 1);
+  int l2min = mpc_iabs(lk - ll);
+  int l2max = lk + ll;
+  const int lkl = mpc_indx(lk + 1, ll + 1);
+  if (l1max > 2) l1max = 2;
+  if (l1min > 2) l1min = 2;
+  if (l2max > 2) l2max = 2;
+  if (l2min > 2) l2min = 2;
+  double sum = 0.0;
+  for (int l1 = l1min; l1 <= l1max; ++l1) {
+    if (l1 == 0) {
+      switch (lij) {
+        case 1:
+          pij = mpc_po(prm, 1, ni);
+          if (ic == 1) pij = mpc_po(prm, 9, ni);
+          break;
+        case 3:
+          pij = mpc_po(prm, 7, ni);
+          break;
+        case 6:
+          pij = mpc_po(prm, 8, ni);
+          break;
+        default:
+          break;
+      }
+    } else {
+      dij = mpc_ddp(prm, lij, ni);
+      pij = mpc_po(prm, lij, ni);
+    }
+    for (int l2 = l2min; l2 <= l2max; ++l2) {
+      if (l2 == 0) {
+        switch (lkl) {
+          case 1:
+            pkl = mpc_po(prm, 1, nj);
+            if (ic == 2) pkl = mpc_po(prm, 9, nj);
+            break;
+          case 3:
+            pkl = mpc_po(prm, 7, nj);
+            break;
+          case 6:
+            pkl = mpc_po(prm, 8, nj);
+            break;
+          default:
+            break;
+        }
+      } else {
+        dkl = mpc_ddp(prm, lkl, nj);
+        pkl = mpc_po(prm, lkl, nj);
+      }
+      const double add = mpc_sq(pij + pkl);
+      const int lmin = (l1 < l2) ? l1 : l2;
+      double s1 = 0.0;
+      for (int m = -lmin; m <= lmin; ++m) {
+        const double ccc = mpc_ch(ij, l1, m) * mpc_ch(kl, l2, m);
+        if (ccc == 0.0) continue;
+        const int mm = mpc_iabs(m);
+        s1 = s1 + mpc_charg(r, l1, l2, mm, dij, dkl, add) * ccc;
+      }
+      sum = sum + s1;
+    }
+  }
+  return sum;
+}
+
+// ---------------------------------------------------------------------------
+// rotmat (mndod.F90), full version: p/pp as in mpc_rotmat_sp plus the d(5,5)
+// block and the derived sd (= d), dp(15,5,3), d_d(15,5,5) arrays.
+//   d[k][c]       = Fortran d(k+1, c+1)
+//   dp[k][l][c]   = Fortran dp(c+1, k+1, l+1)   (k: d orbital, l: p orbital)
+//   dd[k][l][c]   = Fortran d_d(c+1, k+1, l+1), k >= l (k < l never written)
+// The d block is only computed when at least one atom has d orbitals.
+// ---------------------------------------------------------------------------
+struct MozymePairRotD {
+  MozymePairRot sp;
+  double d[5][5];
+  double dp[5][3][15];
+  double dd[5][5][15];
+};
+
+static __device__ __forceinline__ double mpc_rotmat_full(const double *xi, const double *xj,
+                                                         bool dorb, MozymePairRotD &rot) {
+  const double pt5sq3 = 0.8660254037841;
+  const double small = 1.0e-7;
+  const double x11 = xj[0] - xi[0];
+  const double x22 = xj[1] - xi[1];
+  const double x33 = xj[2] - xi[2];
+  const double b = x11 * x11 + x22 * x22;
+  const double r = sqrt(b + x33 * x33);
+  const double sqb = sqrt(b);
+  double sb = sqb / r;
+  double ca, sa, cb;
+  if (sb > small) {
+    ca = x11 / sqb;
+    sa = x22 / sqb;
+    cb = x33 / r;
+  } else {
+    sa = 0.0;
+    sb = 0.0;
+    if (x33 < 0.0) {
+      ca = -1.0;
+      cb = -1.0;
+    } else if (x33 > 0.0) {
+      ca = 1.0;
+      cb = 1.0;
+    } else {
+      ca = 0.0;
+      cb = 0.0;
+    }
+  }
+  // p / pp exactly as in mpc_rotmat_sp
+  mpc_rotmat_sp(xi, xj, rot.sp);
+  if (!dorb) return r;
+  const double c2a = 2.0 * ca * ca - 1.0;
+  const double c2b = 2.0 * cb * cb - 1.0;
+  const double s2a = 2.0 * sa * ca;
+  const double s2b = 2.0 * sb * cb;
+  double (*d)[5] = rot.d;
+  d[0][0] = pt5sq3 * c2a * sb * sb;
+  d[1][0] = 0.5 * c2a * s2b;
+  d[2][0] = -s2a * sb;
+  d[3][0] = c2a * (cb * cb + 0.5 * sb * sb);
+  d[4][0] = -s2a * cb;
+  d[0][1] = pt5sq3 * ca * s2b;
+  d[1][1] = ca * c2b;
+  d[2][1] = -sa * cb;
+  d[3][1] = -0.5 * ca * s2b;
+  d[4][1] = sa * sb;
+  d[0][2] = cb * cb - 0.5 * sb * sb;
+  d[1][2] = -pt5sq3 * s2b;
+  d[2][2] = 0.0;
+  d[3][2] = pt5sq3 * sb * sb;
+  d[4][2] = 0.0;
+  d[0][3] = pt5sq3 * sa * s2b;
+  d[1][3] = sa * c2b;
+  d[2][3] = ca * cb;
+  d[3][3] = -0.5 * sa * s2b;
+  d[4][3] = -ca * sb;
+  d[0][4] = pt5sq3 * s2a * sb * sb;
+  d[1][4] = 0.5 * s2a * s2b;
+  d[2][4] = c2a * sb;
+  d[3][4] = s2a * (cb * cb + 0.5 * sb * sb);
+  d[4][4] = c2a * cb;
+  // dp(3*(a-1)+b, k, l) = d(k,a)*p(l,b)
+  const double (*p)[3] = rot.sp.p;
+  for (int k = 0; k < 5; ++k) {
+    for (int l = 0; l < 3; ++l) {
+      for (int a = 0; a < 5; ++a) {
+        for (int bb = 0; bb < 3; ++bb) rot.dp[k][l][3 * a + bb] = d[k][a] * p[l][bb];
+      }
+    }
+  }
+  // d_d
+  const int pa[10] = {0, 0, 1, 0, 1, 2, 0, 1, 2, 3};  // component pairs for c = 6..15
+  const int pb[10] = {1, 2, 2, 3, 3, 3, 4, 4, 4, 4};
+  for (int k = 0; k < 5; ++k) {
+    for (int l = 0; l < 5; ++l)
+      for (int c = 0; c < 15; ++c) rot.dd[k][l][c] = 0.0;
+    for (int c = 0; c < 5; ++c) rot.dd[k][k][c] = d[k][c] * d[k][c];
+    for (int c = 0; c < 10; ++c) rot.dd[k][k][5 + c] = d[k][pa[c]] * d[k][pb[c]];
+    for (int l = 0; l < k; ++l) {
+      for (int c = 0; c < 5; ++c) rot.dd[k][l][c] = 2.0 * d[k][c] * d[l][c];
+      for (int c = 0; c < 10; ++c)
+        rot.dd[k][l][5 + c] = d[k][pa[c]] * d[l][pb[c]] + d[k][pb[c]] * d[l][pa[c]];
+    }
+  }
+  return r;
+}
+
+// ---------------------------------------------------------------------------
+// reppd2 (mndod.F90): rep(1..491) from ri (sp part) and rijkl (d part), and
+// cored(5..10, 1..2).  r in Bohr.  core1/core2 are the 10-entry cored columns.
+// ---------------------------------------------------------------------------
+static __device__ __forceinline__ void mpc_reppd2(const MozymePairCoreParams &prm, int ni, int nj,
+                                                  double r, const double *ri, double *rep,
+                                                  double *core1, double *core2) {
+  const int ipos[34] = {1, 5, 11, 12, 12, 2, 6, 13, 14, 14, 3, 8, 16, 18, 18, 7, 15,
+                        10, 20, 4, 9, 17, 19, 21, 7, 15, 10, 20, 22, 4, 9, 17, 21, 19};
+  const int lorb[9] = {0, 1, 1, 1, 2, 2, 2, 2, 2};
+  const double ev = prm.ev;
+  for (int n = 0; n < 491; ++n) rep[n] = 0.0;
+  for (int n = 0; n < 34; ++n) rep[n] = ri[ipos[n] - 1];
+  const bool di = prm.natorb[ni - 1] == 9;
+  const bool dj = prm.natorb[nj - 1] == 9;
+  if (di || dj) {
+    const int lasti = di ? 9 : ((ni < 3) ? 1 : 4);
+    const int lastk = dj ? 9 : ((nj < 3) ? 1 : 4);
+    int ij = 0;
+    for (int i = 1; i <= lasti; ++i) {
+      const int li = lorb[i - 1];
+      for (int j = 1; j <= i; ++j) {
+        const bool coul = (i == j);
+        const int lj = lorb[j - 1];
+        ij = mpc_indexd(i, j);
+        for (int k = 1; k <= lastk; ++k) {
+          const int lk = lorb[k - 1];
+          for (int l = 1; l <= k; ++l) {
+            const bool coulomb = coul && (k == l);
+            const int ll = lorb[l - 1];
+            const int kl = mpc_indexd(k, l);
+            const int numb = mpc_ind2(ij, kl);
+            if (numb <= 34) continue;
+            const int nold = mpc_isym(numb);
+            if (nold >= 35) {
+              rep[numb - 1] = rep[nold - 1];
+            } else if (nold <= -35) {
+              rep[numb - 1] = -rep[(-nold) - 1];
+            } else if (nold == 0) {
+              rep[numb - 1] = mpc_rijkl(prm, ni, nj, ij, kl, li, lj, lk, ll, 0, r) * ev;
+              if (prm.l_feather) {
+                double point, cnst;
+                mpc_to_point(prm, r * prm.a0, &point, &cnst);
+                if (coulomb)
+                  rep[numb - 1] = rep[numb - 1] * cnst + (1.0 - cnst) * point;
+                else
+                  rep[numb - 1] = rep[numb - 1] * cnst;
+              }
+            }
+          }
+        }
+      }
+    }
+    for (int c = 4; c < 10; ++c) {
+      core1[c] = 0.0;
+      core2[c] = 0.0;
+    }
+    // ij keeps the value of the last loop iteration, as in the Fortran
+    if (dj) {
+      const double tni = prm.tore[ni - 1];
+      core2[4] = -mpc_rijkl(prm, ni, nj, ij, mpc_indexd(5, 1), 0, 0, 2, 0, 1, r) * ev * tni;
+      core2[5] = -mpc_rijkl(prm, ni, nj, ij, mpc_indexd(5, 2), 0, 0, 2, 1, 1, r) * ev * tni;
+      core2[6] = -mpc_rijkl(prm, ni, nj, ij, mpc_indexd(5, 5), 0, 0, 2, 2, 1, r) * ev * tni;
+      core2[7] = -mpc_rijkl(prm, ni, nj, ij, mpc_indexd(6, 3), 0, 0, 2, 1, 1, r) * ev * tni;
+      core2[8] = -mpc_rijkl(prm, ni, nj, ij, mpc_indexd(6, 6), 0, 0, 2, 2, 1, r) * ev * tni;
+      core2[9] = -mpc_rijkl(prm, ni, nj, ij, mpc_indexd(8, 8), 0, 0, 2, 2, 1, r) * ev * tni;
+    }
+    if (di) {
+      const double tnj = prm.tore[nj - 1];
+      core1[4] = -mpc_rijkl(prm, ni, nj, mpc_indexd(5, 1), ij, 2, 0, 0, 0, 2, r) * ev * tnj;
+      core1[5] = -mpc_rijkl(prm, ni, nj, mpc_indexd(5, 2), ij, 2, 1, 0, 0, 2, r) * ev * tnj;
+      core1[6] = -mpc_rijkl(prm, ni, nj, mpc_indexd(5, 5), ij, 2, 2, 0, 0, 2, r) * ev * tnj;
+      core1[7] = -mpc_rijkl(prm, ni, nj, mpc_indexd(6, 3), ij, 2, 1, 0, 0, 2, r) * ev * tnj;
+      core1[8] = -mpc_rijkl(prm, ni, nj, mpc_indexd(6, 6), ij, 2, 2, 0, 0, 2, r) * ev * tnj;
+      core1[9] = -mpc_rijkl(prm, ni, nj, mpc_indexd(8, 8), ij, 2, 2, 0, 0, 2, r) * ev * tnj;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// tx (mndod.F90), full spd version.  v[ij-1][kl-1]: ij = indexd pair on atom
+// ni (1..45), kl = indx pair on atom nj (1..limkl).
+// ---------------------------------------------------------------------------
+static __device__ __forceinline__ void mpc_tx_full(const MozymePairRotD &rot, const double *rep,
+                                                   int ii, int kk, double v[45][45]) {
+  const int met[45] = {1, 2, 3, 2, 3, 3, 2, 3, 3, 3, 4, 5, 5, 5, 6, 4, 5, 5, 5, 6, 6, 4, 5,
+                       5, 5, 6, 6, 6, 4, 5, 5, 5, 6, 6, 6, 6, 4, 5, 5, 5, 6, 6, 6, 6, 6};
+  const int limkl = mpc_indx(kk, kk);
+  for (int a = 0; a < 45; ++a)
+    for (int b = 0; b < limkl; ++b) v[a][b] = 0.0;
+  for (int i1 = 1; i1 <= ii; ++i1) {
+    for (int j1 = 1; j1 <= i1; ++j1) {
+      const int ij = mpc_indexd(i1, j1);
+      double *vij = v[ij - 1];
+      for (int k1 = 1; k1 <= kk; ++k1) {
+        for (int l1 = 1; l1 <= k1; ++l1) {
+          const int kl = mpc_indexd(k1, l1);
+          const int nd = mpc_ind2(ij, kl);
+          if (nd == 0) continue;
+          const double wrepp = rep[nd - 1];
+          const int ll = mpc_indx(k1, l1);
+          const int mm = met[ll - 1];
+          switch (mm) {
+            case 1:
+              vij[0] = wrepp;
+              break;
+            case 2: {
+              const int k = k1 - 2;  // Fortran k = k1 - 1 (1-based) -> 0-based
+              vij[1] = vij[1] + rot.sp.p[k][0] * wrepp;
+              vij[3] = vij[3] + rot.sp.p[k][1] * wrepp;
+              vij[6] = vij[6] + rot.sp.p[k][2] * wrepp;
+              break;
+            }
+            case 3: {
+              const int k = k1 - 2;
+              const int l = l1 - 2;
+              const double *ppkl = rot.sp.pp[k][l];
+              vij[2] = vij[2] + ppkl[0] * wrepp;
+              vij[5] = vij[5] + ppkl[1] * wrepp;
+              vij[9] = vij[9] + ppkl[2] * wrepp;
+              vij[4] = vij[4] + ppkl[3] * wrepp;
+              vij[7] = vij[7] + ppkl[4] * wrepp;
+              vij[8] = vij[8] + ppkl[5] * wrepp;
+              break;
+            }
+            case 4: {
+              const int k = k1 - 5;  // Fortran k = k1 - 4 -> 0-based
+              vij[10] = vij[10] + rot.d[k][0] * wrepp;
+              vij[15] = vij[15] + rot.d[k][1] * wrepp;
+              vij[21] = vij[21] + rot.d[k][2] * wrepp;
+              vij[28] = vij[28] + rot.d[k][3] * wrepp;
+              vij[36] = vij[36] + rot.d[k][4] * wrepp;
+              break;
+            }
+            case 5: {
+              const int k = k1 - 5;
+              const int l = l1 - 2;
+              const double *dpkl = rot.dp[k][l];
+              vij[11] = vij[11] + dpkl[0] * wrepp;
+              vij[12] = vij[12] + dpkl[1] * wrepp;
+              vij[13] = vij[13] + dpkl[2] * wrepp;
+              vij[16] = vij[16] + dpkl[3] * wrepp;
+              vij[17] = vij[17] + dpkl[4] * wrepp;
+              vij[18] = vij[18] + dpkl[5] * wrepp;
+              vij[22] = vij[22] + dpkl[6] * wrepp;
+              vij[23] = vij[23] + dpkl[7] * wrepp;
+              vij[24] = vij[24] + dpkl[8] * wrepp;
+              vij[29] = vij[29] + dpkl[9] * wrepp;
+              vij[30] = vij[30] + dpkl[10] * wrepp;
+              vij[31] = vij[31] + dpkl[11] * wrepp;
+              vij[37] = vij[37] + dpkl[12] * wrepp;
+              vij[38] = vij[38] + dpkl[13] * wrepp;
+              vij[39] = vij[39] + dpkl[14] * wrepp;
+              break;
+            }
+            default: {  // 6
+              const int k = k1 - 5;
+              const int l = l1 - 5;
+              const double *ddkl = rot.dd[k][l];
+              vij[14] = vij[14] + ddkl[0] * wrepp;
+              vij[20] = vij[20] + ddkl[1] * wrepp;
+              vij[27] = vij[27] + ddkl[2] * wrepp;
+              vij[35] = vij[35] + ddkl[3] * wrepp;
+              vij[44] = vij[44] + ddkl[4] * wrepp;
+              vij[19] = vij[19] + ddkl[5] * wrepp;
+              vij[25] = vij[25] + ddkl[6] * wrepp;
+              vij[26] = vij[26] + ddkl[7] * wrepp;
+              vij[32] = vij[32] + ddkl[8] * wrepp;
+              vij[33] = vij[33] + ddkl[9] * wrepp;
+              vij[34] = vij[34] + ddkl[10] * wrepp;
+              vij[40] = vij[40] + ddkl[11] * wrepp;
+              vij[41] = vij[41] + ddkl[12] * wrepp;
+              vij[42] = vij[42] + ddkl[13] * wrepp;
+              vij[43] = vij[43] + ddkl[14] * wrepp;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// rotatd second step (full spd): ww[(indx(i,j)-1)*limkl + (kl-1)], 1-based
+// Fortran ww(indw(i,j)) with indw = (indx(i,j)-1)*limkl + kl.
+static __device__ __forceinline__ void mpc_rotate_w_full(const MozymePairRotD &rot,
+                                                         const double *rep, int ii, int kk,
+                                                         double *ww) {
+  const int met[45] = {1, 2, 3, 2, 3, 3, 2, 3, 3, 3, 4, 5, 5, 5, 6, 4, 5, 5, 5, 6, 6, 4, 5,
+                       5, 5, 6, 6, 6, 4, 5, 5, 5, 6, 6, 6, 6, 4, 5, 5, 5, 6, 6, 6, 6, 6};
+  double v[45][45];
+  for (int n = 0; n < 2025; ++n) ww[n] = 0.0;
+  if (ii * kk <= 0) return;
+  const int limkl = mpc_indx(kk, kk);
+  mpc_tx_full(rot, rep, ii, kk, v);
+#define MPC_INDW(I, J) ((mpc_indx((I), (J)) - 1) * limkl + (kl - 1))
+  for (int i1 = 1; i1 <= ii; ++i1) {
+    for (int j1 = 1; j1 <= i1; ++j1) {
+      const int ij = mpc_indexd(i1, j1);
+      const int jj = mpc_indx(i1, j1);
+      const int mm = met[jj - 1];
+      for (int k = 1; k <= kk; ++k) {
+        for (int l = 1; l <= k; ++l) {
+          const int kl = mpc_indx(k, l);
+          const double wrepp = v[ij - 1][kl - 1];
+          if (wrepp == 0.0) continue;  // logv
+          switch (mm) {
+            case 1:
+              ww[MPC_INDW(1, 1)] = wrepp;
+              break;
+            case 2:
+              for (int i = 1; i <= 3; ++i) {
+                const int iw = MPC_INDW(i + 1, 1);
+                ww[iw] = ww[iw] + rot.sp.p[i1 - 2][i - 1] * wrepp;  // sp(i1-1,i)
+              }
+              break;
+            case 3:
+              for (int i = 1; i <= 3; ++i) {
+                double cc = rot.sp.pp[i1 - 2][j1 - 2][i - 1];  // pp(i,i1-1,j1-1)
+                int iw = MPC_INDW(i + 1, i + 1);
+                ww[iw] = ww[iw] + cc * wrepp;
+                for (int j = 1; j < i; ++j) {
+                  cc = rot.sp.pp[i1 - 2][j1 - 2][i + j];  // pp(1+i+j,...)
+                  iw = MPC_INDW(i + 1, j + 1);
+                  ww[iw] = ww[iw] + cc * wrepp;
+                }
+              }
+              break;
+            case 4:
+              for (int i = 1; i <= 5; ++i) {
+                const int iw = MPC_INDW(i + 4, 1);
+                ww[iw] = ww[iw] + rot.d[i1 - 5][i - 1] * wrepp;  // sd(i1-4,i)
+              }
+              break;
+            case 5:
+              for (int i = 1; i <= 5; ++i) {
+                for (int j = 1; j <= 3; ++j) {
+                  const int iw = MPC_INDW(i + 4, j + 1);
+                  const int ij1 = 3 * (i - 1) + j;
+                  ww[iw] = ww[iw] + rot.dp[i1 - 5][j1 - 2][ij1 - 1] * wrepp;  // dp(ij1,i1-4,j1-1)
+                }
+              }
+              break;
+            default:  // 6
+              for (int i = 1; i <= 5; ++i) {
+                double cc = rot.dd[i1 - 5][j1 - 5][i - 1];  // d_d(i,i1-4,j1-4)
+                int iw = MPC_INDW(i + 4, i + 4);
+                ww[iw] = ww[iw] + cc * wrepp;
+                for (int j = 1; j < i; ++j) {
+                  const int ij1 = mpc_inddd(i, j);
+                  cc = rot.dd[i1 - 5][j1 - 5][ij1 - 1];
+                  iw = MPC_INDW(i + 4, j + 4);
+                  ww[iw] = ww[iw] + cc * wrepp;
+                }
+              }
+              break;
+          }
+        }
+      }
+    }
+  }
+#undef MPC_INDW
+}
+
+// ---------------------------------------------------------------------------
+// elenuc (mndod.F90), full spd version for one atom with nat orbitals.
+//   e[ind1*(ind1+1)/2 + ind2], 0-based local orbital indices, ind2 <= ind1.
+//   core[c] = cored(c+1, n), c = 0..9.
+// ---------------------------------------------------------------------------
+static __device__ __forceinline__ void mpc_elenuc_full(const MozymePairRotD &rot, const double *core,
+                                                       int nat, double *e) {
+  for (int ind1 = 0; ind1 < nat; ++ind1) {
+    for (int ind2 = 0; ind2 <= ind1; ++ind2) {
+      const int m = (ind1 * (ind1 + 1)) / 2 + ind2;
+      double h = 0.0;
+      if (ind1 == 0) {
+        h = h + core[0];  // (SS/)
+      } else if (ind1 < 4) {
+        if (ind2 == 0) {
+          h = h + rot.sp.p[0][ind1 - 1] * core[1];  // (SP/) sp(1,ind1)*cored(2)
+        } else {
+          const int ipp = mpc_indpp(ind1, ind2) - 1;  // (PP/)
+          h = h + core[2] * rot.sp.pp[0][0][ipp] + core[3] * (rot.sp.pp[1][1][ipp] + rot.sp.pp[2][2][ipp]);
+        }
+      } else {
+        if (ind2 == 0) {
+          h = h + rot.d[0][ind1 - 4] * core[4];  // (SD/) sd(1,ind1-3)*cored(5)
+        } else if (ind2 < 4) {
+          const int idp = mpc_inddp(ind1 - 3, ind2) - 1;  // (PD/)
+          h = h + core[5] * rot.dp[0][0][idp] + core[7] * (rot.dp[1][1][idp] + rot.dp[2][2][idp]);
+        } else {
+          const int idd = mpc_inddd(ind1 - 3, ind2 - 3) - 1;  // (DD/)
+          h = h + core[6] * rot.dd[0][0][idd] + core[8] * (rot.dd[1][1][idd] + rot.dd[2][2][idd]) +
+              core[9] * (rot.dd[3][3][idd] + rot.dd[4][4][idd]);
+        }
+      }
+      e[m] = h;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point for any natorb <= 9 (s, p, d).
+//
+// Inputs : ni, nj      atomic numbers (1..107)
+//          xi, xj      Cartesian coordinates in Angstrom
+//          prm         parameter block (same as for the sp version)
+// Outputs: w[0..2024]  two-electron integrals in rotate's order
+//                      ((i,j) i>=j on ni outer, (k,l) k>=l on nj inner);
+//                      *w_count = natorb(ni)(natorb(ni)+1)/2 *
+//                                 natorb(nj)(natorb(nj)+1)/2 entries written
+//          e1b[0..44]  electron (ni) - core (nj) attraction, packed lower
+//                      triangle over natorb(ni) orbitals
+//          e2a[0..44]  electron (nj) - core (ni) attraction
+//          *enuc       core-core repulsion (eV)
+// Returns false (outputs untouched) for atomic numbers outside 1..107 or
+// natorb > 9.  For rij^2 < 2e-5 A^2 all outputs are zeroed, *w_count = 0 and
+// true is returned (rotate zeroes w but does not advance kr).
+// Local storage: about 40 KB per call (ww, v, rep, rotation matrices).
+// ---------------------------------------------------------------------------
+static __device__ __forceinline__ bool mozyme_pair_core_dev(
+    int ni, int nj, const double *xi, const double *xj, const MozymePairCoreParams &prm,
+    double *w, int *w_count, double *e1b, double *e2a, double *enuc) {
+  if (ni < 1 || ni > 107 || nj < 1 || nj > 107) return false;
+  const int li = prm.natorb[ni - 1];
+  const int lj = prm.natorb[nj - 1];
+  if (li > 9 || lj > 9 || li < 0 || lj < 0) return false;
+
+  for (int i = 0; i < 45; ++i) {
+    e1b[i] = 0.0;
+    e2a[i] = 0.0;
+  }
+  for (int i = 0; i < 2025; ++i) w[i] = 0.0;
+  *w_count = 0;
+  *enuc = 0.0;
+
+  // rotate: small-rij exit on the squared distance (Angstrom^2)
+  {
+    const double x0 = xi[0] - xj[0];
+    const double x1 = xi[1] - xj[1];
+    const double x2 = xi[2] - xj[2];
+    const double rij2 = x0 * x0 + x1 * x1 + x2 * x2;
+    if (rij2 < 0.00002) return true;
+  }
+  const bool dorb = (li == 9) || (lj == 9);
+
+  // rotatd: rotmat(nj, ni, ci, cj, r)
+  MozymePairRotD rot;
+  const double rij = mpc_rotmat_full(xi, xj, dorb, rot);
+
+  // reppd: 22 local integrals + gab
+  double ri[22];
+  double gab;
+  mpc_reppd(prm, ni, nj, rij, ri, &gab);
+
+  // spcore in Bohr -> cored(1..4,:); reppd2 -> rep(1..491), cored(5..10,:)
+  const double r = rij / prm.a0;
+  double cored1[10], cored2[10];
+  mpc_spcore(prm, ni, nj, r, cored1, cored2);
+  for (int c = 4; c < 10; ++c) {
+    cored1[c] = 0.0;
+    cored2[c] = 0.0;
+  }
+  double point, cnst;
+  if (prm.l_feather) {
+    mpc_to_point(prm, rij, &point, &cnst);
+  } else {
+    cnst = 1.0;
+    point = 0.0;
+  }
+  double rep[491];
+  mpc_reppd2(prm, ni, nj, r, ri, rep, cored1, cored2);
+  point = -(prm.ev / r) * prm.tore[nj - 1];
+  cored1[0] = cored1[0] * cnst + (1.0 - cnst) * point;
+  cored1[1] = cored1[1] * cnst;
+  cored1[2] = cored1[2] * cnst + (1.0 - cnst) * point;
+  cored1[3] = cored1[3] * cnst + (1.0 - cnst) * point;
+  cored1[4] = cored1[4] * cnst;
+  cored1[5] = cored1[5] * cnst;
+  cored1[6] = cored1[6] * cnst + (1.0 - cnst) * point;
+  cored1[7] = cored1[7] * cnst;
+  cored1[8] = cored1[8] * cnst + (1.0 - cnst) * point;
+  cored1[9] = cored1[9] * cnst + (1.0 - cnst) * point;
+  point = -(prm.ev / r) * prm.tore[ni - 1];
+  cored2[0] = cored2[0] * cnst + (1.0 - cnst) * point;
+  cored2[1] = cored2[1] * cnst;
+  cored2[2] = cored2[2] * cnst + (1.0 - cnst) * point;
+  cored2[3] = cored2[3] * cnst + (1.0 - cnst) * point;
+  cored2[4] = cored2[4] * cnst;
+  cored2[5] = cored2[5] * cnst;
+  cored2[6] = cored2[6] * cnst + (1.0 - cnst) * point;
+  cored2[7] = cored2[7] * cnst;
+  cored2[8] = cored2[8] * cnst + (1.0 - cnst) * point;
+  cored2[9] = cored2[9] * cnst + (1.0 - cnst) * point;
+
+  // two-electron integrals in the molecular frame, ww(2025)
+  double ww[2025];
+  mpc_rotate_w_full(rot, rep, li, lj, ww);
+
+  // PM7 "d"-orbital balance block of rotatd, complete.  Fortran 1-based
+  // ww(n) -> ww[n-1].
+  if (prm.method_pm7) {
+    if (prm.iod[ni - 1] > 0) {
+      double sum = 0.0;
+      int k;
+      if (lj == 9)
+        k = 45;
+      else if (lj == 4)
+        k = 10;
+      else
+        k = 1;
+      if (lj > 1) {
+        for (int i = 5; i <= 9; ++i) {  // "p" on nj with "d" on ni
+          const int j = k * ((i * (i + 1)) / 2 - 1);
+          sum = sum + ww[j + 3 - 1] + ww[j + 6 - 1] + ww[j + 10 - 1];
+        }
+        sum = (ww[0] - sum / 15.0);
+        for (int i = 5; i <= 9; ++i) {
+          const int j = k * ((i * (i + 1)) / 2 - 1);
+          for (int l = 2; l <= 4; ++l) ww[(l * (l + 1)) / 2 + j - 1] = ww[(l * (l + 1)) / 2 + j - 1] + sum;
+        }
+        sum = cored1[0] - (cored1[2] + 2.0 * cored1[3]) / 3.0;
+        cored1[2] = cored1[2] + sum;
+        cored1[3] = cored1[3] + sum;
+      }
+      sum = 0.0;
+      for (int i = 5; i <= 9; ++i) sum = sum + ww[k * ((i * (i + 1)) / 2 - 1) + 1 - 1];
+      sum = (ww[0] - sum / 5.0);
+      for (int i = 5; i <= 9; ++i) {  // "s" on nj with "d" on ni
+        const int n = k * ((i * (i + 1)) / 2 - 1) + 1 - 1;
+        ww[n] = ww[n] + sum;
+      }
+      sum = cored1[0] - (cored1[6] + 2.0 * cored1[8] + 2.0 * cored1[9]) / 5.0;
+      cored1[6] = cored1[6] + sum;
+      cored1[8] = cored1[8] + sum;
+      cored1[9] = cored1[9] + sum;
+    }
+    if (prm.iod[nj - 1] > 0) {
+      double sum = 0.0;
+      if (prm.iod[ni - 1] > 0) {
+        for (int i = 5; i <= 9; ++i) {  // "d" with "d"
+          const int j = 45 * ((i * (i + 1)) / 2 - 1);
+          sum = sum + (ww[j + 15 - 1] + ww[j + 21 - 1] + ww[j + 28 - 1] + ww[j + 36 - 1] + ww[j + 45 - 1]);
+        }
+        sum = (ww[0] - sum / 25.0);
+        for (int i = 5; i <= 9; ++i) {
+          const int j = 45 * ((i * (i + 1)) / 2 - 1);
+          for (int k = 5; k <= 9; ++k) ww[(k * (k + 1)) / 2 + j - 1] = ww[(k * (k + 1)) / 2 + j - 1] + sum;
+        }
+      }
+      if (li > 1) {
+        sum = 0.0;
+        for (int i = 2; i <= 4; ++i) {  // "p" on ni with "d" on nj
+          const int j = 45 * ((i * (i + 1)) / 2 - 1);
+          sum = sum + (ww[j + 15 - 1] + ww[j + 21 - 1] + ww[j + 28 - 1] + ww[j + 36 - 1] + ww[j + 45 - 1]);
+        }
+        sum = (ww[0] - sum / 15.0);
+        for (int i = 2; i <= 4; ++i) {
+          const int j = 45 * ((i * (i + 1)) / 2 - 1);
+          for (int k = 5; k <= 9; ++k) ww[(k * (k + 1)) / 2 + j - 1] = ww[(k * (k + 1)) / 2 + j - 1] + sum;
+        }
+        sum = cored2[0] - (cored2[2] + 2.0 * cored2[3]) / 3.0;
+        cored2[2] = cored2[2] + sum;
+        cored2[3] = cored2[3] + sum;
+      }
+      sum = (ww[0] - (ww[15 - 1] + ww[21 - 1] + ww[28 - 1] + ww[36 - 1] + ww[45 - 1]) / 5.0);
+      for (int k = 5; k <= 9; ++k) {  // "s" on ni with "d" on nj
+        ww[(k * (k + 1)) / 2 - 1] = ww[(k * (k + 1)) / 2 - 1] + sum;
+      }
+      sum = (cored2[0] - (cored2[6] + 2.0 * cored2[8] + 2.0 * cored2[9]) / 5.0);
+      cored2[6] = cored2[6] + sum;
+      cored2[8] = cored2[8] + sum;
+      cored2[9] = cored2[9] + sum;
+    }
+  }
+
+  // w2mat: w(l) = ww(kl, ij), ij outer, kl inner == ww's linear storage
+  const int limij = (li * (li + 1)) / 2;
+  const int limkl = (lj * (lj + 1)) / 2;
+  const int istep = limij * limkl;
+  for (int n = 0; n < istep; ++n) w[n] = ww[n];
+  *w_count = istep;
+
+  // elenuc
+  mpc_elenuc_full(rot, cored1, li, e1b);
+  mpc_elenuc_full(rot, cored2, lj, e2a);
+
+  // ccrep (distance passed in Bohr, converted back inside)
+  *enuc = mpc_ccrep(prm, ni, nj, r, gab);
+  return true;
+}
+
 #endif  // MOPAC_GPU_MOZYME_PAIR_CORE_CUH

@@ -25,9 +25,9 @@
 //     (src/MOZYME/hcore_for_MOZYME.F90): h1elec() into the off-diagonal h
 //     block, rotate()'s e1b/e2a into the diagonal blocks and enuc summed.
 //
-// Contributions are accumulated with atomicAdd.  Pairs involving an atom
-// with d orbitals (or sparkles) are skipped and counted; the caller finishes
-// them on the CPU.
+// Contributions are accumulated with atomicAdd.  sp-sp pairs and pairs with a
+// d-orbital atom run in separate kernels (the d one with larger local arrays);
+// sparkles (or d pairs when d_on_device == 0) are counted and left to the CPU.
 
 #include <cuda_runtime.h>
 
@@ -79,6 +79,12 @@ namespace {
 
 constexpr int kPairThreads = 128;
 constexpr int kPointThreads = 256;
+// The d-pair kernels keep ~60 KB of local storage per thread (W up to 2025
+// entries, rotation scratch).  Small blocks plus a dummy dynamic shared
+// allocation cap the number of resident threads per SM, which bounds the
+// local-memory reservation the driver makes at launch.
+constexpr int kPairThreadsD = 32;
+constexpr size_t kPairSharedD = 40 * 1024;
 
 template <typename T>
 struct DeviceArray {
@@ -180,6 +186,7 @@ struct PairGeom {
   const int *nat;
   const double *coord;   // 3 x numat
   int distance_gate;     // 1 when ijbo() applies the cutof1/cutof2 tests (compact index route)
+  int d_on_device;       // 1: pairs with a d-orbital atom are evaluated by the d kernels
   double cutof1;         // squared
   double cutof2;         // squared
   int *status;           // status[0] = failed pairs, status[1] = pairs left to the CPU
@@ -214,15 +221,22 @@ __device__ __forceinline__ double coord_at(const double *coord, int atom1, int k
 }
 
 __device__ __forceinline__ bool sp_orbital_count(int n) { return n == 1 || n == 4; }
+__device__ __forceinline__ bool spd_orbital_count(int n) { return n == 1 || n == 4 || n == 9; }
 
-// Returns false when the pair is not a device pair (d atom / sparkle, or
-// outside the compact-route cutoffs); counts the former in status[1].
-__device__ __forceinline__ bool device_pair(const PairGeom &g, int idx, int *ii_out, int *jj_out) {
+// Classifies pair idx: 0 = not a device pair (sparkle, d pair with the d path
+// off, or outside the compact-route cutoffs), 1 = sp-sp, 2 = involves a d atom
+// (both atoms in {1,4,9}).  Pairs left to the CPU are counted in status[1]
+// when `count_cpu` is set (only one kernel per launch must count).
+__device__ __forceinline__ int pair_class(const PairGeom &g, int idx, int *ii_out, int *jj_out,
+                                          bool count_cpu) {
   const int ii = g.pair_i[idx];
   const int jj = g.pair_j[idx];
-  if (!sp_orbital_count(g.iorbs[ii - 1]) || !sp_orbital_count(g.iorbs[jj - 1])) {
-    atomicAdd(g.status + 1, 1);
-    return false;
+  const int ni = g.iorbs[ii - 1];
+  const int nj = g.iorbs[jj - 1];
+  const bool has_d = (ni == 9 || nj == 9);
+  if (!spd_orbital_count(ni) || !spd_orbital_count(nj) || (has_d && !g.d_on_device)) {
+    if (count_cpu) atomicAdd(g.status + 1, 1);
+    return 0;
   }
   if (g.distance_gate) {
     double r2 = 0.0;
@@ -231,51 +245,59 @@ __device__ __forceinline__ bool device_pair(const PairGeom &g, int idx, int *ii_
       r2 += d * d;
     }
     // ijbo() returns -1/-2 (point pair) for these.
-    if (r2 > g.cutof1 || r2 > g.cutof2) return false;
+    if (r2 > g.cutof1 || r2 > g.cutof2) return 0;
   }
   *ii_out = ii;
   *jj_out = jj;
-  return true;
+  return has_d ? 2 : 1;
 }
 
 // Diatomic energy for atoms (jj = atom 1, ii = atom 2) at coordinates x1/x2.
+// D = false: sp-sp pair (small local arrays); D = true: pair with a d atom.
+template <bool D>
 __device__ bool pair_energy(const PairGradArgs &a, int nat1, int nat2, int n1, int n2,
                             const double *x1, const double *x2, const double *pdi,
                             double *dener) {
+  constexpr int kL = D ? mozyme_pair::kMaxLinearD : mozyme_pair::kMaxLinear;
+  constexpr int kW = D ? mozyme_pair::kMaxWD : mozyme_pair::kMaxW;
   double smat[81];
   const double *smat_ptr = nullptr;
   if (nat1 != 102 && nat2 != 102) {
-    if (!mozyme_pair_h1elec_sp_dev(nat1, nat2, x1, x2, a.ovl, smat)) return false;
+    const bool ok = D ? mozyme_pair_h1elec_dev(nat1, nat2, x1, x2, a.ovl, smat)
+                      : mozyme_pair_h1elec_sp_dev(nat1, nat2, x1, x2, a.ovl, smat);
+    if (!ok) return false;
     smat_ptr = smat;
   }
-  double e_at2[10], e_at1[10], w[mozyme_pair::kMaxW];
+  double e_at2[45], e_at1[45], w[kW];
   double enuc = 0.0;
   int w_count = 0;
   // dhc(): rotate(ni = nat(ii), nj = nat(jj), xi = coord(ii), xj = coord(jj), w, kr, e2a, e1b, enuc)
   // i.e. rotate's first block belongs to atom ii (= atom 2 here).
-  if (!mozyme_pair_core_sp_dev(nat2, nat1, x2, x1, a.core, w, &w_count, e_at2, e_at1, &enuc)) {
-    return false;
-  }
+  const bool ok = D ? mozyme_pair_core_dev(nat2, nat1, x2, x1, a.core, w, &w_count, e_at2, e_at1, &enuc)
+                    : mozyme_pair_core_sp_dev(nat2, nat1, x2, x1, a.core, w, &w_count, e_at2, e_at1, &enuc);
+  if (!ok) return false;
   // w_count == 0 only for coincident atoms (rotate's small-rij exit): all
   // integrals are zero and the pair contributes nothing.
   const int expect = mozyme_pair::tri1(n2 + 1) * mozyme_pair::tri1(n1 + 1);
   if (w_count != 0 && w_count != expect) return false;
-  *dener = mozyme_pair::diatomic_energy_sp(n1, n2, smat_ptr, e_at1, e_at2, w, enuc, pdi);
+  double h[kL], f[kL], pa[kL];
+  *dener = mozyme_pair::diatomic_energy_generic(n1, n2, smat_ptr, e_at1, e_at2, w, enuc, pdi, h, f, pa);
   return true;
 }
 
+template <bool D>
 __global__ void mozyme_pair_gradient_kernel(PairGradArgs a) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= a.g.npairs) return;
   int ii, jj;
-  if (!device_pair(a.g, idx, &ii, &jj)) return;
+  if (pair_class(a.g, idx, &ii, &jj, !D) != (D ? 2 : 1)) return;
   const int n2 = a.g.iorbs[ii - 1];
   const int n1 = a.g.iorbs[jj - 1];
   const int nat1 = a.g.nat[jj - 1];
   const int nat2 = a.g.nat[ii - 1];
 
   // Packed diatomic density, atom jj first (mirrors dcart.F90).
-  double pdi[mozyme_pair::kMaxLinear];
+  double pdi[D ? mozyme_pair::kMaxLinearD : mozyme_pair::kMaxLinear];
   {
     int k = a.g.diag_off[jj - 1];
     int ij = 0;
@@ -309,19 +331,19 @@ __global__ void mozyme_pair_gradient_kernel(PairGradArgs a) {
     x1[0] += a.chnge2;
     x1[1] += a.chnge2;
     x1[2] += a.chnge2;
-    ok = pair_energy(a, nat1, nat2, n1, n2, x1, x2, pdi, &aa);
+    ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &aa);
   }
   for (int k = 0; k < 3 && ok; ++k) {
     const double x0 = x2[k];
     if (a.force) {
       x2[k] = x0 - a.chnge2;
-      ok = pair_energy(a, nat1, nat2, n1, n2, x1, x2, pdi, &aa);
+      ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &aa);
       if (!ok) break;
       x2[k] = x0 + a.chnge2;
     } else {
       x2[k] = x0 + a.chnge;
     }
-    ok = pair_energy(a, nat1, nat2, n1, n2, x1, x2, pdi, &ee);
+    ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &ee);
     x2[k] = x0;
     if (!ok) break;
     const double deriv = (aa - ee) * a.cnst / a.chnge;
@@ -386,12 +408,14 @@ __global__ void mozyme_atom_charge_kernel(PairGradArgs a, double *qatom) {
 
 // hcore_for_MOZYME block pair: h(i,j) += h1elec, h(i,i) += e1b, h(j,j) += e2a,
 // enuclr += enuc, for atom i = ii (first in the pair loop) and j = jj < ii.
+template <bool D>
 __global__ void mozyme_hcore_pairs_kernel(HcoreArgs a) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   bool ok = true;
   double enuc = 0.0;
   int ii = 0, jj = 0;
-  const bool active = idx < a.g.npairs && device_pair(a.g, idx, &ii, &jj);
+  const bool active =
+      idx < a.g.npairs && pair_class(a.g, idx, &ii, &jj, !D) == (D ? 2 : 1);
   if (active) {
     const int ni = a.g.nat[ii - 1];
     const int nj = a.g.nat[jj - 1];
@@ -400,7 +424,8 @@ __global__ void mozyme_hcore_pairs_kernel(HcoreArgs a) {
     const double *xi = a.g.coord + 3 * (ii - 1);
     const double *xj = a.g.coord + 3 * (jj - 1);
     double smat[81];
-    ok = mozyme_pair_h1elec_sp_dev(ni, nj, xi, xj, a.ovl, smat);
+    ok = D ? mozyme_pair_h1elec_dev(ni, nj, xi, xj, a.ovl, smat)
+           : mozyme_pair_h1elec_sp_dev(ni, nj, xi, xj, a.ovl, smat);
     if (ok) {
       double *hij = a.h + a.g.pair_off[idx];
       for (int i1 = 1; i1 <= norb_i; ++i1) {
@@ -409,9 +434,10 @@ __global__ void mozyme_hcore_pairs_kernel(HcoreArgs a) {
           hij[(i1 - 1) * norb_j + (j1 - 1)] += smat[(i1 - 1) + 9 * (j1 - 1)];
         }
       }
-      double e1b[10], e2a[10], w[mozyme_pair::kMaxW];
+      double e1b[45], e2a[45], w[D ? mozyme_pair::kMaxWD : mozyme_pair::kMaxW];
       int w_count = 0;
-      ok = mozyme_pair_core_sp_dev(ni, nj, xi, xj, a.core, w, &w_count, e1b, e2a, &enuc);
+      ok = D ? mozyme_pair_core_dev(ni, nj, xi, xj, a.core, w, &w_count, e1b, e2a, &enuc)
+             : mozyme_pair_core_sp_dev(ni, nj, xi, xj, a.core, w, &w_count, e1b, e2a, &enuc);
       if (ok) {
         const int ti = (norb_i * (norb_i + 1)) / 2;
         const int tj = (norb_j * (norb_j + 1)) / 2;
@@ -522,8 +548,8 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
     int numat, int mpack, int npairs, const int *pair_i, const int *pair_j,
     const int *pair_off, const int *row_start, const int *diag_off,
     const int *iorbs, const int *nat, const double *coord, const double *p,
-    int distance_gate, double cutof2, double cutofp, double chnge, double cnst,
-    double fpc_9, int force, const MozymePairTablesC *tables,
+    int distance_gate, int d_on_device, double cutof2, double cutofp, double chnge,
+    double cnst, double fpc_9, int force, const MozymePairTablesC *tables,
     double *dxyz, double *ms_out, int *d_pairs_out) {
   if (numat <= 0 || mpack <= 0 || !iorbs || !nat || !coord || !p || !dxyz || !tables ||
       !row_start || !diag_off) {
@@ -546,6 +572,7 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
     return 2;
   }
   a.g.distance_gate = distance_gate;
+  a.g.d_on_device = d_on_device;
   a.g.cutof1 = tables->cutof1;
   a.g.cutof2 = cutof2;
   a.p = d_p.ptr;
@@ -563,7 +590,12 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
 
   mozyme_atom_charge_kernel<<<(numat + 255) / 256, 256>>>(a, d_q.ptr);
   if (npairs > 0) {
-    mozyme_pair_gradient_kernel<<<(npairs + kPairThreads - 1) / kPairThreads, kPairThreads>>>(a);
+    const int grid = (npairs + kPairThreads - 1) / kPairThreads;
+    mozyme_pair_gradient_kernel<false><<<grid, kPairThreads>>>(a);
+    if (d_on_device) {
+      const int grid_d = (npairs + kPairThreadsD - 1) / kPairThreadsD;
+      mozyme_pair_gradient_kernel<true><<<grid_d, kPairThreadsD, kPairSharedD>>>(a);
+    }
   }
   if (numat >= 2) {
     dim3 grid((numat + kPointThreads - 1) / kPointThreads, numat - 1);
@@ -587,8 +619,8 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
     int numat, int mpack, int npairs, const int *pair_i, const int *pair_j,
     const int *pair_off, const int *row_start, const int *diag_off,
     const int *iorbs, const int *nat, const double *coord, int distance_gate,
-    double cutof2, const MozymePairTablesC *tables, double *h, double *enuc_out,
-    double *ms_out, int *d_pairs_out) {
+    int d_on_device, double cutof2, const MozymePairTablesC *tables, double *h,
+    double *enuc_out, double *ms_out, int *d_pairs_out) {
   if (numat <= 0 || mpack <= 0 || !iorbs || !nat || !coord || !h || !tables || !enuc_out ||
       !row_start || !diag_off) {
     return 1;
@@ -610,6 +642,7 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
     return 2;
   }
   a.g.distance_gate = distance_gate;
+  a.g.d_on_device = d_on_device;
   a.g.cutof1 = tables->cutof1;
   a.g.cutof2 = cutof2;
   a.ovl = tab.ovl;
@@ -618,7 +651,12 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
   a.enuc = d_enuc.ptr;
 
   if (npairs > 0) {
-    mozyme_hcore_pairs_kernel<<<(npairs + kPairThreads - 1) / kPairThreads, kPairThreads>>>(a);
+    const int grid = (npairs + kPairThreads - 1) / kPairThreads;
+    mozyme_hcore_pairs_kernel<false><<<grid, kPairThreads>>>(a);
+    if (d_on_device) {
+      const int grid_d = (npairs + kPairThreadsD - 1) / kPairThreadsD;
+      mozyme_hcore_pairs_kernel<true><<<grid_d, kPairThreadsD, kPairSharedD>>>(a);
+    }
   }
   int code = finish_launch("MOZYME GPU hcore", geom.status, d_pairs_out);
   if (code == 0) {

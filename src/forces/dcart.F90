@@ -22,7 +22,7 @@
       nbonds, ibonds, geoa, geo
       use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
       use mozyme_gpu_gradient, only : mozyme_gpu_gradient_enabled, mozyme_gpu_gradient_check_enabled, &
-      mozyme_gpu_gradient_run
+      mozyme_gpu_gradient_run, mozyme_gpu_device_pair
 !
       USE molkst_C, only : numat, numcal, keywrd, id, l1u, l2u, l3u, l123, mpack, &
       use_ref_geo, cutofp, method_pm6, method_PM7, mozyme, density, N_3_present, &
@@ -519,6 +519,7 @@
       use common_arrays_C, only : nfirst, nlast, nat, p, pa, pb, tvec
       use molkst_C, only : mozyme, id, cutofp, l1u, l2u, l3u
       use MOZYME_C, only : iorbs, part_dxyz, mode, jopt
+      use mozyme_gpu_gradient, only : mozyme_gpu_device_pair
       implicit none
       integer, intent(in) :: numat_in, l123_in, numtot_in, icuc, ione
       double precision, intent(in) :: coord(3, *)
@@ -575,9 +576,9 @@
           jl = nlast(jj)
           ndi(1) = nat(jj)
           if (only_d) then
-            ! The device kernel handles exactly the pairs whose two atoms have 1 or 4
-            ! orbitals; everything else (d shells, sparkles) is done here.
-            if ((iorbs(ii) == 1 .or. iorbs(ii) == 4) .and. (iorbs(jj) == 1 .or. iorbs(jj) == 4)) cycle
+            ! The device kernels handle sp-sp pairs and (when enabled) pairs with d
+            ! atoms; everything else (sparkles, d pairs with the d path off) is done here.
+            if (mozyme_gpu_device_pair(iorbs(ii), iorbs(jj))) cycle
             if (ijbo(ii, jj) < 0) cycle
           end if
           if (mozyme) then

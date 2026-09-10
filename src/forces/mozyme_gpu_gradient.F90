@@ -30,6 +30,8 @@ module mozyme_gpu_gradient
   public :: mozyme_gpu_hcore_check_enabled
   public :: mozyme_gpu_hcore_run
   public :: mozyme_gpu_sp_pair
+  public :: mozyme_gpu_device_pair
+  public :: mozyme_gpu_d_pairs_enabled
   public :: mozyme_gpu_disp_enabled
   public :: mozyme_gpu_disp_check_enabled
 
@@ -54,10 +56,10 @@ module mozyme_gpu_gradient
   interface
     function mopac_cuda_mozyme_pair_gradient(numat_c, mpack_c, npairs_c, pair_i_c, pair_j_c, &
         pair_off_c, row_start_c, diag_off_c, iorbs_c, nat_c, coord_c, p_c, distance_gate_c, &
-        cutof2_c, cutofp_c, chnge_c, cnst_c, fpc_9_c, force_c, tables_c, dxyz_c, ms_c, d_pairs_c) &
-        bind(C, name='mopac_cuda_mozyme_pair_gradient') result(rc)
+        d_on_device_c, cutof2_c, cutofp_c, chnge_c, cnst_c, fpc_9_c, force_c, tables_c, dxyz_c, ms_c, &
+        d_pairs_c) bind(C, name='mopac_cuda_mozyme_pair_gradient') result(rc)
       import :: c_int, c_double, mozyme_pair_tables_c
-      integer(c_int), value :: numat_c, mpack_c, npairs_c, distance_gate_c, force_c
+      integer(c_int), value :: numat_c, mpack_c, npairs_c, distance_gate_c, d_on_device_c, force_c
       integer(c_int) :: pair_i_c(*), pair_j_c(*), pair_off_c(*), row_start_c(*), diag_off_c(*)
       integer(c_int) :: iorbs_c(*), nat_c(*)
       real(c_double) :: coord_c(*), p_c(*), dxyz_c(*)
@@ -70,10 +72,10 @@ module mozyme_gpu_gradient
 
     function mopac_cuda_mozyme_hcore_pairs(numat_c, mpack_c, npairs_c, pair_i_c, pair_j_c, &
         pair_off_c, row_start_c, diag_off_c, iorbs_c, nat_c, coord_c, distance_gate_c, &
-        cutof2_c, tables_c, h_c, enuc_c, ms_c, d_pairs_c) &
+        d_on_device_c, cutof2_c, tables_c, h_c, enuc_c, ms_c, d_pairs_c) &
         bind(C, name='mopac_cuda_mozyme_hcore_pairs') result(rc)
       import :: c_int, c_double, mozyme_pair_tables_c
-      integer(c_int), value :: numat_c, mpack_c, npairs_c, distance_gate_c
+      integer(c_int), value :: numat_c, mpack_c, npairs_c, distance_gate_c, d_on_device_c
       integer(c_int) :: pair_i_c(*), pair_j_c(*), pair_off_c(*), row_start_c(*), diag_off_c(*)
       integer(c_int) :: iorbs_c(*), nat_c(*)
       real(c_double) :: coord_c(*), h_c(*)
@@ -103,6 +105,23 @@ contains
       env_truthy = .true.
     end select
   end function env_truthy
+
+  ! Explicit off switch: 0 / off / no / false.
+  logical function env_falsy(name)
+    implicit none
+    character(len=*), intent(in) :: name
+    character(len=16) :: value
+    integer :: status, length
+    env_falsy = .false.
+    value = ' '
+    call get_environment_variable(name, value, length=length, status=status)
+    if (status /= 0 .or. length <= 0) return
+    value = adjustl(value)
+    select case (trim(value))
+    case ('0', 'F', 'f', 'FALSE', 'false', 'False', 'N', 'n', 'NO', 'no', 'OFF', 'off')
+      env_falsy = .true.
+    end select
+  end function env_falsy
 
   logical function gpu_allowed()
     implicit none
@@ -152,12 +171,30 @@ contains
     mozyme_gpu_disp_check_enabled = env_truthy('MOPAC_GPU_DISP_CHECK')
   end function mozyme_gpu_disp_check_enabled
 
-  ! True when the device kernels handle the pair: both atoms carry 1 or 4 orbitals.
+  ! True when the sp device kernels handle the pair: both atoms carry 1 or 4 orbitals.
   logical function mozyme_gpu_sp_pair(norb_i, norb_j)
     implicit none
     integer, intent(in) :: norb_i, norb_j
     mozyme_gpu_sp_pair = (norb_i == 1 .or. norb_i == 4) .and. (norb_j == 1 .or. norb_j == 4)
   end function mozyme_gpu_sp_pair
+
+  ! Pairs with a d-orbital atom go to the device unless MOPAC_MOZYME_DPAIRS_GPU=0.
+  logical function mozyme_gpu_d_pairs_enabled()
+    implicit none
+    mozyme_gpu_d_pairs_enabled = gpu_allowed() .and. .not. env_falsy('MOPAC_MOZYME_DPAIRS_GPU')
+  end function mozyme_gpu_d_pairs_enabled
+
+  ! True when some device kernel handles the pair (sp-sp, or {1,4,9} x {1,4,9}
+  ! with the d path enabled).  Everything else stays on the CPU.
+  logical function mozyme_gpu_device_pair(norb_i, norb_j)
+    implicit none
+    integer, intent(in) :: norb_i, norb_j
+    mozyme_gpu_device_pair = mozyme_gpu_sp_pair(norb_i, norb_j)
+    if (.not. mozyme_gpu_device_pair .and. mozyme_gpu_d_pairs_enabled()) then
+      mozyme_gpu_device_pair = (norb_i == 1 .or. norb_i == 4 .or. norb_i == 9) .and. &
+        (norb_j == 1 .or. norb_j == 4 .or. norb_j == 9)
+    end if
+  end function mozyme_gpu_device_pair
 
   ! Adds the pair contributions of the MOZYME gradient on to dxyz(3, numat).
   ! code: 0 success, 1 unsupported configuration (nothing done), 2 device
@@ -404,7 +441,8 @@ contains
     ms_c = 0.d0
     rc = mopac_cuda_mozyme_pair_gradient(int(numat, kind=c_int), int(mpack, kind=c_int), &
         int(npairs, kind=c_int), pair_i, pair_j, pair_off, row_start, diag_off, iorbs_c, nat_c, &
-        coord, p, int(distance_gate, kind=c_int), real(cutof2, kind=c_double), &
+        coord, p, int(distance_gate, kind=c_int), merge(1_c_int, 0_c_int, mozyme_gpu_d_pairs_enabled()), &
+        real(cutof2, kind=c_double), &
         real(cutofp, kind=c_double), real(chnge, kind=c_double), real(const, kind=c_double), &
         real(fpc_9, kind=c_double), merge(1_c_int, 0_c_int, force), tables, dxyz, ms_c, d_pairs_c)
     code = int(rc)
@@ -448,8 +486,8 @@ contains
     enuc_c = 0.d0
     rc = mopac_cuda_mozyme_hcore_pairs(int(numat, kind=c_int), int(mpack, kind=c_int), &
         int(npairs, kind=c_int), pair_i, pair_j, pair_off, row_start, diag_off, iorbs_c, nat_c, &
-        coord, int(distance_gate, kind=c_int), real(cutof2, kind=c_double), tables, h, enuc_c, &
-        ms_c, d_pairs_c)
+        coord, int(distance_gate, kind=c_int), merge(1_c_int, 0_c_int, mozyme_gpu_d_pairs_enabled()), &
+        real(cutof2, kind=c_double), tables, h, enuc_c, ms_c, d_pairs_c)
     code = int(rc)
     ms = ms_c
     enuc_add = enuc_c

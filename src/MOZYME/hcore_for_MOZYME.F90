@@ -27,7 +27,7 @@ subroutine hcore_for_MOZYME ()
     iorbs, jopt, mode, numred, refnuc
   use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
   use mozyme_gpu_gradient, only : mozyme_gpu_hcore_enabled, mozyme_gpu_hcore_check_enabled, &
-    mozyme_gpu_hcore_run, mozyme_gpu_sp_pair
+    mozyme_gpu_hcore_run, mozyme_gpu_device_pair
   implicit none
   double precision :: hcore_timer
   ! GPU evaluation of the sp-sp block pairs (h1elec + rotate); the CPU loop
@@ -203,11 +203,12 @@ subroutine hcore_for_MOZYME ()
         !   Molecular system
         !
         if (ijbo(i, j) >= 0) then
-          if (calcij .and. gpu_block_pairs .and. mozyme_gpu_sp_pair(iorbs(i), iorbs(j))) then
+          if (calcij .and. gpu_block_pairs .and. mozyme_gpu_device_pair(iorbs(i), iorbs(j))) then
             ! Evaluated on the device after the loop (kr is not advanced for
-            ! block pairs, so nothing else changes here).
-            e1b(1:10) = 0.d0
-            e2a(1:10) = 0.d0
+            ! block pairs, so nothing else changes here).  The diagonal-block
+            ! update below still runs with these zeros (up to 45 entries for d atoms).
+            e1b(1:45) = 0.d0
+            e2a(1:45) = 0.d0
           else if (calcij) then
             call h1elec (ni, nj, coord(1, i), coord(1, j), di)
             ii = ijbo (i, j)
@@ -490,7 +491,7 @@ subroutine hcore_for_MOZYME ()
   end if
 contains
 
-  ! CPU reference / fallback for the sp-sp block pairs skipped in the main loop
+  ! CPU reference / fallback for the device block pairs skipped in the main loop
   ! (mode == 0, id == 0): h1elec into the off-diagonal block, rotate's e1b/e2a
   ! into the diagonal blocks, enuc summed into enuc_sum.
   subroutine cpu_sp_block_pairs(hh, enuc_sum)
@@ -501,10 +502,9 @@ contains
     double precision :: e1b_l(45), e2a_l(45), enuc_l, di_l(9, 9), w_l(2025)
     enuc_sum = 0.d0
     do ia = 2, numat
-      if (iorbs(ia) /= 1 .and. iorbs(ia) /= 4) cycle
       na = nat(ia)
       do ja = 1, ia - 1
-        if (.not. mozyme_gpu_sp_pair(iorbs(ia), iorbs(ja))) cycle
+        if (.not. mozyme_gpu_device_pair(iorbs(ia), iorbs(ja))) cycle
         ka = ijbo(ia, ja)
         if (ka < 0) cycle
         nb = nat(ja)
