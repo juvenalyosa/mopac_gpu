@@ -1,4 +1,5 @@
 #include <cstddef>
+#include <chrono>
 #include <climits>
 #include <algorithm>
 #include <chrono>
@@ -10349,6 +10350,32 @@ extern "C" int mopac_cuda_mozyme_scf_register_state(
   return kMozymeScfSuccess;
 }
 
+
+// Accumulates host wall time into the Fortran section-timer table
+// (mozyme_section_timers), so driver-level costs show up next to the
+// Fortran sections in the [PROFILE] MOZYME_SECTION report.
+extern "C" void mozyme_section_timer_add_c(const char *name, int name_len, double ms);
+
+namespace {
+inline double host_ms_since(const std::chrono::steady_clock::time_point &t0) {
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+inline void add_host_section_ms(const char *name, double ms) {
+  mozyme_section_timer_add_c(name, static_cast<int>(std::strlen(name)), ms);
+}
+}  // namespace
+
+
+namespace {
+bool timed_copy_resident_state_to_host(MozymeScfContext &ctx,
+                                       ResidentFinalPublicationProof *proof = nullptr) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool ok = copy_resident_state_to_host(ctx, proof);
+  if (resident_stage_profile_enabled()) add_host_section_ms("resident_publish", host_ms_since(t0));
+  return ok;
+}
+}  // namespace
+
 extern "C" int mopac_cuda_mozyme_scf_run(void *context,
                                           MozymeScfStatus *status) {
   auto *ctx = static_cast<MozymeScfContext *>(context);
@@ -10359,7 +10386,11 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
   int final_code = kMozymeScfNotReady;
 
 #ifdef __CUDACC__
-  if (upload_registered_state(*ctx)) {
+  const bool host_profile = resident_stage_profile_enabled();
+  const auto t_run0 = std::chrono::steady_clock::now();
+  const bool uploaded = upload_registered_state(*ctx);
+  if (host_profile) add_host_section_ms("resident_upload", host_ms_since(t_run0));
+  if (uploaded) {
     const bool strict_resident = strict_resident_request_enabled();
     double accumulated_ms = 0.0;
     bool have_checkpoint = false;
@@ -10451,8 +10482,8 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
                 (needs_final_reorth &&
                  !apply_final_reorth_on_gpu(*ctx, &final_status,
                                             &accumulated_ms)) ||
-                !copy_resident_state_to_host(*ctx,
-                                             &final_publication_proof)) {
+                !timed_copy_resident_state_to_host(*ctx,
+                                                   &final_publication_proof)) {
               final_code = kMozymeScfNotReady;
             } else {
               mark_final_publication_done(&final_status,
@@ -10530,7 +10561,7 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
               (needs_final_reorth &&
                !apply_final_reorth_on_gpu(*ctx, &final_status,
                                           &accumulated_ms)) ||
-              !copy_resident_state_to_host(*ctx)) {
+              !timed_copy_resident_state_to_host(*ctx)) {
             final_code = kMozymeScfNotReady;
           } else {
             ResidentControlSnapshot final_control{};
@@ -10578,7 +10609,10 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
       }
     }
   }
-  if (resident_stage_profile_enabled()) report_resident_stage_profile(*ctx);
+  if (host_profile) {
+    add_host_section_ms("resident_run_total", host_ms_since(t_run0));
+    report_resident_stage_profile(*ctx);
+  }
 #endif
 
   status->code = final_code;

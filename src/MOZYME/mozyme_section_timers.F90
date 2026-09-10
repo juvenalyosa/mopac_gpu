@@ -17,7 +17,7 @@ module mozyme_section_timers
   implicit none
   private
 
-  integer, parameter :: max_sections = 64
+  integer, parameter :: max_sections = 128
   integer, parameter :: section_name_len = 48
 
   logical, save :: env_checked = .false.
@@ -32,6 +32,7 @@ module mozyme_section_timers
   public :: mozyme_section_timer_report
   public :: mozyme_section_timer_report_all
   public :: mozyme_section_timers_enabled
+  public :: mozyme_section_timer_add_c
 
 contains
 
@@ -144,6 +145,29 @@ contains
       env_enabled = .true.
     end select
   end function env_enabled
+
+  ! C-callable accumulator (used by the CUDA driver): adds one call of `ms`
+  ! milliseconds to the section `name(1:name_len)`.
+  subroutine mozyme_section_timer_add_c(name, name_len, ms) bind(C, name='mozyme_section_timer_add_c')
+    use iso_c_binding, only : c_char, c_int, c_double
+    implicit none
+    character(kind=c_char), intent(in) :: name(*)
+    integer(c_int), value :: name_len
+    real(c_double), value :: ms
+    character(len=section_name_len) :: fname
+    integer :: i, n, idx
+
+    if (.not. mozyme_section_timers_enabled()) return
+    fname = ' '
+    n = min(int(name_len), section_name_len)
+    do i = 1, n
+      fname(i:i) = name(i)
+    end do
+    idx = mozyme_section_index(fname, .true.)
+    if (idx <= 0) return
+    section_calls(idx) = section_calls(idx) + 1_8
+    section_ms(idx) = section_ms(idx) + ms
+  end subroutine mozyme_section_timer_add_c
 
   integer function mozyme_section_index(name, create_if_missing)
     implicit none
