@@ -1417,6 +1417,7 @@ struct MozymeScfDeviceState {
   DeviceBuffer<int> diagg_pair_state;
   DeviceBuffer<unsigned long long> diagg_vclaim;
   DeviceBuffer<unsigned long long> diagg_oclaim;
+  DeviceBuffer<int> diagg_olock;  // per-occupied-LMO spin locks (lock-based diagg2)
   DeviceBuffer<int> hb_pair_counts;
   DeviceBuffer<int> hb_pair_offsets;
   DeviceBuffer<int> hb_pair_i;
@@ -3622,6 +3623,85 @@ mozyme_diagg2_parallel_kernel(DiaggRotateArgs a) {
   }
 
   if (gtid == 0) a.work_ints[kDiaggWorkIntRounds] = round;
+  if (lane == 0) {
+    if (rotated != 0) atomicAdd(a.work_ints + kDiaggWorkIntRotated, rotated);
+    if (sumb_acc != 0.0) atomicAdd_double(a.sumb_out, sumb_acc);
+    if (nrej_acc != 0) atomicAdd(a.nrej_out, nrej_acc);
+    if (error != 0) {
+      atomicExch(a.work_ints + kDiaggWorkIntError, 1);
+      if (a.ok_slot) atomicExch(a.ok_slot, 0);
+    }
+  }
+}
+
+// Lock-based diagg2 sweep (default).  One warp per virtual LMO i walks its
+// candidate pairs (i, j) in list order (diagg1 stores them contiguously at
+// offsets[i-1] .. offsets[i]); the occupied LMO j is held under a spin lock
+// for the duration of the rotation, so no two concurrent rotations share an
+// LMO and every LMO sees a sequential chain of updates.  No grid-wide
+// synchronisation: the cooperative sweep needed ~2 grid.sync() per scheduling
+// round and the number of rounds equals the largest LMO degree (500+ for
+// crambin), which made it latency-bound.  The order in which different
+// virtuals touch the same occupied LMO depends on lock timing, so results
+// differ run to run at rounding level (accepted: tolerance vs CPU).
+__global__ void __launch_bounds__(kDiaggRotateThreads)
+mozyme_diagg2_locked_kernel(DiaggRotateArgs a, const int *offsets, int *olock) {
+  __shared__ int s_joff[kDiaggRotateWarps][kDiaggMaxLmoAtoms];
+  __shared__ int s_ioff[kDiaggRotateWarps][kDiaggMaxLmoAtoms];
+  __shared__ int s_jatoms[kDiaggRotateWarps][kDiaggMaxLmoAtoms];
+  __shared__ int s_iatoms[kDiaggRotateWarps][kDiaggMaxLmoAtoms];
+
+  if (resident_control_terminal(a.resident_control_ints)) return;
+  const int nij = a.control_ints[a.nij_slot];
+  const int retry = a.control_ints[a.retry_slot];
+  const double tiny = a.control_scalars[a.tiny_slot];
+  const double biglim = a.control_scalars[a.biglim_slot];
+  a.shift = resident_control_double_or(a.resident_control_scalars,
+                                       kResidentControlShift, a.shift);
+  if (nij <= 0) return;
+
+  const int lane = threadIdx.x & 31;
+  const int warp_in_block = threadIdx.x >> 5;
+  const int gwarp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+  const int gwarps = (gridDim.x * blockDim.x) >> 5;
+
+  double sumb_acc = 0.0;
+  int nrej_acc = 0;
+  int error = 0;
+  int rotated = 0;
+  for (int i = gwarp + 1; i <= a.nvir && error == 0; i += gwarps) {
+    const int start = offsets[i - 1];
+    int end = offsets[i];
+    if (end > nij) end = nij;
+    for (int ij = start; ij < end; ++ij) {
+      const int j = a.ifmo[2 * ij + 1];
+      if (a.ifmo[2 * ij] != i || j < 1 || j > a.nocc) {
+        error = 1;
+        break;
+      }
+      const double f = a.fmo[ij];
+      if (fabs(f) < tiny) continue;
+      const double c = f * a.rot_const;
+      const double d = a.eigs[j - 1] - a.eigv[i - 1] - a.shift;
+      if (fabs(c / d) < biglim) continue;
+      if (lane == 0) {
+        while (atomicCAS(olock + j - 1, 0, 1) != 0) __nanosleep(100);
+        __threadfence();
+      }
+      __syncwarp();
+      warp_rotate_pair(a, ij, retry, s_joff[warp_in_block],
+                       s_ioff[warp_in_block], s_jatoms[warp_in_block],
+                       s_iatoms[warp_in_block], sumb_acc, nrej_acc, error);
+      ++rotated;
+      __syncwarp();
+      __threadfence();
+      if (lane == 0) atomicExch(olock + j - 1, 0);
+      __syncwarp();
+      if (error != 0) break;
+    }
+  }
+
+  if (gwarp == 0 && lane == 0) a.work_ints[kDiaggWorkIntRounds] = 1;
   if (lane == 0) {
     if (rotated != 0) atomicAdd(a.work_ints + kDiaggWorkIntRotated, rotated);
     if (sumb_acc != 0.0) atomicAdd_double(a.sumb_out, sumb_acc);
@@ -6952,6 +7032,7 @@ bool upload_registered_state(MozymeScfContext &ctx) {
     if (!dev.diagg_pair_state.resize(fmo_count)) return false;
     if (!dev.diagg_vclaim.resize(nvir_count)) return false;
     if (!dev.diagg_oclaim.resize(nocc_count)) return false;
+    if (!dev.diagg_olock.resize(nocc_count)) return false;
     if (!dev.hb_pair_counts.resize(numat_count)) return false;
     if (!dev.hb_pair_offsets.resize(numat_count + 1)) return false;
     if (!dev.hb_pair_i.resize(hb_capacity)) return false;
@@ -7157,6 +7238,28 @@ bool launch_diagg2_parallel(int max_pairs, DiaggRotateArgs args,
       label);
 }
 
+// Lock-based diagg2 launch (see mozyme_diagg2_locked_kernel).  Falls back to
+// the cooperative sweep when MOPAC_MOZYME_DIAGG2_COOPERATIVE is set.
+bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
+                             DiaggRotateArgs args, const char *label) {
+  static const bool cooperative = env_enabled("MOPAC_MOZYME_DIAGG2_COOPERATIVE");
+  auto &dev = ctx.device;
+  if (cooperative || !dev.diagg_olock.ptr || !dev.diagg_offsets.ptr ||
+      dev.diagg_olock.count < static_cast<std::size_t>(ctx.config.noccupied)) {
+    return launch_diagg2_parallel(max_pairs, args, label);
+  }
+  if (!cuda_context_ok(cudaMemsetAsync(dev.diagg_olock.ptr, 0,
+                                       dev.diagg_olock.count * sizeof(int)),
+                       label)) {
+    return false;
+  }
+  const int warps = std::max(1, ctx.config.nvirtual);
+  const int grid = (warps + kDiaggRotateWarps - 1) / kDiaggRotateWarps;
+  mozyme_diagg2_locked_kernel<<<grid, kDiaggRotateThreads>>>(
+      args, dev.diagg_offsets.ptr, dev.diagg_olock.ptr);
+  return cuda_context_ok(cudaGetLastError(), label);
+}
+
 DiaggRotateArgs make_diagg_rotate_args(MozymeScfContext &ctx,
                                        const int *control_ints, int nij_slot,
                                        int retry_slot,
@@ -7220,6 +7323,7 @@ bool diagg_parallel_buffers_ready(MozymeScfContext &ctx) {
          device_buffer_ready(dev.diagg_pair_state, fmo) &&
          device_buffer_ready(dev.diagg_vclaim, nvir) &&
          device_buffer_ready(dev.diagg_oclaim, nocc) &&
+         device_buffer_ready(dev.diagg_olock, nocc) &&
          device_buffer_ready(dev.diagg_counts, nvir) &&
          device_buffer_ready(dev.diagg_offsets, nvir + 1);
 }
@@ -7547,8 +7651,8 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
         dev.resident_control_ints.ptr);
     if (!cuda_context_ok(cudaGetLastError(),
                          "resident diagg control kernel")) break;
-    if (!launch_diagg2_parallel(
-            fmo_dim,
+    if (!launch_diagg2_for_diagg(
+            ctx, fmo_dim,
             make_diagg_rotate_args(
                 ctx, dev.diagg_ints.ptr, kDiaggIntNij, kDiaggIntRetry,
                 dev.diagg_scalars.ptr, kDiaggDoubleRotateTiny,
