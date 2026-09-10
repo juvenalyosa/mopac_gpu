@@ -1,3 +1,2 @@
-PM7 GEO_DAT="protein_adenylate_kinase_1ake.pdb" 1SCF MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 NEWPDB PDB GEO-OK NOCOMMENTS
-Large protein benchmark: adenylate kinase, PDB 1AKE
-
+PM7 GEO_DAT="protein_adenylate_kinase_1ake_hydrogenated.pdb" 1SCF MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 NEWPDB PDB GEO-OK NOCOMMENTS
+Publication benchmark compute deck for protein_adenylate_kinase_1ake

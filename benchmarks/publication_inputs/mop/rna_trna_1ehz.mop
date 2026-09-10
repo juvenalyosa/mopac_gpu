@@ -1,3 +1,2 @@
-PM7 GEO_DAT="rna_trna_1ehz.pdb" 1SCF MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 NEWPDB PDB GEO-OK NOCOMMENTS
-RNA benchmark: yeast phenylalanine tRNA, PDB 1EHZ
-
+PM7 GEO_DAT="rna_trna_1ehz_hydrogenated.pdb" 1SCF MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 NEWPDB PDB GEO-OK NOCOMMENTS
+Publication benchmark compute deck for rna_trna_1ehz

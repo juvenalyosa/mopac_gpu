@@ -1,3 +1,2 @@
-PM7 GEO_DAT="dna_dodecamer_1bna.pdb" 1SCF MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 NEWPDB PDB GEO-OK NOCOMMENTS
-DNA benchmark: Dickerson dodecamer, PDB 1BNA
-
+PM7 GEO_DAT="dna_dodecamer_1bna_hydrogenated.pdb" 1SCF MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 NEWPDB PDB GEO-OK NOCOMMENTS
+Publication benchmark compute deck for dna_dodecamer_1bna
