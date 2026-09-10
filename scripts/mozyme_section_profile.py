@@ -192,6 +192,16 @@ def main() -> None:
     mopac = Path(args.mopac).resolve()
     if not mopac.exists():
         raise SystemExit(f"MOPAC executable not found: {mopac}")
+    # GPU timings are only comparable across runs on the same device/clocks.
+    try:
+        smi = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,clocks.sm,clocks.max.sm,memory.used", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        if smi.returncode == 0 and smi.stdout.strip():
+            print(f"GPU: {smi.stdout.strip()}")
+    except (OSError, subprocess.TimeoutExpired):
+        pass
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     unknown = [m for m in modes if m not in MODES]
     if unknown:
