@@ -14,22 +14,88 @@
 ! limitations under the License.
 
 double precision function PM6_DH_Dispersion(l_grad)
-  use molkst_C, only : numat, E_disp
-  use common_arrays_C, only: coord, dxyz
+  use molkst_C, only : numat, E_disp, id, method_PM7
+  use common_arrays_C, only: coord, dxyz, nat, nbonds
+  use chanel_C, only : iw
+  use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
+  use mozyme_gpu_gradient, only : mozyme_gpu_disp_enabled, mozyme_gpu_disp_check_enabled
+#ifdef GPU
+  use iso_c_binding, only : c_int, c_double
+#endif
   implicit none
   logical, intent (in) :: l_grad
   double precision, external :: PM6_DH_Disp
-!
-!  Local
-!
   double precision :: sum, sum1, sum2, delta = 1.d-5
   integer :: i, k
+#ifdef GPU
+  interface
+    function mopac_cuda_dh_dispersion(numat_c, nat_c, nbonds_c, coord_c, pm7_c, lgrad_c, e_c, dxyz_c, ms_c) &
+        bind(C, name='mopac_cuda_dh_dispersion') result(rc)
+      use iso_c_binding, only : c_int, c_double
+      integer(c_int), value :: numat_c, pm7_c, lgrad_c
+      integer(c_int) :: nat_c(*), nbonds_c(*)
+      real(c_double) :: coord_c(*), dxyz_c(*)
+      real(c_double) :: e_c, ms_c
+      integer(c_int) :: rc
+    end function mopac_cuda_dh_dispersion
+  end interface
+  integer(c_int), allocatable :: nat_c(:), nbonds_c(:)
+  integer(c_int) :: rc
+  real(c_double) :: e_c, ms_c
+  double precision, allocatable :: dxyz_ref(:)
+  double precision :: timer, gmax
+  logical :: check
+  !
+  !  GPU path (non-periodic): energy and analytic gradient on the device.
+  !
+  if (id == 0 .and. mozyme_gpu_disp_enabled()) then
+    check = mozyme_gpu_disp_check_enabled()
+    allocate(nat_c(numat), nbonds_c(numat))
+    nat_c = int(nat(1:numat), kind=c_int)
+    nbonds_c = int(nbonds(1:numat), kind=c_int)
+    if (check .and. l_grad) then
+      allocate(dxyz_ref(3*numat))
+      dxyz_ref(1:3*numat) = dxyz(1:3*numat)
+    end if
+    e_c = 0.d0
+    ms_c = 0.d0
+    call mozyme_section_timer_begin('disp_gpu', timer)
+    rc = mopac_cuda_dh_dispersion(int(numat, kind=c_int), nat_c, nbonds_c, coord, &
+      merge(1_c_int, 0_c_int, method_PM7), merge(1_c_int, 0_c_int, l_grad), e_c, dxyz, ms_c)
+    call mozyme_section_timer_end('disp_gpu', timer)
+    deallocate(nat_c, nbonds_c)
+    if (rc == 0) then
+      if (check) then
+        sum2 = PM6_DH_Disp(0, numat)
+        gmax = 0.d0
+        if (l_grad) then
+          call cpu_fd_gradient(dxyz_ref)
+          gmax = maxval(abs(dxyz(1:3*numat) - dxyz_ref(1:3*numat)))
+        end if
+        write (iw, '(1x,a,f14.6,a,f14.6,a,es12.4,a,es12.4,a,f10.3)') '[MOZYME GPU disp] check E_gpu=', e_c, &
+          ' E_cpu=', sum2, ' dE=', e_c - sum2, ' max_abs_dgrad=', gmax, ' ms=', ms_c
+        call flush(iw)
+      end if
+      if (allocated(dxyz_ref)) deallocate(dxyz_ref)
+      E_disp = e_c
+      PM6_DH_Dispersion = E_disp
+      return
+    end if
+    if (allocated(dxyz_ref)) deallocate(dxyz_ref)
+  end if
+#endif
   E_disp = PM6_DH_Disp(0, numat)
   PM6_DH_Dispersion = E_disp
-  if (l_grad) then
-!
-!   Dispersion contribution is small, so only calculate the CUC.
-!
+  if (l_grad) call cpu_fd_gradient(dxyz)
+  return
+
+contains
+
+  ! Numerical gradient of the dispersion energy (forward difference, one
+  ! O(numat) sweep per displaced coordinate), added on to g(3*numat).
+  subroutine cpu_fd_gradient(g)
+    implicit none
+    double precision, intent(inout) :: g(*)
     do k = 1, numat
       sum2 = PM6_DH_Disp(k, 1)
       do i = 1, 3
@@ -37,13 +103,12 @@ double precision function PM6_DH_Dispersion(l_grad)
         sum = PM6_DH_Disp(k, 1)
         sum1 = (sum2 - sum)/delta
         if (Abs(sum1) < 50.d0) then
-          dxyz((k - 1)*3 + i) = dxyz((k - 1)*3 + i) - sum1
+          g((k - 1)*3 + i) = g((k - 1)*3 + i) - sum1
         end if
         coord(i,k) = coord(i,k) - delta
       end do
     end do
-  end if
-  return
+  end subroutine cpu_fd_gradient
 end function PM6_DH_Dispersion
 
 double precision function PM6_DH_Disp(set_a, nsa)

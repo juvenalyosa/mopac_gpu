@@ -51,12 +51,14 @@ MODES: dict[str, dict[str, str | None]] = {
         "MOPAC_MOZYME_SCF_EARLY_PROBE": "0",
         "MOPAC_MOZYME_GRAD_GPU": "1",
         "MOPAC_MOZYME_HCORE_GPU": "1",
+        "MOPAC_DH_DISP_GPU": "1",
     },
 }
 # Resident SCF plus a CPU-vs-GPU comparison of the MOZYME gradient and hcore on
 # every evaluation (prints [MOZYME GPU gradient|hcore] check lines; the gradient
 # keeps the CPU result, hcore keeps the GPU result).
-MODES["resident-gradcheck"] = dict(MODES["resident"], MOPAC_GPU_GRAD_CHECK="1", MOPAC_GPU_HCORE_CHECK="1")
+MODES["resident-gradcheck"] = dict(MODES["resident"], MOPAC_GPU_GRAD_CHECK="1", MOPAC_GPU_HCORE_CHECK="1",
+                                   MOPAC_GPU_DISP_CHECK="1")
 # Strict proof variant: aborts instead of running any setup/bookend on CPU.
 MODES["resident-strict"] = dict(MODES["resident"], MOPAC_MOZYME_SCF_STRICT_RESIDENT="1")
 # No overrides at all: exercises the production defaults MOPAC applies itself.

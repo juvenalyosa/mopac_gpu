@@ -30,6 +30,8 @@ module mozyme_gpu_gradient
   public :: mozyme_gpu_hcore_check_enabled
   public :: mozyme_gpu_hcore_run
   public :: mozyme_gpu_sp_pair
+  public :: mozyme_gpu_disp_enabled
+  public :: mozyme_gpu_disp_check_enabled
 
   ! Mirror of MozymePairTablesC in mozyme_pair_gradient.cu.
   type, bind(C) :: mozyme_pair_tables_c
@@ -136,6 +138,19 @@ contains
     implicit none
     mozyme_gpu_hcore_check_enabled = env_truthy('MOPAC_GPU_HCORE_CHECK')
   end function mozyme_gpu_hcore_check_enabled
+
+  ! MOPAC_DH_DISP_GPU=1 (set by the defaults): PM6-DH/PM7 dispersion energy and
+  ! analytic gradient on the device (src/gpu/dh_dispersion.cu).
+  logical function mozyme_gpu_disp_enabled()
+    implicit none
+    mozyme_gpu_disp_enabled = gpu_allowed() .and. env_truthy('MOPAC_DH_DISP_GPU')
+  end function mozyme_gpu_disp_enabled
+
+  ! MOPAC_GPU_DISP_CHECK=1: compare with the CPU energy / numerical gradient.
+  logical function mozyme_gpu_disp_check_enabled()
+    implicit none
+    mozyme_gpu_disp_check_enabled = env_truthy('MOPAC_GPU_DISP_CHECK')
+  end function mozyme_gpu_disp_check_enabled
 
   ! True when the device kernels handle the pair: both atoms carry 1 or 4 orbitals.
   logical function mozyme_gpu_sp_pair(norb_i, norb_j)

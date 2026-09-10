@@ -23,6 +23,7 @@ subroutine post_scf_corrections(correction, l_grad)
     method_pm6_dh_plus, method_pm6_dh2, method_pm6_d3h4, method_pm6_dh2x, method_pm6_d3h4x, &
     method_pm6_d3, method_pm6_d3_not_h4, method_pm7_hh, method_pm7_minus, method_pm6_org, method_PM8
   use common_arrays_C, only: dxyz
+  use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
   implicit none
   double precision, intent(out) ::  correction
   logical, intent (in) :: l_grad
@@ -30,6 +31,7 @@ subroutine post_scf_corrections(correction, l_grad)
 ! Local variables
 !
   logical ::  prt
+  double precision :: psc_timer
   double precision, external :: & !                  Original references
                           !
   energy_corr_hh_rep,   & ! Rezac J., Hobza P., "Advanced Corrections of Hydrogen Bonding and
@@ -118,8 +120,12 @@ subroutine post_scf_corrections(correction, l_grad)
     correction = correction + Hydrogen_bond_corrections(l_grad, prt)
     correction = correction + energy_corr_hh_rep(l_grad, dxyz)
   else if (method_pm7) then
+    call mozyme_section_timer_begin('post_scf_dispersion', psc_timer)
     correction = correction + PM6_DH_Dispersion(l_grad)
+    call mozyme_section_timer_end('post_scf_dispersion', psc_timer)
+    call mozyme_section_timer_begin('post_scf_hbonds', psc_timer)
     correction = correction + Hydrogen_bond_corrections(l_grad, prt)
+    call mozyme_section_timer_end('post_scf_hbonds', psc_timer)
   end if
   if (index(keywrd, " SILENT") == 0) then
     if (prt .and. P_Hbonds > 0) call print_post_scf_corrections
