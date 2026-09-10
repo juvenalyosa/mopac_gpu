@@ -161,21 +161,19 @@ def last_cycle_sections(text: str) -> dict[str, float]:
             current = {}
     if current:
         blocks.append(current)
-    # Reports are printed inside every SCF and at job end.  Key them by the
-    # (hcore calls, deriv calls) pair: the last block with key (k, k-1) is the
-    # end of SCF k, the last block with key (k, k) is after gradient k.  The
-    # difference between the last block of key n and the last block of key
-    # n-2 is therefore hcore + SCF + gradient of the final geometry step.
-    last_by_key: dict[tuple[int, int], dict[str, tuple[int, float]]] = {}
-    order: list[tuple[int, int]] = []
+    # compfg prints a cumulative report after every gradient, so the blocks
+    # whose (hcore calls, deriv calls) key is (k, k) mark the end of step k.
+    # The last two such blocks differ by exactly one geometry step.
+    step_end: dict[int, dict[str, tuple[int, float]]] = {}
     for b in blocks:
-        key = (b.get("compfg_hcore", (0, 0.0))[0], b.get("compfg_deriv", (0, 0.0))[0])
-        if key not in last_by_key:
-            order.append(key)
-        last_by_key[key] = b
-    if len(order) < 3:
+        h = b.get("compfg_hcore", (0, 0.0))[0]
+        d = b.get("compfg_deriv", (0, 0.0))[0]
+        if h == d and d > 0:
+            step_end[d] = b
+    steps = sorted(step_end)
+    if len(steps) < 2:
         return {}
-    a, b = last_by_key[order[-3]], last_by_key[order[-1]]
+    a, b = step_end[steps[-2]], step_end[steps[-1]]
     out: dict[str, float] = {}
     for name, (_, ms) in b.items():
         prev = a.get(name, (0, 0.0))[1]

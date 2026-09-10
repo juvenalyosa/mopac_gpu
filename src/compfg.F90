@@ -44,7 +44,8 @@
       use reimers_C, only: x, y, z, xz, zcore, beta, gamma, s, betao, ibf, &
       & natm, r, nbf, nbt, nprn, iat, natt, zcorea, betaa, matind, n, &
       & nprin, vnn, dm, ef, dd, ff, cc0, aa, dtmp, nb2, ppg, pg, nsym
-      use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
+      use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end, &
+        mozyme_section_timer_report_all
 !
 !***********************************************************************
 !-----------------------------------------------
@@ -469,6 +470,9 @@
           call mozyme_section_timer_begin('compfg_deriv', compfg_timer)
           call deriv (geo, grad)
           call mozyme_section_timer_end('compfg_deriv', compfg_timer)
+          ! One cumulative section report per geometry step (energy + gradient),
+          ! so consecutive reports differ by exactly one step.
+          if (mozyme) call mozyme_section_timer_report_all()
         end if
         if (moperr) return
         if (times) call timer ('AFTER  DERIV')
