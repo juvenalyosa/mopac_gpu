@@ -31,6 +31,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -285,6 +286,95 @@ __device__ bool pair_energy(const PairGradArgs &a, int nat1, int nat2, int n1, i
   return true;
 }
 
+// Packed diatomic density of pair idx, atom jj first (mirrors dcart.F90).
+__device__ __forceinline__ void load_pair_density(const PairGradArgs &a, int idx, int ii, int jj,
+                                                  int n1, int n2, double *pdi) {
+  int k = a.g.diag_off[jj - 1];
+  int ij = 0;
+  for (int i = 1; i <= n1; ++i) {
+    for (int j = 1; j <= i; ++j) pdi[ij++] = a.p[k++];
+  }
+  ij = n1;
+  k = a.g.pair_off[idx];
+  for (int i = 1; i <= n2; ++i) {
+    ++ij;
+    int l = (ij * (ij - 1)) / 2;
+    for (int j = 1; j <= n1; ++j) pdi[l++] = a.p[k++];
+  }
+  k = a.g.diag_off[ii - 1];
+  ij = n1;
+  for (int i = 1; i <= n2; ++i) {
+    ++ij;
+    int l = (ij * (ij - 1)) / 2 + n1;
+    for (int j = 1; j <= i; ++j) pdi[l++] = a.p[k++];
+  }
+}
+
+// d pairs: the diatomic energy of one pair takes ~1-2 ms of single-thread
+// work (2025 two-electron integrals through the full rotatd path), and there
+// are only ~10^3 such pairs, so the 4 (6 with FORCE) finite-difference probes
+// of a pair are spread over separate threads: probe 0 is the reference
+// energy, probes 1..3 the +chnge displacements of atom ii, and with FORCE
+// probes 4..6 the -chnge/2 references per coordinate.  energies[7*idx+probe].
+constexpr int kProbesPerPair = 7;
+
+__global__ void mozyme_pair_energy_d_kernel(PairGradArgs a, double *energies) {
+  const int gid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int nprobe = a.force ? 6 : 4;
+  const int idx = gid / nprobe;
+  const int probe = gid - idx * nprobe;
+  if (idx >= a.g.npairs) return;
+  int ii, jj;
+  if (pair_class(a.g, idx, &ii, &jj, false) != 2) return;
+  const int n2 = a.g.iorbs[ii - 1];
+  const int n1 = a.g.iorbs[jj - 1];
+  const int nat1 = a.g.nat[jj - 1];
+  const int nat2 = a.g.nat[ii - 1];
+  double pdi[mozyme_pair::kMaxLinearD];
+  load_pair_density(a, idx, ii, jj, n1, n2, pdi);
+  double x1[3], x2[3];
+  for (int k = 0; k < 3; ++k) {
+    x1[k] = coord_at(a.g.coord, jj, k);
+    x2[k] = coord_at(a.g.coord, ii, k);
+  }
+  // Slot layout: 0 = reference, 1..3 = +displacement of atom ii, 4..6 = the
+  // -chnge/2 references of FORCE mode (probe p -> slot p+1 in that mode).
+  const int slot = a.force ? probe + 1 : probe;
+  if (!a.force) {
+    // dcart: the reference is taken with atom jj shifted by chnge/2 in all
+    // three coordinates; slots 1..3 keep that shift and move atom ii by chnge.
+    x1[0] += a.chnge2;
+    x1[1] += a.chnge2;
+    x1[2] += a.chnge2;
+    if (slot >= 1) x2[slot - 1] += a.chnge;
+  } else if (slot <= 3) {
+    x2[slot - 1] += a.chnge2;
+  } else {
+    x2[slot - 4] -= a.chnge2;
+  }
+  double e = 0.0;
+  if (!pair_energy<true>(a, nat1, nat2, n1, n2, x1, x2, pdi, &e)) {
+    atomicAdd(a.g.status, 1);
+    return;
+  }
+  energies[kProbesPerPair * idx + slot] = e;
+}
+
+__global__ void mozyme_pair_deriv_d_kernel(PairGradArgs a, const double *energies) {
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= a.g.npairs) return;
+  int ii, jj;
+  if (pair_class(a.g, idx, &ii, &jj, false) != 2) return;
+  const double *e = energies + kProbesPerPair * idx;
+  for (int k = 0; k < 3; ++k) {
+    const double aa = a.force ? e[4 + k] : e[0];
+    const double ee = e[1 + k];
+    const double deriv = (aa - ee) * a.cnst / a.chnge;
+    atomicAdd(&a.dxyz[3 * (ii - 1) + k], -deriv);
+    atomicAdd(&a.dxyz[3 * (jj - 1) + k], deriv);
+  }
+}
+
 template <bool D>
 __global__ void mozyme_pair_gradient_kernel(PairGradArgs a) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -296,29 +386,8 @@ __global__ void mozyme_pair_gradient_kernel(PairGradArgs a) {
   const int nat1 = a.g.nat[jj - 1];
   const int nat2 = a.g.nat[ii - 1];
 
-  // Packed diatomic density, atom jj first (mirrors dcart.F90).
   double pdi[D ? mozyme_pair::kMaxLinearD : mozyme_pair::kMaxLinear];
-  {
-    int k = a.g.diag_off[jj - 1];
-    int ij = 0;
-    for (int i = 1; i <= n1; ++i) {
-      for (int j = 1; j <= i; ++j) pdi[ij++] = a.p[k++];
-    }
-    ij = n1;
-    k = a.g.pair_off[idx];
-    for (int i = 1; i <= n2; ++i) {
-      ++ij;
-      int l = (ij * (ij - 1)) / 2;
-      for (int j = 1; j <= n1; ++j) pdi[l++] = a.p[k++];
-    }
-    k = a.g.diag_off[ii - 1];
-    ij = n1;
-    for (int i = 1; i <= n2; ++i) {
-      ++ij;
-      int l = (ij * (ij - 1)) / 2 + n1;
-      for (int j = 1; j <= i; ++j) pdi[l++] = a.p[k++];
-    }
-  }
+  load_pair_density(a, idx, ii, jj, n1, n2, pdi);
 
   double x1[3], x2[3];
   for (int k = 0; k < 3; ++k) {
@@ -561,14 +630,16 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
   EventTimer timer;
   GeomBuffers geom;
   PairTables tab;
-  DeviceArray<double> d_p, d_dxyz, d_q;
+  DeviceArray<double> d_p, d_dxyz, d_q, d_energies;
   PairGradArgs a;
   std::memset(&a, 0, sizeof(a));
   const size_t na = static_cast<size_t>(numat);
   if (!geom.upload(numat, npairs, pair_i, pair_j, pair_off, row_start, diag_off, iorbs, nat,
                    coord, a.g) ||
       !tab.upload(*tables) || !d_p.upload(p, static_cast<size_t>(mpack)) ||
-      !d_dxyz.upload(dxyz, 3 * na) || !d_q.alloc(na)) {
+      !d_dxyz.upload(dxyz, 3 * na) || !d_q.alloc(na) ||
+      (d_on_device && !d_energies.alloc(static_cast<size_t>(kProbesPerPair) *
+                                         static_cast<size_t>(std::max(npairs, 1))))) {
     return 2;
   }
   a.g.distance_gate = distance_gate;
@@ -593,8 +664,11 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
     const int grid = (npairs + kPairThreads - 1) / kPairThreads;
     mozyme_pair_gradient_kernel<false><<<grid, kPairThreads>>>(a);
     if (d_on_device) {
-      const int grid_d = (npairs + kPairThreadsD - 1) / kPairThreadsD;
-      mozyme_pair_gradient_kernel<true><<<grid_d, kPairThreadsD, kPairSharedD>>>(a);
+      const int nprobe = force ? 6 : 4;
+      const int work = npairs * nprobe;
+      const int grid_e = (work + kPairThreadsD - 1) / kPairThreadsD;
+      mozyme_pair_energy_d_kernel<<<grid_e, kPairThreadsD, kPairSharedD>>>(a, d_energies.ptr);
+      mozyme_pair_deriv_d_kernel<<<grid, kPairThreads>>>(a, d_energies.ptr);
     }
   }
   if (numat >= 2) {

@@ -103,7 +103,10 @@ subroutine iter_for_MOZYME (ee)
     logical :: resident_tidy_select_lmos
     logical :: resident_tidy_mode_due
     logical :: makvec_gpu_done
-    double precision :: mozyme_timer
+    double precision :: mozyme_timer, iter_pre_timer, iter_post_timer
+    iter_pre_timer = -1.d0
+    iter_post_timer = -1.d0
+    call mozyme_section_timer_begin('iter_pre_boundary', iter_pre_timer)
     add_niter = 0
     resident_strict_required = mozyme_gpu_scf_no_fallback_required()
     resident_final_reorth_done = .false.
@@ -437,6 +440,8 @@ subroutine iter_for_MOZYME (ee)
         ! bookends for full and selected partial-active-space paths.
         ! Unsupported cases fall through to the existing CPU path unless the
         ! strict resident proof contract is active.
+        call mozyme_section_timer_end('iter_pre_boundary', iter_pre_timer)
+        iter_pre_timer = -1.d0
         call mozyme_section_timer_begin('iter_resident_scf_boundary', mozyme_timer)
         resident_scf_complete = .false.
         resident_isitsc_done = .false.
@@ -464,6 +469,7 @@ subroutine iter_for_MOZYME (ee)
             imol = numcal
           end if
           call mozyme_section_timer_end('iter_resident_scf_boundary', mozyme_timer)
+          call mozyme_section_timer_begin('iter_post_boundary', iter_post_timer)
           if (resident_scf_complete) then
             energy_diff = escf - eold
             eold = escf
@@ -1283,6 +1289,7 @@ subroutine iter_for_MOZYME (ee)
       end if
     end if
     nmol = numcal
+    call mozyme_section_timer_end('iter_post_boundary', iter_post_timer)
     call mozyme_section_timer_report_all()
     return
     end subroutine iter_for_MOZYME
