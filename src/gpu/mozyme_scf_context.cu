@@ -2505,6 +2505,7 @@ constexpr int kDiaggWorkIntRounds = 3;    // scheduling rounds of the last diagg
 constexpr int kDiaggWorkIntRotated = 4;   // rotations performed in that sweep
 constexpr int kDiaggWorkIntNbrOverflow = 5;  // atom neighbour list capacity exceeded (diagg1 index off)
 constexpr int kDiaggNbrPerAtomCap = 512;      // neighbour list capacity per atom
+constexpr int kDiaggMaxCandidates = 1024;     // diagg1 candidate list per virtual (shared memory)
 constexpr int kDiaggWorkIntCount = 8;
 constexpr int kDiaggWorkDoubleSumt = 0;
 constexpr int kDiaggWorkDoubleTiny = 1;
@@ -2943,6 +2944,9 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   __shared__ int s_span;
   __shared__ int s_fail;
   __shared__ int s_running;
+  __shared__ int s_cand[kDiaggMaxCandidates];
+  __shared__ int s_ncand;
+  __shared__ int s_cand_overflow;
 
   if (resident_control_terminal(a.resident_control_ints)) return;
   const int i = blockIdx.x + 1;
@@ -3129,36 +3133,58 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
         }
       }
       __syncthreads();
+      // Compact the set bits into an ascending candidate list (word order,
+      // then bit order), so the evaluation below runs one candidate per
+      // thread exactly like the full scan.
+      if (tid == 0) {
+        s_ncand = 0;
+        s_cand_overflow = 0;
+      }
+      __syncthreads();
       for (int chunk = 0; chunk < a.occ_words; chunk += blockDim.x) {
         const int w = chunk + tid;
         unsigned int bits = w < a.occ_words ? s_bits[w] : 0u;
-        int emit_n = 0;
-        int emit_j[32];
-        double emit_v[32];
+        const int mine = __popc(bits);
+        int chunk_total = 0;
+        const int rank = block_exclusive_scan_int(mine, s_warp, &chunk_total);
+        int pos = s_ncand + rank;
         while (bits) {
           const int b = __ffs(bits) - 1;
           bits &= bits - 1;
-          const int j = w * 32 + b + 1;
-          if (j > a.nocc) break;
-          double value = 0.0;
-          if (diagg1_candidate(a, j, i1, i2, flim, cutoff, oldlim, s_sorted, padded,
-                               s_aov, s_off, s_ws, sumt_local, tiny_local, value,
-                               &s_fail)) {
-            emit_j[emit_n] = j;
-            emit_v[emit_n] = value;
-            ++emit_n;
+          if (pos < kDiaggMaxCandidates) {
+            s_cand[pos] = w * 32 + b + 1;
+          } else {
+            s_cand_overflow = 1;
+          }
+          ++pos;
+        }
+        __syncthreads();
+        if (tid == 0) s_ncand += chunk_total;
+        __syncthreads();
+      }
+      const bool cand_ok = (s_cand_overflow == 0);
+      const int ncand = cand_ok ? s_ncand : a.nocc;
+      for (int chunk = 0; chunk < ncand; chunk += blockDim.x) {
+        const int c = chunk + tid;
+        int emit = 0;
+        double value = 0.0;
+        int j = 0;
+        if (c < ncand) {
+          j = cand_ok ? s_cand[c] : c + 1;
+          if (j >= 1 && j <= a.nocc) {
+            emit = diagg1_candidate(a, j, i1, i2, flim, cutoff, oldlim, s_sorted, padded,
+                                    s_aov, s_off, s_ws, sumt_local, tiny_local, value,
+                                    &s_fail) ? 1 : 0;
           }
         }
         int chunk_total = 0;
-        const int rank = block_exclusive_scan_int(emit_n, s_warp, &chunk_total);
-        if (a.fill) {
-          for (int e = 0; e < emit_n; ++e) {
-            const int pos = base + s_running + rank + e;
-            if (pos < a.capacity) {
-              a.ifmo[2 * pos] = i;
-              a.ifmo[2 * pos + 1] = emit_j[e];
-              a.fmo[pos] = emit_v[e];
-            }
+        const int rank = block_exclusive_scan_int(emit, s_warp, &chunk_total);
+        if (a.fill && emit) {
+          const int pos = base + s_running + rank;
+          if (pos < a.capacity) {
+            a.ifmo[2 * pos] = i;
+            a.ifmo[2 * pos + 1] = j;
+            a.fmo[pos] = value;
           }
         }
         __syncthreads();

@@ -1252,7 +1252,7 @@ contains
 
   integer(c_int64_t) function mozyme_resident_signature(iorbs, nat, ifact, wj, wk, &
       kopt, mode, ione, coord, use_nijbo)
-    use molkst_C, only: numat, norbs, mpack, l_feather, trunc_1, trunc_2, method_PM7
+    use molkst_C, only: numat, norbs, mpack, n2elec, l_feather, trunc_1, trunc_2, method_PM7
     use MOZYME_C, only: direct, semidr, nijbo
     use parameters_C, only: am, ad, aq, dd, qq, po, ddp, tore, iod
     use funcon_C, only: ev, a0
@@ -1308,14 +1308,21 @@ contains
     do i = 1, min(norbs, 16)
       call mozyme_mix_int64(h1, h2, int(ifact(i), c_int64_t))
     end do
-    if (use_nijbo) then
-      do j = 1, numat
-        do i = 1, numat
-          call mozyme_mix_int64(h1, h2, int(nijbo(i, j), c_int64_t))
+    call mozyme_mix_int64(h1, h2, int(n2elec, c_int64_t))
+    ! nijbo and the stored integrals are functions of the coordinates (hashed
+    ! above), the cutoffs and the parameters, so hashing them again only costs
+    ! time (numat**2 + n2elec terms: ~0.4 s per SCF for 7000 atoms).  The full
+    ! hash remains available for debugging.
+    if (resident_env_requested('MOPAC_MOZYME_FOCK_FULL_SIGNATURE')) then
+      if (use_nijbo) then
+        do j = 1, numat
+          do i = 1, numat
+            call mozyme_mix_int64(h1, h2, int(nijbo(i, j), c_int64_t))
+          end do
         end do
-      end do
+      end if
+      call mozyme_resident_integral_signature_hash(iorbs, wj, wk, use_nijbo, h1, h2)
     end if
-    call mozyme_resident_integral_signature_hash(iorbs, wj, wk, use_nijbo, h1, h2)
     mozyme_resident_signature = h1 * mozyme_sig_mod2 + h2
   end function mozyme_resident_signature
 

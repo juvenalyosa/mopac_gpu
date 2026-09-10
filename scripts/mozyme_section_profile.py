@@ -59,6 +59,8 @@ MODES: dict[str, dict[str, str | None]] = {
 # keeps the CPU result, hcore keeps the GPU result).
 MODES["resident-gradcheck"] = dict(MODES["resident"], MOPAC_GPU_GRAD_CHECK="1", MOPAC_GPU_HCORE_CHECK="1",
                                    MOPAC_GPU_DISP_CHECK="1")
+# Resident SCF with the diagg1 candidate index disabled (full occupied scan).
+MODES["resident-noindex"] = dict(MODES["resident"], MOPAC_MOZYME_DIAGG1_INDEX="0")
 # Strict proof variant: aborts instead of running any setup/bookend on CPU.
 MODES["resident-strict"] = dict(MODES["resident"], MOPAC_MOZYME_SCF_STRICT_RESIDENT="1")
 # No overrides at all: exercises the production defaults MOPAC applies itself.
