@@ -1643,6 +1643,7 @@ bool resident_stage_timing_enabled(const MozymeScfContext &ctx,
                                    const double *wall_ms);
 bool begin_resident_stage_timing(MozymeScfContext &ctx, bool time_stage,
                                  const char *label);
+void split_resident_stage_profile(MozymeScfContext &ctx, const char *stop_label);
 bool finish_resident_stage_timing(MozymeScfContext &ctx, bool time_stage,
                                   const char *stop_label,
                                   const char *kernels_label,
@@ -2494,6 +2495,8 @@ constexpr int kDiaggRotateWarps = kDiaggRotateThreads / 32;
 constexpr int kDiaggWorkIntError = 0;
 constexpr int kDiaggWorkIntFlag0 = 1;
 constexpr int kDiaggWorkIntFlag1 = 2;
+constexpr int kDiaggWorkIntRounds = 3;    // scheduling rounds of the last diagg2 sweep
+constexpr int kDiaggWorkIntRotated = 4;   // rotations performed in that sweep
 constexpr int kDiaggWorkIntCount = 8;
 constexpr int kDiaggWorkDoubleSumt = 0;
 constexpr int kDiaggWorkDoubleTiny = 1;
@@ -3578,7 +3581,9 @@ mozyme_diagg2_parallel_kernel(DiaggRotateArgs a) {
   double sumb_acc = 0.0;
   int nrej_acc = 0;
   int error = 0;
-  for (int round = 0; round <= nij; ++round) {
+  int rotated = 0;
+  int round = 0;
+  for (; round <= nij; ++round) {
     int *flag = a.work_ints + (round & 1 ? kDiaggWorkIntFlag1
                                          : kDiaggWorkIntFlag0);
     int *next_flag = a.work_ints + (round & 1 ? kDiaggWorkIntFlag0
@@ -3606,6 +3611,7 @@ mozyme_diagg2_parallel_kernel(DiaggRotateArgs a) {
                        s_ioff[warp_in_block], s_jatoms[warp_in_block],
                        s_iatoms[warp_in_block], sumb_acc, nrej_acc, error);
       __syncwarp();
+      ++rotated;
       if (lane == 0) {
         a.pair_state[ij] = kPairStateDone;
         a.vclaim[i - 1] = ULLONG_MAX;
@@ -3615,7 +3621,9 @@ mozyme_diagg2_parallel_kernel(DiaggRotateArgs a) {
     grid.sync();
   }
 
+  if (gtid == 0) a.work_ints[kDiaggWorkIntRounds] = round;
   if (lane == 0) {
+    if (rotated != 0) atomicAdd(a.work_ints + kDiaggWorkIntRotated, rotated);
     if (sumb_acc != 0.0) atomicAdd_double(a.sumb_out, sumb_acc);
     if (nrej_acc != 0) atomicAdd(a.nrej_out, nrej_acc);
     if (error != 0) {
@@ -7531,6 +7539,7 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
     diagg_debug_dump_doubles("resident control scalars",
                              dev.resident_control_scalars.ptr, 8);
 
+    split_resident_stage_profile(ctx, "resident diagg1 stop event");
     mozyme_diagg2_prepare_control_kernel<<<1, 1>>>(
         ctx.config.diagg_mode, ctx.config.diagg_bigeps,
         ctx.config.diagg2_nrejct[0], ctx.config.diagg2_nrejct[1],
@@ -7549,7 +7558,10 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
             "resident diagg rotate kernel")) {
       break;
     }
+    split_resident_stage_profile(ctx, "resident diagg2 stop event");
     diagg_debug_checkpoint("resident diagg2 rotate");
+    diagg_debug_dump_ints("resident diagg2 work ints (err,flag0,flag1,rounds,rotated)",
+                          dev.diagg_work_ints.ptr, kDiaggWorkIntCount);
     diagg_debug_dump_ints("resident diagg ints after diagg2",
                           dev.diagg_ints.ptr, kDiaggIntCount);
     diagg_debug_dump_doubles("resident diagg scalars after diagg2",
@@ -8866,6 +8878,20 @@ void record_resident_stage_profile(MozymeScfContext &ctx,
   cudaEventRecord(stop);
   dev.stage_timings.push_back({stop_label, dev.pending_stage_start, stop});
   dev.pending_stage_start = nullptr;
+}
+
+// Close the running stage under `stop_label` and start a new one immediately,
+// so a stage can be broken into sub-stages in the profile report.
+void split_resident_stage_profile(MozymeScfContext &ctx, const char *stop_label) {
+  if (!resident_stage_profile_enabled()) return;
+  auto &dev = ctx.device;
+  if (!dev.pending_stage_start) return;
+  record_resident_stage_profile(ctx, stop_label);
+  if (cudaEventCreate(&dev.pending_stage_start) == cudaSuccess) {
+    cudaEventRecord(dev.pending_stage_start);
+  } else {
+    dev.pending_stage_start = nullptr;
+  }
 }
 
 void report_resident_stage_profile(MozymeScfContext &ctx) {
