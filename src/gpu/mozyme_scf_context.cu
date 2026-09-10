@@ -1419,6 +1419,10 @@ struct MozymeScfDeviceState {
   DeviceBuffer<unsigned long long> diagg_vclaim;
   DeviceBuffer<unsigned long long> diagg_oclaim;
   DeviceBuffer<int> diagg_olock;  // per-occupied-LMO spin locks (lock-based diagg2)
+  // diagg1 candidate index: atom neighbour CSR (from nijbo) and atom -> occupied
+  // LMOs whose first two atoms are that atom.
+  DeviceBuffer<int> diagg_nbr_count, diagg_nbr_start, diagg_nbr_list;
+  DeviceBuffer<int> diagg_head_count, diagg_head_start, diagg_head_list, diagg_head_cursor;
   DeviceBuffer<int> hb_pair_counts;
   DeviceBuffer<int> hb_pair_offsets;
   DeviceBuffer<int> hb_pair_i;
@@ -2499,6 +2503,8 @@ constexpr int kDiaggWorkIntFlag0 = 1;
 constexpr int kDiaggWorkIntFlag1 = 2;
 constexpr int kDiaggWorkIntRounds = 3;    // scheduling rounds of the last diagg2 sweep
 constexpr int kDiaggWorkIntRotated = 4;   // rotations performed in that sweep
+constexpr int kDiaggWorkIntNbrOverflow = 5;  // atom neighbour list capacity exceeded (diagg1 index off)
+constexpr int kDiaggNbrPerAtomCap = 512;      // neighbour list capacity per atom
 constexpr int kDiaggWorkIntCount = 8;
 constexpr int kDiaggWorkDoubleSumt = 0;
 constexpr int kDiaggWorkDoubleTiny = 1;
@@ -2762,7 +2768,168 @@ struct DiaggVirtualArgs {
   double *work_scalars;
   int *work_ints;
   const int *resident_control_ints;
+  // Candidate index (nullptr / occ_words == 0: scan every occupied LMO).
+  const int *nbr_start, *nbr_list, *head_start, *head_list;
+  int occ_words;
 };
+
+// ---- diagg1 candidate index -------------------------------------------------
+// Block per atom: number of atoms b with nijbo(a, b) >= 0 (self included).
+__global__ void __launch_bounds__(kDiaggBlockThreads)
+mozyme_atom_nbr_count_kernel(int numat, const int *nijbo, int *counts,
+                             const int *resident_control_ints) {
+  __shared__ int s_warp[8];
+  if (resident_control_terminal(resident_control_ints)) return;
+  const int a = blockIdx.x + 1;
+  if (a > numat) return;
+  int local = 0;
+  for (int b = threadIdx.x + 1; b <= numat; b += blockDim.x) {
+    if (mozyme_nijbo_at(nijbo, numat, a, b) >= 0) ++local;
+  }
+  int total = 0;
+  block_exclusive_scan_int(local, s_warp, &total);
+  if (threadIdx.x == 0) counts[a - 1] = total;
+}
+
+// Block per atom: writes the neighbour atoms in ascending order at start[a-1].
+__global__ void __launch_bounds__(kDiaggBlockThreads)
+mozyme_atom_nbr_fill_kernel(int numat, const int *nijbo, const int *start,
+                            int *list, int capacity, int *work_ints,
+                            const int *resident_control_ints) {
+  __shared__ int s_warp[8];
+  __shared__ int s_running;
+  if (resident_control_terminal(resident_control_ints)) return;
+  const int a = blockIdx.x + 1;
+  if (a > numat) return;
+  const int base = start[a - 1];
+  if (threadIdx.x == 0) s_running = 0;
+  __syncthreads();
+  for (int chunk = 0; chunk < numat; chunk += blockDim.x) {
+    const int b = chunk + threadIdx.x + 1;
+    const int flag = (b <= numat && mozyme_nijbo_at(nijbo, numat, a, b) >= 0) ? 1 : 0;
+    int total = 0;
+    const int rank = block_exclusive_scan_int(flag, s_warp, &total);
+    if (flag) {
+      const int pos = base + s_running + rank;
+      if (pos < capacity) {
+        list[pos] = b;
+      } else {
+        atomicExch(work_ints + kDiaggWorkIntNbrOverflow, 1);
+      }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) s_running += total;
+    __syncthreads();
+  }
+}
+
+// Thread per occupied LMO: histogram of its first two atoms.
+__global__ void mozyme_occ_head_count_kernel(int nocc, int numat, int icocc_dim,
+                                             const int *nncf, const int *ncf,
+                                             const int *icocc, int *counts,
+                                             int *work_ints,
+                                             const int *resident_control_ints) {
+  if (resident_control_terminal(resident_control_ints)) return;
+  const int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  if (j > nocc) return;
+  const int jbase = nncf[j - 1];
+  const int n = ncf[j - 1];
+  if (jbase < 0 || n <= 0 || jbase + n > icocc_dim) {
+    atomicExch(work_ints + kDiaggWorkIntError, 1);
+    return;
+  }
+  const int j1 = icocc[jbase];
+  const int j2 = n > 1 ? icocc[jbase + 1] : j1;
+  if (j1 < 1 || j1 > numat || j2 < 1 || j2 > numat) {
+    atomicExch(work_ints + kDiaggWorkIntError, 1);
+    return;
+  }
+  atomicAdd(counts + j1 - 1, 1);
+  if (j2 != j1) atomicAdd(counts + j2 - 1, 1);
+}
+
+__global__ void mozyme_occ_head_fill_kernel(int nocc, int numat, int icocc_dim,
+                                            const int *nncf, const int *ncf,
+                                            const int *icocc, const int *start,
+                                            int *cursor, int *list, int capacity,
+                                            const int *resident_control_ints) {
+  if (resident_control_terminal(resident_control_ints)) return;
+  const int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  if (j > nocc) return;
+  const int jbase = nncf[j - 1];
+  const int n = ncf[j - 1];
+  if (jbase < 0 || n <= 0 || jbase + n > icocc_dim) return;
+  const int j1 = icocc[jbase];
+  const int j2 = n > 1 ? icocc[jbase + 1] : j1;
+  if (j1 < 1 || j1 > numat || j2 < 1 || j2 > numat) return;
+  int pos = start[j1 - 1] + atomicAdd(cursor + j1 - 1, 1);
+  if (pos < capacity) list[pos] = j;
+  if (j2 != j1) {
+    pos = start[j2 - 1] + atomicAdd(cursor + j2 - 1, 1);
+    if (pos < capacity) list[pos] = j;
+  }
+}
+
+// Occupied candidate j of virtual i (even mode): the CPU prescreen on the
+// Fock elements between the first two atoms of each LMO, then the full
+// overlap sum over the shared atoms.  Returns true when the pair is emitted.
+__device__ __forceinline__ bool diagg1_candidate(const DiaggVirtualArgs &a, int j,
+                                                 int i1, int i2, double flim,
+                                                 double cutoff, double oldlim,
+                                                 const unsigned long long *s_sorted,
+                                                 int padded, const double *s_aov,
+                                                 const int *s_off, const double *s_ws,
+                                                 double &sumt_local, double &tiny_local,
+                                                 double &value, int *s_fail) {
+  const int jbase = a.nncf[j - 1];
+  const int ncf_j = a.ncf[j - 1];
+  if (jbase < 0 || ncf_j <= 0 || jbase + ncf_j > a.icocc_dim) {
+    *s_fail = 1;
+    return false;
+  }
+  const int j1 = a.icocc[jbase];
+  const int j2 = ncf_j > 1 ? a.icocc[jbase + 1] : j1;
+  const int i1j1 = mozyme_nijbo_at(a.nijbo, a.numat, i1, j1);
+  const int i1j2 = mozyme_nijbo_at(a.nijbo, a.numat, i1, j2);
+  const int i2j1 = mozyme_nijbo_at(a.nijbo, a.numat, i2, j1);
+  const int i2j2 = mozyme_nijbo_at(a.nijbo, a.numat, i2, j2);
+  if (i1j1 < 0 && i1j2 < 0 && i2j1 < 0 && i2j2 < 0) return false;
+  double pre = 0.0;
+  if (i1j1 >= 0) pre = fabs(a.fao[i1j1]);
+  if (i1j2 >= 0) pre += fabs(a.fao[i1j2]);
+  if (i2j1 >= 0) pre += fabs(a.fao[i2j1]);
+  if (i2j2 >= 0) pre += fabs(a.fao[i2j2]);
+  if (pre < flim) return false;
+  const int loopj = a.ncocc[j - 1];
+  bool lij = false;
+  double sum = 0.0;
+  int kl = 0;
+  for (int kk = 0; kk < ncf_j; ++kk) {
+    const int k1 = a.icocc[jbase + kk];
+    const int norb = a.iorbs[k1 - 1];
+    const int e = find_lmo_entry(s_sorted, padded, k1);
+    if (e < 0 || a.aocc[jbase + kk] * s_aov[e] < cutoff) {
+      kl += norb;
+      continue;
+    }
+    lij = true;
+    const int off = s_off[e];
+    const int cbase = loopj + kl;
+    if (cbase < 0 || cbase + norb > a.cocc_dim) {
+      *s_fail = 1;
+      return false;
+    }
+    for (int k = 0; k < norb; ++k) sum += s_ws[off + k] * a.cocc[cbase + k];
+    kl += norb;
+  }
+  sumt_local += fabs(sum);
+  tiny_local = fmax(tiny_local, fabs(sum));
+  if (lij && fabs(sum) > oldlim) {
+    value = sum;
+    return true;
+  }
+  return false;
+}
 
 __global__ void __launch_bounds__(kDiaggBlockThreads)
 mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
@@ -2933,62 +3100,80 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
     if (tid == 0) s_running = 0;
     __syncthreads();
 
+    const bool use_index = a.nbr_start && a.nbr_list && a.head_start &&
+                           a.head_list && a.occ_words > 0 &&
+                           a.work_ints[kDiaggWorkIntNbrOverflow] == 0;
+    if (use_index) {
+      // Candidate set = occupied LMOs whose first two atoms lie in the
+      // nijbo neighbourhood of the virtual's first two atoms (exactly the
+      // pairs that pass the CPU prescreen), collected in a shared bitmap and
+      // visited in ascending j, so the emitted order matches the full scan.
+      extern __shared__ unsigned int s_bits[];
+      for (int w = tid; w < a.occ_words; w += blockDim.x) s_bits[w] = 0u;
+      __syncthreads();
+      const int nq = (i2 != i1) ? 2 : 1;
+      for (int q = 0; q < nq; ++q) {
+        const int at = q ? i2 : i1;
+        const int nb0 = a.nbr_start[at - 1];
+        const int nb1 = a.nbr_start[at];
+        for (int idx = nb0 + tid; idx < nb1; idx += blockDim.x) {
+          const int b = a.nbr_list[idx];
+          const int h0 = a.head_start[b - 1];
+          const int h1 = a.head_start[b];
+          for (int h = h0; h < h1; ++h) {
+            const int j = a.head_list[h];
+            if (j >= 1 && j <= a.nocc) {
+              atomicOr(&s_bits[(j - 1) >> 5], 1u << ((j - 1) & 31));
+            }
+          }
+        }
+      }
+      __syncthreads();
+      for (int chunk = 0; chunk < a.occ_words; chunk += blockDim.x) {
+        const int w = chunk + tid;
+        unsigned int bits = w < a.occ_words ? s_bits[w] : 0u;
+        int emit_n = 0;
+        int emit_j[32];
+        double emit_v[32];
+        while (bits) {
+          const int b = __ffs(bits) - 1;
+          bits &= bits - 1;
+          const int j = w * 32 + b + 1;
+          if (j > a.nocc) break;
+          double value = 0.0;
+          if (diagg1_candidate(a, j, i1, i2, flim, cutoff, oldlim, s_sorted, padded,
+                               s_aov, s_off, s_ws, sumt_local, tiny_local, value,
+                               &s_fail)) {
+            emit_j[emit_n] = j;
+            emit_v[emit_n] = value;
+            ++emit_n;
+          }
+        }
+        int chunk_total = 0;
+        const int rank = block_exclusive_scan_int(emit_n, s_warp, &chunk_total);
+        if (a.fill) {
+          for (int e = 0; e < emit_n; ++e) {
+            const int pos = base + s_running + rank + e;
+            if (pos < a.capacity) {
+              a.ifmo[2 * pos] = i;
+              a.ifmo[2 * pos + 1] = emit_j[e];
+              a.fmo[pos] = emit_v[e];
+            }
+          }
+        }
+        __syncthreads();
+        if (tid == 0) s_running += chunk_total;
+        __syncthreads();
+      }
+    } else {
     for (int chunk = 0; chunk < a.nocc; chunk += blockDim.x) {
       const int j = chunk + tid + 1;
       int emit = 0;
       double value = 0.0;
       if (j <= a.nocc) {
-        const int jbase = a.nncf[j - 1];
-        const int ncf_j = a.ncf[j - 1];
-        if (jbase < 0 || ncf_j <= 0 || jbase + ncf_j > a.icocc_dim) {
-          s_fail = 1;
-        } else {
-          const int j1 = a.icocc[jbase];
-          const int j2 = ncf_j > 1 ? a.icocc[jbase + 1] : j1;
-          const int i1j1 = mozyme_nijbo_at(a.nijbo, a.numat, i1, j1);
-          const int i1j2 = mozyme_nijbo_at(a.nijbo, a.numat, i1, j2);
-          const int i2j1 = mozyme_nijbo_at(a.nijbo, a.numat, i2, j1);
-          const int i2j2 = mozyme_nijbo_at(a.nijbo, a.numat, i2, j2);
-          if (i1j1 >= 0 || i1j2 >= 0 || i2j1 >= 0 || i2j2 >= 0) {
-            double pre = 0.0;
-            if (i1j1 >= 0) pre = fabs(a.fao[i1j1]);
-            if (i1j2 >= 0) pre += fabs(a.fao[i1j2]);
-            if (i2j1 >= 0) pre += fabs(a.fao[i2j1]);
-            if (i2j2 >= 0) pre += fabs(a.fao[i2j2]);
-            if (pre >= flim) {
-              const int loopj = a.ncocc[j - 1];
-              bool lij = false;
-              double sum = 0.0;
-              int kl = 0;
-              for (int kk = 0; kk < ncf_j; ++kk) {
-                const int k1 = a.icocc[jbase + kk];
-                const int norb = a.iorbs[k1 - 1];
-                const int e = find_lmo_entry(s_sorted, padded, k1);
-                if (e < 0 || a.aocc[jbase + kk] * s_aov[e] < cutoff) {
-                  kl += norb;
-                  continue;
-                }
-                lij = true;
-                const int off = s_off[e];
-                const int cbase = loopj + kl;
-                if (cbase < 0 || cbase + norb > a.cocc_dim) {
-                  s_fail = 1;
-                  break;
-                }
-                for (int k = 0; k < norb; ++k) {
-                  sum += s_ws[off + k] * a.cocc[cbase + k];
-                }
-                kl += norb;
-              }
-              sumt_local += fabs(sum);
-              tiny_local = fmax(tiny_local, fabs(sum));
-              if (lij && fabs(sum) > oldlim) {
-                emit = 1;
-                value = sum;
-              }
-            }
-          }
-        }
+        emit = diagg1_candidate(a, j, i1, i2, flim, cutoff, oldlim, s_sorted, padded,
+                                s_aov, s_off, s_ws, sumt_local, tiny_local, value,
+                                &s_fail) ? 1 : 0;
       }
       int chunk_total = 0;
       const int rank = block_exclusive_scan_int(emit, s_warp, &chunk_total);
@@ -3003,6 +3188,7 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
       __syncthreads();
       if (tid == 0) s_running += chunk_total;
       __syncthreads();
+    }
     }
     if (tid == 0) {
       if (a.fill) {
@@ -7034,6 +7220,13 @@ bool upload_registered_state(MozymeScfContext &ctx) {
     if (!dev.diagg_vclaim.resize(nvir_count)) return false;
     if (!dev.diagg_oclaim.resize(nocc_count)) return false;
     if (!dev.diagg_olock.resize(nocc_count)) return false;
+    if (!dev.diagg_nbr_count.resize(numat_count)) return false;
+    if (!dev.diagg_nbr_start.resize(numat_count + 1)) return false;
+    if (!dev.diagg_nbr_list.resize(numat_count * static_cast<std::size_t>(kDiaggNbrPerAtomCap))) return false;
+    if (!dev.diagg_head_count.resize(numat_count)) return false;
+    if (!dev.diagg_head_start.resize(numat_count + 1)) return false;
+    if (!dev.diagg_head_list.resize(2 * nocc_count)) return false;
+    if (!dev.diagg_head_cursor.resize(numat_count)) return false;
     if (!dev.hb_pair_counts.resize(numat_count)) return false;
     if (!dev.hb_pair_offsets.resize(numat_count + 1)) return false;
     if (!dev.hb_pair_i.resize(hb_capacity)) return false;
@@ -7475,6 +7668,43 @@ bool compute_check_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
   return ok;
 }
 
+// diagg1 candidate index (MOPAC_MOZYME_DIAGG1_INDEX=0 restores the full scan).
+bool diagg1_index_enabled() {
+  static const bool disabled = []() {
+    const char *v = std::getenv("MOPAC_MOZYME_DIAGG1_INDEX");
+    return v && (*v == '0' || *v == 'n' || *v == 'N' || *v == 'f' || *v == 'F');
+  }();
+  return !disabled;
+}
+
+// Dynamic shared memory for the occupied-LMO bitmap; raises the kernel's
+// opt-in limit once when the static + dynamic total exceeds 48 KB.
+bool diagg1_dynamic_shared_ok(int occ_words, std::size_t *bytes_out) {
+  static int max_optin = -1;
+  static std::size_t attr_set_bytes = 0;
+  const std::size_t bytes = sizeof(unsigned int) * static_cast<std::size_t>(std::max(occ_words, 1));
+  if (max_optin < 0) {
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess ||
+        cudaDeviceGetAttribute(&max_optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device) != cudaSuccess) {
+      max_optin = 48 * 1024;
+    }
+  }
+  cudaFuncAttributes attr{};
+  if (cudaFuncGetAttributes(&attr, mozyme_diagg1_virtual_kernel) != cudaSuccess) return false;
+  if (attr.sharedSizeBytes + bytes > static_cast<std::size_t>(max_optin)) return false;
+  if (attr.sharedSizeBytes + bytes > 48u * 1024u && bytes > attr_set_bytes) {
+    if (cudaFuncSetAttribute(mozyme_diagg1_virtual_kernel,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             static_cast<int>(bytes)) != cudaSuccess) {
+      return false;
+    }
+    attr_set_bytes = bytes;
+  }
+  *bytes_out = bytes;
+  return true;
+}
+
 bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
   if (!wall_ms || !ctx.device.uploaded || !ctx.state.use_nijbo ||
       !ctx.device.eimp_p.ptr) {
@@ -7597,13 +7827,52 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
     va.work_ints = dev.diagg_work_ints.ptr;
     va.resident_control_ints = dev.resident_control_ints.ptr;
 
+    // Candidate index for the even-mode search (see diagg1_candidate).
+    va.nbr_start = nullptr;
+    va.nbr_list = nullptr;
+    va.head_start = nullptr;
+    va.head_list = nullptr;
+    va.occ_words = 0;
+    std::size_t dyn_shared = 0;
+    if (diagg1_index_enabled() && dev.diagg_nbr_list.ptr && dev.diagg_head_list.ptr &&
+        diagg1_dynamic_shared_ok((nocc + 31) / 32, &dyn_shared)) {
+      const int nbr_cap = static_cast<int>(dev.diagg_nbr_list.count);
+      const int head_cap = static_cast<int>(dev.diagg_head_list.count);
+      cudaMemsetAsync(dev.diagg_head_count.ptr, 0, sizeof(int) * static_cast<std::size_t>(numat));
+      cudaMemsetAsync(dev.diagg_head_cursor.ptr, 0, sizeof(int) * static_cast<std::size_t>(numat));
+      mozyme_atom_nbr_count_kernel<<<numat, kDiaggBlockThreads>>>(
+          numat, dev.nijbo.ptr, dev.diagg_nbr_count.ptr, dev.resident_control_ints.ptr);
+      mozyme_exclusive_scan_kernel<<<1, 1024>>>(
+          numat, nullptr, dev.diagg_nbr_count.ptr, dev.diagg_nbr_start.ptr,
+          dev.resident_control_ints.ptr);
+      mozyme_atom_nbr_fill_kernel<<<numat, kDiaggBlockThreads>>>(
+          numat, dev.nijbo.ptr, dev.diagg_nbr_start.ptr, dev.diagg_nbr_list.ptr, nbr_cap,
+          dev.diagg_work_ints.ptr, dev.resident_control_ints.ptr);
+      const int occ_blocks = (nocc + kDiaggBlockThreads - 1) / kDiaggBlockThreads;
+      mozyme_occ_head_count_kernel<<<occ_blocks, kDiaggBlockThreads>>>(
+          nocc, numat, ctx.state.icocc_dim, dev.nncf.ptr, dev.ncf.ptr, dev.icocc.ptr,
+          dev.diagg_head_count.ptr, dev.diagg_work_ints.ptr, dev.resident_control_ints.ptr);
+      mozyme_exclusive_scan_kernel<<<1, 1024>>>(
+          numat, nullptr, dev.diagg_head_count.ptr, dev.diagg_head_start.ptr,
+          dev.resident_control_ints.ptr);
+      mozyme_occ_head_fill_kernel<<<occ_blocks, kDiaggBlockThreads>>>(
+          nocc, numat, ctx.state.icocc_dim, dev.nncf.ptr, dev.ncf.ptr, dev.icocc.ptr,
+          dev.diagg_head_start.ptr, dev.diagg_head_cursor.ptr, dev.diagg_head_list.ptr,
+          head_cap, dev.resident_control_ints.ptr);
+      if (!cuda_context_ok(cudaGetLastError(), "resident diagg1 index kernels")) break;
+      va.nbr_start = dev.diagg_nbr_start.ptr;
+      va.nbr_list = dev.diagg_nbr_list.ptr;
+      va.head_start = dev.diagg_head_start.ptr;
+      va.head_list = dev.diagg_head_list.ptr;
+      va.occ_words = (nocc + 31) / 32;
+    }
     va.fill = 0;
-    mozyme_diagg1_virtual_kernel<<<nvir, kDiaggBlockThreads>>>(va);
+    mozyme_diagg1_virtual_kernel<<<nvir, kDiaggBlockThreads, dyn_shared>>>(va);
     mozyme_exclusive_scan_kernel<<<1, 1024>>>(
         nvir, nullptr, dev.diagg_counts.ptr, dev.diagg_offsets.ptr,
         dev.resident_control_ints.ptr);
     va.fill = 1;
-    mozyme_diagg1_virtual_kernel<<<nvir, kDiaggBlockThreads>>>(va);
+    mozyme_diagg1_virtual_kernel<<<nvir, kDiaggBlockThreads, dyn_shared>>>(va);
     if (!cuda_context_ok(cudaGetLastError(),
                          "resident diagg1 virtual kernels")) break;
     diagg_debug_checkpoint("resident diagg1 virtual passes");
