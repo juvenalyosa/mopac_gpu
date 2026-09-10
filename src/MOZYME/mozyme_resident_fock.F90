@@ -210,9 +210,11 @@ contains
   logical function resident_strict_requested()
     implicit none
 
+    ! MOPAC_MOZYME_SCF_GPU is a production default and must not make the
+    ! CPU-driven Fock path abort (it is taken after the resident loop hands
+    ! back to the CPU, e.g. when ITRY is exhausted or PLS restarts).
     resident_strict_requested = resident_env_requested( &
       'MOPAC_MOZYME_SCF_STRICT_RESIDENT') .or. &
-      resident_env_requested('MOPAC_MOZYME_SCF_GPU') .or. &
       resident_env_requested('MOPAC_MOZYME_GPU_STRICT') .or. &
       resident_env_requested('MOPAC_MOZYME_FULL_SCF_GPU')
   end function resident_strict_requested

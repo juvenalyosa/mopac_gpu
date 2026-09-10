@@ -70,9 +70,10 @@ contains
   logical function mozyme_gpu_scf_strict_resident()
     implicit none
 
+    ! MOPAC_MOZYME_SCF_GPU only requests the resident loop (it is a production
+    ! default); strictness (abort instead of CPU fallback) needs an explicit flag.
     mozyme_gpu_scf_strict_resident = &
       env_is_one('MOPAC_MOZYME_SCF_STRICT_RESIDENT') .or. &
-      env_is_one('MOPAC_MOZYME_SCF_GPU') .or. &
       env_is_one('MOPAC_MOZYME_GPU_STRICT') .or. &
       env_is_one('MOPAC_MOZYME_FULL_SCF_GPU')
   end function mozyme_gpu_scf_strict_resident
