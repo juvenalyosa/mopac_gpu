@@ -43,7 +43,7 @@ double precision function PM6_DH_Dispersion(l_grad)
   integer(c_int) :: rc
   real(c_double) :: e_c, ms_c
   double precision, allocatable :: dxyz_ref(:)
-  double precision :: timer, gmax
+  double precision :: timer, gmax, e_ref
   logical :: check
   !
   !  GPU path (non-periodic): energy and analytic gradient on the device.
@@ -66,14 +66,14 @@ double precision function PM6_DH_Dispersion(l_grad)
     deallocate(nat_c, nbonds_c)
     if (rc == 0) then
       if (check) then
-        sum2 = PM6_DH_Disp(0, numat)
+        e_ref = PM6_DH_Disp(0, numat)
         gmax = 0.d0
         if (l_grad) then
           call cpu_fd_gradient(dxyz_ref)
           gmax = maxval(abs(dxyz(1:3*numat) - dxyz_ref(1:3*numat)))
         end if
         write (iw, '(1x,a,f14.6,a,f14.6,a,es12.4,a,es12.4,a,f10.3)') '[MOZYME GPU disp] check E_gpu=', e_c, &
-          ' E_cpu=', sum2, ' dE=', e_c - sum2, ' max_abs_dgrad=', gmax, ' ms=', ms_c
+          ' E_cpu=', e_ref, ' dE=', e_c - e_ref, ' max_abs_dgrad=', gmax, ' ms=', ms_c
         call flush(iw)
       end if
       if (allocated(dxyz_ref)) deallocate(dxyz_ref)
