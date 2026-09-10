@@ -34,7 +34,7 @@ subroutine hcore_for_MOZYME ()
   ! below skips them when gpu_block_pairs is true and the device adds them
   ! afterwards.  gpu_check keeps a CPU reference for those pairs and reports
   ! the difference.
-  logical :: gpu_block_pairs, gpu_check, gpu_verbose
+  logical :: gpu_block_pairs, gpu_point_pairs, gpu_check, gpu_verbose
   double precision, allocatable :: h_ref(:)
   double precision :: gpu_enuc, gpu_ms, enuc_ref, h_diff
   integer :: gpu_code, gpu_pairs, gpu_d_pairs, env_stat
@@ -136,6 +136,9 @@ subroutine hcore_for_MOZYME ()
     h(1:mpack) = 0.d0
   end if
   gpu_block_pairs = (id == 0 .and. mode == 0 .and. .not. fldon .and. mozyme_gpu_hcore_enabled())
+  ! Point/dipole pairs (outer1/outer2) store no W in direct mode, so they can
+  ! go to the device too: only e1b/e2a and enuc come back.
+  gpu_point_pairs = gpu_block_pairs .and. semidr
   gpu_check = gpu_block_pairs .and. mozyme_gpu_hcore_check_enabled()
   call mozyme_section_timer_begin('hcore_pair_loop', hcore_timer)
   do i = 1, numat
@@ -238,7 +241,10 @@ subroutine hcore_for_MOZYME ()
             kr = kr + (natorb(ni)*(natorb(ni)+1))/2 * (natorb(nj)*(natorb(nj)+1))/2
           end if
         else if (ijbo(i, j) ==-2) then
-          if (calcij) then
+          if (calcij .and. gpu_point_pairs) then
+            e1b(1:45) = 0.d0
+            e2a(1:45) = 0.d0
+          else if (calcij) then
             call outer2 (ni, nj, coord(1, i), coord(1, j), w(kr), kr, e1b, e2a, enuc, id, semidr)
             enuclr = enuclr + enuc
           else if ( .not. semidr) then
@@ -256,6 +262,9 @@ subroutine hcore_for_MOZYME ()
               end if
             end if
           end if
+        else if (calcij .and. gpu_point_pairs) then
+          e1b(1:45) = 0.d0
+          e2a(1:45) = 0.d0
         else if (calcij) then
           call outer1 (ni, nj, coord(1, i), coord(1, j), w(kr), kr, e1b, e2a, enuc, 0, semidr)
           enuclr = enuclr + enuc
@@ -424,7 +433,7 @@ subroutine hcore_for_MOZYME ()
       call cpu_sp_block_pairs(h_ref, enuc_ref)
     end if
     call mozyme_section_timer_begin('hcore_gpu_pairs', hcore_timer)
-    call mozyme_gpu_hcore_run(numat, coord, h, gpu_enuc, gpu_code, gpu_ms, gpu_pairs, gpu_d_pairs)
+    call mozyme_gpu_hcore_run(numat, coord, h, gpu_enuc, gpu_point_pairs, gpu_code, gpu_ms, gpu_pairs, gpu_d_pairs)
     call mozyme_section_timer_end('hcore_gpu_pairs', hcore_timer)
     if (gpu_code == 0) then
       enuclr = enuclr + gpu_enuc
@@ -504,10 +513,28 @@ contains
     do ia = 2, numat
       na = nat(ia)
       do ja = 1, ia - 1
-        if (.not. mozyme_gpu_device_pair(iorbs(ia), iorbs(ja))) cycle
         ka = ijbo(ia, ja)
-        if (ka < 0) cycle
         nb = nat(ja)
+        if (ka < 0) then
+          if (.not. gpu_point_pairs) cycle
+          kdum = 1
+          if (ka == -2) then
+            call outer2 (na, nb, coord(1, ia), coord(1, ja), w_l, kdum, e1b_l, e2a_l, enuc_l, id, semidr)
+          else
+            call outer1 (na, nb, coord(1, ia), coord(1, ja), w_l, kdum, e1b_l, e2a_l, enuc_l, 0, semidr)
+          end if
+          enuc_sum = enuc_sum + enuc_l
+          ka = ijbo(ia, ia)
+          do i1 = 1, (iorbs(ia)*(iorbs(ia)+1))/2
+            hh(ka + i1) = hh(ka + i1) + e1b_l(i1)
+          end do
+          ka = ijbo(ja, ja)
+          do i1 = 1, (iorbs(ja)*(iorbs(ja)+1))/2
+            hh(ka + i1) = hh(ka + i1) + e2a_l(i1)
+          end do
+          cycle
+        end if
+        if (.not. mozyme_gpu_device_pair(iorbs(ia), iorbs(ja))) cycle
         call h1elec (na, nb, coord(1, ia), coord(1, ja), di_l)
         do i1 = 1, iorbs(ia)
           do j1 = 1, iorbs(ja)

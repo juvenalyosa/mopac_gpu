@@ -72,12 +72,13 @@ module mozyme_gpu_gradient
 
     function mopac_cuda_mozyme_hcore_pairs(numat_c, mpack_c, npairs_c, pair_i_c, pair_j_c, &
         pair_off_c, row_start_c, diag_off_c, iorbs_c, nat_c, coord_c, distance_gate_c, &
-        d_on_device_c, cutof2_c, tables_c, h_c, enuc_c, ms_c, d_pairs_c) &
+        d_on_device_c, cutof2_c, tables_c, nijbo_c, have_nijbo_c, point_c, h_c, enuc_c, ms_c, d_pairs_c) &
         bind(C, name='mopac_cuda_mozyme_hcore_pairs') result(rc)
       import :: c_int, c_double, mozyme_pair_tables_c
       integer(c_int), value :: numat_c, mpack_c, npairs_c, distance_gate_c, d_on_device_c
+      integer(c_int), value :: have_nijbo_c, point_c
       integer(c_int) :: pair_i_c(*), pair_j_c(*), pair_off_c(*), row_start_c(*), diag_off_c(*)
-      integer(c_int) :: iorbs_c(*), nat_c(*)
+      integer(c_int) :: iorbs_c(*), nat_c(*), nijbo_c(*)
       real(c_double) :: coord_c(*), h_c(*)
       real(c_double), value :: cutof2_c
       type(mozyme_pair_tables_c) :: tables_c
@@ -227,24 +228,25 @@ contains
 
   ! Adds the block-pair (ijbo >= 0, sp-sp) contributions of hcore_for_MOZYME on
   ! to h(mpack) and returns their core-core repulsion in enuc_add.  Codes as above.
-  subroutine mozyme_gpu_hcore_run(numat_in, coord, h, enuc_add, code, ms, npairs_out, d_pairs_out)
+  subroutine mozyme_gpu_hcore_run(numat_in, coord, h, enuc_add, point_pairs, code, ms, npairs_out, d_pairs_out)
     implicit none
     integer, intent(in) :: numat_in
     double precision, intent(in) :: coord(3, numat_in)
     double precision, intent(inout) :: h(*)
     double precision, intent(out) :: enuc_add
+    logical, intent(in) :: point_pairs
     integer, intent(out) :: code
     double precision, intent(out) :: ms
     integer, intent(out) :: npairs_out, d_pairs_out
 #ifdef GPU
-    call mozyme_gpu_hcore_run_gpu(numat_in, coord, h, enuc_add, code, ms, npairs_out, d_pairs_out)
+    call mozyme_gpu_hcore_run_gpu(numat_in, coord, h, enuc_add, point_pairs, code, ms, npairs_out, d_pairs_out)
 #else
     code = 1
     ms = 0.d0
     enuc_add = 0.d0
     npairs_out = 0
     d_pairs_out = 0
-    if (numat_in < 0) code = 1
+    if (numat_in < 0 .or. point_pairs) code = 1
     if (coord(1, 1) /= coord(1, 1)) h(1) = h(1)
 #endif
   end subroutine mozyme_gpu_hcore_run
@@ -451,20 +453,22 @@ contains
     d_pairs_out = int(d_pairs_c)
   end subroutine mozyme_gpu_gradient_run_gpu
 
-  subroutine mozyme_gpu_hcore_run_gpu(numat_in, coord, h, enuc_add, code, ms, npairs_out, d_pairs_out)
+  subroutine mozyme_gpu_hcore_run_gpu(numat_in, coord, h, enuc_add, point_pairs, code, ms, npairs_out, d_pairs_out)
     use molkst_C, only : mpack, id, numat
-    use MOZYME_C, only : mode
+    use MOZYME_C, only : mode, lijbo, nijbo
     use overlaps_C, only : cutof2
     implicit none
     integer, intent(in) :: numat_in
     double precision, intent(in) :: coord(3, numat_in)
     double precision, intent(inout) :: h(*)
     double precision, intent(out) :: enuc_add
+    logical, intent(in) :: point_pairs
     integer, intent(out) :: code
     double precision, intent(out) :: ms
     integer, intent(out) :: npairs_out, d_pairs_out
     integer(c_int), allocatable :: pair_i(:), pair_j(:), pair_off(:), row_start(:), diag_off(:)
     integer(c_int), allocatable :: iorbs_c(:), nat_c(:)
+    integer(c_int) :: nijbo_dummy(1)
     type(mozyme_pair_tables_c) :: tables
     integer(c_int) :: d_pairs_c, rc
     real(c_double) :: ms_c, enuc_c
@@ -484,10 +488,19 @@ contains
     d_pairs_c = 0_c_int
     ms_c = 0.d0
     enuc_c = 0.d0
-    rc = mopac_cuda_mozyme_hcore_pairs(int(numat, kind=c_int), int(mpack, kind=c_int), &
-        int(npairs, kind=c_int), pair_i, pair_j, pair_off, row_start, diag_off, iorbs_c, nat_c, &
-        coord, int(distance_gate, kind=c_int), merge(1_c_int, 0_c_int, mozyme_gpu_d_pairs_enabled()), &
-        real(cutof2, kind=c_double), tables, h, enuc_c, ms_c, d_pairs_c)
+    nijbo_dummy = 0_c_int
+    if (point_pairs .and. lijbo .and. allocated(nijbo)) then
+      rc = mopac_cuda_mozyme_hcore_pairs(int(numat, kind=c_int), int(mpack, kind=c_int), &
+          int(npairs, kind=c_int), pair_i, pair_j, pair_off, row_start, diag_off, iorbs_c, nat_c, &
+          coord, int(distance_gate, kind=c_int), merge(1_c_int, 0_c_int, mozyme_gpu_d_pairs_enabled()), &
+          real(cutof2, kind=c_double), tables, nijbo, 1_c_int, 1_c_int, h, enuc_c, ms_c, d_pairs_c)
+    else
+      rc = mopac_cuda_mozyme_hcore_pairs(int(numat, kind=c_int), int(mpack, kind=c_int), &
+          int(npairs, kind=c_int), pair_i, pair_j, pair_off, row_start, diag_off, iorbs_c, nat_c, &
+          coord, int(distance_gate, kind=c_int), merge(1_c_int, 0_c_int, mozyme_gpu_d_pairs_enabled()), &
+          real(cutof2, kind=c_double), tables, nijbo_dummy, 0_c_int, merge(1_c_int, 0_c_int, point_pairs), &
+          h, enuc_c, ms_c, d_pairs_c)
+    end if
     code = int(rc)
     ms = ms_c
     enuc_add = enuc_c

@@ -213,6 +213,7 @@ struct HcoreArgs {
   PairGeom g;
   MozymePairOverlapParams ovl;
   MozymePairCoreParams core;
+  const int *nijbo;      // numat x numat block index (lijbo route), nullptr on the compact route
   double *h;             // packed MOZYME one-electron matrix (mpack), accumulated
   double *enuc;          // accumulated core-core repulsion
 };
@@ -532,6 +533,136 @@ __global__ void mozyme_hcore_pairs_kernel(HcoreArgs a) {
   if (threadIdx.x == 0 && red[0] != 0.0) atomicAdd(a.enuc, red[0]);
 }
 
+// hcore_for_MOZYME point pairs (ijbo = -2: outer2, ijbo = -1: outer1) in
+// direct mode: only the diagonal-block core attraction terms e1b/e2a and the
+// core-core repulsion (no W storage).  One thread per (ii, jj < ii).
+__global__ void mozyme_hcore_point_kernel(HcoreArgs a) {
+  const int ii = blockIdx.y + 2;  // 2..numat
+  const int jj = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  double enuc = 0.0;
+  if (ii <= a.g.numat && jj < ii) {
+    double x[3];
+    double r2 = 0.0;
+    for (int k = 0; k < 3; ++k) {
+      x[k] = coord_at(a.g.coord, ii, k) - coord_at(a.g.coord, jj, k);
+      r2 += x[k] * x[k];
+    }
+    int cls = 0;  // -2: dipole/point pair, -1: far pair, 0: block pair (skip)
+    if (a.nijbo) {
+      const int v = a.nijbo[(ii - 1) + (jj - 1) * a.g.numat];
+      cls = v >= 0 ? 0 : v;
+    } else if (r2 > a.g.cutof1) {
+      cls = -1;
+    } else if (r2 > a.g.cutof2 || !is_block_pair(a.g, ii, jj, r2)) {
+      cls = -2;
+    }
+    if (cls != 0) {
+      const int ni = a.g.nat[ii - 1];
+      const int nj = a.g.nat[jj - 1];
+      const int norb_i = a.core.natorb[ni - 1];
+      const int norb_j = a.core.natorb[nj - 1];
+      const double tore_i = a.core.tore[ni - 1];
+      const double tore_j = a.core.tore[nj - 1];
+      double e1b[45], e2a[45];
+      for (int k = 0; k < 45; ++k) {
+        e1b[k] = 0.0;
+        e2a[k] = 0.0;
+      }
+      const double rij = sqrt(r2);
+      if (cls == -1) {
+        // outer1: monopole-monopole with the am additive terms (+ feather).
+        const double r = rij / a.core.a0;
+        double aee = 0.5 / a.core.am[ni - 1] + 0.5 / a.core.am[nj - 1];
+        aee *= aee;
+        double ww = a.core.ev / sqrt(r * r + aee);
+        if (a.core.l_feather) {
+          const double point = a.core.ev * a.core.a0 / rij;
+          double cnst = 0.0;
+          if (rij < a.core.trunc_1) {
+            const double t = rij - a.core.trunc_1;
+            cnst = 1.0 - exp(-(t * t) * a.core.trunc_2);
+          }
+          ww = ww * cnst + (1.0 - cnst) * point;
+        }
+        const int diag[9] = {0, 2, 5, 9, 14, 20, 27, 35, 44};
+        for (int k = 0; k < 9; ++k) {
+          e1b[diag[k]] = -ww * tore_j;
+          e2a[diag[k]] = -ww * tore_i;
+        }
+        enuc = tore_i * tore_j * ww;
+      } else {
+        // outer2: reppd monopole/dipole integrals rotated onto the axis.
+        double ri[22];
+        double gab = 0.0;
+        mpc_reppd(a.core, ni, nj, rij, ri, &gab);
+        const double inv = 1.0 / rij;
+        x[0] *= inv;
+        x[1] *= inv;
+        x[2] *= inv;
+        if (fabs(x[2]) > 0.99999999) x[2] = copysign(1.0, x[2]);
+        const double w1 = ri[0];
+        e1b[0] = -w1 * tore_j;
+        e2a[0] = -w1 * tore_i;
+        if (norb_j > 1) {
+          const double w2 = -ri[4] * x[0];
+          const double w3 = -ri[4] * x[1];
+          const double w4 = -ri[4] * x[2];
+          e2a[1] = -w2 * tore_i;
+          e2a[2] = -w1 * tore_i;
+          e2a[3] = -w3 * tore_i;
+          e2a[5] = -w1 * tore_i;
+          e2a[6] = -w4 * tore_i;
+          e2a[9] = -w1 * tore_i;
+          if (norb_j > 4) {
+            e2a[14] = e2a[0];
+            e2a[20] = e2a[0];
+            e2a[27] = e2a[0];
+            e2a[35] = e2a[0];
+            e2a[44] = e2a[0];
+          }
+        }
+        if (norb_i > 1) {
+          const double w5 = -ri[1] * x[0];
+          const double w6 = -ri[1] * x[1];
+          const double w7 = -ri[1] * x[2];
+          e1b[1] = -w5 * tore_j;
+          e1b[2] = -w1 * tore_j;
+          e1b[3] = -w6 * tore_j;
+          e1b[5] = -w1 * tore_j;
+          e1b[6] = -w7 * tore_j;
+          e1b[9] = -w1 * tore_j;
+          if (norb_i > 4) {
+            e1b[14] = e1b[0];
+            e1b[20] = e1b[0];
+            e1b[27] = e1b[0];
+            e1b[35] = e1b[0];
+            e1b[44] = e1b[0];
+          }
+        }
+        enuc = tore_i * tore_j * w1;
+      }
+      const int oi = a.g.iorbs[ii - 1];
+      const int oj = a.g.iorbs[jj - 1];
+      double *hii = a.h + a.g.diag_off[ii - 1];
+      double *hjj = a.h + a.g.diag_off[jj - 1];
+      for (int k = 0; k < (oi * (oi + 1)) / 2; ++k) {
+        if (e1b[k] != 0.0) atomicAdd(&hii[k], e1b[k]);
+      }
+      for (int k = 0; k < (oj * (oj + 1)) / 2; ++k) {
+        if (e2a[k] != 0.0) atomicAdd(&hjj[k], e2a[k]);
+      }
+    }
+  }
+  __shared__ double red[kPointThreads];
+  red[threadIdx.x] = enuc;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0 && red[0] != 0.0) atomicAdd(a.enuc, red[0]);
+}
+
 bool grad_verbose() {
   const char *v = std::getenv("MOPAC_GPU_VERBOSE");
   return v && *v && *v != '0';
@@ -693,7 +824,8 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
     int numat, int mpack, int npairs, const int *pair_i, const int *pair_j,
     const int *pair_off, const int *row_start, const int *diag_off,
     const int *iorbs, const int *nat, const double *coord, int distance_gate,
-    int d_on_device, double cutof2, const MozymePairTablesC *tables, double *h,
+    int d_on_device, double cutof2, const MozymePairTablesC *tables,
+    const int *nijbo, int have_nijbo, int point_on_device, double *h,
     double *enuc_out, double *ms_out, int *d_pairs_out) {
   if (numat <= 0 || mpack <= 0 || !iorbs || !nat || !coord || !h || !tables || !enuc_out ||
       !row_start || !diag_off) {
@@ -707,14 +839,18 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
   GeomBuffers geom;
   PairTables tab;
   DeviceArray<double> d_h, d_enuc;
+  DeviceArray<int> d_nijbo;
   HcoreArgs a;
   std::memset(&a, 0, sizeof(a));
+  const size_t na = static_cast<size_t>(numat);
   if (!geom.upload(numat, npairs, pair_i, pair_j, pair_off, row_start, diag_off, iorbs, nat,
                    coord, a.g) ||
       !tab.upload(*tables) || !d_h.upload(h, static_cast<size_t>(mpack)) || !d_enuc.alloc(1) ||
-      cudaMemset(d_enuc.ptr, 0, sizeof(double)) != cudaSuccess) {
+      cudaMemset(d_enuc.ptr, 0, sizeof(double)) != cudaSuccess ||
+      (point_on_device && have_nijbo && !d_nijbo.upload(nijbo, na * na))) {
     return 2;
   }
+  a.nijbo = (point_on_device && have_nijbo) ? d_nijbo.ptr : nullptr;
   a.g.distance_gate = distance_gate;
   a.g.d_on_device = d_on_device;
   a.g.cutof1 = tables->cutof1;
@@ -731,6 +867,10 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
       const int grid_d = (npairs + kPairThreadsD - 1) / kPairThreadsD;
       mozyme_hcore_pairs_kernel<true><<<grid_d, kPairThreadsD, kPairSharedD>>>(a);
     }
+  }
+  if (point_on_device && numat >= 2) {
+    dim3 grid((numat + kPointThreads - 1) / kPointThreads, numat - 1);
+    mozyme_hcore_point_kernel<<<grid, kPointThreads>>>(a);
   }
   int code = finish_launch("MOZYME GPU hcore", geom.status, d_pairs_out);
   if (code == 0) {
