@@ -725,6 +725,8 @@ subroutine iter_for_MOZYME (ee)
         ! Fallback initial setup after CPU tidy if the pre-tidy resident
         ! attempt did not handle the case.
         resident_loop_control_needed = (.not. bigscf .and. numcal == 1+numcal0)
+        call mozyme_section_timer_end('iter_pre_boundary', iter_pre_timer)
+        iter_pre_timer = -1.d0
         call mozyme_section_timer_begin('iter_resident_scf_boundary', mozyme_timer)
         resident_scf_complete = .false.
         resident_isitsc_done = .false.
@@ -749,6 +751,7 @@ subroutine iter_for_MOZYME (ee)
           icalcn = step_num
           imol = numcal
           call mozyme_section_timer_end('iter_resident_scf_boundary', mozyme_timer)
+          call mozyme_section_timer_begin('iter_post_boundary', iter_post_timer)
           if (resident_scf_complete) then
             energy_diff = escf - eold
             eold = escf
@@ -835,6 +838,8 @@ subroutine iter_for_MOZYME (ee)
         else
           resident_fock_mode = 0
         end if
+        call mozyme_section_timer_end('iter_pre_boundary', iter_pre_timer)
+        iter_pre_timer = -1.d0
         call mozyme_section_timer_begin('iter_resident_scf_boundary', mozyme_timer)
         resident_scf_complete = .false.
         resident_isitsc_done = .false.
@@ -856,6 +861,7 @@ subroutine iter_for_MOZYME (ee)
                 escf = escf + solv_energy * fpc_9
           end if
           call mozyme_section_timer_end('iter_resident_scf_boundary', mozyme_timer)
+          call mozyme_section_timer_begin('iter_post_boundary', iter_post_timer)
           if (resident_scf_complete) then
             energy_diff = escf - eold
             eold = escf
@@ -1011,6 +1017,8 @@ subroutine iter_for_MOZYME (ee)
       else
         resident_fock_mode = 0
       end if
+      call mozyme_section_timer_end('iter_pre_boundary', iter_pre_timer)
+      iter_pre_timer = -1.d0
       call mozyme_section_timer_begin('iter_resident_scf_boundary', mozyme_timer)
       resident_scf_complete = .false.
       resident_isitsc_done = .false.
@@ -1031,6 +1039,7 @@ subroutine iter_for_MOZYME (ee)
               escf = escf + solv_energy * fpc_9
         end if
         call mozyme_section_timer_end('iter_resident_scf_boundary', mozyme_timer)
+        call mozyme_section_timer_begin('iter_post_boundary', iter_post_timer)
         if (resident_scf_complete) then
           energy_diff = escf - eold
           eold = escf
