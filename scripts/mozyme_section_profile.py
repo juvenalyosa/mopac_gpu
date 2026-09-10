@@ -118,6 +118,7 @@ def run_mode(mopac: Path, input_path: Path, mode: str, out_dir: Path, timeout: f
 
     heat = HEAT_RE.search(text)
     status = SCF_STATUS_RE.findall(text)
+    last_cycle = last_cycle_sections(text)
     resident_stages: dict[str, tuple[int, float]] = {}
     for m in RESIDENT_STAGE_RE.finditer(text):
         calls, ms = resident_stages.get(m.group(1), (0, 0.0))
@@ -134,8 +135,53 @@ def run_mode(mopac: Path, input_path: Path, mode: str, out_dir: Path, timeout: f
         "scf_status": status[-1] if status else None,
         "helpers": helpers,
         "sections": {r["name"]: r for r in parse_mozyme_section_times(text)},
+        "last_cycle": last_cycle,
         "resident_stages": resident_stages,
     }
+
+
+SECTION_LINE_RE = re.compile(r"\[PROFILE\]\s+MOZYME_SECTION\s+name=(\S+)\s+calls=(\d+)\s+ms=([+\-0-9.Ee]+)")
+
+
+def last_cycle_sections(text: str) -> dict[str, float]:
+    """Per-section ms of roughly one geometry step of an optimization.
+
+    MOPAC prints the cumulative section table at the end of every SCF (and at
+    job end).  The difference between the last two end-of-SCF tables covers
+    the last geometry step (hcore + SCF + gradient).  Empty for single points.
+    """
+    blocks: list[dict[str, tuple[int, float]]] = []
+    current: dict[str, tuple[int, float]] = {}
+    for line in text.splitlines():
+        m = SECTION_LINE_RE.search(line)
+        if m:
+            current[m.group(1)] = (int(m.group(2)), float(m.group(3)))
+        elif current:
+            blocks.append(current)
+            current = {}
+    if current:
+        blocks.append(current)
+    # Reports are printed inside every SCF and at job end.  Key them by the
+    # (hcore calls, deriv calls) pair: the last block with key (k, k-1) is the
+    # end of SCF k, the last block with key (k, k) is after gradient k.  The
+    # difference between the last block of key n and the last block of key
+    # n-2 is therefore hcore + SCF + gradient of the final geometry step.
+    last_by_key: dict[tuple[int, int], dict[str, tuple[int, float]]] = {}
+    order: list[tuple[int, int]] = []
+    for b in blocks:
+        key = (b.get("compfg_hcore", (0, 0.0))[0], b.get("compfg_deriv", (0, 0.0))[0])
+        if key not in last_by_key:
+            order.append(key)
+        last_by_key[key] = b
+    if len(order) < 3:
+        return {}
+    a, b = last_by_key[order[-3]], last_by_key[order[-1]]
+    out: dict[str, float] = {}
+    for name, (_, ms) in b.items():
+        prev = a.get(name, (0, 0.0))[1]
+        if ms - prev > 0.05:
+            out[name] = ms - prev
+    return out
 
 
 def print_table(input_path: Path, results: list[dict]) -> None:
@@ -170,6 +216,21 @@ def print_table(input_path: Path, results: list[dict]) -> None:
             row = r["sections"].get(name)
             line += f"{row['ms']:>14.1f}{row['calls']:>8}" if row else f"{'-':>14}{'-':>8}"
         print(line)
+
+    if any(r["last_cycle"] for r in results):
+        names_lc: set[str] = set()
+        for r in results:
+            names_lc.update(r["last_cycle"])
+        ref_lc = results[-1]["last_cycle"]
+        header = f"{'last geometry step':<32}" + "".join(f"{m + ' ms':>14}" for m in modes)
+        print("\n" + header)
+        print("-" * len(header))
+        for name in sorted(names_lc, key=lambda n: -ref_lc.get(n, 0.0)):
+            line = f"{name:<32}"
+            for r in results:
+                v = r["last_cycle"].get(name)
+                line += f"{v:>14.1f}" if v is not None else f"{'-':>14}"
+            print(line)
 
     for r in results:
         if r["resident_stages"]:
