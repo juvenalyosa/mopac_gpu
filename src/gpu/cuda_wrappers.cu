@@ -5020,7 +5020,11 @@ __global__ void mozyme_resident_fock_pack_plan_kernel(
 // Row count slots: 0 pair, 1 pair4, 2 point, 3 pair_w, 4 one_sup,
 // 5 one_w_sup (destination), 6 one_w_all (source offset into wj).
 static constexpr int kMzParRowSlots = 7;
-static constexpr int kMzParScratchSlots = 1024;
+// Scratch slots for the pair-integral pack kernels (one per thread, ~17 KB
+// each: W up to 2025 doubles plus spd rotation scratch).  1024 slots meant
+// only 8 blocks of 128 threads for ~700k block pairs at 7000 atoms
+// (fock_pack_build 235 ms per geometry step); 16384 slots = 283 MB.
+static constexpr int kMzParScratchSlots = 16384;
 static constexpr int kMzParThreads = 128;
 
 __device__ __forceinline__ void mozyme_resident_increment_fallback_basis_atomic_dev(
@@ -5681,7 +5685,15 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
         plan->point_jba.ptr, plan->point_i_atom.ptr, plan->point_j_atom.ptr,
         plan->point_i.ptr, plan->point_j.ptr, plan->point_addr.ptr,
         g_mz_res_pack_status.ptr);
-    const int slot_blocks = kMzParScratchSlots / kMzParThreads;
+    // Per-kernel split of the build (stream syncs only at pack time).
+    if (cudaStreamSynchronize(s) != cudaSuccess) return 2;
+    mz_add_section_ms("fock_pack_rows", mz_host_ms_since(t_pack2));
+    auto t_split = std::chrono::steady_clock::now();
+    const long long slot_need =
+        (static_cast<long long>(std::max(pair_count, pair4_count)) + kMzParThreads - 1) /
+        kMzParThreads;
+    const int slot_blocks = static_cast<int>(
+        std::max<long long>(1, std::min<long long>(kMzParScratchSlots / kMzParThreads, slot_need)));
     if (pair_count > 0) {
       mozyme_resident_pair_integrals_kernel<<<slot_blocks, kMzParThreads, 0, s>>>(
           pair_count, l_feather_flag, method_pm7_flag, ev, a0, trunc_1, trunc_2,
@@ -5692,6 +5704,9 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
           plan->pair_jba.ptr, g_mz_par_task_ii.ptr, g_mz_par_task_jj.ptr,
           plan->pair_w.ptr, plan->pair_wj.ptr, plan->pair_wk.ptr,
           g_mz_res_pack_status.ptr);
+      if (cudaStreamSynchronize(s) != cudaSuccess) return 2;
+      mz_add_section_ms("fock_pack_pairs", mz_host_ms_since(t_split));
+      t_split = std::chrono::steady_clock::now();
     }
     if (pair4_count > 0) {
       mozyme_resident_pair4_integrals_kernel<<<slot_blocks, kMzParThreads, 0, s>>>(
@@ -5702,6 +5717,9 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
           g_mz_res_pack_jindex.ptr, g_mz_par_scratch.ptr,
           g_mz_par_task4_ii.ptr, g_mz_par_task4_jj.ptr, plan->pair4_wj.ptr,
           plan->pair4_wk.ptr, g_mz_res_pack_status.ptr);
+      if (cudaStreamSynchronize(s) != cudaSuccess) return 2;
+      mz_add_section_ms("fock_pack_pair4", mz_host_ms_since(t_split));
+      t_split = std::chrono::steady_clock::now();
     }
     if (point_count > 0) {
       const int point_blocks = (point_count + kMzParThreads - 1) / kMzParThreads;
@@ -5712,6 +5730,8 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
           g_mz_res_pack_dd.ptr, plan->point_iab.ptr, plan->point_jba.ptr,
           plan->point_i_atom.ptr, plan->point_j_atom.ptr, plan->point_addr.ptr,
           plan->point_w.ptr, g_mz_res_pack_status.ptr);
+      if (cudaStreamSynchronize(s) != cudaSuccess) return 2;
+      mz_add_section_ms("fock_pack_points", mz_host_ms_since(t_split));
     }
   } else {
   status = cudaMemsetAsync(g_mz_res_pack_status.ptr, 0, sizeof(int) * 12u, s);
