@@ -19,8 +19,9 @@
 !-----------------------------------------------
       USE molkst_C, ONLY: numat, norbs, nclose, nopen, fract, natoms, numcal, &
       & ndep, nvar, keywrd, cosine, moperr, mpack, isok, id, l123, line, nscf, &
-      pressure, l1u, l2u, l3u, method_PM7, method_pm8, method_pm6_org
-      use common_arrays_C, only : dxyz, loc, errfn, aicorr, tvec
+      pressure, l1u, l2u, l3u, method_PM7, method_pm8, method_pm6_org, &
+      saddle_step => step
+      use common_arrays_C, only : dxyz, loc, errfn, aicorr, tvec, na
       USE symmetry_C, ONLY: locpar, idepfn
       USE chanel_C, only : iw, ir, job_fn
       use funcon_C, only : pi
@@ -53,7 +54,7 @@
       double precision, dimension(3,3) :: tderiv
       double precision, external :: dot, volume
       logical :: scf1, halfe, slow, aifrst, debug, precis, intn, geochk, ci, &
-        aic, noanci, field, saddle, DH_correction, l_redo_bonds
+        aic, noanci, field, saddle, DH_correction, l_redo_bonds, cart_identity
 
       save change, scf1, halfe, idelta, slow, icalcn, aifrst, debug, l_redo_bonds, &
         precis, intn, geochk, ci, aic, grlim, nw2, field, DH_correction
@@ -328,20 +329,44 @@
          call print_dxyz("  (Includes post-SCF corrections)")
       end if
 
-      step = change(1)
-      nstep = nw2/(3*numat*l123)
-      do i = 1, nvar, nstep
-        j = min(i + nstep - 1,nvar)
-        call jcarin (xparam, step, precis, work2, ncol, i, j)
-        call mxm (work2, j - i + 1, dxyz, ncol, gradnt(i), 1)
 !
-      end do
-      if (precis) then
-        step = 0.5D0/step
-      else
-        step = 1.0D0/step
+!   When every atom is defined in Cartesian coordinates (no dummy atoms, no
+!   symmetry relations, molecular system, no SADDLE shift), gmetry copies geo
+!   straight into coord, so the Jacobian dCARTESIAN/dPARAMETER is the identity
+!   and the parameter gradient is just the matching Cartesian component.  The
+!   finite-difference construction below (jcarin + mxm) is otherwise O(nvar*3*numat)
+!   even in this case: 8 s per geometry step for a 6700-atom protein.
+!
+      cart_identity = (id == 0 .and. ndep == 0 .and. natoms == numat .and. &
+        abs(saddle_step) <= 1.d-4)
+      if (cart_identity) then
+        do i = 2, natoms
+          if (na(i) /= 0) then
+            cart_identity = .false.
+            exit
+          end if
+        end do
       end if
-      gradnt(:nvar) = gradnt(:nvar)*step
+      if (cart_identity) then
+        do i = 1, nvar
+          gradnt(i) = dxyz(3*(loc(1,i) - 1) + loc(2,i))
+        end do
+      else
+        step = change(1)
+        nstep = nw2/(3*numat*l123)
+        do i = 1, nvar, nstep
+          j = min(i + nstep - 1,nvar)
+          call jcarin (xparam, step, precis, work2, ncol, i, j)
+          call mxm (work2, j - i + 1, dxyz, ncol, gradnt(i), 1)
+!
+        end do
+        if (precis) then
+          step = 0.5D0/step
+        else
+          step = 1.0D0/step
+        end if
+        gradnt(:nvar) = gradnt(:nvar)*step
+      end if
 !
 !  NOW TO ENSURE THAT INTERNAL DERIVATIVES ACCURATELY REFLECT CARTESIAN
 !  DERIVATIVES
