@@ -57,6 +57,7 @@ module mozyme_gpu_scf_driver
   public :: mozyme_gpu_scf_force_final_reorth
   public :: mozyme_gpu_scf_early_probe
   public :: mozyme_gpu_scf_try
+  public :: mozyme_gpu_scf_release_context
 
 contains
 
@@ -182,6 +183,7 @@ contains
     use mozyme_diagg1_state, only: mozyme_diagg1_set_state
     use mozyme_diagg2_state, only: mozyme_diagg2_set_state
     use mozyme_isitsc_state, only: mozyme_isitsc_set_state
+    use mozyme_section_timers, only: mozyme_section_timer_begin, mozyme_section_timer_end
 #ifdef GPU
     use mod_vars_cuda, only: lgpu, mozyme_gpu_requested, &
       mozyme_resident_fock_gpu
@@ -205,7 +207,7 @@ contains
     logical, intent(out), optional :: final_reorth_done
     logical, intent(out) :: scf_complete
 
-    double precision :: start_time
+    double precision :: start_time, try_timer
     logical :: trace, full_success, step_success
     logical :: initial_setup_requested, block_failures
     logical :: final_reorth_requested
@@ -295,7 +297,9 @@ contains
       return
     end if
 
-    call destroy_scf_context()
+    ! The device context is kept across SCF calls (geometry steps); setup below
+    ! re-initialises it in place and the state is re-registered and re-uploaded.
+    call mozyme_section_timer_begin('scf_try_prepare', try_timer)
     call init_config(config, nocc, nvir, resident_max_iter, niter, &
       fock_mode, idiagg, nhb, density_indi, selcon, previous_escf, &
       iemin, iemax, lstart, initial_setup_requested, final_reorth_requested)
@@ -442,6 +446,7 @@ contains
         status%code = code
       end if
     end if
+    call mozyme_section_timer_end('scf_try_prepare', try_timer)
 
     if (code /= GPU_MOZYME_SCF_SUCCESS .or. status%ready /= 1_c_int) then
       if (block_failures) blocked_nscf = nscf
@@ -498,7 +503,6 @@ contains
       else
         call trace_status(iw, trace, status, 'status=resident_step')
       end if
-      call destroy_scf_context()
       if (full_success) then
         call trace_end(iw, trace, handled, start_time, &
           'status=success reason=backend_complete code='// &
@@ -2196,5 +2200,13 @@ contains
       env_is_cpu_task = .false.
     end select
   end function env_is_cpu_task
+
+  ! Frees the device SCF context kept across geometry steps (end of job).
+  subroutine mozyme_gpu_scf_release_context()
+    implicit none
+#ifdef GPU
+    call destroy_scf_context()
+#endif
+  end subroutine mozyme_gpu_scf_release_context
 
 end module mozyme_gpu_scf_driver

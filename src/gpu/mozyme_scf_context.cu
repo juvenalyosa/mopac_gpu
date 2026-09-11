@@ -10909,10 +10909,20 @@ extern "C" int mopac_cuda_mozyme_scf_setup(const MozymeScfConfig *config,
   if (!config || !context) return kMozymeScfBadArgument;
   if (!valid_config(*config)) return kMozymeScfBadArgument;
 
-  auto *ctx = new (std::nothrow) MozymeScfContext();
-  if (!ctx) return kMozymeScfNotReady;
-
+  // Reuse a context kept alive from the previous SCF of the same job: its
+  // device buffers are re-uploaded by the next run anyway (DeviceBuffer::resize
+  // is a no-op when the size is unchanged), so keeping them avoids freeing and
+  // re-allocating every buffer per geometry step (~0.5 s at 7000 atoms).
+  auto *ctx = static_cast<MozymeScfContext *>(*context);
+  if (!ctx) {
+    ctx = new (std::nothrow) MozymeScfContext();
+    if (!ctx) return kMozymeScfNotReady;
+  }
   ctx->config = *config;
+  ctx->state_registered = false;
+#ifdef __CUDACC__
+  ctx->device.uploaded = false;
+#endif
   *context = ctx;
   return kMozymeScfSuccess;
 }

@@ -60,6 +60,29 @@ subroutine add_more_interactions()
   end if
   i = mpack
   call fillij (.false.)
+  !
+  !  Re-allocate only when the arrays are really too small: they are created 20%
+  !  larger than mpack below, so most promotions during an optimization fit in the
+  !  slack.  (Testing mpack against its old value re-copied every mpack-sized array,
+  !  ~0.2 s per geometry step for a 7000-atom protein, whenever a single pair was
+  !  promoted.)
+  !
+  if (mpack > i) then
+    j = min(size(pold), size(p), size(h), size(f))
+    if (rapid) j = min(j, size(partp), size(parth), size(partf))
+    if (mpack <= j) then
+      pold(i+1:mpack) = 0.d0
+      p(i+1:mpack) = 0.d0
+      h(i+1:mpack) = 0.d0
+      f(i+1:mpack) = 0.d0
+      if (rapid) then
+        partp(i+1:mpack) = 0.d0
+        parth(i+1:mpack) = 0.d0
+        partf(i+1:mpack) = 0.d0
+      end if
+      return
+    end if
+  end if
   if (mpack > i) then
 !
 ! Some arrays are now too small - increase their size, but also preserve their contents

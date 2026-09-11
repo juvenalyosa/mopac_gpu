@@ -45,7 +45,8 @@
       USE funcon_C, only : fpc_9
 !
       use mozyme_gpu_scf_driver, only : mozyme_gpu_scf_no_fallback_required, &
-        mozyme_gpu_scf_reset_request_state, mozyme_gpu_apply_default_environment
+        mozyme_gpu_scf_reset_request_state, mozyme_gpu_apply_default_environment, &
+        mozyme_gpu_scf_release_context
 !
       USE maps_C, only : latom, react, rxn_coord
 !
@@ -1790,6 +1791,7 @@
 !
   101 call setup_mopac_arrays(0,0)
       call delete_MOZYME_arrays()
+      call mozyme_gpu_scf_release_context()
       ! Final cumulative section report (covers the gradient of the last geometry step,
       ! which finishes after the last SCF-time report).
       if (run_setup_token >= 0.d0) then
