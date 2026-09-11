@@ -528,6 +528,11 @@ struct MozymeSparseFockPlan {
   DevBuf<double> one_w_values, pair_wj, pair_wk;
   DevBuf<double> pair4_wj, pair4_wk, point_w;
   DevBuf<double> ptot, qe, f;
+  // Point-pair Fock terms: per-atom accumulators (8 doubles per atom) and the
+  // per-atom diagonal-block offset / basis size derived from the point tasks.
+  DevBuf<double> point_acc;
+  DevBuf<int> point_atom_off, point_atom_iab;
+  bool point_index_ready = false;
   int mpack = 0;
   int natoms = 0;
   int one_count = 0;
@@ -552,6 +557,8 @@ struct MozymeSparseFockPlan {
     one_w_values.release(); pair_wj.release(); pair_wk.release();
     pair4_wj.release(); pair4_wk.release(); point_w.release();
     ptot.release(); qe.release(); f.release();
+    point_acc.release(); point_atom_off.release(); point_atom_iab.release();
+    point_index_ready = false;
     mpack = 0;
     natoms = 0;
     one_count = 0;
@@ -578,6 +585,7 @@ static inline MozymeSparseFockPlan *mozyme_sparse_fock_plan(int plan_id) {
 
 static inline void mozyme_sparse_fock_invalidate_plan(MozymeSparseFockPlan *plan) {
   if (!plan) return;
+  plan->point_index_ready = false;
   plan->mpack = 0;
   plan->natoms = 0;
   plan->one_count = 0;
@@ -2173,6 +2181,157 @@ __global__ void mozyme_sparse_point_kernel(int ntasks,
     int ndiag = (iab > 1) ? 4 : 1;
     double sum = 2.0 * (ptot[jbase + 1] * w2 + ptot[jbase + 3] * w3 + ptot[jbase + 6] * w4);
     if (tid < ndiag) atomicAdd_double(f + ibase + diag[tid], sum);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Point-pair Fock terms without one block per pair.
+//
+// mozyme_sparse_point_kernel above launches one 32-thread block per point
+// pair, and a 7000-atom protein has ~22 million of them: the block scheduling
+// alone costs ~25 ms per SCF iteration.  The kernels below keep the same
+// arithmetic but (a) run one thread per pair with a grid-stride loop, (b)
+// accumulate per-atom scalars instead of touching f directly, reducing the
+// row side (pairs of one atom are contiguous in the plan) inside the warp
+// before a single atomic, and (c) apply the accumulators to f with one thread
+// per atom.  Per atom the accumulator holds
+//   [0] value added to every diagonal element of the block (monopole + the
+//       density-weighted dipole term),
+//   [1] value added to the first min(nb,4) diagonal elements only (the
+//       dipole term that the original kernel restricted to diag[0..3]),
+//   [2..4] values added to the s-p elements 1, 3, 6 (dipole pairs only).
+// ---------------------------------------------------------------------------
+static constexpr int kMzPointAccStride = 8;
+
+__global__ void mozyme_sparse_point_atom_index_kernel(int ntasks,
+                                                      const int *iabs,
+                                                      const int *jbas,
+                                                      const int *i_atoms,
+                                                      const int *j_atoms,
+                                                      const int *i_offsets,
+                                                      const int *j_offsets,
+                                                      int *atom_off,
+                                                      int *atom_iab) {
+  for (int t = blockIdx.x * blockDim.x + threadIdx.x; t < ntasks;
+       t += gridDim.x * blockDim.x) {
+    const int ia = i_atoms[t] - 1;
+    const int ja = j_atoms[t] - 1;
+    atom_off[ia] = i_offsets[t] - 1;
+    atom_iab[ia] = iabs[t];
+    atom_off[ja] = j_offsets[t] - 1;
+    atom_iab[ja] = jbas[t];
+  }
+}
+
+__global__ void mozyme_sparse_point_accumulate_kernel(int ntasks,
+                                                      const int *iabs,
+                                                      const int *jbas,
+                                                      const int *i_atoms,
+                                                      const int *j_atoms,
+                                                      const int *i_offsets,
+                                                      const int *j_offsets,
+                                                      const int *addr_flags,
+                                                      const double *w_values,
+                                                      const double *qe,
+                                                      const double *ptot,
+                                                      double *acc,
+                                                      const int *guard_ints,
+                                                      int guard_slot,
+                                                      int guard_continue) {
+  if (!mozyme_sparse_guard_allows_work(guard_ints, guard_slot,
+                                       guard_continue)) return;
+  const int lane = threadIdx.x & 31;
+  const unsigned full = 0xffffffffu;
+  const int stride = gridDim.x * blockDim.x;
+  for (int t0 = blockIdx.x * blockDim.x + (threadIdx.x & ~31); t0 < ntasks;
+       t0 += stride) {
+    const int t = t0 + lane;
+    const bool valid = t < ntasks;
+    int ia = -1, ja = -1;
+    double ai = 0.0, aj = 0.0, di = 0.0, dj = 0.0;
+    if (valid) {
+      const int iab = iabs[t];
+      const int jba = jbas[t];
+      ia = i_atoms[t] - 1;
+      ja = j_atoms[t] - 1;
+      const double *w = w_values + static_cast<size_t>(t) * 7u;
+      const double w1 = w[0];
+      const double qi = qe[ia];
+      const double qj = qe[ja];
+      ai = qj * w1;
+      aj = qi * w1;
+      if (addr_flags[t] == -2) {
+        const int ibase = i_offsets[t] - 1;
+        const int jbase = j_offsets[t] - 1;
+        const double w2 = w[1], w3 = w[2], w4 = w[3];
+        const double w5 = w[4], w6 = w[5], w7 = w[6];
+        if (iab > 1) {
+          // s-p elements of atom i, and the density-weighted term on the
+          // first diagonal elements of atom j
+          atomicAdd_double(acc + ia * kMzPointAccStride + 2, qj * w5);
+          atomicAdd_double(acc + ia * kMzPointAccStride + 3, qj * w6);
+          atomicAdd_double(acc + ia * kMzPointAccStride + 4, qj * w7);
+          dj = 2.0 * (ptot[ibase + 1] * w5 + ptot[ibase + 3] * w6 +
+                      ptot[ibase + 6] * w7);
+        }
+        if (jba > 1) {
+          atomicAdd_double(acc + ja * kMzPointAccStride + 2, qi * w2);
+          atomicAdd_double(acc + ja * kMzPointAccStride + 3, qi * w3);
+          atomicAdd_double(acc + ja * kMzPointAccStride + 4, qi * w4);
+          di = 2.0 * (ptot[jbase + 1] * w2 + ptot[jbase + 3] * w3 +
+                      ptot[jbase + 6] * w4);
+        }
+      }
+    }
+    // Row side: keys (ia) are non-decreasing across the warp, so equal keys
+    // form one contiguous run.  Segmented inclusive scan, then the last lane
+    // of each run adds the run total with a single atomic.
+    double v = ai;
+    for (int off = 1; off < 32; off <<= 1) {
+      const double nv = __shfl_up_sync(full, v, off);
+      const int nk = __shfl_up_sync(full, ia, off);
+      if (lane >= off && nk == ia) v += nv;
+    }
+    const int nextkey = __shfl_down_sync(full, ia, 1);
+    const bool tail = (lane == 31) || (nextkey != ia);
+    if (valid && tail) atomicAdd_double(acc + ia * kMzPointAccStride, v);
+    if (valid && di != 0.0) atomicAdd_double(acc + ia * kMzPointAccStride + 1, di);
+    // Column side: one atomic per pair.
+    if (valid) {
+      atomicAdd_double(acc + ja * kMzPointAccStride, aj);
+      if (dj != 0.0) atomicAdd_double(acc + ja * kMzPointAccStride + 1, dj);
+    }
+  }
+}
+
+__global__ void mozyme_sparse_point_apply_kernel(int natoms,
+                                                 const int *atom_off,
+                                                 const int *atom_iab,
+                                                 const double *acc,
+                                                 double *f,
+                                                 const int *guard_ints,
+                                                 int guard_slot,
+                                                 int guard_continue) {
+  if (!mozyme_sparse_guard_allows_work(guard_ints, guard_slot,
+                                       guard_continue)) return;
+  const int a = blockIdx.x * blockDim.x + threadIdx.x;
+  if (a >= natoms) return;
+  const int iab = atom_iab[a];
+  if (iab <= 0) return;
+  const int off = atom_off[a];
+  const double *ac = acc + a * kMzPointAccStride;
+  const double mono = ac[0];
+  const double dip = ac[1];
+  const int ndip = (iab > 1) ? 4 : 1;
+  for (int orb = 0; orb < iab; ++orb) {
+    double add = mono;
+    if (orb < ndip) add += dip;
+    if (add != 0.0) f[off + pack_pair(orb, orb)] += add;
+  }
+  if (iab > 1) {
+    f[off + 1] += ac[2];
+    f[off + 3] += ac[3];
+    f[off + 6] += ac[4];
   }
 }
 
@@ -5771,6 +5930,56 @@ extern "C" void mopac_cuda_mozyme_sparse_fock_set_full_coverage(int complete) {
       kMozymeSparseFockPlanDefault, complete);
 }
 
+// Launches the point-pair Fock terms of a plan (see the kernels above).
+// Returns 0 on success, 2 on allocation failure, 3 on launch failure.
+static int mozyme_sparse_point_terms_launch(MozymeSparseFockPlan *plan,
+                                            const double *qe_dev,
+                                            const double *ptot_dev,
+                                            double *f_dev,
+                                            const int *guard_ints,
+                                            int guard_slot,
+                                            int guard_continue,
+                                            cudaStream_t s) {
+  if (plan->point_count <= 0) return 0;
+  const size_t natoms = static_cast<size_t>(plan->natoms);
+  if (natoms == 0) return 2;
+  const size_t acc_bytes = sizeof(double) * natoms * kMzPointAccStride;
+  const size_t atom_bytes = sizeof(int) * natoms;
+  if (!plan->point_acc.ensure(acc_bytes) ||
+      !plan->point_atom_off.ensure(atom_bytes) ||
+      !plan->point_atom_iab.ensure(atom_bytes)) {
+    return 2;
+  }
+  constexpr int kThreads = 256;
+  const int task_blocks = static_cast<int>(
+      std::min<long long>((plan->point_count + kThreads - 1) / kThreads, 8192ll));
+  const int atom_blocks = static_cast<int>((natoms + kThreads - 1) / kThreads);
+  if (!plan->point_index_ready) {
+    if (cudaMemsetAsync(plan->point_atom_iab.ptr, 0, atom_bytes, s) != cudaSuccess ||
+        cudaMemsetAsync(plan->point_atom_off.ptr, 0, atom_bytes, s) != cudaSuccess) {
+      return 2;
+    }
+    mozyme_sparse_point_atom_index_kernel<<<task_blocks, kThreads, 0, s>>>(
+        plan->point_count, plan->point_iab.ptr, plan->point_jba.ptr,
+        plan->point_i_atom.ptr, plan->point_j_atom.ptr, plan->point_i.ptr,
+        plan->point_j.ptr, plan->point_atom_off.ptr, plan->point_atom_iab.ptr);
+    if (cudaPeekAtLastError() != cudaSuccess) return 3;
+    plan->point_index_ready = true;
+  }
+  if (cudaMemsetAsync(plan->point_acc.ptr, 0, acc_bytes, s) != cudaSuccess) return 2;
+  mozyme_sparse_point_accumulate_kernel<<<task_blocks, kThreads, 0, s>>>(
+      plan->point_count, plan->point_iab.ptr, plan->point_jba.ptr,
+      plan->point_i_atom.ptr, plan->point_j_atom.ptr, plan->point_i.ptr,
+      plan->point_j.ptr, plan->point_addr.ptr, plan->point_w.ptr, qe_dev,
+      ptot_dev, plan->point_acc.ptr, guard_ints, guard_slot, guard_continue);
+  if (cudaPeekAtLastError() != cudaSuccess) return 3;
+  mozyme_sparse_point_apply_kernel<<<atom_blocks, kThreads, 0, s>>>(
+      plan->natoms, plan->point_atom_off.ptr, plan->point_atom_iab.ptr,
+      plan->point_acc.ptr, f_dev, guard_ints, guard_slot, guard_continue);
+  if (cudaPeekAtLastError() != cudaSuccess) return 3;
+  return 0;
+}
+
 extern "C" int mopac_cuda_mozyme_sparse_fock_run(int mpack,
                                                   const double *ptot,
                                                   const double *qe,
@@ -5814,13 +6023,10 @@ extern "C" int mopac_cuda_mozyme_sparse_fock_run(int mpack,
         nullptr, -1, 0);
     if (cudaPeekAtLastError() != cudaSuccess) return 3;
   }
-  if (plan->point_count > 0) {
-    mozyme_sparse_point_kernel<<<plan->point_count, 32, 0, s>>>(
-        plan->point_count, plan->point_iab.ptr, plan->point_jba.ptr,
-        plan->point_i_atom.ptr, plan->point_j_atom.ptr, plan->point_i.ptr,
-        plan->point_j.ptr, plan->point_addr.ptr, plan->point_w.ptr,
-        plan->qe.ptr, plan->ptot.ptr, plan->f.ptr, nullptr, -1, 0);
-    if (cudaPeekAtLastError() != cudaSuccess) return 3;
+  {
+    const int point_code = mozyme_sparse_point_terms_launch(
+        plan, plan->qe.ptr, plan->ptot.ptr, plan->f.ptr, nullptr, -1, 0, s);
+    if (point_code != 0) return point_code;
   }
   if (cudaMemcpyAsync(f, plan->f.ptr, bytes, cudaMemcpyDeviceToHost, s) != cudaSuccess) return 2;
   if (cudaStreamSynchronize(s) != cudaSuccess) return 2;
@@ -5888,15 +6094,14 @@ static int mozyme_sparse_fock_run_device_plan_guarded_impl(
     if (!report_cuda_error("mozyme_sparse_fock_run_device 4x1 kernel",
                            cudaPeekAtLastError())) return 3;
   }
-  if (plan->point_count > 0) {
-    mozyme_sparse_point_kernel<<<plan->point_count, 32, 0, s>>>(
-        plan->point_count, plan->point_iab.ptr,
-        plan->point_jba.ptr, plan->point_i_atom.ptr,
-        plan->point_j_atom.ptr, plan->point_i.ptr,
-        plan->point_j.ptr, plan->point_addr.ptr, plan->point_w.ptr,
-        qe_dev, ptot_dev, f_dev, guard_ints, guard_slot, guard_continue);
-    if (!report_cuda_error("mozyme_sparse_fock_run_device point kernel",
-                           cudaPeekAtLastError())) return 3;
+  {
+    const int point_code = mozyme_sparse_point_terms_launch(
+        plan, qe_dev, ptot_dev, f_dev, guard_ints, guard_slot, guard_continue, s);
+    if (point_code != 0) {
+      report_cuda_error("mozyme_sparse_fock_run_device point terms",
+                        cudaPeekAtLastError());
+      return point_code;
+    }
   }
   if (wait_for_completion &&
       !report_cuda_error("mozyme_sparse_fock_run_device synchronize",
