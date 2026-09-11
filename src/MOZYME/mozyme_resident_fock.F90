@@ -439,12 +439,26 @@ contains
             mozyme_resident_fock_prepare_plan = .true.
             return
           end if
+          if (.not. mozyme_resident_trace()) then
+            ! Trust the device pack as the strict path does: the host
+            ! re-count below is an O(numat**2) scan of nijbo (0.55 s per
+            ! geometry step for 7000 atoms) that only cross-checks the kernel
+            ! counters.  It still runs under MOPAC_GPU_PROFILE / trace.
+            resident_ready(plan_id) = .true.
+            resident_full_coverage(plan_id) = gpu_pack_full_coverage /= 0_c_int
+            resident_gpu_pack_ready(plan_id) = .true.
+            last_signature(plan_id) = signature
+            mozyme_resident_fock_prepare_plan = .true.
+            return
+          end if
+          call mozyme_section_timer_begin('fock_plan_count_host', plan_timer)
           call count_resident_plan(iorbs, mode, kopt, ione, use_nijbo, &
             one_count, one_center_cpu_count, pair_count, pair4_count, point_count, one_w_count, pair_w_count, &
 	            real_pair_count, real_pair_gpu_count, real_pair_cpu_count, real_pair_inactive_count, &
 	            real_pair_basis_limit_count, real_pair_direct_basis_count, real_pair_other_count, &
 	            point_pair_count, point_pair_gpu_count, point_pair_cpu_count, point_pair_basis_limit_count, &
 	            point_pair_direct_basis_count, point_pair_other_count, fallback_basis)
+	          call mozyme_section_timer_end('fock_plan_count_host', plan_timer)
 	          gpu_pack_counts_ok = &
 	            int(gpu_pack_counts(1)) == one_count .and. &
 	            int(gpu_pack_counts(2)) == pair_count .and. &
