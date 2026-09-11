@@ -13,6 +13,63 @@
 ! See the License for the specific language governing permissions and
 ! limitations under the License.
 
+! Changed entries of a fillij update pass (promotions of atom pairs), sent to
+! the device copy of nijbo as a patch in GPU builds.  Kept in a module (not an
+! internal procedure of fillij) so the pair loop is not pessimised by host
+! association.
+module fillij_changes_C
+  implicit none
+  integer, parameter :: nchg_cap = 2000000
+  integer, allocatable, save :: chg_i(:), chg_j(:), chg_v(:)
+  integer, save :: nchg = 0
+  logical, save :: chg_overflow = .false.
+contains
+  subroutine fillij_changes_reset()
+    implicit none
+    nchg = 0
+    chg_overflow = .false.
+  end subroutine fillij_changes_reset
+
+  subroutine fillij_record_change(ii, jj, value)
+    implicit none
+    integer, intent(in) :: ii, jj, value
+    integer :: stat, ncap
+    integer, allocatable :: tmp(:)
+    if (chg_overflow) return
+    if (.not. allocated(chg_i)) then
+      allocate (chg_i(4096), chg_j(4096), chg_v(4096), stat=stat)
+      if (stat /= 0) then
+        chg_overflow = .true.
+        return
+      end if
+    end if
+    if (nchg == size(chg_i)) then
+      ncap = 2*size(chg_i)
+      if (ncap > nchg_cap) then
+        chg_overflow = .true.
+        return
+      end if
+      allocate (tmp(ncap), stat=stat)
+      if (stat /= 0) then
+        chg_overflow = .true.
+        return
+      end if
+      tmp(1:nchg) = chg_i(1:nchg)
+      call move_alloc(tmp, chg_i)
+      allocate (tmp(ncap))
+      tmp(1:nchg) = chg_j(1:nchg)
+      call move_alloc(tmp, chg_j)
+      allocate (tmp(ncap))
+      tmp(1:nchg) = chg_v(1:nchg)
+      call move_alloc(tmp, chg_v)
+    end if
+    nchg = nchg + 1
+    chg_i(nchg) = ii
+    chg_j(nchg) = jj
+    chg_v(nchg) = value
+  end subroutine fillij_record_change
+end module fillij_changes_C
+
   subroutine fillij (count)
 #ifdef GPU
       use iso_c_binding, only: c_int, c_double
@@ -26,6 +83,8 @@
       use overlaps_C, only : cutof1, cutof2
       use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
       use mozyme_section_timers, only: mozyme_section_timer_begin, mozyme_section_timer_end
+      use fillij_changes_C, only: fillij_changes_reset, fillij_record_change, &
+        nchg, chg_overflow, chg_i, chg_j, chg_v
 !
       implicit none
       !
@@ -43,13 +102,6 @@
       save :: ix
       logical :: first
       integer :: ib, jb
-      ! Changed entries of the update pass (promotions), sent to the device
-      ! copy of nijbo as a patch (GPU builds); beyond the capacity the whole
-      ! array is re-uploaded.
-      integer, parameter :: nchg_cap = 2000000
-      integer, allocatable, save :: chg_i(:), chg_j(:), chg_v(:)
-      integer :: nchg
-      logical :: chg_overflow
       integer, parameter :: nblk = 64
       double precision :: fillij_timer
       logical, save :: strict_nijbo_marker_written = .false.
@@ -272,8 +324,7 @@
       !     on interatomic distance.
       !
       call mozyme_section_timer_begin('fillij_pairs', fillij_timer)
-      nchg = 0
-      chg_overflow = .false.
+      call fillij_changes_reset()
       i = 0
       do iloop = 1, numat
           io = iorbs(iloop)
@@ -323,7 +374,7 @@
                     else if (nijbo(j, i) < 0) then
                       nijbo(i, j) = mpack
                       nijbo(j, i) = mpack
-                      call record_change(i, j, mpack)
+                      call fillij_record_change(i, j, mpack)
                     else
                       mpack = mpack - io * jo  !  prevent mpack from being incremented - the element of
                                                  !  nijbo was already set.
@@ -366,7 +417,7 @@
                   else if (nijbo(j, i) == -1) then
                     nijbo(i, j) = -2
                     nijbo(j, i) = -2
-                    call record_change(i, j, -2)
+                    call fillij_record_change(i, j, -2)
                   end if
                 end if
                 !#aab
@@ -452,43 +503,4 @@
       if (id /= 0) then
         n2elec = n2elec * 2
       end if
-    contains
-      subroutine record_change(ii, jj, value)
-        implicit none
-        integer, intent(in) :: ii, jj, value
-        integer :: stat, ncap
-        integer, allocatable :: tmp(:)
-        if (chg_overflow) return
-        if (.not. allocated(chg_i)) then
-          allocate (chg_i(4096), chg_j(4096), chg_v(4096), stat=stat)
-          if (stat /= 0) then
-            chg_overflow = .true.
-            return
-          end if
-        end if
-        if (nchg == size(chg_i)) then
-          ncap = 2*size(chg_i)
-          if (ncap > nchg_cap) then
-            chg_overflow = .true.
-            return
-          end if
-          allocate (tmp(ncap), stat=stat)
-          if (stat /= 0) then
-            chg_overflow = .true.
-            return
-          end if
-          tmp(1:nchg) = chg_i(1:nchg)
-          call move_alloc(tmp, chg_i)
-          allocate (tmp(ncap))
-          tmp(1:nchg) = chg_j(1:nchg)
-          call move_alloc(tmp, chg_j)
-          allocate (tmp(ncap))
-          tmp(1:nchg) = chg_v(1:nchg)
-          call move_alloc(tmp, chg_v)
-        end if
-        nchg = nchg + 1
-        chg_i(nchg) = ii
-        chg_j(nchg) = jj
-        chg_v(nchg) = value
-      end subroutine record_change
     end subroutine fillij
