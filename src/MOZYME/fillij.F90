@@ -19,55 +19,28 @@
 ! association.
 module fillij_changes_C
   implicit none
-  integer, parameter :: nchg_cap = 2000000
+  ! Fixed capacity: 1M entries (12 MB); an update pass that changes more
+  ! than that falls back to a full re-upload of nijbo (chg_overflow).
+  integer, parameter :: nchg_cap = 1048576
   integer, allocatable, save :: chg_i(:), chg_j(:), chg_v(:)
   integer, save :: nchg = 0
   logical, save :: chg_overflow = .false.
 contains
   subroutine fillij_changes_reset()
     implicit none
+    integer :: stat
     nchg = 0
     chg_overflow = .false.
-  end subroutine fillij_changes_reset
-
-  subroutine fillij_record_change(ii, jj, value)
-    implicit none
-    integer, intent(in) :: ii, jj, value
-    integer :: stat, ncap
-    integer, allocatable :: tmp(:)
-    if (chg_overflow) return
     if (.not. allocated(chg_i)) then
-      allocate (chg_i(4096), chg_j(4096), chg_v(4096), stat=stat)
+      allocate (chg_i(nchg_cap), chg_j(nchg_cap), chg_v(nchg_cap), stat=stat)
       if (stat /= 0) then
         chg_overflow = .true.
-        return
+        if (allocated(chg_i)) deallocate(chg_i)
+        if (allocated(chg_j)) deallocate(chg_j)
+        if (allocated(chg_v)) deallocate(chg_v)
       end if
     end if
-    if (nchg == size(chg_i)) then
-      ncap = 2*size(chg_i)
-      if (ncap > nchg_cap) then
-        chg_overflow = .true.
-        return
-      end if
-      allocate (tmp(ncap), stat=stat)
-      if (stat /= 0) then
-        chg_overflow = .true.
-        return
-      end if
-      tmp(1:nchg) = chg_i(1:nchg)
-      call move_alloc(tmp, chg_i)
-      allocate (tmp(ncap))
-      tmp(1:nchg) = chg_j(1:nchg)
-      call move_alloc(tmp, chg_j)
-      allocate (tmp(ncap))
-      tmp(1:nchg) = chg_v(1:nchg)
-      call move_alloc(tmp, chg_v)
-    end if
-    nchg = nchg + 1
-    chg_i(nchg) = ii
-    chg_j(nchg) = jj
-    chg_v(nchg) = value
-  end subroutine fillij_record_change
+  end subroutine fillij_changes_reset
 end module fillij_changes_C
 
   subroutine fillij (count)
@@ -83,7 +56,7 @@ end module fillij_changes_C
       use overlaps_C, only : cutof1, cutof2
       use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
       use mozyme_section_timers, only: mozyme_section_timer_begin, mozyme_section_timer_end
-      use fillij_changes_C, only: fillij_changes_reset, fillij_record_change, &
+      use fillij_changes_C, only: fillij_changes_reset, nchg_cap, &
         nchg, chg_overflow, chg_i, chg_j, chg_v
 !
       implicit none
@@ -374,7 +347,15 @@ end module fillij_changes_C
                     else if (nijbo(j, i) < 0) then
                       nijbo(i, j) = mpack
                       nijbo(j, i) = mpack
-                      call fillij_record_change(i, j, mpack)
+                      ! record the promotion inline (no call inside the pair loop)
+                      if (nchg < nchg_cap .and. .not. chg_overflow) then
+                        nchg = nchg + 1
+                        chg_i(nchg) = i
+                        chg_j(nchg) = j
+                        chg_v(nchg) = mpack
+                      else
+                        chg_overflow = .true.
+                      end if
                     else
                       mpack = mpack - io * jo  !  prevent mpack from being incremented - the element of
                                                  !  nijbo was already set.
@@ -417,7 +398,14 @@ end module fillij_changes_C
                   else if (nijbo(j, i) == -1) then
                     nijbo(i, j) = -2
                     nijbo(j, i) = -2
-                    call fillij_record_change(i, j, -2)
+                    if (nchg < nchg_cap .and. .not. chg_overflow) then
+                      nchg = nchg + 1
+                      chg_i(nchg) = i
+                      chg_j(nchg) = j
+                      chg_v(nchg) = -2
+                    else
+                      chg_overflow = .true.
+                    end if
                   end if
                 end if
                 !#aab
