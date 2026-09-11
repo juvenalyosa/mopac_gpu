@@ -205,6 +205,18 @@ subroutine hcore_for_MOZYME ()
         !
         !   Molecular system
         !
+        ! Pairs handled on the device contribute nothing here (kr is not
+        ! advanced for them in direct mode), so skip the whole body instead
+        ! of adding zeros: with all point pairs on the GPU this loop is
+        ! otherwise still O(numat**2) (3 s for 7000 atoms).
+        if (calcij .and. gpu_block_pairs) then
+          k = ijbo(i, j)
+          if (k < 0) then
+            if (gpu_point_pairs) cycle
+          else if (mozyme_gpu_device_pair(iorbs(i), iorbs(j))) then
+            cycle
+          end if
+        end if
         if (ijbo(i, j) >= 0) then
           if (calcij .and. gpu_block_pairs .and. mozyme_gpu_device_pair(iorbs(i), iorbs(j))) then
             ! Evaluated on the device after the loop (kr is not advanced for
