@@ -260,19 +260,41 @@ contains
   subroutine build_pair_list(pair_i, pair_j, pair_off, row_start, diag_off, iorbs_c, nat_c, &
       npairs, distance_gate, ok)
     use common_arrays_C, only : nat
-    use molkst_C, only : numat
+    use molkst_C, only : numat, mpack
     use MOZYME_C, only : iorbs, lijbo, nijbo, iij, numij, ijall, iijj
+    use fillij_changes_C, only : nijbo_fill_count
     implicit none
     integer(c_int), allocatable, intent(out) :: pair_i(:), pair_j(:), pair_off(:), row_start(:), diag_off(:)
     integer(c_int), allocatable, intent(out) :: iorbs_c(:), nat_c(:)
     integer, intent(out) :: npairs, distance_gate
     logical, intent(out) :: ok
     integer :: ii, jj, ix
+    ! hcore and the gradient build the same list from the same nijbo within a
+    ! geometry step (55 ms each at 7000 atoms): keep the last one, keyed by
+    ! the fillij fill pass, numat and mpack.
+    integer(c_int), allocatable, save :: c_pair_i(:), c_pair_j(:), c_pair_off(:), c_row_start(:), c_diag_off(:)
+    integer(c_int), allocatable, save :: c_iorbs(:), c_nat(:)
+    integer, save :: c_fill = -1, c_numat = -1, c_mpack = -1, c_npairs = 0, c_gate = 1
+    logical, save :: c_lijbo = .false.
 
     ok = .false.
     npairs = 0
     distance_gate = 1
     if (.not. allocated(iorbs)) return
+    if (c_fill == nijbo_fill_count .and. c_numat == numat .and. c_mpack == mpack .and. &
+        c_lijbo .eqv. lijbo .and. allocated(c_pair_i) .and. c_fill >= 0) then
+      pair_i = c_pair_i
+      pair_j = c_pair_j
+      pair_off = c_pair_off
+      row_start = c_row_start
+      diag_off = c_diag_off
+      iorbs_c = c_iorbs
+      nat_c = c_nat
+      npairs = c_npairs
+      distance_gate = c_gate
+      ok = .true.
+      return
+    end if
     if (lijbo) then
       if (.not. allocated(nijbo)) return
       distance_gate = 0
@@ -330,6 +352,19 @@ contains
       nat_c(ii) = int(nat(ii), kind=c_int)
     end do
     ok = .true.
+    c_pair_i = pair_i
+    c_pair_j = pair_j
+    c_pair_off = pair_off
+    c_row_start = row_start
+    c_diag_off = diag_off
+    c_iorbs = iorbs_c
+    c_nat = nat_c
+    c_npairs = npairs
+    c_gate = distance_gate
+    c_fill = nijbo_fill_count
+    c_numat = numat
+    c_mpack = mpack
+    c_lijbo = lijbo
   end subroutine build_pair_list
 
   subroutine fill_tables(tables)

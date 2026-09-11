@@ -18,12 +18,14 @@ module hbond_neighbours_C
 !  Short-range neighbour lists for the hydrogen-bond corrections (PM6-DH+, PM7, ...).
 !
 !  The original H-bond machinery scans all "numat" atoms for every candidate
-!  pair (setup_DH_Plus) and for every acceptor (find_XH_bonds), which is
-!  O(nrpairs*numat): ~1.4 s per call for a 6700-atom protein.  This module
-!  builds, once per call, a cell-grid list of every atom within "hb_nbr_rcut"
-!  of each atom.  Lists are sorted by ascending atom number so that callers
-!  iterating over them visit atoms in exactly the same order as the original
-!  1..numat loops, which keeps the results bit-identical.
+!  pair (setup_DH_Plus), for every acceptor (find_XH_bonds) and for every
+!  X-H group (find_H__Y_bonds), which is O(nrpairs*numat): ~1.4 s per call for
+!  a 6700-atom protein.  This module builds, once per call, cell-grid lists of
+!  the atoms within a radius of each atom: a covalent one (hb_nbr_*, radius
+!  hb_nbr_rcut ~ 3 A) and a hydrogen-bond one (hb_far_*, hb_far_rcut ~ 10 A).
+!  Lists are sorted by ascending atom number so that callers iterating over
+!  them visit atoms in exactly the same order as the original 1..numat loops,
+!  which keeps the results bit-identical.
 !
 !  Only used for isolated molecules (id == 0); periodic systems keep the
 !  original loops (distance() handles the translations there).
@@ -31,10 +33,14 @@ module hbond_neighbours_C
   implicit none
   private
   public :: hb_nbr_build, hb_nbr_clear, hb_nbr_ready, hb_nbr_rcut, hb_nbr_start, hb_nbr_list
+  public :: hb_far_build, hb_far_ready, hb_far_rcut, hb_far_start, hb_far_list
   logical :: hb_nbr_ready = .false.
   double precision :: hb_nbr_rcut = 0.d0
   integer :: hb_nbr_numat = 0
   integer, allocatable :: hb_nbr_start(:), hb_nbr_list(:)
+  logical :: hb_far_ready = .false.
+  double precision :: hb_far_rcut = 0.d0
+  integer, allocatable :: hb_far_start(:), hb_far_list(:)
 contains
 
   subroutine hb_nbr_clear()
@@ -44,23 +50,48 @@ contains
     hb_nbr_rcut = 0.d0
     if (allocated(hb_nbr_start)) deallocate(hb_nbr_start)
     if (allocated(hb_nbr_list)) deallocate(hb_nbr_list)
+    hb_far_ready = .false.
+    hb_far_rcut = 0.d0
+    if (allocated(hb_far_start)) deallocate(hb_far_start)
+    if (allocated(hb_far_list)) deallocate(hb_far_list)
   end subroutine hb_nbr_clear
 
   subroutine hb_nbr_build(numat, coord, rcut)
+    implicit none
+    integer, intent(in) :: numat
+    double precision, intent(in) :: coord(3, *), rcut
+    call hb_cell_list_build(numat, coord, rcut, hb_nbr_start, hb_nbr_list, hb_nbr_ready)
+    hb_nbr_numat = merge(numat, 0, hb_nbr_ready)
+    hb_nbr_rcut = merge(rcut, 0.d0, hb_nbr_ready)
+  end subroutine hb_nbr_build
+
+  subroutine hb_far_build(numat, coord, rcut)
+    implicit none
+    integer, intent(in) :: numat
+    double precision, intent(in) :: coord(3, *), rcut
+    call hb_cell_list_build(numat, coord, rcut, hb_far_start, hb_far_list, hb_far_ready)
+    hb_far_rcut = merge(rcut, 0.d0, hb_far_ready)
+  end subroutine hb_far_build
+
+  subroutine hb_cell_list_build(numat, coord, rcut, nbr_start, nbr_list, ready)
 !
-!  Build the neighbour lists: for every atom i, hb_nbr_list(hb_nbr_start(i):hb_nbr_start(i+1)-1)
+!  Build a neighbour list: for every atom i, nbr_list(nbr_start(i):nbr_start(i+1)-1)
 !  holds all j /= i with |r_i - r_j| < rcut, in ascending order of j.
-!  On exit hb_nbr_ready is .false. if the lists could not be built (degenerate box);
+!  On exit ready is .false. if the list could not be built (degenerate box);
 !  callers must then fall back to the full scans.
 !
     implicit none
     integer, intent(in) :: numat
     double precision, intent(in) :: coord(3, *), rcut
+    integer, allocatable, intent(inout) :: nbr_start(:), nbr_list(:)
+    logical, intent(out) :: ready
     integer :: i, j, k, m, n, ix, iy, iz, jx, jy, jz, nx, ny, nz, ncell, ic, jc, total, cap, ntmp, stat
     integer, allocatable :: cell_of(:), cell_count(:), cell_start(:), cell_atoms(:), counts(:), tmp(:)
     double precision :: lo(3), hi(3), inv, r2, d(3), rcut2
     integer, parameter :: max_cells_per_atom = 16
-    call hb_nbr_clear()
+    ready = .false.
+    if (allocated(nbr_start)) deallocate(nbr_start)
+    if (allocated(nbr_list)) deallocate(nbr_list)
     if (numat <= 0 .or. rcut <= 0.d0) return
     lo = coord(1:3, 1)
     hi = coord(1:3, 1)
@@ -75,9 +106,9 @@ contains
     if (dble(nx)*dble(ny)*dble(nz) > dble(max_cells_per_atom)*dble(numat) + 1000.d0) return
     ncell = nx*ny*nz
     allocate (cell_of(numat), cell_count(ncell), cell_start(ncell + 1), cell_atoms(numat), &
-      counts(numat), hb_nbr_start(numat + 1), stat=stat)
+      counts(numat), nbr_start(numat + 1), stat=stat)
     if (stat /= 0) then
-      call hb_nbr_clear()
+      if (allocated(nbr_start)) deallocate(nbr_start)
       return
     end if
     cell_count = 0
@@ -125,14 +156,14 @@ contains
       end do
       counts(i) = n
     end do
-    hb_nbr_start(1) = 1
+    nbr_start(1) = 1
     do i = 1, numat
-      hb_nbr_start(i + 1) = hb_nbr_start(i) + counts(i)
+      nbr_start(i + 1) = nbr_start(i) + counts(i)
     end do
-    total = hb_nbr_start(numat + 1) - 1
-    allocate (hb_nbr_list(max(1, total)), stat=stat)
+    total = nbr_start(numat + 1) - 1
+    allocate (nbr_list(max(1, total)), stat=stat)
     if (stat /= 0) then
-      call hb_nbr_clear()
+      deallocate(nbr_start)
       return
     end if
 !
@@ -178,12 +209,10 @@ contains
         tmp(m + 1) = j
       end do
       do k = 1, ntmp
-        hb_nbr_list(hb_nbr_start(i) + k - 1) = tmp(k)
+        nbr_list(nbr_start(i) + k - 1) = tmp(k)
       end do
     end do
     deallocate (tmp, cell_of, cell_count, cell_start, cell_atoms, counts)
-    hb_nbr_numat = numat
-    hb_nbr_rcut = rcut
-    hb_nbr_ready = .true.
-  end subroutine hb_nbr_build
+    ready = .true.
+  end subroutine hb_cell_list_build
 end module hbond_neighbours_C

@@ -124,14 +124,25 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
 !
   use chanel_C, only : iw
   use funcon_C, only : pi
-  use molkst_C, only : keywrd, method_pm7
+  use molkst_C, only : keywrd, method_pm7, numat, id
+  use hbond_neighbours_C, only : hb_nbr_ready, hb_nbr_rcut, hb_nbr_start, hb_nbr_list, &
+    hb_far_ready, hb_far_rcut, hb_far_start, hb_far_list
   implicit none
   integer :: nacc_a, nacc_b, nb_a_h, nrpairs, max_h_bonds
   integer :: acc_a(nacc_a), acc_b(nacc_b), bonding_a_h(nb_a_h), hblist1(max_h_bonds), hblist2(max_h_bonds), hblist3(max_h_bonds)
-  integer:: ii, i, jj, j, kk, k, i1, numat_h, stat
+  integer:: ii, i, jj, j, kk, k, i1, numat_h, stat, j0, j1, k0, k1, ncand, m, n
+  integer, parameter :: max_cand = 64
+  integer :: cand(max_cand), cand_pos(max_cand)
+  integer, allocatable :: pos_h(:)
   double precision :: RAH, cutoff
   logical, external :: connected
   double precision, external :: angle
+  ! Neighbour-list route (isolated molecules): the hydrogen loop visits the
+  ! covalent neighbours of i that are in bonding_a_h, and the acceptor loop the
+  ! atoms within hb_far_rcut of i that are in acc_b, both in ascending atom
+  ! order, exactly the atoms the full scans would accept.
+  logical :: use_lists
+  logical, allocatable :: is_h(:), is_acc(:)
 !
 !  Duplicate detection: pairs are chained per hydrogen atom (hblist2), so the
 !  "does (k,j,i) or (i,j,k) already exist" test only visits the pairs of hydrogen j
@@ -171,13 +182,80 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
       RAH = 1.15d0
       cutoff = 5.5d0
     end if
+    use_lists = (id == 0 .and. hb_nbr_ready .and. hb_far_ready .and. &
+      hb_nbr_rcut >= RAH .and. hb_far_rcut >= cutoff)
+    if (use_lists) then
+      allocate (is_h(numat), is_acc(numat), pos_h(numat), stat=stat)
+      if (stat /= 0) then
+        use_lists = .false.
+      else
+        is_h = .false.
+        is_acc = .false.
+        pos_h = 0
+        do jj = 1, nb_a_h
+          if (bonding_a_h(jj) >= 1 .and. bonding_a_h(jj) <= numat) then
+            if (.not. is_h(bonding_a_h(jj))) pos_h(bonding_a_h(jj)) = jj
+            is_h(bonding_a_h(jj)) = .true.
+          end if
+        end do
+        do kk = 1, nacc_b
+          if (acc_b(kk) >= 1 .and. acc_b(kk) <= numat) is_acc(acc_b(kk)) = .true.
+        end do
+      end if
+    end if
     do ii = 1, nacc_a
       i = acc_a(ii)   !  i = Acceptor atom bonded to H
-      do jj = 1, nb_a_h
-        j = bonding_a_h(jj)   !  j = Hydrogen bond to acceptor atom
+      ncand = 0
+      if (use_lists) then
+        ! Hydrogens of bonding_a_h within the covalent list of i, visited in
+        ! bonding_a_h order (the order of the original loop); more than
+        ! max_cand candidates falls back to the full scan for this atom.
+        do m = hb_nbr_start(i), hb_nbr_start(i + 1) - 1
+          j = hb_nbr_list(m)
+          if (.not. is_h(j)) cycle
+          if (ncand == max_cand) then
+            ncand = -1
+            exit
+          end if
+          n = ncand
+          do while (n >= 1)
+            if (cand_pos(n) <= pos_h(j)) exit
+            cand(n + 1) = cand(n)
+            cand_pos(n + 1) = cand_pos(n)
+            n = n - 1
+          end do
+          cand(n + 1) = j
+          cand_pos(n + 1) = pos_h(j)
+          ncand = ncand + 1
+        end do
+        k0 = hb_far_start(i)
+        k1 = hb_far_start(i + 1) - 1
+      end if
+      if (use_lists .and. ncand >= 0) then
+        j0 = 1
+        j1 = ncand
+      else
+        j0 = 1
+        j1 = nb_a_h
+      end if
+      if (.not. use_lists) then
+        k0 = 1
+        k1 = nacc_b
+      end if
+      do jj = j0, j1
+        if (use_lists .and. ncand >= 0) then
+          j = cand(jj)
+        else
+          j = bonding_a_h(jj)   !  j = Hydrogen bond to acceptor atom
+        end if
         if (connected(i, j, RAH**2)) then
-          do kk = 1, nacc_b
-            k = acc_b(kk)
+          do kk = k0, k1
+            if (use_lists) then
+              k = hb_far_list(kk)
+              if (.not. is_acc(k)) cycle
+            else
+              k = acc_b(kk)
+            end if
             if (k /= i) then
               if (connected(k, i, cutoff**2)) then
                 if (angle(k,j,i) > pi*0.5d0) then
@@ -268,7 +346,7 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
   use common_arrays_C, only: bonding_a_h, bonding_b_h, acceptor_a, acceptor_b, coord, nat
   use molkst_C, only : numat, line, moperr, id
   use chanel_C, only : iw
-  use hbond_neighbours_C, only : hb_nbr_build, hb_nbr_clear
+  use hbond_neighbours_C, only : hb_nbr_build, hb_nbr_clear, hb_nbr_ready, hb_far_build
   implicit none
     integer, intent (in) :: max_h_bonds
     integer, intent (out) :: hblist1(max_h_bonds), hblist2(max_h_bonds), hblist3(max_h_bonds), nrpairs
@@ -292,6 +370,9 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
       end do
       rcut = max(1.4d0, 2.d0*cmax)*1.05d0 + 0.01d0
       call hb_nbr_build(numat, coord, rcut)
+      ! Hydrogen-bond search radius (10 A for PM6-DH+, 7 A for PM7, 5.5 A
+      ! otherwise, see find_H__Y_bonds): one list covering all of them.
+      if (hb_nbr_ready) call hb_far_build(numat, coord, 10.0d0*1.01d0 + 0.01d0)
     end if
 !
 !  Work out list of of potential hydrogen bonds

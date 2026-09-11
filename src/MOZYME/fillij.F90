@@ -25,6 +25,9 @@ module fillij_changes_C
   integer, allocatable, save :: chg_i(:), chg_j(:), chg_v(:)
   integer, save :: nchg = 0
   logical, save :: chg_overflow = .false.
+  ! Number of completed fill passes (not counts); consumers that derive
+  ! lists from nijbo (GPU pair lists) use it as their cache key.
+  integer, save :: nijbo_fill_count = 0
 contains
   subroutine fillij_changes_reset()
     implicit none
@@ -57,7 +60,7 @@ end module fillij_changes_C
       use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
       use mozyme_section_timers, only: mozyme_section_timer_begin, mozyme_section_timer_end
       use fillij_changes_C, only: fillij_changes_reset, nchg_cap, &
-        nchg, chg_overflow, chg_i, chg_j, chg_v
+        nchg, chg_overflow, chg_i, chg_j, chg_v, nijbo_fill_count
 !
       implicit none
       !
@@ -280,6 +283,7 @@ end module fillij_changes_C
         call flush(iw)
         if (.not. count .and. lijbo .and. allocated(nijbo)) &
           call mopac_cuda_mozyme_nijbo_touch(nijbo, int(numat, c_int))
+        if (.not. count) nijbo_fill_count = nijbo_fill_count + 1
         return
       end if
 #else
@@ -460,6 +464,7 @@ end module fillij_changes_C
         end do
       end if
       call mozyme_section_timer_end('fillij_pairs', fillij_timer)
+      if (.not. count) nijbo_fill_count = nijbo_fill_count + 1
 #ifdef GPU
       if (.not. count .and. lijbo .and. allocated(nijbo)) then
         if (first .or. chg_overflow) then
