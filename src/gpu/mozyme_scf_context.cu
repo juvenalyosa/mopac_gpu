@@ -1173,6 +1173,7 @@ template <typename T>
 struct DeviceBuffer {
   T *ptr = nullptr;
   std::size_t count = 0;
+  bool borrowed = false;   // ptr owned elsewhere (shared cache): never freed here
 
   DeviceBuffer() = default;
   DeviceBuffer(const DeviceBuffer &) = delete;
@@ -1181,9 +1182,17 @@ struct DeviceBuffer {
   ~DeviceBuffer() { reset(); }
 
   void reset() {
-    if (ptr) cudaFree(ptr);
+    if (ptr && !borrowed) cudaFree(ptr);
     ptr = nullptr;
     count = 0;
+    borrowed = false;
+  }
+
+  void borrow(T *shared, std::size_t next_count) {
+    reset();
+    ptr = shared;
+    count = next_count;
+    borrowed = true;
   }
 
   bool resize(std::size_t next_count) {
@@ -1302,8 +1311,7 @@ struct MozymeScfDeviceState {
   DeviceBuffer<int> nfmo;
   DeviceBuffer<int> nfirst;
   DeviceBuffer<int> nlast;
-  DeviceBuffer<int> nijbo;
-  long long nijbo_gen = -2;   // generation of the host nijbo held in dev.nijbo (see nijbo cache)
+  DeviceBuffer<int> nijbo;   // borrowed from the shared nijbo cache when available
   DeviceBuffer<double> coord;
   DeviceBuffer<int> nat;
   DeviceBuffer<double> param_dd;
@@ -7110,8 +7118,8 @@ __global__ void mozyme_cnvgz_commit_diag_kernel(
 
 int ceil_div(int value, int divisor) { return (value + divisor - 1) / divisor; }
 
-// nijbo generation as tracked by the shared device cache (cuda_wrappers.cu).
-extern "C" long long mopac_cuda_mozyme_nijbo_generation(const int *host, int numat);
+// Shared device copy of nijbo (cuda_wrappers.cu); uploads only when stale.
+extern "C" const int *mopac_cuda_mozyme_nijbo_device(const int *host, int numat);
 
 bool upload_registered_state(MozymeScfContext &ctx) {
   ctx.device.uploaded = false;
@@ -7274,23 +7282,22 @@ bool upload_registered_state(MozymeScfContext &ctx) {
     return false;
   }
   if (ctx.state.use_nijbo) {
-    // Skip the 179 MB (7000 atoms) re-upload when fillij has not touched the
-    // host array since the copy already on the device was made.
-    const long long gen = mopac_cuda_mozyme_nijbo_generation(
+    // Use the shared device copy of nijbo (cuda_wrappers.cu): it is uploaded
+    // (or patched) only when fillij changed the host array, so the resident
+    // SCF no longer re-uploads 179 MB (7000 atoms) per geometry step.  The
+    // resident kernels only read nijbo.
+    const int *shared = mopac_cuda_mozyme_nijbo_device(
         static_cast<const int *>(ctx.state.nijbo), numat);
-    const bool current = gen >= 0 && gen == dev.nijbo_gen && dev.nijbo.ptr &&
-                         dev.nijbo.count == nijbo_count;
-    if (!current) {
-      if (!dev.nijbo.upload(static_cast<const int *>(ctx.state.nijbo),
-                            nijbo_count)) {
-        dev.nijbo_gen = -2;
-        return false;
+    if (shared) {
+      if (dev.nijbo.ptr != shared || dev.nijbo.count != nijbo_count) {
+        dev.nijbo.borrow(const_cast<int *>(shared), nijbo_count);
       }
-      dev.nijbo_gen = gen;
+    } else if (!dev.nijbo.upload(static_cast<const int *>(ctx.state.nijbo),
+                                 nijbo_count)) {
+      return false;
     }
   } else {
     dev.nijbo.reset();
-    dev.nijbo_gen = -2;
   }
   if (ctx.state.cosmo_enabled) {
     const int cosmo_nps = ctx.state.cosmo_nps;
@@ -11053,9 +11060,6 @@ extern "C" int mopac_cuda_mozyme_scf_register_state(
 // (mozyme_section_timers), so driver-level costs show up next to the
 // Fortran sections in the [PROFILE] MOZYME_SECTION report.
 extern "C" void mozyme_section_timer_add_c(const char *name, int name_len, double ms);
-// nijbo generation as tracked by the shared device cache (cuda_wrappers.cu).
-extern "C" long long mopac_cuda_mozyme_nijbo_generation(const int *host, int numat);
-
 namespace {
 inline double host_ms_since(const std::chrono::steady_clock::time_point &t0) {
   return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();

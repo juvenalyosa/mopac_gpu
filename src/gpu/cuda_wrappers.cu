@@ -612,6 +612,58 @@ extern "C" long long mopac_cuda_mozyme_nijbo_generation(const int *host, int num
   return g_mz_nijbo_cache.gen_host;
 }
 
+__global__ void mozyme_nijbo_patch_kernel(int numat, int n, const int *pi,
+                                          const int *pj, const int *pv, int *nijbo) {
+  const int t = blockIdx.x * blockDim.x + threadIdx.x;
+  if (t >= n) return;
+  const int i = pi[t] - 1;
+  const int j = pj[t] - 1;
+  if (i < 0 || j < 0 || i >= numat || j >= numat) return;
+  nijbo[i + j * numat] = pv[t];
+  nijbo[j + i * numat] = pv[t];
+}
+
+namespace {
+DevBuf<int> g_mz_nijbo_patch_i, g_mz_nijbo_patch_j, g_mz_nijbo_patch_v;
+}  // namespace
+
+// fillij update pass: only n entries (i, j) changed to value v (both
+// triangles).  Applies them to the device copy when it is current, so the host
+// array need not be re-uploaded; otherwise behaves like a touch.
+extern "C" void mopac_cuda_mozyme_nijbo_patch(const int *host, int numat, int n,
+                                              const int *pi, const int *pj,
+                                              const int *pv) {
+  MozymeNijboCache &c = g_mz_nijbo_cache;
+  const bool current = host && numat > 0 && host == c.host && numat == c.numat &&
+                       c.buf.ptr && c.gen_uploaded == c.gen_host;
+  if (!current) {
+    mopac_cuda_mozyme_nijbo_touch(host, numat);
+    return;
+  }
+  if (n <= 0) return;   // nothing changed: device copy stays current
+  const size_t bytes = sizeof(int) * static_cast<size_t>(n);
+  cudaStream_t s = g_stream ? g_stream : 0;
+  if (!g_mz_nijbo_patch_i.ensure(bytes) || !g_mz_nijbo_patch_j.ensure(bytes) ||
+      !g_mz_nijbo_patch_v.ensure(bytes) ||
+      cudaMemcpyAsync(g_mz_nijbo_patch_i.ptr, pi, bytes, cudaMemcpyHostToDevice, s) != cudaSuccess ||
+      cudaMemcpyAsync(g_mz_nijbo_patch_j.ptr, pj, bytes, cudaMemcpyHostToDevice, s) != cudaSuccess ||
+      cudaMemcpyAsync(g_mz_nijbo_patch_v.ptr, pv, bytes, cudaMemcpyHostToDevice, s) != cudaSuccess) {
+    mopac_cuda_mozyme_nijbo_touch(host, numat);
+    return;
+  }
+  const int blocks = (n + 255) / 256;
+  mozyme_nijbo_patch_kernel<<<blocks, 256, 0, s>>>(numat, n, g_mz_nijbo_patch_i.ptr,
+                                                   g_mz_nijbo_patch_j.ptr,
+                                                   g_mz_nijbo_patch_v.ptr, c.buf.ptr);
+  if (cudaGetLastError() != cudaSuccess || cudaStreamSynchronize(s) != cudaSuccess) {
+    mopac_cuda_mozyme_nijbo_touch(host, numat);
+    return;
+  }
+  // Host and device advance together: consumers see the copy as current.
+  ++c.gen_host;
+  c.gen_uploaded = c.gen_host;
+}
+
 // Device pointer to the current nijbo; uploads only when stale.  nullptr on failure.
 extern "C" const int *mopac_cuda_mozyme_nijbo_device(const int *host, int numat) {
   if (!host || numat <= 0) return nullptr;

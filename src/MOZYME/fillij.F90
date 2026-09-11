@@ -43,6 +43,13 @@
       save :: ix
       logical :: first
       integer :: ib, jb
+      ! Changed entries of the update pass (promotions), sent to the device
+      ! copy of nijbo as a patch (GPU builds); beyond the capacity the whole
+      ! array is re-uploaded.
+      integer, parameter :: nchg_cap = 2000000
+      integer, allocatable, save :: chg_i(:), chg_j(:), chg_v(:)
+      integer :: nchg
+      logical :: chg_overflow
       integer, parameter :: nblk = 64
       double precision :: fillij_timer
       logical, save :: strict_nijbo_marker_written = .false.
@@ -83,6 +90,13 @@
           integer(c_int), intent(in) :: nijbo_c(*)
           integer(c_int), value :: numat_c
         end subroutine mopac_cuda_mozyme_nijbo_touch
+        ! Update pass: only n entries changed; patch the device copy instead.
+        subroutine mopac_cuda_mozyme_nijbo_patch(nijbo_c, numat_c, n_c, pi_c, pj_c, pv_c) &
+            bind(C, name='mopac_cuda_mozyme_nijbo_patch')
+          use iso_c_binding, only: c_int
+          integer(c_int), intent(in) :: nijbo_c(*), pi_c(*), pj_c(*), pv_c(*)
+          integer(c_int), value :: numat_c, n_c
+        end subroutine mopac_cuda_mozyme_nijbo_patch
       end interface
 #endif
 !
@@ -258,6 +272,8 @@
       !     on interatomic distance.
       !
       call mozyme_section_timer_begin('fillij_pairs', fillij_timer)
+      nchg = 0
+      chg_overflow = .false.
       i = 0
       do iloop = 1, numat
           io = iorbs(iloop)
@@ -307,6 +323,7 @@
                     else if (nijbo(j, i) < 0) then
                       nijbo(i, j) = mpack
                       nijbo(j, i) = mpack
+                      call record_change(i, j, mpack)
                     else
                       mpack = mpack - io * jo  !  prevent mpack from being incremented - the element of
                                                  !  nijbo was already set.
@@ -349,6 +366,7 @@
                   else if (nijbo(j, i) == -1) then
                     nijbo(i, j) = -2
                     nijbo(j, i) = -2
+                    call record_change(i, j, -2)
                   end if
                 end if
                 !#aab
@@ -404,8 +422,17 @@
       end if
       call mozyme_section_timer_end('fillij_pairs', fillij_timer)
 #ifdef GPU
-      if (.not. count .and. lijbo .and. allocated(nijbo)) &
-        call mopac_cuda_mozyme_nijbo_touch(nijbo, int(numat, c_int))
+      if (.not. count .and. lijbo .and. allocated(nijbo)) then
+        if (first .or. chg_overflow) then
+          call mopac_cuda_mozyme_nijbo_touch(nijbo, int(numat, c_int))
+        else if (nchg > 0) then
+          call mopac_cuda_mozyme_nijbo_patch(nijbo, int(numat, c_int), int(nchg, c_int), &
+            chg_i, chg_j, chg_v)
+        else
+          call mopac_cuda_mozyme_nijbo_patch(nijbo, int(numat, c_int), 0_c_int, &
+            chg_i, chg_j, chg_v)
+        end if
+      end if
 #endif
       !
       if (count) then
@@ -425,4 +452,43 @@
       if (id /= 0) then
         n2elec = n2elec * 2
       end if
+    contains
+      subroutine record_change(ii, jj, value)
+        implicit none
+        integer, intent(in) :: ii, jj, value
+        integer :: stat, ncap
+        integer, allocatable :: tmp(:)
+        if (chg_overflow) return
+        if (.not. allocated(chg_i)) then
+          allocate (chg_i(4096), chg_j(4096), chg_v(4096), stat=stat)
+          if (stat /= 0) then
+            chg_overflow = .true.
+            return
+          end if
+        end if
+        if (nchg == size(chg_i)) then
+          ncap = 2*size(chg_i)
+          if (ncap > nchg_cap) then
+            chg_overflow = .true.
+            return
+          end if
+          allocate (tmp(ncap), stat=stat)
+          if (stat /= 0) then
+            chg_overflow = .true.
+            return
+          end if
+          tmp(1:nchg) = chg_i(1:nchg)
+          call move_alloc(tmp, chg_i)
+          allocate (tmp(ncap))
+          tmp(1:nchg) = chg_j(1:nchg)
+          call move_alloc(tmp, chg_j)
+          allocate (tmp(ncap))
+          tmp(1:nchg) = chg_v(1:nchg)
+          call move_alloc(tmp, chg_v)
+        end if
+        nchg = nchg + 1
+        chg_i(nchg) = ii
+        chg_j(nchg) = jj
+        chg_v(nchg) = value
+      end subroutine record_change
     end subroutine fillij
