@@ -1303,6 +1303,7 @@ struct MozymeScfDeviceState {
   DeviceBuffer<int> nfirst;
   DeviceBuffer<int> nlast;
   DeviceBuffer<int> nijbo;
+  long long nijbo_gen = -2;   // generation of the host nijbo held in dev.nijbo (see nijbo cache)
   DeviceBuffer<double> coord;
   DeviceBuffer<int> nat;
   DeviceBuffer<double> param_dd;
@@ -7109,6 +7110,9 @@ __global__ void mozyme_cnvgz_commit_diag_kernel(
 
 int ceil_div(int value, int divisor) { return (value + divisor - 1) / divisor; }
 
+// nijbo generation as tracked by the shared device cache (cuda_wrappers.cu).
+extern "C" long long mopac_cuda_mozyme_nijbo_generation(const int *host, int numat);
+
 bool upload_registered_state(MozymeScfContext &ctx) {
   ctx.device.uploaded = false;
   if (!ctx.state_registered) return false;
@@ -7270,12 +7274,23 @@ bool upload_registered_state(MozymeScfContext &ctx) {
     return false;
   }
   if (ctx.state.use_nijbo) {
-    if (!dev.nijbo.upload(static_cast<const int *>(ctx.state.nijbo),
-                          nijbo_count)) {
-      return false;
+    // Skip the 179 MB (7000 atoms) re-upload when fillij has not touched the
+    // host array since the copy already on the device was made.
+    const long long gen = mopac_cuda_mozyme_nijbo_generation(
+        static_cast<const int *>(ctx.state.nijbo), numat);
+    const bool current = gen >= 0 && gen == dev.nijbo_gen && dev.nijbo.ptr &&
+                         dev.nijbo.count == nijbo_count;
+    if (!current) {
+      if (!dev.nijbo.upload(static_cast<const int *>(ctx.state.nijbo),
+                            nijbo_count)) {
+        dev.nijbo_gen = -2;
+        return false;
+      }
+      dev.nijbo_gen = gen;
     }
   } else {
     dev.nijbo.reset();
+    dev.nijbo_gen = -2;
   }
   if (ctx.state.cosmo_enabled) {
     const int cosmo_nps = ctx.state.cosmo_nps;
@@ -11038,6 +11053,8 @@ extern "C" int mopac_cuda_mozyme_scf_register_state(
 // (mozyme_section_timers), so driver-level costs show up next to the
 // Fortran sections in the [PROFILE] MOZYME_SECTION report.
 extern "C" void mozyme_section_timer_add_c(const char *name, int name_len, double ms);
+// nijbo generation as tracked by the shared device cache (cuda_wrappers.cu).
+extern "C" long long mopac_cuda_mozyme_nijbo_generation(const int *host, int numat);
 
 namespace {
 inline double host_ms_since(const std::chrono::steady_clock::time_point &t0) {

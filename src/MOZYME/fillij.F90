@@ -75,6 +75,14 @@
           integer(c_int) :: iorbs_c(*), nijbo_c(numat_c,*), mpack_c, n2elec_c, ij_dim_c
           integer(c_int) :: code
         end function mopac_cuda_mozyme_fillij_nijbo
+        ! Announces a (re)filled host nijbo to the shared device cache
+        ! (cuda_wrappers.cu), so hcore / Fock plan / resident SCF re-upload it
+        ! only after a fillij pass instead of on every use.
+        subroutine mopac_cuda_mozyme_nijbo_touch(nijbo_c, numat_c) bind(C, name='mopac_cuda_mozyme_nijbo_touch')
+          use iso_c_binding, only: c_int
+          integer(c_int), intent(in) :: nijbo_c(*)
+          integer(c_int), value :: numat_c
+        end subroutine mopac_cuda_mozyme_nijbo_touch
       end interface
 #endif
 !
@@ -231,6 +239,8 @@
           '[MOZYME GPU SCF]', 'fillij_gpu=1 count=', count, 'mpack=', mpack, &
           'n2elec=', n2elec, 'ij_dim=', int(gpu_ij_dim)
         call flush(iw)
+        if (.not. count .and. lijbo .and. allocated(nijbo)) &
+          call mopac_cuda_mozyme_nijbo_touch(nijbo, int(numat, c_int))
         return
       end if
 #else
@@ -393,6 +403,10 @@
         end do
       end if
       call mozyme_section_timer_end('fillij_pairs', fillij_timer)
+#ifdef GPU
+      if (.not. count .and. lijbo .and. allocated(nijbo)) &
+        call mopac_cuda_mozyme_nijbo_touch(nijbo, int(numat, c_int))
+#endif
       !
       if (count) then
         ij_dim = ix

@@ -41,6 +41,8 @@
 // Fortran section-timer hook (mozyme_section_timers), so the upload / kernel /
 // download split of the hcore entry point shows up in the [PROFILE] report.
 extern "C" void mozyme_section_timer_add_c(const char *name, int name_len, double ms);
+// Shared device copy of nijbo (cuda_wrappers.cu), re-uploaded only when fillij touched it.
+extern "C" const int *mopac_cuda_mozyme_nijbo_device(const int *host, int numat);
 
 namespace {
 using HostClock = std::chrono::steady_clock;
@@ -862,13 +864,20 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
   if (!geom.upload(numat, npairs, pair_i, pair_j, pair_off, row_start, diag_off, iorbs, nat,
                    coord, a.g) ||
       !tab.upload(*tables) || !d_h.upload(h, static_cast<size_t>(mpack)) || !d_enuc.alloc(1) ||
-      cudaMemset(d_enuc.ptr, 0, sizeof(double)) != cudaSuccess ||
-      (point_on_device && have_nijbo && !d_nijbo.upload(nijbo, na * na))) {
+      cudaMemset(d_enuc.ptr, 0, sizeof(double)) != cudaSuccess) {
     return 2;
+  }
+  const int *nijbo_dev = nullptr;
+  if (point_on_device && have_nijbo) {
+    nijbo_dev = mopac_cuda_mozyme_nijbo_device(nijbo, numat);
+    if (!nijbo_dev) {
+      if (!d_nijbo.upload(nijbo, na * na)) return 2;
+      nijbo_dev = d_nijbo.ptr;
+    }
   }
   const HostClock::time_point t_uploaded = HostClock::now();
   add_section_ms("hcore_gpu_upload", host_ms_between(t_start, t_uploaded));
-  a.nijbo = (point_on_device && have_nijbo) ? d_nijbo.ptr : nullptr;
+  a.nijbo = nijbo_dev;
   a.g.distance_gate = distance_gate;
   a.g.d_on_device = d_on_device;
   a.g.cutof1 = tables->cutof1;

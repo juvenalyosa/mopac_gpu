@@ -578,6 +578,63 @@ static constexpr int kMozymeSparseFockPlanCount = 2;
 static constexpr int kMozymeSparseFockPlanDefault = 0;
 static MozymeSparseFockPlan g_mz_res_plans[kMozymeSparseFockPlanCount];
 
+// ---------------------------------------------------------------------------
+// Device copy of the MOZYME block index nijbo (numat x numat ints), shared by
+// the hcore, Fock-plan and resident-SCF entry points.  fillij is the only
+// writer of the host array and calls mopac_cuda_mozyme_nijbo_touch after each
+// fill; consumers ask for the device copy and it is re-uploaded only when the
+// host array was touched (or is a different array).  For a 7000-atom protein
+// the array is 179 MB and used to be uploaded three times per geometry step.
+// ---------------------------------------------------------------------------
+namespace {
+struct MozymeNijboCache {
+  DevBuf<int> buf;
+  const int *host = nullptr;
+  int numat = 0;
+  long long gen_host = 0;       // bumped by every touch / new array
+  long long gen_uploaded = -1;  // generation currently on the device
+};
+MozymeNijboCache g_mz_nijbo_cache;
+}  // namespace
+
+extern "C" void mopac_cuda_mozyme_nijbo_touch(const int *host, int numat) {
+  g_mz_nijbo_cache.host = host;
+  g_mz_nijbo_cache.numat = numat;
+  ++g_mz_nijbo_cache.gen_host;
+}
+
+// Generation of the host array as known to the cache (-1 if unknown).
+extern "C" long long mopac_cuda_mozyme_nijbo_generation(const int *host, int numat) {
+  if (!host || numat <= 0 || host != g_mz_nijbo_cache.host ||
+      numat != g_mz_nijbo_cache.numat) {
+    return -1;
+  }
+  return g_mz_nijbo_cache.gen_host;
+}
+
+// Device pointer to the current nijbo; uploads only when stale.  nullptr on failure.
+extern "C" const int *mopac_cuda_mozyme_nijbo_device(const int *host, int numat) {
+  if (!host || numat <= 0) return nullptr;
+  MozymeNijboCache &c = g_mz_nijbo_cache;
+  if (host != c.host || numat != c.numat) {
+    // Not announced by fillij: treat as a new array (always re-uploaded).
+    c.host = host;
+    c.numat = numat;
+    ++c.gen_host;
+  }
+  const size_t bytes = sizeof(int) * static_cast<size_t>(numat) * static_cast<size_t>(numat);
+  if (c.gen_uploaded == c.gen_host && c.buf.ptr && c.buf.cap >= bytes) return c.buf.ptr;
+  if (!c.buf.ensure(bytes)) return nullptr;
+  cudaStream_t s = g_stream ? g_stream : 0;
+  if (cudaMemcpyAsync(c.buf.ptr, host, bytes, cudaMemcpyHostToDevice, s) != cudaSuccess ||
+      cudaStreamSynchronize(s) != cudaSuccess) {
+    c.gen_uploaded = -1;
+    return nullptr;
+  }
+  c.gen_uploaded = c.gen_host;
+  return c.buf.ptr;
+}
+
 static inline MozymeSparseFockPlan *mozyme_sparse_fock_plan(int plan_id) {
   if (plan_id < 0 || plan_id >= kMozymeSparseFockPlanCount) return nullptr;
   return &g_mz_res_plans[plan_id];
@@ -5343,7 +5400,6 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
       static_cast<size_t>(kMozymeResidentDirectPackScratchDoubles);
 
   if (!g_mz_res_count_iorbs.ensure(atom_bytes) ||
-      !g_mz_res_count_nijbo.ensure(nijbo_bytes) ||
       !g_mz_res_count_out.ensure(sizeof(int) * 19u) ||
       !g_mz_res_count_fallback.ensure(
           sizeof(int) * kMozymeResidentFallbackBasisBins *
@@ -5394,8 +5450,13 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
                    "resident fock pack copy iorbs");
   code |= copy_int(g_mz_res_pack_nat, nat, atom_bytes,
                    "resident fock pack copy nat");
-  code |= copy_int(g_mz_res_count_nijbo, nijbo, nijbo_bytes,
-                   "resident fock pack copy nijbo");
+  const int *nijbo_dev = mopac_cuda_mozyme_nijbo_device(nijbo, natoms);
+  if (!nijbo_dev) {
+    if (!g_mz_res_count_nijbo.ensure(nijbo_bytes)) return 2;
+    code |= copy_int(g_mz_res_count_nijbo, nijbo, nijbo_bytes,
+                     "resident fock pack copy nijbo");
+    nijbo_dev = g_mz_res_count_nijbo.ptr;
+  }
   code |= copy_int(g_mz_res_pack_jindex, jindex, sizeof(int) * 16u,
                    "resident fock pack copy jindex");
   if (mode != 0) {
@@ -5455,7 +5516,7 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
     const int row_blocks = (natoms + kMzParThreads - 1) / kMzParThreads;
     mozyme_resident_row_count_kernel<<<row_blocks, kMzParThreads, 0, s>>>(
         natoms, ione, 1, g_mz_res_count_iorbs.ptr, g_mz_par_calc.ptr,
-        g_mz_res_count_nijbo.ptr, g_mz_par_rows.ptr, g_mz_res_count_out.ptr,
+        nijbo_dev, g_mz_par_rows.ptr, g_mz_res_count_out.ptr,
         g_mz_res_count_fallback.ptr);
     mozyme_resident_row_scan_kernel<<<1, 1024, 0, s>>>(
         natoms, g_mz_par_rows.ptr, g_mz_par_bases.ptr, g_mz_res_count_out.ptr,
@@ -5463,7 +5524,7 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
   } else {
     mozyme_resident_fock_count_kernel<<<1, 1, 0, s>>>(
         natoms, mode, ione, direct_flag != 0 ? 1 : 0, 1, g_mz_res_count_iorbs.ptr,
-        mode != 0 ? g_mz_res_count_kopt.ptr : nullptr, g_mz_res_count_nijbo.ptr,
+        mode != 0 ? g_mz_res_count_kopt.ptr : nullptr, nijbo_dev,
         g_mz_res_count_out.ptr, g_mz_res_count_fallback.ptr);
   }
   cudaError_t status = cudaGetLastError();
@@ -5557,7 +5618,7 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
     const int row_blocks = (natoms + kMzParThreads - 1) / kMzParThreads;
     mozyme_resident_row_pack_kernel<<<row_blocks, kMzParThreads, 0, s>>>(
         natoms, mpack, ione, 1, w_count, g_mz_res_count_iorbs.ptr,
-        g_mz_par_calc.ptr, g_mz_res_count_nijbo.ptr, g_mz_res_pack_wj.ptr,
+        g_mz_par_calc.ptr, nijbo_dev, g_mz_res_pack_wj.ptr,
         g_mz_par_bases.ptr, plan->one_f.ptr, plan->one_w.ptr,
         plan->one_iab.ptr, plan->one_ilim.ptr, plan->one_w_values.ptr,
         plan->pair_iab.ptr, plan->pair_jba.ptr, plan->pair_i.ptr,
@@ -5611,7 +5672,7 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
       natoms, mpack, mode, ione, direct_flag != 0 ? 1 : 0, semidr_flag,
       l_feather_flag, ev, a0, trunc_1, trunc_2, w_count,
       g_mz_res_count_iorbs.ptr, g_mz_res_pack_nat.ptr,
-      mode != 0 ? g_mz_res_count_kopt.ptr : nullptr, g_mz_res_count_nijbo.ptr,
+      mode != 0 ? g_mz_res_count_kopt.ptr : nullptr, nijbo_dev,
       g_mz_res_pack_jindex.ptr, g_mz_res_pack_coord.ptr, g_mz_res_pack_wj.ptr,
       direct_flag == 0 ? g_mz_res_pack_wk.ptr : nullptr, g_mz_res_pack_am.ptr, g_mz_res_pack_ad.ptr,
       g_mz_res_pack_aq.ptr, g_mz_res_pack_dd.ptr, g_mz_res_pack_qq.ptr,
