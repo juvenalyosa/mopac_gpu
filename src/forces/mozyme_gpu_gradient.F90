@@ -281,8 +281,9 @@ contains
     npairs = 0
     distance_gate = 1
     if (.not. allocated(iorbs)) return
-    if (c_fill == nijbo_fill_count .and. c_numat == numat .and. c_mpack == mpack .and. &
-        c_lijbo .eqv. lijbo .and. allocated(c_pair_i) .and. c_fill >= 0) then
+    ! (.eqv. binds looser than .and.: keep it parenthesised)
+    if (c_fill >= 0 .and. c_fill == nijbo_fill_count .and. c_numat == numat .and. &
+        c_mpack == mpack .and. (c_lijbo .eqv. lijbo) .and. allocated(c_pair_i)) then
       pair_i = c_pair_i
       pair_j = c_pair_j
       pair_off = c_pair_off
