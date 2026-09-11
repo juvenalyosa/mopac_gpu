@@ -1,0 +1,2 @@
+PM7 GEO_DAT="protein_adenylate_kinase_1ake_apo_hydrogenated.pdb" MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 CYCLES=3 GEO-OK NOCOMMENTS
+Geometry optimization benchmark (3 cycles): adenylate kinase 1AKE, protein only, hydrogenated

@@ -29,6 +29,19 @@
 
 #include "grad_launch.h"
 
+// Fortran section-timer hook (mozyme_section_timers): lets the resident Fock
+// plan packing report its upload / count / build split in the [PROFILE] table.
+extern "C" void mozyme_section_timer_add_c(const char *name, int name_len, double ms);
+namespace {
+inline void mz_add_section_ms(const char *name, double ms) {
+  mozyme_section_timer_add_c(name, static_cast<int>(std::strlen(name)), ms);
+}
+inline double mz_host_ms_since(const std::chrono::steady_clock::time_point &t0) {
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+}  // namespace
+
+
 #if defined(MOPAC_ENABLE_NVTX)
 #  if defined(__has_include)
 #    if __has_include(<nvToolsExt.h>)
@@ -5156,6 +5169,7 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
   }
 
   cudaStream_t s = g_stream ? g_stream : 0;
+  const auto t_pack0 = std::chrono::steady_clock::now();
   const size_t atom_bytes = sizeof(int) * static_cast<size_t>(natoms);
   const size_t nijbo_bytes =
       sizeof(int) * static_cast<size_t>(natoms) * static_cast<size_t>(natoms);
@@ -5256,6 +5270,10 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
   code |= copy_int(g_mz_res_pack_iod, iod, iod_bytes,
                    "resident fock pack copy iod");
   if (code != 0) return code;
+  // nijbo (natoms^2 ints) and wj (n2elec doubles) dominate this upload.
+  if (cudaStreamSynchronize(s) != cudaSuccess) return 2;
+  mz_add_section_ms("fock_pack_upload", mz_host_ms_since(t_pack0));
+  const auto t_pack1 = std::chrono::steady_clock::now();
 
   const bool parallel_pack = direct_flag != 0;
   const size_t row_bytes = sizeof(int) * static_cast<size_t>(natoms);
@@ -5314,6 +5332,8 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
     return 2;
   }
   if (counts_out[18] != 0) return counts_out[18];
+  mz_add_section_ms("fock_pack_count", mz_host_ms_since(t_pack1));
+  const auto t_pack2 = std::chrono::steady_clock::now();
 
   const int one_count = counts_out[0];
   const int pair_count = counts_out[1];
@@ -5468,6 +5488,7 @@ extern "C" int mopac_cuda_mozyme_resident_fock_pack_plan(
     return 2;
   }
   if (host_status[0] != 0) return 10 + host_status[0];
+  mz_add_section_ms("fock_pack_build", mz_host_ms_since(t_pack2));
 
   plan->mpack = mpack;
   plan->natoms = natoms;
