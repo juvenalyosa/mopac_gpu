@@ -1489,6 +1489,12 @@ struct MozymeScfDeviceState {
   cudaEvent_t start = nullptr;
   cudaEvent_t stop = nullptr;
   bool uploaded = false;
+  // True right after a successful final publish: the host copies of the
+  // SCF-internal arrays (f, partp, partf, pold, p1-p3, fmo, ifmo) equal the
+  // device copies, so the next run of this kept context can skip their
+  // upload when the sizes still match (the host never writes them between
+  // geometry steps; a size change re-uploads).  Cleared at every upload.
+  bool host_synced = false;
 
   // Non-blocking per-stage profile: event pairs are only read back after the run.
   struct StageTiming {
@@ -7162,51 +7168,69 @@ bool upload_registered_state(MozymeScfContext &ctx) {
   const std::size_t partf_upload_count =
       std::min(static_cast<std::size_t>(ctx.state.partf_dim), mpack_count);
 
+  // Device copies of the SCF-internal arrays still equal the host copies
+  // when the previous run of this context ended with a full publish and no
+  // size changed (see host_synced); their upload is then skipped.
+  const bool synced = dev.host_synced;
+  dev.host_synced = false;
+  auto keep = [&](const auto &buf, std::size_t n) {
+    return synced && buf.ptr && buf.count == n;
+  };
+
   if (!dev.p.upload(static_cast<const double *>(ctx.state.p), mpack_count)) {
     return false;
   }
-  if (!dev.f.upload(static_cast<const double *>(ctx.state.f), mpack_count)) {
+  if (!keep(dev.f, mpack_count) &&
+      !dev.f.upload(static_cast<const double *>(ctx.state.f), mpack_count)) {
     return false;
   }
   if (!dev.h.upload(static_cast<const double *>(ctx.state.h), mpack_count)) {
     return false;
   }
   if (!dev.eimp_p.resize(mpack_count)) return false;
-  if (!dev.partp.resize(mpack_count)) return false;
-  if (!cuda_context_ok(cudaMemset(dev.partp.ptr, 0,
-                                  mpack_count * sizeof(double)),
-                       "resident upload partp memset")) {
-    return false;
+  if (!keep(dev.partp, mpack_count)) {
+    if (!dev.partp.resize(mpack_count)) return false;
+    if (!cuda_context_ok(cudaMemset(dev.partp.ptr, 0,
+                                    mpack_count * sizeof(double)),
+                         "resident upload partp memset")) {
+      return false;
+    }
+    if (!cuda_context_ok(cudaMemcpy(dev.partp.ptr, ctx.state.partp,
+                                    partp_upload_count * sizeof(double),
+                                    cudaMemcpyHostToDevice),
+                         "resident upload partp copy")) {
+      return false;
+    }
   }
-  if (!cuda_context_ok(cudaMemcpy(dev.partp.ptr, ctx.state.partp,
-                                  partp_upload_count * sizeof(double),
-                                  cudaMemcpyHostToDevice),
-                       "resident upload partp copy")) {
-    return false;
+  if (!keep(dev.partf, mpack_count)) {
+    if (!dev.partf.resize(mpack_count)) return false;
+    if (!cuda_context_ok(cudaMemset(dev.partf.ptr, 0,
+                                    mpack_count * sizeof(double)),
+                         "resident upload partf memset")) {
+      return false;
+    }
+    if (!cuda_context_ok(cudaMemcpy(dev.partf.ptr, ctx.state.partf,
+                                    partf_upload_count * sizeof(double),
+                                    cudaMemcpyHostToDevice),
+                         "resident upload partf copy")) {
+      return false;
+    }
   }
-  if (!dev.partf.resize(mpack_count)) return false;
-  if (!cuda_context_ok(cudaMemset(dev.partf.ptr, 0,
-                                  mpack_count * sizeof(double)),
-                       "resident upload partf memset")) {
-    return false;
-  }
-  if (!cuda_context_ok(cudaMemcpy(dev.partf.ptr, ctx.state.partf,
-                                  partf_upload_count * sizeof(double),
-                                  cudaMemcpyHostToDevice),
-                       "resident upload partf copy")) {
-    return false;
-  }
-  if (!dev.pold.upload(static_cast<const double *>(ctx.state.pold),
+  if (!keep(dev.pold, mpack_count) &&
+      !dev.pold.upload(static_cast<const double *>(ctx.state.pold),
                        mpack_count)) {
     return false;
   }
-  if (!dev.p1.upload(static_cast<const double *>(ctx.state.p1), norbs_count)) {
+  if (!keep(dev.p1, norbs_count) &&
+      !dev.p1.upload(static_cast<const double *>(ctx.state.p1), norbs_count)) {
     return false;
   }
-  if (!dev.p2.upload(static_cast<const double *>(ctx.state.p2), norbs_count)) {
+  if (!keep(dev.p2, norbs_count) &&
+      !dev.p2.upload(static_cast<const double *>(ctx.state.p2), norbs_count)) {
     return false;
   }
-  if (!dev.p3.upload(static_cast<const double *>(ctx.state.p3), norbs_count)) {
+  if (!keep(dev.p3, norbs_count) &&
+      !dev.p3.upload(static_cast<const double *>(ctx.state.p3), norbs_count)) {
     return false;
   }
   if (!dev.idiag.upload(static_cast<const int *>(ctx.state.idiag),
@@ -7266,10 +7290,12 @@ bool upload_registered_state(MozymeScfContext &ctx) {
                        static_cast<std::size_t>(ctx.state.cvir_dim))) {
     return false;
   }
-  if (!dev.fmo.upload(static_cast<const double *>(ctx.state.fmo), fmo_count)) {
+  if (!keep(dev.fmo, fmo_count) &&
+      !dev.fmo.upload(static_cast<const double *>(ctx.state.fmo), fmo_count)) {
     return false;
   }
-  if (!dev.ifmo.upload(static_cast<const int *>(ctx.state.ifmo),
+  if (!keep(dev.ifmo, 2 * fmo_count) &&
+      !dev.ifmo.upload(static_cast<const int *>(ctx.state.ifmo),
                        2 * fmo_count)) {
     return false;
   }
@@ -11195,6 +11221,7 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
               publish_resident_control_to_status(&final_status, control);
               *status = final_status;
               final_code = kMozymeScfSuccess;
+              ctx->device.host_synced = true;
             }
           } else if (return_decision == ResidentReturnDecision::CpuBoundary) {
             if (publish_strict_stage_status_or_not_ready()) {
@@ -11275,6 +11302,7 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
                                                  final_control);
               *status = final_status;
               final_code = kMozymeScfSuccess;
+              ctx->device.host_synced = true;
             } else {
               final_code = kMozymeScfNotReady;
             }
