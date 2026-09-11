@@ -25,6 +25,7 @@
         nijbo, lijbo, iijj, iij, ij_dim, ijall, numij, morb, iorbs
       use overlaps_C, only : cutof1, cutof2
       use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
+      use mozyme_section_timers, only: mozyme_section_timer_begin, mozyme_section_timer_end
 !
       implicit none
       !
@@ -41,6 +42,9 @@
       double precision :: r, rmin, rr, x1, x2, x3
       save :: ix
       logical :: first
+      integer :: ib, jb
+      integer, parameter :: nblk = 64
+      double precision :: fillij_timer
       logical, save :: strict_nijbo_marker_written = .false.
       double precision, dimension (3) :: xj
       double precision, external :: reada
@@ -243,6 +247,7 @@
       !     Identify atom pairs involved in calculation.  This is done based
       !     on interatomic distance.
       !
+      call mozyme_section_timer_begin('fillij_pairs', fillij_timer)
       i = 0
       do iloop = 1, numat
           io = iorbs(iloop)
@@ -282,7 +287,14 @@
                 ix = ix + 1
                 if (.not. count) then
                   if (lijbo) then
-                    if (first .or. nijbo(i,j) < 0) then
+                    !  nijbo is symmetric: read/write nijbo(j, i) (contiguous in the
+                    !  inner j loop).  On the first pass only the lower triangle is
+                    !  written here and the upper one is filled by the tiled copy
+                    !  after the loop; strided nijbo(i, j) stores cost ~0.3 s per
+                    !  pass for 7000 atoms.
+                    if (first) then
+                      nijbo(j, i) = mpack
+                    else if (nijbo(j, i) < 0) then
                       nijbo(i, j) = mpack
                       nijbo(j, i) = mpack
                     else
@@ -322,7 +334,9 @@
                 end if !#aab - end
                 !
                 if (lijbo .and. (.not. count)) then
-                  if (first .or. nijbo(i,j) == -1) then
+                  if (first) then
+                    nijbo(j, i) = -2
+                  else if (nijbo(j, i) == -1) then
                     nijbo(i, j) = -2
                     nijbo(j, i) = -2
                   end if
@@ -337,10 +351,7 @@
                 end if
                 !
                 if (lijbo .and. (.not. count)) then
-                  if (first) then
-                    nijbo(i, j) = -1
-                    nijbo(j, i) = -1
-                  end if
+                  if (first) nijbo(j, i) = -1
                 end if
                 !#aab
             end if
@@ -366,6 +377,22 @@
           end if
           mpack = mpack + (io*(io+1)) / 2
       end do
+      if (first .and. lijbo .and. .not. count .and. numat > 1) then
+        !
+        !  Fill the upper triangle nijbo(i, j) = nijbo(j, i), i > j, in cache-sized
+        !  tiles (contiguous stores along i).
+        !
+        do jb = 1, numat, nblk
+          do ib = jb, numat, nblk
+            do j = jb, min(jb + nblk - 1, numat)
+              do i = max(ib, j + 1), min(ib + nblk - 1, numat)
+                nijbo(i, j) = nijbo(j, i)
+              end do
+            end do
+          end do
+        end do
+      end if
+      call mozyme_section_timer_end('fillij_pairs', fillij_timer)
       !
       if (count) then
         ij_dim = ix
