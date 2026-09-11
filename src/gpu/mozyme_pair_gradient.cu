@@ -32,10 +32,25 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+// Fortran section-timer hook (mozyme_section_timers), so the upload / kernel /
+// download split of the hcore entry point shows up in the [PROFILE] report.
+extern "C" void mozyme_section_timer_add_c(const char *name, int name_len, double ms);
+
+namespace {
+using HostClock = std::chrono::steady_clock;
+inline double host_ms_between(const HostClock::time_point &t0, const HostClock::time_point &t1) {
+  return std::chrono::duration<double, std::milli>(t1 - t0).count();
+}
+inline void add_section_ms(const char *name, double ms) {
+  mozyme_section_timer_add_c(name, static_cast<int>(std::strlen(name)), ms);
+}
+}  // namespace
 
 #include "mozyme_pair_overlap.cuh"
 #include "mozyme_pair_core.cuh"
@@ -836,6 +851,7 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
   *enuc_out = 0.0;
 
   EventTimer timer;
+  const HostClock::time_point t_start = HostClock::now();
   GeomBuffers geom;
   PairTables tab;
   DeviceArray<double> d_h, d_enuc;
@@ -850,6 +866,8 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
       (point_on_device && have_nijbo && !d_nijbo.upload(nijbo, na * na))) {
     return 2;
   }
+  const HostClock::time_point t_uploaded = HostClock::now();
+  add_section_ms("hcore_gpu_upload", host_ms_between(t_start, t_uploaded));
   a.nijbo = (point_on_device && have_nijbo) ? d_nijbo.ptr : nullptr;
   a.g.distance_gate = distance_gate;
   a.g.d_on_device = d_on_device;
@@ -873,6 +891,8 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
     mozyme_hcore_point_kernel<<<grid, kPointThreads>>>(a);
   }
   int code = finish_launch("MOZYME GPU hcore", geom.status, d_pairs_out);
+  const HostClock::time_point t_kernels = HostClock::now();
+  add_section_ms("hcore_gpu_kernels", host_ms_between(t_uploaded, t_kernels));
   if (code == 0) {
     if (cudaMemcpy(h, d_h.ptr, static_cast<size_t>(mpack) * sizeof(double),
                    cudaMemcpyDeviceToHost) != cudaSuccess ||
@@ -880,6 +900,7 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
       code = 2;
     }
   }
+  add_section_ms("hcore_gpu_download", host_ms_between(t_kernels, HostClock::now()));
   const double ms = timer.stop_ms();
   if (ms_out) *ms_out = ms;
   return code;

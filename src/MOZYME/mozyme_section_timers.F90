@@ -27,6 +27,12 @@ module mozyme_section_timers
   integer(kind=8), save :: section_calls(max_sections) = 0_8
   double precision, save :: section_ms(max_sections) = 0.d0
 
+  ! Whole-run phase tokens: run_mopac starts them right after reading the
+  ! input; compfg closes 'run_setup' on its first call, run_mopac closes
+  ! 'run_total' before the final report.  -1 = not started / already closed.
+  double precision, save, public :: run_setup_token = -1.d0
+  double precision, save, public :: run_total_token = -1.d0
+
   public :: mozyme_section_timer_begin
   public :: mozyme_section_timer_end
   public :: mozyme_section_timer_report

@@ -22,6 +22,7 @@ set(src_list
     post_scf_corrections H_bonds4 copyc6
     H_bond_correction_PM6_DH_Dispersion
     H_bond_correction_PM6_DH_type
+    H_bond_neighbours
     Hydrogen_bond_corrections
    )
 #-----------------------------------------------

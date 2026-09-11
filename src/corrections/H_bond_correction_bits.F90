@@ -54,15 +54,16 @@ subroutine find_XH_bonds(acc, nacc, h_b, nhb)
 !  nhb:   Number of hydrogen atoms involved in O-H or N-H bonds
 !  h_b:   Atom numbers of the hydrogen atoms
 !
-  use molkst_C, only : numat, method_PM7, method_pm6_dh_plus, method_pm6_d3h4, method_pm6_d3h4x
+  use molkst_C, only : numat, method_PM7, method_pm6_dh_plus, method_pm6_d3h4, method_pm6_d3h4x, id
   use common_arrays_C, only: nat
+  use hbond_neighbours_C, only : hb_nbr_ready, hb_nbr_rcut, hb_nbr_start, hb_nbr_list
   implicit none
   integer :: nacc, nhb
 
   integer :: acc(numat), h_b(numat)
-  integer :: i, j, is
+  integer :: i, j, is, m
   double precision :: RAH
-  logical :: used(numat)
+  logical :: used(numat), use_nbr
   logical, external :: connected
     if (method_pm6_dh_plus) then
       RAH = 1.4d0
@@ -80,19 +81,37 @@ subroutine find_XH_bonds(acc, nacc, h_b, nhb)
     used = .false.
     nacc = 0
     nhb  = 0
+!
+!  With neighbour lists (isolated molecules) only the atoms within hb_nbr_rcut of i
+!  are visited, in ascending order of j: same result as the full 1..numat scan.
+!
+    use_nbr = (id == 0 .and. hb_nbr_ready .and. hb_nbr_rcut >= RAH)
     do i = 1, numat
       if (nat(i) ==  7 .or. nat(i) ==  8 .or. nat(i) ==  is) then
         nacc = nacc + 1
         acc(nacc) = i
-        do j = 1, numat
-          if (nat(j) ==  1 .and. .not. used(j)) then
-            if (connected(i, j, RAH**2)) then
-              nhb = nhb + 1
-              h_b(nhb) = j
-              used(j) = .true.
+        if (use_nbr) then
+          do m = hb_nbr_start(i), hb_nbr_start(i + 1) - 1
+            j = hb_nbr_list(m)
+            if (nat(j) ==  1 .and. .not. used(j)) then
+              if (connected(i, j, RAH**2)) then
+                nhb = nhb + 1
+                h_b(nhb) = j
+                used(j) = .true.
+              end if
             end if
-          end if
-        end do
+          end do
+        else
+          do j = 1, numat
+            if (nat(j) ==  1 .and. .not. used(j)) then
+              if (connected(i, j, RAH**2)) then
+                nhb = nhb + 1
+                h_b(nhb) = j
+                used(j) = .true.
+              end if
+            end if
+          end do
+        end if
       end if
     end do
 end subroutine find_XH_bonds
@@ -109,10 +128,35 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
   implicit none
   integer :: nacc_a, nacc_b, nb_a_h, nrpairs, max_h_bonds
   integer :: acc_a(nacc_a), acc_b(nacc_b), bonding_a_h(nb_a_h), hblist1(max_h_bonds), hblist2(max_h_bonds), hblist3(max_h_bonds)
-  integer:: ii, i, jj, j, kk, k, i1
+  integer:: ii, i, jj, j, kk, k, i1, numat_h, stat
   double precision :: RAH, cutoff
   logical, external :: connected
   double precision, external :: angle
+!
+!  Duplicate detection: pairs are chained per hydrogen atom (hblist2), so the
+!  "does (k,j,i) or (i,j,k) already exist" test only visits the pairs of hydrogen j
+!  instead of all nrpairs (which made this routine O(nrpairs**2)).
+!
+  integer, allocatable :: head_h(:), next_pair(:)
+  logical :: dup
+  numat_h = 0
+  do jj = 1, nb_a_h
+    numat_h = max(numat_h, bonding_a_h(jj))
+  end do
+  allocate (head_h(max(1, numat_h)), next_pair(max_h_bonds), stat=stat)
+  if (stat /= 0) then
+    call mopend("Cannot allocate work arrays for hydrogen bonds")
+    return
+  end if
+  head_h = 0
+  next_pair = 0
+  do i1 = 1, nrpairs   ! chain any pairs already present (nrpairs is normally 0 on entry)
+    j = hblist2(i1)
+    if (j >= 1 .and. j <= numat_h) then
+      next_pair(i1) = head_h(j)
+      head_h(j) = i1
+    end if
+  end do
   if (index(keywrd, "PM6-DH+") /= 0 ) then
       RAH = 1.4d0
       cutoff = 10.d0
@@ -140,20 +184,17 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
 !
 !  Eliminate bonds of type O(n) - H - O(m) if O(m) - H - O(n) exists
 !
-                  do i1 = 1, nrpairs
-                    if (hblist2(i1) /= j) cycle
-                    if (hblist1(i1) /= k) cycle
-                    if (hblist3(i1) /= i) cycle
-                    exit
+                  dup = .false.
+                  i1 = head_h(j)
+                  do while (i1 > 0)
+                    if ((hblist1(i1) == k .and. hblist3(i1) == i) .or. &
+                        (hblist1(i1) == i .and. hblist3(i1) == k)) then
+                      dup = .true.
+                      exit
+                    end if
+                    i1 = next_pair(i1)
                   end do
-                  if (i1 /= nrpairs + 1) cycle
-                  do i1 = 1, nrpairs
-                    if (hblist2(i1) /= j) cycle
-                    if (hblist1(i1) /= i) cycle
-                    if (hblist3(i1) /= k) cycle
-                    exit
-                  end do
-                  if (i1 /= nrpairs + 1) cycle
+                  if (dup) cycle
                   nrpairs = nrpairs + 1 !  k = Distant acceptor atom
                   if (nrpairs > max_h_bonds) then
                     call mopend("The default array size for hydrogen bonds is too small")
@@ -165,6 +206,8 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
                   hblist3(nrpairs) = k ! O or N hydrogen-bonded to hydrogen j
                   hblist2(nrpairs) = j ! H singly bonded to i
                   hblist1(nrpairs) = i ! O or N of single bond to H
+                  next_pair(nrpairs) = head_h(j)
+                  head_h(j) = nrpairs
                 end if
               end if
             end if
@@ -205,7 +248,7 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
 
 
 
-  subroutine all_h_bonds(hblist1, hblist2, hblist3, max_h_bonds, nrpairs)
+  subroutine all_h_bonds(hblist1, hblist2, hblist3, max_h_bonds, nrpairs, covrad)
 !
 !  all_h_bonds detects all potential hydrogen bonds.  A hydrogen bond is a set of three atoms,
 !  an oxygen or nitrogen, a hydrogen, and an oxygen or nitrogen atom.  The hydrogen atom must
@@ -218,17 +261,38 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
 !    hblist2: Atom number of hydrogen atom involved in hydrogen bonding
 !    hblist3: Atom number ofoxygen or nitrogen hydrogen bonded to the hydrogen atom
 !
+!    covrad:  scaled covalent radii used by "bonding" (see Hydrogen_bond_corrections);
+!             they set the range of the neighbour lists built here for find_XH_bonds
+!             and setup_DH_Plus.
 !
-  use common_arrays_C, only: bonding_a_h, bonding_b_h, acceptor_a, acceptor_b
-  use molkst_C, only : numat, line, moperr
+  use common_arrays_C, only: bonding_a_h, bonding_b_h, acceptor_a, acceptor_b, coord, nat
+  use molkst_C, only : numat, line, moperr, id
   use chanel_C, only : iw
+  use hbond_neighbours_C, only : hb_nbr_build, hb_nbr_clear
   implicit none
     integer, intent (in) :: max_h_bonds
     integer, intent (out) :: hblist1(max_h_bonds), hblist2(max_h_bonds), hblist3(max_h_bonds), nrpairs
+    double precision, intent (in) :: covrad(94)
 !
 !  Local variables
 !
     integer :: i, nacceptor_a, nbonding_a_h
+    double precision :: rcut, cmax
+!
+!  Neighbour lists (isolated molecules only): must be a superset of every
+!  "distance < bonding" and "connected(i, j, RAH**2)" test used later, so the range
+!  is twice the largest scaled covalent radius present, or RAH (1.4), whichever is larger,
+!  with a small margin against rounding at the boundary.
+!
+    call hb_nbr_clear()
+    if (id == 0) then
+      cmax = 0.d0
+      do i = 1, numat
+        if (nat(i) >= 1 .and. nat(i) <= 94) cmax = max(cmax, covrad(nat(i)))
+      end do
+      rcut = max(1.4d0, 2.d0*cmax)*1.05d0 + 0.01d0
+      call hb_nbr_build(numat, coord, rcut)
+    end if
 !
 !  Work out list of of potential hydrogen bonds
 !

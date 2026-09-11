@@ -22,6 +22,7 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
     line, id, numcal, method_pm6_org
   use parameters_C, only : tore
   use common_arrays_C, only: coord, nat, q, p, hblist, dxyz, cell_ijk
+  use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
   implicit none
   logical, intent (in) :: l_grad, prt
 !
@@ -31,7 +32,7 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
     nrpairs, max_h_bonds, icalcn = -1
   logical :: n_h_bonds, first = .true.
   integer, allocatable :: nrbondsa(:), nrbondsb(:)
-  double precision :: EC, ER, vector(numat), sum, sum1, delta = 1.d-5, covrad(94)
+  double precision :: EC, ER, vector(numat), sum, sum1, delta = 1.d-5, covrad(94), hb_timer
   double precision, external :: EC_plus_ER, EH_plus, h_bonds4
   logical, external :: connected
 
@@ -81,11 +82,16 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
   hblist(:,:) = 0
   nrpairs = 0
   if (method_pm6_dh_plus .or. method_PM7) then
-    call all_h_bonds(hblist(1,1), hblist(1,9), hblist(1,5), max_h_bonds, nrpairs)
+    call mozyme_section_timer_begin('hbonds_find_pairs', hb_timer)
+    call all_h_bonds(hblist(1,1), hblist(1,9), hblist(1,5), max_h_bonds, nrpairs, covrad)
+    call mozyme_section_timer_end('hbonds_find_pairs', hb_timer)
+    call mozyme_section_timer_begin('hbonds_setup_dh_plus', hb_timer)
     call setup_DH_Plus(nrpairs, nrbondsa, nrbondsb, n_h_bonds, covrad)
+    call mozyme_section_timer_end('hbonds_setup_dh_plus', hb_timer)
   else
-    call all_h_bonds(hblist(1,1), hblist(1,2), hblist(1,3), max_h_bonds, nrpairs)
+    call all_h_bonds(hblist(1,1), hblist(1,2), hblist(1,3), max_h_bonds, nrpairs, covrad)
   end if
+  call mozyme_section_timer_begin('hbonds_energy_grad', hb_timer)
   if (method_pm6_dh2 .or. method_pm6_dh2x) then
     call chrge (p, vector)  ! PM6-DH2 needs partial charges
     do i = 1, numat
@@ -183,12 +189,14 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
       end do
     end if
   end do
+  call mozyme_section_timer_end('hbonds_energy_grad', hb_timer)
   Hydrogen_bond_corrections = E_hb
   return
   end function Hydrogen_bond_corrections
   subroutine setup_DH_Plus(nrpairs, nrbondsa, nrbondsb, l_h_bonds, covrad)
-  use molkst_C, only : numat
+  use molkst_C, only : numat, id
   use common_arrays_C, only: hblist
+  use hbond_neighbours_C, only : hb_nbr_ready, hb_nbr_rcut, hb_nbr_start, hb_nbr_list
   implicit none
   integer :: nrpairs, nrbondsa(nrpairs), nrbondsb(nrpairs)
   logical :: l_h_bonds
@@ -196,12 +204,19 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
 !
 !   Local variables
 !
-  integer :: i, j, i1, k, l, bondlist(10,3), nrbondsc
+  integer :: i, j, i1, k, l, m, m0, m1, bondlist(10,3), nrbondsc
   double precision :: xa_dist, xb_dist, xh_dist, xc_dist, sum, sum1, old_dist
   double precision, external :: distance, bonding
-  logical :: hbs1_ok, hbs2_ok
+  logical :: hbs1_ok, hbs2_ok, use_nbr
   hbs1_ok = .false.
   hbs2_ok = .false.
+!
+!  The covalent-bond searches below visit either all atoms (1..numat) or, for isolated
+!  molecules with neighbour lists available, only the atoms within hb_nbr_rcut of the
+!  reference atom, in ascending order.  all_h_bonds builds the lists with a range
+!  larger than any bonding(j, x) in the molecule, so both paths give the same bondlist.
+!
+  use_nbr = (id == 0 .and. hb_nbr_ready .and. hb_nbr_rcut > 0.d0)
 !
 !  Identify atoms associated with the hydrogen bonds
 !
@@ -209,9 +224,10 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
     nrbondsa(i) = 0
     nrbondsb(i) = 0
     bondlist(:,  :) = 0
-    do j = 1, numat
+    call nbr_range(hblist(i, 1), m0, m1)
+    do m = m0, m1
+      j = nbr_atom(m)
       xa_dist = distance(j, hblist(i, 1))
-      xb_dist = distance(j, hblist(i, 5))
       if (xa_dist < bonding(j, hblist(i, 1), covrad) .and. hblist(i, 1) /= j) then
 !
 !  Atom j is covalently bonded to atom hblist(i,1) (either the H bond donor or accepter)
@@ -238,6 +254,11 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
           nrbondsa(i) = 4
         end if
       end if
+    end do
+    call nbr_range(hblist(i, 5), m0, m1)
+    do m = m0, m1
+      j = nbr_atom(m)
+      xb_dist = distance(j, hblist(i, 5))
       if (xb_dist < bonding(j, hblist(i, 5), covrad) .and. hblist(i, 5) /= j) then
 !
 !  Atom j is covalently bonded to atom hblist(i,5) (either the H bond donor or accepter)
@@ -332,7 +353,9 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
       hblist(i, 2) = bondlist(1, 1)
 ! need bonds on first bonded atom here
       nrbondsc = 0
-      do k = 1, numat
+      call nbr_range(hblist(i, 2), m0, m1)
+      do m = m0, m1
+        k = nbr_atom(m)
         xc_dist = distance(k, hblist(i, 2))
         if (xc_dist < bonding(k, hblist(i, 2), covrad) .and. hblist(i, 2) /= k) then
           nrbondsc = nrbondsc + 1
@@ -415,7 +438,9 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
       hblist(i, 6) = bondlist(1, 2)
 ! need bonds on first bonded atom here
       nrbondsc = 0
-      do k = 1, numat
+      call nbr_range(hblist(i, 6), m0, m1)
+      do m = m0, m1
+        k = nbr_atom(m)
 !
 ! Check only H, N, and DO DO NOT USE!
 !
@@ -462,4 +487,30 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
 !
     l_h_bonds = .false.
   end if
+  contains
+    subroutine nbr_range(atom, first, last)
+!
+!  Index range to scan for atoms bonded to "atom": the neighbour list of "atom"
+!  when available, otherwise all atoms.
+!
+      implicit none
+      integer, intent(in) :: atom
+      integer, intent(out) :: first, last
+      if (use_nbr .and. atom >= 1 .and. atom <= numat) then
+        first = hb_nbr_start(atom)
+        last = hb_nbr_start(atom + 1) - 1
+      else
+        first = 1
+        last = numat
+      end if
+    end subroutine nbr_range
+    integer function nbr_atom(m)
+      implicit none
+      integer, intent(in) :: m
+      if (use_nbr) then
+        nbr_atom = hb_nbr_list(m)
+      else
+        nbr_atom = m
+      end if
+    end function nbr_atom
 end subroutine setup_DH_Plus

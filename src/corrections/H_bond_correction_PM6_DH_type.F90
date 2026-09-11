@@ -84,10 +84,10 @@ double precision function PM6_DH_H_bond_corrections(l_grad, prt)
   hblist(:,:) = 0
   nrpairs = 0
   if (method_pm6_dh_plus .or. method_PM7) then
-    call all_h_bonds(hblist(1,1), hblist(1,9), hblist(1,5), max_h_bonds, nrpairs)
+    call all_h_bonds(hblist(1,1), hblist(1,9), hblist(1,5), max_h_bonds, nrpairs, covrad)
     call setup_DH_Plus(nrpairs, nrbondsa, nrbondsb, n_h_bonds, covrad)
   else
-    call all_h_bonds(hblist(1,1), hblist(1,2), hblist(1,3), max_h_bonds, nrpairs)
+    call all_h_bonds(hblist(1,1), hblist(1,2), hblist(1,3), max_h_bonds, nrpairs, covrad)
   end if
   if (method_pm6_dh2 .or. method_pm6_dh2x) then
     call chrge (p, vector)  ! PM6-DH2 needs partial charges

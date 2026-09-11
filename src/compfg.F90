@@ -45,7 +45,7 @@
       & natm, r, nbf, nbt, nprn, iat, natt, zcorea, betaa, matind, n, &
       & nprin, vnn, dm, ef, dd, ff, cc0, aa, dtmp, nb2, ppg, pg, nsym
       use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end, &
-        mozyme_section_timer_report_all
+        mozyme_section_timer_report_all, run_setup_token
 !
 !***********************************************************************
 !-----------------------------------------------
@@ -211,6 +211,11 @@
       if (mozyme) then
         if (iseps) useps = .true.
         if (l_locate_ts .or. int) then
+          if (run_setup_token >= 0.d0) then
+            ! Everything before the first Hamiltonian: input, geometry, MOZYME set-up.
+            call mozyme_section_timer_end('run_setup', run_setup_token)
+            run_setup_token = -1.d0
+          end if
           call mozyme_section_timer_begin('compfg_hcore', compfg_timer)
           call hcore_for_MOZYME ()
           call mozyme_section_timer_end('compfg_hcore', compfg_timer)

@@ -30,6 +30,9 @@ subroutine hcore_for_MOZYME ()
     mozyme_gpu_hcore_run, mozyme_gpu_device_pair
   implicit none
   double precision :: hcore_timer
+  ! True when every atom pair is evaluated on the device (block pairs and
+  ! point/dipole pairs), so the j loop below has nothing to do at all.
+  logical :: gpu_all_pairs
   ! GPU evaluation of the sp-sp block pairs (h1elec + rotate); the CPU loop
   ! below skips them when gpu_block_pairs is true and the device adds them
   ! afterwards.  gpu_check keeps a CPU reference for those pairs and reports
@@ -140,6 +143,15 @@ subroutine hcore_for_MOZYME ()
   ! go to the device too: only e1b/e2a and enuc come back.
   gpu_point_pairs = gpu_block_pairs .and. semidr
   gpu_check = gpu_block_pairs .and. mozyme_gpu_hcore_check_enabled()
+  gpu_all_pairs = gpu_point_pairs
+  if (gpu_all_pairs) then
+    do i = 1, numat
+      if (.not. mozyme_gpu_device_pair(iorbs(i), iorbs(i))) then
+        gpu_all_pairs = .false.   ! sparkle or unsupported atom: keep the CPU scan
+        exit
+      end if
+    end do
+  end if
   call mozyme_section_timer_begin('hcore_pair_loop', hcore_timer)
   do i = 1, numat
 
@@ -191,6 +203,10 @@ subroutine hcore_for_MOZYME ()
     !
     jred = 1
     im1 = i - ione
+    ! With every pair on the device the loop body would only "cycle": skip
+    ! the O(numat) scan (it still cost 0.4 s for 7000 atoms, mostly the
+    ! strided ijbo(i, j) lookups).  mode == 0 here, so jred/kr are unused.
+    if (gpu_all_pairs) im1 = 0
     do j = 1, im1
       half = 1.d0
       if (i == 46 .and. j < 888) then

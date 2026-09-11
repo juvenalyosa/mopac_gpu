@@ -39,7 +39,8 @@
 !
 !
       use cosmo_C, only : iseps, useps, lpka, solv_energy, area, fepsi, ediel
-      use mozyme_section_timers, only : mozyme_section_timer_report_all
+      use mozyme_section_timers, only : mozyme_section_timer_report_all, mozyme_section_timer_begin, &
+        mozyme_section_timer_end, run_setup_token, run_total_token
 !
       USE funcon_C, only : fpc_9
 !
@@ -82,7 +83,7 @@
 #endif
       implicit none
       integer ::  i, j, k, l
-      double precision :: eat,  tim, store_fepsi
+      double precision :: eat,  tim, store_fepsi, run_writmo_token
       logical :: exists, opend, l_OLDDEN, strict_mozyme_scf
       double precision, external :: C_triple_bond_C, reada, seconds
       character :: nokey(20)*10
@@ -254,6 +255,10 @@
       id = 0
       iflepo = 0
       time0 = seconds(1)
+      if (run_total_token < 0.d0) then   ! first job of the input file only
+        call mozyme_section_timer_begin('run_setup', run_setup_token)
+        call mozyme_section_timer_begin('run_total', run_total_token)
+      end if
       MM_corrections = .false.
       nelecs = 0
       pdb_label = .false.
@@ -1702,7 +1707,9 @@
       if (moperr) go to 100
       last = 1
       if (iflepo >= 0) then
+        call mozyme_section_timer_begin('run_writmo', run_writmo_token)
         call writmo
+        call mozyme_section_timer_end('run_writmo', run_writmo_token)
         if (moperr) go to 100
         if (index(keywrd,' POLAR') /= 0) then
           call polar ()
@@ -1785,6 +1792,14 @@
       call delete_MOZYME_arrays()
       ! Final cumulative section report (covers the gradient of the last geometry step,
       ! which finishes after the last SCF-time report).
+      if (run_setup_token >= 0.d0) then
+        call mozyme_section_timer_end('run_setup', run_setup_token)
+        run_setup_token = -1.d0
+      end if
+      if (run_total_token >= 0.d0) then
+        call mozyme_section_timer_end('run_total', run_total_token)
+        run_total_token = -1.d0
+      end if
       call mozyme_section_timer_report_all()
       call summary(" ",1)
       if (tim > 1.d7) tim = tim - 1.d7

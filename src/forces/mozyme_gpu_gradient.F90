@@ -21,6 +21,7 @@
 ! results on to the Fortran arrays.
 module mozyme_gpu_gradient
   use iso_c_binding, only : c_int, c_double, c_ptr
+  use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
   implicit none
   private
   public :: mozyme_gpu_gradient_enabled
@@ -279,10 +280,12 @@ contains
       if (.not. allocated(iij) .or. .not. allocated(numij) .or. .not. allocated(ijall) &
           .or. .not. allocated(iijj)) return
     end if
+    ! nijbo is symmetric; index it as nijbo(jj, ii) so the inner loop walks a
+    ! contiguous column (the strided form cost ~0.3 s per call for 7000 atoms).
     if (lijbo) then
       do ii = 2, numat
         do jj = 1, ii - 1
-          if (nijbo(ii, jj) >= 0) npairs = npairs + 1
+          if (nijbo(jj, ii) >= 0) npairs = npairs + 1
         end do
       end do
     else
@@ -300,11 +303,11 @@ contains
       if (lijbo) then
         diag_off(ii) = int(nijbo(ii, ii), kind=c_int)
         do jj = 1, ii - 1
-          if (nijbo(ii, jj) >= 0) then
+          if (nijbo(jj, ii) >= 0) then
             npairs = npairs + 1
             pair_i(npairs) = int(ii, kind=c_int)
             pair_j(npairs) = int(jj, kind=c_int)
-            pair_off(npairs) = int(nijbo(ii, jj), kind=c_int)
+            pair_off(npairs) = int(nijbo(jj, ii), kind=c_int)
           end if
         end do
       else
@@ -474,6 +477,7 @@ contains
     real(c_double) :: ms_c, enuc_c
     integer :: npairs, distance_gate
     logical :: ok
+    double precision :: t_section
 
     code = 1
     ms = 0.d0
@@ -481,10 +485,13 @@ contains
     npairs_out = 0
     d_pairs_out = 0
     if (id /= 0 .or. mode /= 0 .or. numat_in /= numat .or. mpack <= 0) return
+    call mozyme_section_timer_begin('hcore_gpu_pairlist', t_section)
     call build_pair_list(pair_i, pair_j, pair_off, row_start, diag_off, iorbs_c, nat_c, &
       npairs, distance_gate, ok)
+    call mozyme_section_timer_end('hcore_gpu_pairlist', t_section)
     if (.not. ok) return
     call fill_tables(tables)
+    call mozyme_section_timer_begin('hcore_gpu_call', t_section)
     d_pairs_c = 0_c_int
     ms_c = 0.d0
     enuc_c = 0.d0
@@ -501,6 +508,7 @@ contains
           real(cutof2, kind=c_double), tables, nijbo_dummy, 0_c_int, merge(1_c_int, 0_c_int, point_pairs), &
           h, enuc_c, ms_c, d_pairs_c)
     end if
+    call mozyme_section_timer_end('hcore_gpu_call', t_section)
     code = int(rc)
     ms = ms_c
     enuc_add = enuc_c
