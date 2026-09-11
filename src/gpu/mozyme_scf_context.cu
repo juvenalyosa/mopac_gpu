@@ -1415,6 +1415,10 @@ struct MozymeScfDeviceState {
   DeviceBuffer<double> diagg_avir_entry;
   DeviceBuffer<int> diagg_counts;
   DeviceBuffer<int> diagg_offsets;
+  DeviceBuffer<int> diagg1_cache_n;        // diagg1 count-pass cache (see DiaggVirtualArgs)
+  DeviceBuffer<int> diagg1_cache_j;
+  DeviceBuffer<double> diagg1_cache_v;
+  DeviceBuffer<double> diagg1_cache_meta;
   DeviceBuffer<int> diagg_pair_state;
   DeviceBuffer<unsigned long long> diagg_vclaim;
   DeviceBuffer<unsigned long long> diagg_oclaim;
@@ -2773,7 +2777,16 @@ struct DiaggVirtualArgs {
   // Candidate index (nullptr / occ_words == 0: scan every occupied LMO).
   const int *nbr_start, *nbr_list, *head_start, *head_list;
   int occ_words;
+  // Count-pass cache (even mode): emitted (j, value) per virtual plus
+  // [sumt, tiny, eigv]; cache_n[i] = entry count, or -1 when the virtual
+  // overflowed cache_cap and the fill pass must recompute.  nullptr = off.
+  int *cache_n = nullptr;
+  int *cache_j = nullptr;
+  double *cache_v = nullptr;
+  double *cache_meta = nullptr;
+  int cache_cap = 0;
 };
+constexpr int kDiagg1CacheCap = 512;   // cached (j, value) entries per virtual
 
 // ---- diagg1 candidate index -------------------------------------------------
 // Block per atom: number of atoms b with nijbo(a, b) >= 0 (self included).
@@ -2973,6 +2986,38 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   if (!even_mode && !a.fill) {
     if (tid == 0) a.counts[i - 1] = a.nfmo[i - 1];
     return;
+  }
+  const bool use_cache = even_mode && a.cache_n && a.cache_j && a.cache_v &&
+                         a.cache_meta && a.cache_cap > 0;
+  if (use_cache && !a.fill && tid == 0) a.cache_n[i - 1] = -1;
+  if (use_cache && a.fill) {
+    // Fill pass: replay the count pass from the cache (identical results,
+    // none of the ws / candidate work is repeated).
+    const int n = a.cache_n[i - 1];
+    if (n >= 0) {
+      const int base = a.offsets[i - 1];
+      const int *cj = a.cache_j + static_cast<size_t>(i - 1) * a.cache_cap;
+      const double *cv = a.cache_v + static_cast<size_t>(i - 1) * a.cache_cap;
+      for (int t = tid; t < n; t += blockDim.x) {
+        const int pos = base + t;
+        if (pos < a.capacity) {
+          a.ifmo[2 * pos] = i;
+          a.ifmo[2 * pos + 1] = cj[t];
+          a.fmo[pos] = cv[t];
+        }
+      }
+      if (tid == 0) {
+        int emitted = n;
+        const int room = a.capacity - base;
+        if (emitted > room) emitted = room < 0 ? 0 : room;
+        a.nfmo[i - 1] = emitted;
+        const double *meta = a.cache_meta + static_cast<size_t>(i - 1) * 3;
+        a.eigv[i - 1] = meta[2];
+        atomicAdd_double(a.work_scalars + kDiaggWorkDoubleSumt, meta[0]);
+        atomicMax_double(a.work_scalars + kDiaggWorkDoubleTiny, meta[1]);
+      }
+      return;
+    }
   }
 
   const int nce_i = a.nce[i - 1];
@@ -3187,6 +3232,12 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
             a.ifmo[2 * pos + 1] = j;
             a.fmo[pos] = value;
           }
+        } else if (use_cache && emit) {
+          const int cpos = s_running + rank;
+          if (cpos < a.cache_cap) {
+            a.cache_j[static_cast<size_t>(i - 1) * a.cache_cap + cpos] = j;
+            a.cache_v[static_cast<size_t>(i - 1) * a.cache_cap + cpos] = value;
+          }
         }
         __syncthreads();
         if (tid == 0) s_running += chunk_total;
@@ -3211,6 +3262,12 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
           a.ifmo[2 * pos + 1] = j;
           a.fmo[pos] = value;
         }
+      } else if (use_cache && emit) {
+        const int cpos = s_running + rank;
+        if (cpos < a.cache_cap) {
+          a.cache_j[static_cast<size_t>(i - 1) * a.cache_cap + cpos] = j;
+          a.cache_v[static_cast<size_t>(i - 1) * a.cache_cap + cpos] = value;
+        }
       }
       __syncthreads();
       if (tid == 0) s_running += chunk_total;
@@ -3225,6 +3282,20 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
         a.nfmo[i - 1] = emitted;
       } else {
         a.counts[i - 1] = s_running;
+      }
+    }
+    if (use_cache && !a.fill) {
+      // Count pass: keep the per-virtual totals the fill pass would have
+      // accumulated, and mark the cache valid when every entry fitted.
+      __syncthreads();
+      const double sumt_block = block_sum_double(sumt_local, s_red);
+      const double tiny_block = block_max_double(tiny_local, s_red);
+      if (tid == 0 && !s_fail) {
+        double *meta = a.cache_meta + static_cast<size_t>(i - 1) * 3;
+        meta[0] = sumt_block;
+        meta[1] = tiny_block;
+        meta[2] = eigv_i;
+        a.cache_n[i - 1] = (s_running <= a.cache_cap) ? s_running : -1;
       }
     }
   } else {
@@ -7516,6 +7587,10 @@ bool upload_registered_state(MozymeScfContext &ctx) {
       return false;
     }
     if (!dev.diagg_counts.resize(nvir_count)) return false;
+    if (!dev.diagg1_cache_n.resize(nvir_count)) return false;
+    if (!dev.diagg1_cache_j.resize(nvir_count * kDiagg1CacheCap)) return false;
+    if (!dev.diagg1_cache_v.resize(nvir_count * kDiagg1CacheCap)) return false;
+    if (!dev.diagg1_cache_meta.resize(nvir_count * 3)) return false;
     if (!dev.diagg_offsets.resize(nvir_count + 1)) return false;
     if (!dev.diagg_pair_state.resize(fmo_count)) return false;
     if (!dev.diagg_vclaim.resize(nvir_count)) return false;
@@ -8188,6 +8263,13 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
       va.head_list = dev.diagg_head_list.ptr;
       va.occ_words = (nocc + 31) / 32;
     }
+    va.cache_n = dev.diagg1_cache_n.ptr;
+    va.cache_j = dev.diagg1_cache_j.ptr;
+    va.cache_v = dev.diagg1_cache_v.ptr;
+    va.cache_meta = dev.diagg1_cache_meta.ptr;
+    va.cache_cap = (va.cache_n && va.cache_j && va.cache_v && va.cache_meta &&
+                    dev.diagg1_cache_j.count >= static_cast<std::size_t>(nvir) * kDiagg1CacheCap)
+                       ? kDiagg1CacheCap : 0;
     va.fill = 0;
     mozyme_diagg1_virtual_kernel<<<nvir, kDiaggBlockThreads, dyn_shared>>>(va);
     mozyme_exclusive_scan_kernel<<<1, 1024>>>(
