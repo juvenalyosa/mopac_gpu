@@ -167,16 +167,16 @@ contains
       return
     end if
 !
-!  Pass 2: fill, then sort each atom's list by ascending atom number
+!  Pass 2: fill.  Visiting j in ascending order and appending j to the lists
+!  of all its neighbours i leaves every list sorted without any sorting step
+!  (an insertion sort per atom was quadratic for the ~450-entry 10 A lists).
 !
-    cap = 0
+    allocate (tmp(numat))   ! per-atom write cursor
     do i = 1, numat
-      cap = max(cap, counts(i))
+      tmp(i) = nbr_start(i)
     end do
-    allocate (tmp(max(1, cap)))
-    do i = 1, numat
-      ntmp = 0
-      ic = cell_of(i) - 1
+    do j = 1, numat
+      ic = cell_of(j) - 1
       ix = mod(ic, nx)
       iy = mod(ic/nx, ny)
       iz = ic/(nx*ny)
@@ -185,31 +185,17 @@ contains
           do jx = max(0, ix - 1), min(nx - 1, ix + 1)
             jc = 1 + jx + nx*(jy + ny*jz)
             do m = cell_start(jc), cell_start(jc + 1) - 1
-              j = cell_atoms(m)
-              if (j == i) cycle
+              i = cell_atoms(m)
+              if (i == j) cycle
               d = coord(1:3, i) - coord(1:3, j)
               r2 = d(1)**2 + d(2)**2 + d(3)**2
               if (r2 < rcut2) then
-                ntmp = ntmp + 1
-                tmp(ntmp) = j
+                nbr_list(tmp(i)) = j
+                tmp(i) = tmp(i) + 1
               end if
             end do
           end do
         end do
-      end do
-      ! insertion sort (lists are short)
-      do k = 2, ntmp
-        j = tmp(k)
-        m = k - 1
-        do while (m >= 1)
-          if (tmp(m) <= j) exit
-          tmp(m + 1) = tmp(m)
-          m = m - 1
-        end do
-        tmp(m + 1) = j
-      end do
-      do k = 1, ntmp
-        nbr_list(nbr_start(i) + k - 1) = tmp(k)
       end do
     end do
     deallocate (tmp, cell_of, cell_count, cell_start, cell_atoms, counts)
