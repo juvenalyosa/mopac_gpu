@@ -125,8 +125,8 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
   use chanel_C, only : iw
   use funcon_C, only : pi
   use molkst_C, only : keywrd, method_pm7, numat, id
-  use hbond_neighbours_C, only : hb_nbr_ready, hb_nbr_rcut, hb_nbr_start, hb_nbr_list, &
-    hb_far_ready, hb_far_rcut, hb_far_start, hb_far_list
+  use common_arrays_C, only : coord
+  use hbond_neighbours_C, only : hb_nbr_ready, hb_nbr_rcut, hb_nbr_start, hb_nbr_list
   implicit none
   integer :: nacc_a, nacc_b, nb_a_h, nrpairs, max_h_bonds
   integer :: acc_a(nacc_a), acc_b(nacc_b), bonding_a_h(nb_a_h), hblist1(max_h_bonds), hblist2(max_h_bonds), hblist3(max_h_bonds)
@@ -138,11 +138,15 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
   logical, external :: connected
   double precision, external :: angle
   ! Neighbour-list route (isolated molecules): the hydrogen loop visits the
-  ! covalent neighbours of i that are in bonding_a_h, and the acceptor loop the
-  ! atoms within hb_far_rcut of i that are in acc_b, both in ascending atom
-  ! order, exactly the atoms the full scans would accept.
+  ! covalent neighbours of i that are in bonding_a_h (in bonding_a_h order),
+  ! and the acceptor loop the acc_b atoms in the 27 cells around i of a grid
+  ! built over acc_b only (cell size = cutoff), gathered in ascending order:
+  ! exactly the atoms the full scans would accept, in the same order.
   logical :: use_lists
-  logical, allocatable :: is_h(:), is_acc(:)
+  logical, allocatable :: is_h(:)
+  integer :: gnx, gny, gnz, gncell, gc, gx, gy, gz, cx, cy, cz, nk
+  double precision :: glo(3), ghi(3), ginv
+  integer, allocatable :: gcell_of(:), gcell_start(:), gcell_atoms(:), gcount(:), kcand(:)
 !
 !  Duplicate detection: pairs are chained per hydrogen atom (hblist2), so the
 !  "does (k,j,i) or (i,j,k) already exist" test only visits the pairs of hydrogen j
@@ -182,15 +186,13 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
       RAH = 1.15d0
       cutoff = 5.5d0
     end if
-    use_lists = (id == 0 .and. hb_nbr_ready .and. hb_far_ready .and. &
-      hb_nbr_rcut >= RAH .and. hb_far_rcut >= cutoff)
+    use_lists = (id == 0 .and. hb_nbr_ready .and. hb_nbr_rcut >= RAH .and. nacc_b > 0)
     if (use_lists) then
-      allocate (is_h(numat), is_acc(numat), pos_h(numat), stat=stat)
+      allocate (is_h(numat), pos_h(numat), kcand(nacc_b), stat=stat)
       if (stat /= 0) then
         use_lists = .false.
       else
         is_h = .false.
-        is_acc = .false.
         pos_h = 0
         do jj = 1, nb_a_h
           if (bonding_a_h(jj) >= 1 .and. bonding_a_h(jj) <= numat) then
@@ -198,14 +200,55 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
             is_h(bonding_a_h(jj)) = .true.
           end if
         end do
-        do kk = 1, nacc_b
-          if (acc_b(kk) >= 1 .and. acc_b(kk) <= numat) is_acc(acc_b(kk)) = .true.
-        end do
+      end if
+    end if
+    if (use_lists) then
+      ! Cell grid over the acceptor atoms (acc_b), cell size = cutoff.
+      glo = coord(1:3, acc_b(1))
+      ghi = glo
+      do kk = 2, nacc_b
+        glo = min(glo, coord(1:3, acc_b(kk)))
+        ghi = max(ghi, coord(1:3, acc_b(kk)))
+      end do
+      ginv = 1.d0/cutoff
+      gnx = int((ghi(1) - glo(1))*ginv) + 1
+      gny = int((ghi(2) - glo(2))*ginv) + 1
+      gnz = int((ghi(3) - glo(3))*ginv) + 1
+      if (dble(gnx)*dble(gny)*dble(gnz) > 16.d0*dble(nacc_b) + 1000.d0) then
+        use_lists = .false.
+      else
+        gncell = gnx*gny*gnz
+        allocate (gcell_of(nacc_b), gcell_start(gncell + 1), gcell_atoms(nacc_b), gcount(gncell), stat=stat)
+        if (stat /= 0) then
+          use_lists = .false.
+        else
+          gcount = 0
+          do kk = 1, nacc_b
+            k = acc_b(kk)
+            cx = min(gnx - 1, max(0, int((coord(1, k) - glo(1))*ginv)))
+            cy = min(gny - 1, max(0, int((coord(2, k) - glo(2))*ginv)))
+            cz = min(gnz - 1, max(0, int((coord(3, k) - glo(3))*ginv)))
+            gc = 1 + cx + gnx*(cy + gny*cz)
+            gcell_of(kk) = gc
+            gcount(gc) = gcount(gc) + 1
+          end do
+          gcell_start(1) = 1
+          do gc = 1, gncell
+            gcell_start(gc + 1) = gcell_start(gc) + gcount(gc)
+          end do
+          gcount = 0
+          do kk = 1, nacc_b   ! ascending kk => cell members ascending (acc_b is ascending)
+            gc = gcell_of(kk)
+            gcell_atoms(gcell_start(gc) + gcount(gc)) = acc_b(kk)
+            gcount(gc) = gcount(gc) + 1
+          end do
+        end if
       end if
     end if
     do ii = 1, nacc_a
       i = acc_a(ii)   !  i = Acceptor atom bonded to H
       ncand = 0
+      nk = -1
       if (use_lists) then
         ! Hydrogens of bonding_a_h within the covalent list of i, visited in
         ! bonding_a_h order (the order of the original loop); more than
@@ -228,8 +271,6 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
           cand_pos(n + 1) = pos_h(j)
           ncand = ncand + 1
         end do
-        k0 = hb_far_start(i)
-        k1 = hb_far_start(i + 1) - 1
       end if
       if (use_lists .and. ncand >= 0) then
         j0 = 1
@@ -238,10 +279,6 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
         j0 = 1
         j1 = nb_a_h
       end if
-      if (.not. use_lists) then
-        k0 = 1
-        k1 = nacc_b
-      end if
       do jj = j0, j1
         if (use_lists .and. ncand >= 0) then
           j = cand(jj)
@@ -249,10 +286,42 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
           j = bonding_a_h(jj)   !  j = Hydrogen bond to acceptor atom
         end if
         if (connected(i, j, RAH**2)) then
+          if (use_lists .and. nk < 0) then
+            ! Acceptor candidates around i: the 27 grid cells, merged into
+            ! ascending atom order (cells' member lists are ascending).
+            cx = min(gnx - 1, max(0, int((coord(1, i) - glo(1))*ginv)))
+            cy = min(gny - 1, max(0, int((coord(2, i) - glo(2))*ginv)))
+            cz = min(gnz - 1, max(0, int((coord(3, i) - glo(3))*ginv)))
+            nk = 0
+            do gz = max(0, cz - 1), min(gnz - 1, cz + 1)
+              do gy = max(0, cy - 1), min(gny - 1, cy + 1)
+                do gx = max(0, cx - 1), min(gnx - 1, cx + 1)
+                  gc = 1 + gx + gnx*(gy + gny*gz)
+                  do m = gcell_start(gc), gcell_start(gc + 1) - 1
+                    k = gcell_atoms(m)
+                    n = nk
+                    do while (n >= 1)
+                      if (kcand(n) <= k) exit
+                      kcand(n + 1) = kcand(n)
+                      n = n - 1
+                    end do
+                    kcand(n + 1) = k
+                    nk = nk + 1
+                  end do
+                end do
+              end do
+            end do
+          end if
+          if (use_lists) then
+            k0 = 1
+            k1 = nk
+          else
+            k0 = 1
+            k1 = nacc_b
+          end if
           do kk = k0, k1
             if (use_lists) then
-              k = hb_far_list(kk)
-              if (.not. is_acc(k)) cycle
+              k = kcand(kk)
             else
               k = acc_b(kk)
             end if
@@ -346,7 +415,7 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
   use common_arrays_C, only: bonding_a_h, bonding_b_h, acceptor_a, acceptor_b, coord, nat
   use molkst_C, only : numat, line, moperr, id
   use chanel_C, only : iw
-  use hbond_neighbours_C, only : hb_nbr_build, hb_nbr_clear, hb_nbr_ready, hb_far_build
+  use hbond_neighbours_C, only : hb_nbr_build, hb_nbr_clear
   implicit none
     integer, intent (in) :: max_h_bonds
     integer, intent (out) :: hblist1(max_h_bonds), hblist2(max_h_bonds), hblist3(max_h_bonds), nrpairs
@@ -370,9 +439,6 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
       end do
       rcut = max(1.4d0, 2.d0*cmax)*1.05d0 + 0.01d0
       call hb_nbr_build(numat, coord, rcut)
-      ! Hydrogen-bond search radius (10 A for PM6-DH+, 7 A for PM7, 5.5 A
-      ! otherwise, see find_H__Y_bonds): one list covering all of them.
-      if (hb_nbr_ready) call hb_far_build(numat, coord, 10.0d0*1.01d0 + 0.01d0)
     end if
 !
 !  Work out list of of potential hydrogen bonds
