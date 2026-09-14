@@ -7872,6 +7872,59 @@ void diagg_debug_dump_doubles(const char *label, const double *device_ptr,
   std::fflush(stderr);
 }
 
+// Degree statistics of the diagg2 pair list (debug only): the longest
+// per-virtual chain and the most-shared occupied LMO bound the parallelism
+// of the lock-based sweep.
+void diagg_debug_dump_degrees(const MozymeScfContext &ctx) {
+  if (!diagg_debug_enabled()) return;
+  const auto &dev = ctx.device;
+  const int nvir = ctx.config.nvirtual;
+  const int nocc = ctx.config.noccupied;
+  if (!dev.diagg_ints.ptr || !dev.diagg_offsets.ptr || !dev.ifmo.ptr || nvir <= 0 || nocc <= 0) return;
+  cudaDeviceSynchronize();
+  int nij = 0;
+  if (cudaMemcpy(&nij, dev.diagg_ints.ptr + kDiaggIntNij, sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess ||
+      nij <= 0) {
+    return;
+  }
+  if (static_cast<std::size_t>(2 * nij) > dev.ifmo.count ||
+      static_cast<std::size_t>(nvir + 1) > dev.diagg_offsets.count) {
+    return;
+  }
+  std::vector<int> offsets(static_cast<std::size_t>(nvir + 1), 0);
+  std::vector<int> ifmo(static_cast<std::size_t>(2 * nij), 0);
+  if (cudaMemcpy(offsets.data(), dev.diagg_offsets.ptr, offsets.size() * sizeof(int),
+                 cudaMemcpyDeviceToHost) != cudaSuccess ||
+      cudaMemcpy(ifmo.data(), dev.ifmo.ptr, ifmo.size() * sizeof(int),
+                 cudaMemcpyDeviceToHost) != cudaSuccess) {
+    std::fprintf(stderr, "[DIAGG DEBUG] diagg2 degrees: copy failed\n");
+    return;
+  }
+  int max_chain = 0;
+  int active_vir = 0;
+  for (int i = 0; i < nvir; ++i) {
+    const int n = std::min(offsets[i + 1], nij) - offsets[i];
+    if (n > 0) ++active_vir;
+    max_chain = std::max(max_chain, n);
+  }
+  std::vector<int> degree(static_cast<std::size_t>(nocc), 0);
+  int max_degree = 0;
+  int active_occ = 0;
+  for (int ij = 0; ij < nij; ++ij) {
+    const int j = ifmo[2 * ij + 1];
+    if (j >= 1 && j <= nocc) {
+      const int d = ++degree[j - 1];
+      if (d == 1) ++active_occ;
+      max_degree = std::max(max_degree, d);
+    }
+  }
+  std::fprintf(stderr,
+               "[DIAGG DEBUG] diagg2 degrees: nij=%d virtuals=%d/%d max_pairs_per_virtual=%d "
+               "occupied=%d/%d max_occupied_degree=%d\n",
+               nij, active_vir, nvir, max_chain, active_occ, nocc, max_degree);
+  std::fflush(stderr);
+}
+
 // Cooperative launch of the parallel diagg2 sweep: every block must be
 // resident at once for grid.sync(), so the grid is sized from occupancy.
 bool launch_diagg2_parallel(int max_pairs, DiaggRotateArgs args,
@@ -8447,6 +8500,7 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
     diagg_debug_checkpoint("resident diagg2 rotate");
     diagg_debug_dump_ints("resident diagg2 work ints (err,flag0,flag1,rounds,rotated,nbrovf,lockspins,maxchain)",
                           dev.diagg_work_ints.ptr, kDiaggWorkIntCount);
+    diagg_debug_dump_degrees(ctx);
     diagg_debug_dump_ints("resident diagg ints after diagg2",
                           dev.diagg_ints.ptr, kDiaggIntCount);
     diagg_debug_dump_doubles("resident diagg scalars after diagg2",
