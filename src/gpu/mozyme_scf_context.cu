@@ -1169,6 +1169,139 @@ inline bool cuda_context_ok(cudaError_t status, const char *where) {
   return false;
 }
 
+// Pinned, double-buffered staging for large host<->device copies.  A plain
+// cudaMemcpy from/to pageable memory is staged by the driver call by call and
+// ran at ~1.5 GB/s for the resident publish (5 mpack-sized arrays, ~200 MB at
+// 7000 atoms: 164 ms per geometry step).  Here each 16 MB chunk is DMA'd
+// to/from a pinned bounce buffer while the host memcpy of the previous chunk
+// runs, which reaches the PCIe rate.  Falls back to cudaMemcpy when pinned
+// memory is unavailable.
+class PinnedStaging {
+ public:
+  static constexpr std::size_t kChunkBytes = static_cast<std::size_t>(16) << 20;
+  static constexpr std::size_t kMinStagedBytes = static_cast<std::size_t>(2) << 20;
+
+  static PinnedStaging &instance() {
+    static PinnedStaging staging;
+    return staging;
+  }
+
+  bool copy_d2h(void *host, const void *device, std::size_t bytes, const char *label) {
+    if (bytes == 0) return true;
+    if (bytes < kMinStagedBytes || !ready()) {
+      return cuda_context_ok(cudaMemcpy(host, device, bytes, cudaMemcpyDeviceToHost), label);
+    }
+    auto *dst = static_cast<char *>(host);
+    const auto *src = static_cast<const char *>(device);
+    std::size_t prev_off = 0;
+    std::size_t prev_len = 0;
+    int k = 0;
+    for (std::size_t off = 0; off < bytes; off += kChunkBytes, ++k) {
+      const int buf = k & 1;
+      const std::size_t len = std::min(kChunkBytes, bytes - off);
+      if (!cuda_context_ok(cudaMemcpyAsync(buf_[buf], src + off, len,
+                                           cudaMemcpyDeviceToHost, stream_), label) ||
+          !cuda_context_ok(cudaEventRecord(ev_[buf], stream_), label)) {
+        cudaStreamSynchronize(stream_);
+        return false;
+      }
+      if (k > 0) {
+        const int prev = (k - 1) & 1;
+        if (!cuda_context_ok(cudaEventSynchronize(ev_[prev]), label)) {
+          cudaStreamSynchronize(stream_);
+          return false;
+        }
+        std::memcpy(dst + prev_off, buf_[prev], prev_len);
+      }
+      prev_off = off;
+      prev_len = len;
+    }
+    const int last = (k - 1) & 1;
+    if (!cuda_context_ok(cudaEventSynchronize(ev_[last]), label)) return false;
+    std::memcpy(dst + prev_off, buf_[last], prev_len);
+    return true;
+  }
+
+  bool copy_h2d(void *device, const void *host, std::size_t bytes, const char *label) {
+    if (bytes == 0) return true;
+    if (bytes < kMinStagedBytes || !ready()) {
+      return cuda_context_ok(cudaMemcpy(device, host, bytes, cudaMemcpyHostToDevice), label);
+    }
+    auto *dst = static_cast<char *>(device);
+    const auto *src = static_cast<const char *>(host);
+    int k = 0;
+    for (std::size_t off = 0; off < bytes; off += kChunkBytes, ++k) {
+      const int buf = k & 1;
+      const std::size_t len = std::min(kChunkBytes, bytes - off);
+      // The bounce buffer was last used by chunk k-2; wait for its DMA.
+      if (k >= 2 && !cuda_context_ok(cudaEventSynchronize(ev_[buf]), label)) {
+        cudaStreamSynchronize(stream_);
+        return false;
+      }
+      std::memcpy(buf_[buf], src + off, len);
+      if (!cuda_context_ok(cudaMemcpyAsync(dst + off, buf_[buf], len,
+                                           cudaMemcpyHostToDevice, stream_), label) ||
+          !cuda_context_ok(cudaEventRecord(ev_[buf], stream_), label)) {
+        cudaStreamSynchronize(stream_);
+        return false;
+      }
+    }
+    return cuda_context_ok(cudaStreamSynchronize(stream_), label);
+  }
+
+ private:
+  PinnedStaging() = default;
+  ~PinnedStaging() {
+    for (int i = 0; i < 2; ++i) {
+      if (buf_[i]) cudaFreeHost(buf_[i]);
+      if (ev_[i]) cudaEventDestroy(ev_[i]);
+    }
+    if (stream_) cudaStreamDestroy(stream_);
+  }
+  PinnedStaging(const PinnedStaging &) = delete;
+  PinnedStaging &operator=(const PinnedStaging &) = delete;
+
+  bool ready() {
+    if (tried_) return ok_;
+    tried_ = true;
+    // A blocking stream (default flags) keeps the copies ordered after the
+    // kernels already queued on the legacy default stream.
+    if (cudaStreamCreate(&stream_) != cudaSuccess) {
+      stream_ = nullptr;
+      return false;
+    }
+    for (int i = 0; i < 2; ++i) {
+      void *buf = nullptr;
+      if (cudaHostAlloc(&buf, kChunkBytes, cudaHostAllocDefault) != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+      }
+      buf_[i] = buf;
+      cudaEvent_t ev = nullptr;
+      if (cudaEventCreateWithFlags(&ev, cudaEventDisableTiming) != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+      }
+      ev_[i] = ev;
+    }
+    ok_ = true;
+    return true;
+  }
+
+  bool tried_ = false;
+  bool ok_ = false;
+  void *buf_[2] = {nullptr, nullptr};
+  cudaEvent_t ev_[2] = {nullptr, nullptr};
+  cudaStream_t stream_ = nullptr;
+};
+
+inline bool copy_d2h_fast(void *host, const void *device, std::size_t bytes, const char *label) {
+  return PinnedStaging::instance().copy_d2h(host, device, bytes, label);
+}
+inline bool copy_h2d_fast(void *device, const void *host, std::size_t bytes, const char *label) {
+  return PinnedStaging::instance().copy_h2d(device, host, bytes, label);
+}
+
 template <typename T>
 struct DeviceBuffer {
   T *ptr = nullptr;
@@ -1212,10 +1345,7 @@ struct DeviceBuffer {
   bool upload(const T *host, std::size_t next_count) {
     if (!host || next_count == 0) return false;
     if (!resize(next_count)) return false;
-    return cuda_context_ok(
-        cudaMemcpy(ptr, host, next_count * sizeof(T),
-                   cudaMemcpyHostToDevice),
-        "cudaMemcpy host-to-device");
+    return copy_h2d_fast(ptr, host, next_count * sizeof(T), "cudaMemcpy host-to-device");
   }
 
 };
@@ -1261,26 +1391,9 @@ bool stage_and_commit_device_vector(void *host, const DeviceBuffer<T> &device,
                                     std::size_t count, const char *label) {
   if (count == 0) return true;
   if (!host || !device.ptr || device.count < count) return false;
-  constexpr std::size_t kMaxStagedElements = 1u << 20;
-  const std::size_t staged_elements = std::min(count, kMaxStagedElements);
-  std::vector<T> values;
-  try {
-    values.resize(staged_elements);
-  } catch (const std::bad_alloc &) {
-    return false;
-  }
-  auto *typed_host = static_cast<T *>(host);
-  for (std::size_t offset = 0; offset < count; offset += staged_elements) {
-    const std::size_t chunk = std::min(staged_elements, count - offset);
-    if (!cuda_context_ok(
-            cudaMemcpy(values.data(), device.ptr + offset,
-                       chunk * sizeof(T), cudaMemcpyDeviceToHost),
-            label)) {
-      return false;
-    }
-    std::memcpy(typed_host + offset, values.data(), chunk * sizeof(T));
-  }
-  return true;
+  // Pinned double-buffered chunks: the host array is written chunk by chunk
+  // as before (a failed copy leaves later chunks untouched).
+  return copy_d2h_fast(host, device.ptr, count * sizeof(T), label);
 }
 
 struct MozymeScfDeviceState {
@@ -7250,10 +7363,8 @@ bool upload_registered_state(MozymeScfContext &ctx) {
                          "resident upload partp memset")) {
       return false;
     }
-    if (!cuda_context_ok(cudaMemcpy(dev.partp.ptr, ctx.state.partp,
-                                    partp_upload_count * sizeof(double),
-                                    cudaMemcpyHostToDevice),
-                         "resident upload partp copy")) {
+    if (!copy_h2d_fast(dev.partp.ptr, ctx.state.partp, partp_upload_count * sizeof(double),
+                       "resident upload partp copy")) {
       return false;
     }
   }
@@ -7264,10 +7375,8 @@ bool upload_registered_state(MozymeScfContext &ctx) {
                          "resident upload partf memset")) {
       return false;
     }
-    if (!cuda_context_ok(cudaMemcpy(dev.partf.ptr, ctx.state.partf,
-                                    partf_upload_count * sizeof(double),
-                                    cudaMemcpyHostToDevice),
-                         "resident upload partf copy")) {
+    if (!copy_h2d_fast(dev.partf.ptr, ctx.state.partf, partf_upload_count * sizeof(double),
+                       "resident upload partf copy")) {
       return false;
     }
   }
