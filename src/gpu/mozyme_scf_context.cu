@@ -1436,7 +1436,6 @@ struct MozymeScfDeviceState {
   // diagg1 candidate index: atom neighbour CSR (from nijbo) and atom -> occupied
   // LMOs whose first two atoms are that atom.
   DeviceBuffer<int> diagg_nbr_count, diagg_nbr_start, diagg_nbr_list;
-  DeviceBuffer<int> diagg_nbr_off;   // nijbo block offset per nbr_list entry
   DeviceBuffer<int> diagg_head_count, diagg_head_start, diagg_head_list, diagg_head_cursor;
   DeviceBuffer<int> hb_pair_counts;
   DeviceBuffer<int> hb_pair_offsets;
@@ -2801,11 +2800,6 @@ struct DiaggVirtualArgs {
   double *cache_v = nullptr;
   double *cache_meta = nullptr;
   int cache_cap = 0;
-  // Block offsets parallel to nbr_list (nijbo(a, b) for each neighbour b),
-  // and the size of the per-block atom->entry map in dynamic shared memory
-  // (numat when enabled, 0 = binary search on the sorted keys instead).
-  const int *nbr_off = nullptr;
-  int map_words = 0;
 };
 constexpr int kDiagg1CacheCap = 512;   // cached (j, value) entries per virtual
 
@@ -2830,7 +2824,7 @@ mozyme_atom_nbr_count_kernel(int numat, const int *nijbo, int *counts,
 // Block per atom: writes the neighbour atoms in ascending order at start[a-1].
 __global__ void __launch_bounds__(kDiaggBlockThreads)
 mozyme_atom_nbr_fill_kernel(int numat, const int *nijbo, const int *start,
-                            int *list, int *offs, int capacity, int *work_ints,
+                            int *list, int capacity, int *work_ints,
                             const int *resident_control_ints) {
   __shared__ int s_warp[8];
   __shared__ int s_running;
@@ -2842,15 +2836,13 @@ mozyme_atom_nbr_fill_kernel(int numat, const int *nijbo, const int *start,
   __syncthreads();
   for (int chunk = 0; chunk < numat; chunk += blockDim.x) {
     const int b = chunk + threadIdx.x + 1;
-    const int off = (b <= numat) ? mozyme_nijbo_at(nijbo, numat, a, b) : -1;
-    const int flag = (off >= 0) ? 1 : 0;
+    const int flag = (b <= numat && mozyme_nijbo_at(nijbo, numat, a, b) >= 0) ? 1 : 0;
     int total = 0;
     const int rank = block_exclusive_scan_int(flag, s_warp, &total);
     if (flag) {
       const int pos = base + s_running + rank;
       if (pos < capacity) {
         list[pos] = b;
-        if (offs) offs[pos] = off;
       } else {
         atomicExch(work_ints + kDiaggWorkIntNbrOverflow, 1);
       }
@@ -2915,8 +2907,7 @@ __device__ __forceinline__ bool diagg1_candidate(const DiaggVirtualArgs &a, int 
                                                  int i1, int i2, double flim,
                                                  double cutoff, double oldlim,
                                                  const unsigned long long *s_sorted,
-                                                 int padded, const short *s_map,
-                                                 const double *s_aov,
+                                                 int padded, const double *s_aov,
                                                  const int *s_off, const double *s_ws,
                                                  double &sumt_local, double &tiny_local,
                                                  double &value, int *s_fail) {
@@ -2946,8 +2937,7 @@ __device__ __forceinline__ bool diagg1_candidate(const DiaggVirtualArgs &a, int 
   for (int kk = 0; kk < ncf_j; ++kk) {
     const int k1 = a.icocc[jbase + kk];
     const int norb = a.iorbs[k1 - 1];
-    const int e = s_map ? ((k1 >= 1 && k1 <= a.map_words) ? static_cast<int>(s_map[k1 - 1]) : -1)
-                        : find_lmo_entry(s_sorted, padded, k1);
+    const int e = find_lmo_entry(s_sorted, padded, k1);
     if (e < 0 || a.aocc[jbase + kk] * s_aov[e] < cutoff) {
       kl += norb;
       continue;
@@ -2986,14 +2976,6 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   __shared__ int s_cand[kDiaggMaxCandidates];
   __shared__ int s_ncand;
   __shared__ int s_cand_overflow;
-
-  // Dynamic shared memory: occupied-LMO bitmap (a.occ_words uints) followed
-  // by the atom->entry map of this virtual (a.map_words shorts, -1 = not in
-  // the LMO), which replaces the binary search on the sorted keys.
-  extern __shared__ unsigned int s_dyn[];
-  short *s_map = (a.map_words > 0)
-                     ? reinterpret_cast<short *>(s_dyn + a.occ_words)
-                     : nullptr;
 
   if (resident_control_terminal(a.resident_control_ints)) return;
   const int i = blockIdx.x + 1;
@@ -3113,55 +3095,8 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   }
   __syncthreads();
   block_bitonic_sort_u64(s_sorted, padded);
-  if (s_map) {
-    for (int t = tid; t < a.map_words; t += blockDim.x) s_map[t] = -1;
-    __syncthreads();
-    for (int e = tid; e < nce_i; e += blockDim.x) {
-      const int atom = s_atoms[e];
-      if (atom >= 1 && atom <= a.map_words) s_map[atom - 1] = static_cast<short>(e);
-    }
-    __syncthreads();
-  }
 
   // ws = F . c_vir restricted to the LMO's atom blocks.
-  const bool ws_by_nbr = (s_map && a.nbr_start && a.nbr_list && a.nbr_off &&
-                          a.work_ints[kDiaggWorkIntNbrOverflow] == 0);
-  if (ws_by_nbr) {
-    // Walk the block-pair neighbours of each LMO atom (ascending b, with the
-    // block offset stored alongside) instead of probing nijbo for every
-    // (atom, atom) pair of the LMO; contributions accumulate in shared memory.
-    for (int c = tid; c < span; c += blockDim.x) s_ws[c] = 0.0;
-    __syncthreads();
-    for (int kk = 0; kk < nce_i; ++kk) {
-      const int k1 = s_atoms[kk];
-      const int nk = a.iorbs[k1 - 1];
-      const double ak = a.avir_entry[ibase + kk];
-      const int cbase = loopi + s_off[kk];
-      const int nb0 = a.nbr_start[k1 - 1];
-      const int nb1 = a.nbr_start[k1];
-      for (int m = nb0 + tid; m < nb1; m += blockDim.x) {
-        const int j1 = a.nbr_list[m];
-        if (j1 < 1 || j1 > a.map_words) continue;
-        const int e = s_map[j1 - 1];
-        if (e < 0) continue;
-        const int kj = a.nbr_off[m];
-        if (kj < 0 || !(ak * a.p[kj] > cutoff)) continue;
-        const int nj = a.iorbs[j1 - 1];
-        const int offj = s_off[e];
-        for (int i4 = 0; i4 < nk; ++i4) {
-          const double cv = a.cvir[cbase + i4];
-          for (int jx = 0; jx < nj; ++jx) {
-            const int fidx = packed_block_index(kj, k1, j1, nk, nj, i4, jx);
-            if (fidx < 0 || fidx >= a.mpack) {
-              s_fail = 1;
-              break;
-            }
-            atomicAdd(&s_ws[offj + jx], a.fao[fidx] * cv);
-          }
-        }
-      }
-    }
-  } else
   for (int c = tid; c < span; c += blockDim.x) {
     int lo = 0;
     int hi = nce_i - 1;
@@ -3238,7 +3173,7 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
       // nijbo neighbourhood of the virtual's first two atoms (exactly the
       // pairs that pass the CPU prescreen), collected in a shared bitmap and
       // visited in ascending j, so the emitted order matches the full scan.
-      unsigned int *s_bits = s_dyn;
+      extern __shared__ unsigned int s_bits[];
       for (int w = tid; w < a.occ_words; w += blockDim.x) s_bits[w] = 0u;
       __syncthreads();
       const int nq = (i2 != i1) ? 2 : 1;
@@ -3299,7 +3234,7 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
           j = cand_ok ? s_cand[c] : c + 1;
           if (j >= 1 && j <= a.nocc) {
             emit = diagg1_candidate(a, j, i1, i2, flim, cutoff, oldlim, s_sorted, padded,
-                                    s_map, s_aov, s_off, s_ws, sumt_local, tiny_local, value,
+                                    s_aov, s_off, s_ws, sumt_local, tiny_local, value,
                                     &s_fail) ? 1 : 0;
           }
         }
@@ -3330,7 +3265,7 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
       double value = 0.0;
       if (j <= a.nocc) {
         emit = diagg1_candidate(a, j, i1, i2, flim, cutoff, oldlim, s_sorted, padded,
-                                s_map, s_aov, s_off, s_ws, sumt_local, tiny_local, value,
+                                s_aov, s_off, s_ws, sumt_local, tiny_local, value,
                                 &s_fail) ? 1 : 0;
       }
       int chunk_total = 0;
@@ -3397,8 +3332,7 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
       for (int kk = 0; kk < ncf_j; ++kk) {
         const int k1 = a.icocc[jbase + kk];
         const int norb = a.iorbs[k1 - 1];
-        const int e = s_map ? ((k1 >= 1 && k1 <= a.map_words) ? static_cast<int>(s_map[k1 - 1]) : -1)
-                            : find_lmo_entry(s_sorted, padded, k1);
+        const int e = find_lmo_entry(s_sorted, padded, k1);
         if (e < 0 || s_aov[e] * a.aocc[jbase + kk] < cutoff) {
           kl += norb;
           continue;
@@ -7713,7 +7647,6 @@ bool upload_registered_state(MozymeScfContext &ctx) {
     if (!dev.diagg_nbr_count.resize(numat_count)) return false;
     if (!dev.diagg_nbr_start.resize(numat_count + 1)) return false;
     if (!dev.diagg_nbr_list.resize(numat_count * static_cast<std::size_t>(kDiaggNbrPerAtomCap))) return false;
-    if (!dev.diagg_nbr_off.resize(numat_count * static_cast<std::size_t>(kDiaggNbrPerAtomCap))) return false;
     if (!dev.diagg_head_count.resize(numat_count)) return false;
     if (!dev.diagg_head_start.resize(numat_count + 1)) return false;
     if (!dev.diagg_head_list.resize(2 * nocc_count)) return false;
@@ -8191,13 +8124,10 @@ bool diagg1_index_enabled() {
 
 // Dynamic shared memory for the occupied-LMO bitmap; raises the kernel's
 // opt-in limit once when the static + dynamic total exceeds 48 KB.
-bool diagg1_dynamic_shared_ok(int occ_words, int map_atoms, std::size_t *bytes_out) {
+bool diagg1_dynamic_shared_ok(int occ_words, std::size_t *bytes_out) {
   static int max_optin = -1;
   static std::size_t attr_set_bytes = 0;
-  // occupied-LMO bitmap (uints) followed by the atom->entry map (shorts,
-  // padded to whole uints); map_atoms = 0 requests the bitmap only.
-  const std::size_t bytes = sizeof(unsigned int) * static_cast<std::size_t>(std::max(occ_words, 1)) +
-                            ((sizeof(short) * static_cast<std::size_t>(std::max(map_atoms, 0)) + 3u) & ~std::size_t(3));
+  const std::size_t bytes = sizeof(unsigned int) * static_cast<std::size_t>(std::max(occ_words, 1));
   if (max_optin < 0) {
     int device = 0;
     if (cudaGetDevice(&device) != cudaSuccess ||
@@ -8349,18 +8279,8 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
     va.head_list = nullptr;
     va.occ_words = 0;
     std::size_t dyn_shared = 0;
-    int map_atoms = 0;
-    if (diagg1_index_enabled() && dev.diagg_nbr_list.ptr && dev.diagg_head_list.ptr) {
-      // Prefer bitmap + atom map; fall back to the bitmap alone when the map
-      // does not fit the opt-in shared memory of this device.
-      if (diagg1_dynamic_shared_ok((nocc + 31) / 32, numat, &dyn_shared)) {
-        map_atoms = numat;
-      } else if (!diagg1_dynamic_shared_ok((nocc + 31) / 32, 0, &dyn_shared)) {
-        dyn_shared = 0;
-      }
-    }
     if (diagg1_index_enabled() && dev.diagg_nbr_list.ptr && dev.diagg_head_list.ptr &&
-        dyn_shared > 0) {
+        diagg1_dynamic_shared_ok((nocc + 31) / 32, &dyn_shared)) {
       const int nbr_cap = static_cast<int>(dev.diagg_nbr_list.count);
       const int head_cap = static_cast<int>(dev.diagg_head_list.count);
       cudaMemsetAsync(dev.diagg_head_count.ptr, 0, sizeof(int) * static_cast<std::size_t>(numat));
@@ -8371,8 +8291,8 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
           numat, nullptr, dev.diagg_nbr_count.ptr, dev.diagg_nbr_start.ptr,
           dev.resident_control_ints.ptr);
       mozyme_atom_nbr_fill_kernel<<<numat, kDiaggBlockThreads>>>(
-          numat, dev.nijbo.ptr, dev.diagg_nbr_start.ptr, dev.diagg_nbr_list.ptr,
-          dev.diagg_nbr_off.ptr, nbr_cap, dev.diagg_work_ints.ptr, dev.resident_control_ints.ptr);
+          numat, dev.nijbo.ptr, dev.diagg_nbr_start.ptr, dev.diagg_nbr_list.ptr, nbr_cap,
+          dev.diagg_work_ints.ptr, dev.resident_control_ints.ptr);
       const int occ_blocks = (nocc + kDiaggBlockThreads - 1) / kDiaggBlockThreads;
       mozyme_occ_head_count_kernel<<<occ_blocks, kDiaggBlockThreads>>>(
           nocc, numat, ctx.state.icocc_dim, dev.nncf.ptr, dev.ncf.ptr, dev.icocc.ptr,
@@ -8391,8 +8311,6 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
       va.head_start = dev.diagg_head_start.ptr;
       va.head_list = dev.diagg_head_list.ptr;
       va.occ_words = (nocc + 31) / 32;
-      va.nbr_off = dev.diagg_nbr_off.ptr;
-      va.map_words = map_atoms;
     }
     va.cache_n = dev.diagg1_cache_n.ptr;
     va.cache_j = dev.diagg1_cache_j.ptr;
