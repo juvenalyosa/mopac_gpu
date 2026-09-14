@@ -1432,7 +1432,8 @@ struct MozymeScfDeviceState {
   DeviceBuffer<unsigned long long> diagg_vclaim;
   DeviceBuffer<unsigned long long> diagg_oclaim;
   DeviceBuffer<int> diagg_olock;  // per-occupied-LMO spin locks (lock-based diagg2)
-  DeviceBuffer<short> diagg_rot_maps;  // per-warp atom->position maps (lock-based diagg2)
+  DeviceBuffer<short> diagg_rot_maps;  // per-block atom->position maps (lock-based diagg2)
+  DeviceBuffer<int> diagg_rot_cursor;  // next virtual to process (lock-based diagg2)
   // diagg1 candidate index: atom neighbour CSR (from nijbo) and atom -> occupied
   // LMOs whose first two atoms are that atom.
   DeviceBuffer<int> diagg_nbr_count, diagg_nbr_start, diagg_nbr_list;
@@ -3934,28 +3935,70 @@ mozyme_diagg2_parallel_kernel(DiaggRotateArgs a) {
   }
 }
 
-// Per-warp atom -> staged-list position maps (1-based, 0 = absent) used by the
+// Per-block atom -> staged-list position maps (1-based, 0 = absent) used by the
 // lock-based sweep instead of linear membership scans.  One entry per atom,
-// in global scratch (private to the warp, so plain loads/stores are fine).
-__device__ inline void warp_map_set(short *map, const int *list, int count) {
-  const int lane = threadIdx.x & 31;
-  for (int e = lane; e < count; e += 32) map[list[e] - 1] = static_cast<short>(e + 1);
+// in global scratch (private to the block, so plain loads/stores are fine; a
+// __syncthreads() after set/clear publishes them to the other warps).
+__device__ inline void block_map_set(short *map, const int *list, int count) {
+  for (int e = threadIdx.x; e < count; e += blockDim.x) map[list[e] - 1] = static_cast<short>(e + 1);
 }
-__device__ inline void warp_map_clear(short *map, const int *list, int count) {
-  const int lane = threadIdx.x & 31;
-  for (int e = lane; e < count; e += 32) map[list[e] - 1] = 0;
+__device__ inline void block_map_clear(short *map, const int *list, int count) {
+  for (int e = threadIdx.x; e < count; e += blockDim.x) map[list[e] - 1] = 0;
 }
 
-// Rotation of occupied j against virtual i for the lock-based sweep.  The
-// virtual's staged list (ilist/ioff, ncei0 atoms, mle0 coefficients) and its
-// position map are owned by the calling warp across all pairs of i and are
-// updated in place when the rotation appends atoms to the virtual LMO.  Only
-// the occupied LMO is staged here (it must be held under its lock).
-__device__ void warp_rotate_pair_indexed(const DiaggRotateArgs &a, int ij, int retry,
-                                         int *joff, int *ioff, int *jlist, int *ilist,
-                                         short *imap, short *jmap, int &ncei0, int &mle0,
-                                         double &sumb_acc, int &nrej_acc, int &error) {
-  const int lane = threadIdx.x & 31;
+// Exclusive orbital offsets for an LMO atom list (block-collective version of
+// warp_build_offsets); returns the coefficient count.  *error is per thread,
+// reduce it with __syncthreads_or afterwards.
+__device__ inline int block_build_offsets(const int *list, int count, const int *iorbs,
+                                          int numat, int *off, int *warp_sums, int *error) {
+  int running = 0;
+  for (int chunk = 0; chunk < count; chunk += blockDim.x) {
+    const int e = chunk + threadIdx.x;
+    int norb = 0;
+    if (e < count) {
+      const int atom = list[e];
+      if (atom < 1 || atom > numat) {
+        *error = 1;
+      } else {
+        norb = iorbs[atom - 1];
+      }
+    }
+    int total = 0;
+    const int prefix = block_exclusive_scan_int(norb, warp_sums, &total);
+    if (e < count) off[e] = running + prefix;
+    running += total;
+  }
+  return running;
+}
+
+// One block scan for both quantities a growth pass needs: the rank of a
+// flagged atom (low 16 bits) and the orbital prefix of the flagged atoms
+// (high 16 bits).  Atoms <= 1024 and orbitals <= 9216 per LMO, so both fit.
+__device__ inline int block_scan_flag_orbs(int flag, int norb, int *warp_sums,
+                                           int *n_out, int *orb_out) {
+  const int v = flag ? (1 | (norb << 16)) : 0;
+  int total = 0;
+  const int prefix = block_exclusive_scan_int(v, warp_sums, &total);
+  *n_out = total & 0xffff;
+  *orb_out = total >> 16;
+  return prefix;
+}
+
+// Rotation of occupied j against virtual i, performed by the whole block.
+// The virtual's staged list (ilist/ioff, ncei0 atoms, mle0 coefficients) and
+// its map imap persist across the virtual's chain and are extended here when
+// the virtual grows; the occupied side is staged per rotation (jlist/joff and
+// jmap, cleared on exit).  The growth decisions of the two count passes are
+// kept in s_fi/s_fj so the apply passes do not re-read the coefficients.
+// Every early exit is on block-uniform data (block_exclusive_scan_int
+// contains barriers).
+__device__ void block_rotate_pair_indexed(const DiaggRotateArgs &a, int ij, int retry,
+                                          int *joff, int *ioff, int *jlist, int *ilist,
+                                          short *imap, short *jmap,
+                                          unsigned char *s_fi, unsigned char *s_fj,
+                                          int *s_warp, int &ncei0, int &mle0,
+                                          double &sumb_acc, int &nrej_acc, int &error) {
+  const int tid = threadIdx.x;
   const int i = a.ifmo[2 * ij];
   const int j = a.ifmo[2 * ij + 1];
   const double c = a.fmo[ij] * a.rot_const;
@@ -3978,32 +4021,31 @@ __device__ void warp_rotate_pair_indexed(const DiaggRotateArgs &a, int ij, int r
   const int incv = (i != a.nvir) ? a.nnce[i] : a.icvir_dim;
   if (iur > loopi + a.norbs) iur = loopi + a.norbs;
 
-  for (int e = lane; e < ncfj0; e += 32) jlist[e] = ld_shared_int(a.icocc + jbase + e);
-  __syncwarp();
+  for (int e = tid; e < ncfj0; e += blockDim.x) jlist[e] = ld_shared_int(a.icocc + jbase + e);
+  __syncthreads();
   int local_error = 0;
-  const int mlf0 = warp_build_offsets(jlist, ncfj0, a.iorbs, a.numat, joff, &local_error);
-  __syncwarp();
-  if (__any_sync(0xffffffffu, local_error != 0) || loopj < 0 || loopi < 0 ||
+  const int mlf0 = block_build_offsets(jlist, ncfj0, a.iorbs, a.numat, joff, s_warp, &local_error);
+  if (__syncthreads_or(local_error) || loopj < 0 || loopi < 0 ||
       loopj + mlf0 > a.cocc_dim || loopi + mle0 > a.cvir_dim) {
     error = 1;
     return;
   }
-  warp_map_set(jmap, jlist, ncfj0);
-  __syncwarp();
+  block_map_set(jmap, jlist, ncfj0);
+  __syncthreads();
 
   const double e = copysign(sqrt(4.0 * c * c + d * d), d);
   double alpha = sqrt(0.5 * (1.0 + d / e));
 
   while (true) {
     const double beta = -copysign(sqrt(fmax(0.0, 1.0 - alpha * alpha)), c);
-    if (lane == 0) sumb_acc += fabs(beta);
+    if (tid == 0) sumb_acc += fabs(beta);
     const double beta2 = beta * beta;
 
     // Count growth: virtual atoms missing from the occupied LMO.
     int n_new_occ = 0;
     int orb_new_occ = 0;
-    for (int chunk = 0; chunk < ncei0; chunk += 32) {
-      const int le = chunk + lane;
+    for (int chunk = 0; chunk < ncei0; chunk += blockDim.x) {
+      const int le = chunk + tid;
       int flag = 0;
       int norb = 0;
       if (le < ncei0) {
@@ -4018,16 +4060,19 @@ __device__ void warp_rotate_pair_indexed(const DiaggRotateArgs &a, int ij, int r
           }
           flag = (beta2 * s > a.thresh) ? 1 : 0;
         }
+        s_fi[le] = static_cast<unsigned char>(flag);
       }
-      const unsigned mask = __ballot_sync(0xffffffffu, flag);
-      n_new_occ += __popc(mask);
-      orb_new_occ += __shfl_sync(0xffffffffu, warp_inclusive_scan_int(flag ? norb : 0), 31);
+      int n = 0;
+      int orb = 0;
+      block_scan_flag_orbs(flag, norb, s_warp, &n, &orb);
+      n_new_occ += n;
+      orb_new_occ += orb;
     }
     // Occupied atoms missing from the virtual LMO.
     int n_new_vir = 0;
     int orb_new_vir = 0;
-    for (int chunk = 0; chunk < ncfj0; chunk += 32) {
-      const int lf = chunk + lane;
+    for (int chunk = 0; chunk < ncfj0; chunk += blockDim.x) {
+      const int lf = chunk + tid;
       int flag = 0;
       int norb = 0;
       if (lf < ncfj0) {
@@ -4042,10 +4087,13 @@ __device__ void warp_rotate_pair_indexed(const DiaggRotateArgs &a, int ij, int r
           }
           flag = (beta2 * s > a.thresh) ? 1 : 0;
         }
+        s_fj[lf] = static_cast<unsigned char>(flag);
       }
-      const unsigned mask = __ballot_sync(0xffffffffu, flag);
-      n_new_vir += __popc(mask);
-      orb_new_vir += __shfl_sync(0xffffffffu, warp_inclusive_scan_int(flag ? norb : 0), 31);
+      int n = 0;
+      int orb = 0;
+      block_scan_flag_orbs(flag, norb, s_warp, &n, &orb);
+      n_new_vir += n;
+      orb_new_vir += orb;
     }
 
     const bool reject = (jbase + ncfj0 + n_new_occ > jncf) ||
@@ -4053,27 +4101,29 @@ __device__ void warp_rotate_pair_indexed(const DiaggRotateArgs &a, int ij, int r
                         (ibase + ncei0 + n_new_vir > incv) ||
                         (loopi + mle0 + orb_new_vir > iur);
     if (reject) {
-      if (lane == 0) ++nrej_acc;
+      if (tid == 0) ++nrej_acc;
       if (retry != 0) {
         alpha = 0.5 * (alpha + 1.0);
         continue;
       }
-      __syncwarp();
-      warp_map_clear(jmap, jlist, ncfj0);
+      __syncthreads();
+      block_map_clear(jmap, jlist, ncfj0);
+      __syncthreads();
       return;
     }
     if (ncei0 + n_new_vir > kDiaggMaxLmoAtoms || mle0 + orb_new_vir > kDiaggMaxLmoCoeffs) {
       error = 1;
-      __syncwarp();
-      warp_map_clear(jmap, jlist, ncfj0);
+      __syncthreads();
+      block_map_clear(jmap, jlist, ncfj0);
+      __syncthreads();
       return;
     }
 
     // Apply: rotate common atoms, append new occupied atoms in virtual order.
     int running_new = 0;
     int running_orb = 0;
-    for (int chunk = 0; chunk < ncei0; chunk += 32) {
-      const int le = chunk + lane;
+    for (int chunk = 0; chunk < ncei0; chunk += blockDim.x) {
+      const int le = chunk + tid;
       int flag = 0;
       int norb = 0;
       int mie = 0;
@@ -4091,23 +4141,16 @@ __device__ void warp_rotate_pair_indexed(const DiaggRotateArgs &a, int ij, int r
             a.cvir[cb_i + k] = alpha * bv - beta * av;
           }
         } else {
-          const int cb = loopi + ioff[le];
-          double s = 0.0;
-          for (int k = 0; k < norb; ++k) {
-            const double v = ld_shared_double(a.cvir + cb + k);
-            s += v * v;
-          }
-          flag = (beta2 * s > a.thresh) ? 1 : 0;
+          flag = s_fi[le];
         }
       }
-      const unsigned mask = __ballot_sync(0xffffffffu, flag);
-      const int rank = __popc(mask & ((1u << lane) - 1u));
-      const int orb_incl = warp_inclusive_scan_int(flag ? norb : 0);
-      const int orb_prefix = orb_incl - (flag ? norb : 0);
+      int n = 0;
+      int orb = 0;
+      const int prefix = block_scan_flag_orbs(flag, norb, s_warp, &n, &orb);
       if (flag) {
-        const int slot = ncfj0 + running_new + rank;
+        const int slot = ncfj0 + running_new + (prefix & 0xffff);
         a.icocc[jbase + slot] = mie;
-        const int cb_j = loopj + mlf0 + running_orb + orb_prefix;
+        const int cb_j = loopj + mlf0 + running_orb + (prefix >> 16);
         const int cb_i = loopi + ioff[le];
         for (int k = 0; k < norb; ++k) {
           const double v = ld_shared_double(a.cvir + cb_i + k);
@@ -4115,38 +4158,31 @@ __device__ void warp_rotate_pair_indexed(const DiaggRotateArgs &a, int ij, int r
           a.cvir[cb_i + k] = alpha * v;
         }
       }
-      running_new += __popc(mask);
-      running_orb += __shfl_sync(0xffffffffu, orb_incl, 31);
+      running_new += n;
+      running_orb += orb;
     }
     // Append new virtual atoms in occupied order (original entries only) and
-    // extend the staged virtual list / map accordingly.
+    // extend the staged virtual list / map accordingly.  These occupied atoms
+    // are not in the virtual, so the pass above did not touch their
+    // coefficients and the cached decision still holds.
     running_new = 0;
     running_orb = 0;
-    for (int chunk = 0; chunk < ncfj0; chunk += 32) {
-      const int lf = chunk + lane;
+    for (int chunk = 0; chunk < ncfj0; chunk += blockDim.x) {
+      const int lf = chunk + tid;
       int flag = 0;
       int norb = 0;
       int ii = 0;
       if (lf < ncfj0) {
         ii = jlist[lf];
-        if (imap[ii - 1] == 0) {
-          norb = a.iorbs[ii - 1];
-          const int cb = loopj + joff[lf];
-          double s = 0.0;
-          for (int k = 0; k < norb; ++k) {
-            const double v = ld_shared_double(a.cocc + cb + k);
-            s += v * v;
-          }
-          flag = (beta2 * s > a.thresh) ? 1 : 0;
-        }
+        flag = s_fj[lf];
+        if (flag) norb = a.iorbs[ii - 1];
       }
-      const unsigned mask = __ballot_sync(0xffffffffu, flag);
-      const int rank = __popc(mask & ((1u << lane) - 1u));
-      const int orb_incl = warp_inclusive_scan_int(flag ? norb : 0);
-      const int orb_prefix = orb_incl - (flag ? norb : 0);
+      int n = 0;
+      int orb = 0;
+      const int prefix = block_scan_flag_orbs(flag, norb, s_warp, &n, &orb);
       if (flag) {
-        const int slot = ncei0 + running_new + rank;
-        const int off_new = mle0 + running_orb + orb_prefix;
+        const int slot = ncei0 + running_new + (prefix & 0xffff);
+        const int off_new = mle0 + running_orb + (prefix >> 16);
         a.icvir[ibase + slot] = ii;
         const int cb_i = loopi + off_new;
         const int cb_j = loopj + joff[lf];
@@ -4159,41 +4195,52 @@ __device__ void warp_rotate_pair_indexed(const DiaggRotateArgs &a, int ij, int r
         ioff[slot] = off_new;
         imap[ii - 1] = static_cast<short>(slot + 1);
       }
-      running_new += __popc(mask);
-      running_orb += __shfl_sync(0xffffffffu, orb_incl, 31);
+      running_new += n;
+      running_orb += orb;
     }
-    __syncwarp();
-    if (lane == 0) {
+    __syncthreads();
+    if (tid == 0) {
       a.ncf[j - 1] = ncfj0 + n_new_occ;
       a.nce[i - 1] = ncei0 + n_new_vir;
     }
     ncei0 += n_new_vir;
     mle0 += orb_new_vir;
-    warp_map_clear(jmap, jlist, ncfj0);
-    __syncwarp();
+    block_map_clear(jmap, jlist, ncfj0);
+    __syncthreads();
     return;
   }
 }
 
-// Lock-based diagg2 sweep (default).  One warp per virtual LMO i walks its
-// candidate pairs (i, j) in list order (diagg1 stores them contiguously at
-// offsets[i-1] .. offsets[i]); the occupied LMO j is held under a spin lock
-// for the duration of the rotation, so no two concurrent rotations share an
-// LMO and every LMO sees a sequential chain of updates.  No grid-wide
-// synchronisation: the cooperative sweep needed ~2 grid.sync() per scheduling
-// round and the number of rounds equals the largest LMO degree (500+ for
-// crambin), which made it latency-bound.  The virtual's atom list is staged
-// once per i and membership tests go through per-warp position maps.  The
-// order in which different virtuals touch the same occupied LMO depends on
-// lock timing, so results differ run to run at rounding level (accepted:
+// Lock-based diagg2 sweep (default).  One block per virtual LMO i (taken
+// from a shared cursor, so blocks that finish early pick up the next
+// virtual) walks its candidate pairs (i, j) in list order (diagg1 stores them
+// contiguously at offsets[i-1] .. offsets[i]); the occupied LMO j is held
+// under a spin lock for the duration of the rotation, so no two concurrent
+// rotations share an LMO and every LMO sees a sequential chain of updates.
+// No grid-wide synchronisation: the cooperative sweep needed ~2 grid.sync()
+// per scheduling round and the number of rounds equals the largest LMO
+// degree (500+ for crambin), which made it latency-bound.  A whole block
+// performs each rotation: LMOs span ~150-250 atoms in proteins, so with one
+// warp per rotation every pass over an LMO was 5-8 dependent L2 round trips
+// and the critical chain (the highest-degree LMO) took ~25 us per rotation.
+// The order in which different virtuals touch the same occupied LMO depends
+// on lock timing, so results differ run to run at rounding level (accepted:
 // tolerance vs CPU).
-__global__ void __launch_bounds__(kDiaggRotateThreads)
-mozyme_diagg2_locked_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
-                            short *maps, int max_warps) {
-  __shared__ int s_joff[kDiaggRotateWarps][kDiaggMaxLmoAtoms];
-  __shared__ int s_ioff[kDiaggRotateWarps][kDiaggMaxLmoAtoms];
-  __shared__ int s_jatoms[kDiaggRotateWarps][kDiaggMaxLmoAtoms];
-  __shared__ int s_iatoms[kDiaggRotateWarps][kDiaggMaxLmoAtoms];
+constexpr int kDiaggRotBlockThreads = 256;
+constexpr int kDiaggWorkIntLockSpins = 6;   // lock-spin iterations of the last sweep (contention)
+constexpr int kDiaggWorkIntMaxChain = 7;    // most rotations performed by one block (critical path)
+
+__global__ void __launch_bounds__(kDiaggRotBlockThreads)
+mozyme_diagg2_block_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
+                           short *maps, int *cursor) {
+  __shared__ int s_joff[kDiaggMaxLmoAtoms];
+  __shared__ int s_ioff[kDiaggMaxLmoAtoms];
+  __shared__ int s_jatoms[kDiaggMaxLmoAtoms];
+  __shared__ int s_iatoms[kDiaggMaxLmoAtoms];
+  __shared__ unsigned char s_fi[kDiaggMaxLmoAtoms];
+  __shared__ unsigned char s_fj[kDiaggMaxLmoAtoms];
+  __shared__ int s_warp[8];
+  __shared__ int s_next;
 
   if (resident_control_terminal(a.resident_control_ints)) return;
   const int nij = a.control_ints[a.nij_slot];
@@ -4204,21 +4251,23 @@ mozyme_diagg2_locked_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
                                        kResidentControlShift, a.shift);
   if (nij <= 0) return;
 
-  const int lane = threadIdx.x & 31;
-  const int w = threadIdx.x >> 5;
-  const int gwarp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
-  const int gwarps = (gridDim.x * blockDim.x) >> 5;
-  if (gwarp >= max_warps) return;
-  short *imap = maps + static_cast<std::size_t>(2 * gwarp) * a.numat;
+  const int tid = threadIdx.x;
+  short *imap = maps + static_cast<std::size_t>(2 * blockIdx.x) * a.numat;
   short *jmap = imap + a.numat;
-  int *ilist = s_iatoms[w];
-  int *ioff = s_ioff[w];
+  int *ilist = s_iatoms;
+  int *ioff = s_ioff;
 
   double sumb_acc = 0.0;
   int nrej_acc = 0;
   int error = 0;
   int rotated = 0;
-  for (int i = gwarp + 1; i <= a.nvir && error == 0; i += gwarps) {
+  int spins = 0;
+  while (error == 0) {
+    if (tid == 0) s_next = atomicAdd(cursor, 1);
+    __syncthreads();
+    const int i = s_next + 1;
+    __syncthreads();
+    if (i > a.nvir) break;
     const int start = offsets[i - 1];
     int end = offsets[i];
     if (end > nij) end = nij;
@@ -4233,17 +4282,16 @@ mozyme_diagg2_locked_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
       error = 1;
       break;
     }
-    for (int e = lane; e < ncei0; e += 32) ilist[e] = ld_shared_int(a.icvir + ibase + e);
-    __syncwarp();
+    for (int e = tid; e < ncei0; e += blockDim.x) ilist[e] = ld_shared_int(a.icvir + ibase + e);
+    __syncthreads();
     int local_error = 0;
-    int mle0 = warp_build_offsets(ilist, ncei0, a.iorbs, a.numat, ioff, &local_error);
-    __syncwarp();
-    if (__any_sync(0xffffffffu, local_error != 0) || loopi + mle0 > a.cvir_dim) {
+    int mle0 = block_build_offsets(ilist, ncei0, a.iorbs, a.numat, ioff, s_warp, &local_error);
+    if (__syncthreads_or(local_error) || loopi + mle0 > a.cvir_dim) {
       error = 1;
       break;
     }
-    warp_map_set(imap, ilist, ncei0);
-    __syncwarp();
+    block_map_set(imap, ilist, ncei0);
+    __syncthreads();
 
     for (int ij = start; ij < end; ++ij) {
       const int j = a.ifmo[2 * ij + 1];
@@ -4256,28 +4304,35 @@ mozyme_diagg2_locked_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
       const double c = f * a.rot_const;
       const double d = a.eigs[j - 1] - a.eigv[i - 1] - a.shift;
       if (fabs(c / d) < biglim) continue;
-      if (lane == 0) {
-        while (atomicCAS(olock + j - 1, 0, 1) != 0) __nanosleep(100);
+      if (tid == 0) {
+        while (atomicCAS(olock + j - 1, 0, 1) != 0) {
+          __nanosleep(100);
+          ++spins;
+        }
         __threadfence();
       }
-      __syncwarp();
-      warp_rotate_pair_indexed(a, ij, retry, s_joff[w], ioff, s_jatoms[w], ilist,
-                               imap, jmap, ncei0, mle0, sumb_acc, nrej_acc, error);
+      __syncthreads();
+      block_rotate_pair_indexed(a, ij, retry, s_joff, ioff, s_jatoms, ilist, imap, jmap,
+                                s_fi, s_fj, s_warp, ncei0, mle0, sumb_acc, nrej_acc, error);
       ++rotated;
-      __syncwarp();
+      __syncthreads();
       __threadfence();
-      if (lane == 0) atomicExch(olock + j - 1, 0);
-      __syncwarp();
+      if (tid == 0) atomicExch(olock + j - 1, 0);
+      __syncthreads();
       if (error != 0) break;
     }
-    __syncwarp();
-    warp_map_clear(imap, ilist, ncei0);
-    __syncwarp();
+    __syncthreads();
+    block_map_clear(imap, ilist, ncei0);
+    __syncthreads();
   }
 
-  if (gwarp == 0 && lane == 0) a.work_ints[kDiaggWorkIntRounds] = 1;
-  if (lane == 0) {
-    if (rotated != 0) atomicAdd(a.work_ints + kDiaggWorkIntRotated, rotated);
+  if (blockIdx.x == 0 && tid == 0) a.work_ints[kDiaggWorkIntRounds] = 1;
+  if (tid == 0) {
+    if (rotated != 0) {
+      atomicAdd(a.work_ints + kDiaggWorkIntRotated, rotated);
+      atomicMax(a.work_ints + kDiaggWorkIntMaxChain, rotated);
+    }
+    if (spins != 0) atomicAdd(a.work_ints + kDiaggWorkIntLockSpins, spins);
     if (sumb_acc != 0.0) atomicAdd_double(a.sumb_out, sumb_acc);
     if (nrej_acc != 0) atomicAdd(a.nrej_out, nrej_acc);
     if (error != 0) {
@@ -7856,7 +7911,7 @@ bool launch_diagg2_parallel(int max_pairs, DiaggRotateArgs args,
       label);
 }
 
-// Lock-based diagg2 launch (see mozyme_diagg2_locked_kernel).  Falls back to
+// Lock-based diagg2 launch (see mozyme_diagg2_block_kernel).  Falls back to
 // the cooperative sweep when MOPAC_MOZYME_DIAGG2_COOPERATIVE is set.
 bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
                              DiaggRotateArgs args, const char *label) {
@@ -7866,36 +7921,37 @@ bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
       dev.diagg_olock.count < static_cast<std::size_t>(ctx.config.noccupied)) {
     return launch_diagg2_parallel(max_pairs, args, label);
   }
-  // Grid sized from occupancy (grid-stride over the virtuals): the per-warp
-  // position maps live in global scratch and scale with the warp count.
+  // Grid = resident capacity (blocks take virtuals from a shared cursor, so
+  // no oversubscription is needed): the per-block position maps live in
+  // global scratch and scale with the block count.
   int device = 0;
   int sms = 0;
   int blocks_per_sm = 0;
   if (!cuda_context_ok(cudaGetDevice(&device), label) ||
       !cuda_context_ok(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device), label) ||
       !cuda_context_ok(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                           &blocks_per_sm, mozyme_diagg2_locked_kernel, kDiaggRotateThreads, 0),
+                           &blocks_per_sm, mozyme_diagg2_block_kernel, kDiaggRotBlockThreads, 0),
                        label)) {
     return false;
   }
   if (blocks_per_sm <= 0 || sms <= 0) return launch_diagg2_parallel(max_pairs, args, label);
-  const int warps_needed = std::max(1, ctx.config.nvirtual);
-  int grid = std::min(blocks_per_sm * sms * 2,
-                      (warps_needed + kDiaggRotateWarps - 1) / kDiaggRotateWarps);
+  int grid = std::min(blocks_per_sm * sms, std::max(1, ctx.config.nvirtual));
   if (grid < 1) grid = 1;
-  const int max_warps = grid * kDiaggRotateWarps;
   const std::size_t map_count =
-      static_cast<std::size_t>(2 * max_warps) * static_cast<std::size_t>(ctx.config.natoms);
+      static_cast<std::size_t>(2 * grid) * static_cast<std::size_t>(ctx.config.natoms);
   if (!dev.diagg_rot_maps.resize(map_count)) return false;
+  if (!dev.diagg_rot_cursor.resize(1)) return false;
   if (!cuda_context_ok(cudaMemsetAsync(dev.diagg_olock.ptr, 0,
                                        dev.diagg_olock.count * sizeof(int)),
                        label) ||
       !cuda_context_ok(cudaMemsetAsync(dev.diagg_rot_maps.ptr, 0, map_count * sizeof(short)),
-                       label)) {
+                       label) ||
+      !cuda_context_ok(cudaMemsetAsync(dev.diagg_rot_cursor.ptr, 0, sizeof(int)), label)) {
     return false;
   }
-  mozyme_diagg2_locked_kernel<<<grid, kDiaggRotateThreads>>>(
-      args, dev.diagg_offsets.ptr, dev.diagg_olock.ptr, dev.diagg_rot_maps.ptr, max_warps);
+  mozyme_diagg2_block_kernel<<<grid, kDiaggRotBlockThreads>>>(
+      args, dev.diagg_offsets.ptr, dev.diagg_olock.ptr, dev.diagg_rot_maps.ptr,
+      dev.diagg_rot_cursor.ptr);
   return cuda_context_ok(cudaGetLastError(), label);
 }
 
@@ -8389,7 +8445,7 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
     }
     split_resident_stage_profile(ctx, "resident diagg2 stop event");
     diagg_debug_checkpoint("resident diagg2 rotate");
-    diagg_debug_dump_ints("resident diagg2 work ints (err,flag0,flag1,rounds,rotated)",
+    diagg_debug_dump_ints("resident diagg2 work ints (err,flag0,flag1,rounds,rotated,nbrovf,lockspins,maxchain)",
                           dev.diagg_work_ints.ptr, kDiaggWorkIntCount);
     diagg_debug_dump_ints("resident diagg ints after diagg2",
                           dev.diagg_ints.ptr, kDiaggIntCount);
