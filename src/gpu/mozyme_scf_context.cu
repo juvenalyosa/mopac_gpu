@@ -3127,39 +3127,48 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   const bool ws_by_nbr = (s_map && a.nbr_start && a.nbr_list && a.nbr_off &&
                           a.work_ints[kDiaggWorkIntNbrOverflow] == 0);
   if (ws_by_nbr) {
-    // Walk the block-pair neighbours of each LMO atom (ascending b, with the
-    // block offset stored alongside) instead of probing nijbo for every
-    // (atom, atom) pair of the LMO; contributions accumulate in shared memory.
-    for (int c = tid; c < span; c += blockDim.x) s_ws[c] = 0.0;
-    __syncthreads();
-    for (int kk = 0; kk < nce_i; ++kk) {
-      const int k1 = s_atoms[kk];
-      const int nk = a.iorbs[k1 - 1];
-      const double ak = a.avir_entry[ibase + kk];
-      const int cbase = loopi + s_off[kk];
-      const int nb0 = a.nbr_start[k1 - 1];
-      const int nb1 = a.nbr_start[k1];
-      for (int m = nb0 + tid; m < nb1; m += blockDim.x) {
-        const int j1 = a.nbr_list[m];
-        if (j1 < 1 || j1 > a.map_words) continue;
-        const int e = s_map[j1 - 1];
-        if (e < 0) continue;
-        const int kj = a.nbr_off[m];
-        if (kj < 0 || !(ak * a.p[kj] > cutoff)) continue;
-        const int nj = a.iorbs[j1 - 1];
-        const int offj = s_off[e];
-        for (int i4 = 0; i4 < nk; ++i4) {
-          const double cv = a.cvir[cbase + i4];
-          for (int jx = 0; jx < nj; ++jx) {
-            const int fidx = packed_block_index(kj, k1, j1, nk, nj, i4, jx);
-            if (fidx < 0 || fidx >= a.mpack) {
-              s_fail = 1;
-              break;
-            }
-            atomicAdd(&s_ws[offj + jx], a.fao[fidx] * cv);
-          }
+    // Thread per coefficient c (atom j1, orbital jx), as in the original
+    // loop, but the row atoms k1 come from the block-pair neighbour list of
+    // j1 (nijbo is symmetric, offsets stored alongside) filtered through the
+    // shared atom->entry map, instead of probing nijbo for every LMO atom.
+    // No atomics: each thread owns its s_ws entry.
+    for (int c = tid; c < span; c += blockDim.x) {
+      int lo = 0;
+      int hi = nce_i - 1;
+      while (lo < hi) {
+        const int mid = (lo + hi + 1) >> 1;
+        if (s_off[mid] <= c) {
+          lo = mid;
+        } else {
+          hi = mid - 1;
         }
       }
+      const int jj = lo;
+      const int j1 = s_atoms[jj];
+      const int nj = a.iorbs[j1 - 1];
+      const int jx = c - s_off[jj];
+      double ws = 0.0;
+      const int nb0 = a.nbr_start[j1 - 1];
+      const int nb1 = a.nbr_start[j1];
+      for (int m = nb0; m < nb1; ++m) {
+        const int k1 = a.nbr_list[m];
+        if (k1 < 1 || k1 > a.map_words) continue;
+        const int kk = s_map[k1 - 1];
+        if (kk < 0) continue;
+        const int kj = a.nbr_off[m];
+        if (kj < 0 || !(a.avir_entry[ibase + kk] * a.p[kj] > cutoff)) continue;
+        const int nk = a.iorbs[k1 - 1];
+        const int cbase = loopi + s_off[kk];
+        for (int i4 = 0; i4 < nk; ++i4) {
+          const int fidx = packed_block_index(kj, k1, j1, nk, nj, i4, jx);
+          if (fidx < 0 || fidx >= a.mpack) {
+            s_fail = 1;
+            break;
+          }
+          ws += a.fao[fidx] * a.cvir[cbase + i4];
+        }
+      }
+      s_ws[c] = ws;
     }
   } else
   for (int c = tid; c < span; c += blockDim.x) {
