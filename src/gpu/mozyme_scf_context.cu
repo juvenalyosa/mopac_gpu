@@ -8305,6 +8305,7 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
           dev.diagg_head_start.ptr, dev.diagg_head_cursor.ptr, dev.diagg_head_list.ptr,
           head_cap, dev.resident_control_ints.ptr);
       if (!cuda_context_ok(cudaGetLastError(), "resident diagg1 index kernels")) break;
+      split_resident_stage_profile(ctx, "resident diagg1_index stop event");
       va.nbr_start = dev.diagg_nbr_start.ptr;
       va.nbr_list = dev.diagg_nbr_list.ptr;
       va.head_start = dev.diagg_head_start.ptr;
@@ -8320,6 +8321,7 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
                        ? kDiagg1CacheCap : 0;
     va.fill = 0;
     mozyme_diagg1_virtual_kernel<<<nvir, kDiaggBlockThreads, dyn_shared>>>(va);
+    split_resident_stage_profile(ctx, "resident diagg1_count stop event");
     mozyme_exclusive_scan_kernel<<<1, 1024>>>(
         nvir, nullptr, dev.diagg_counts.ptr, dev.diagg_offsets.ptr,
         dev.resident_control_ints.ptr);
@@ -8327,6 +8329,7 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
     mozyme_diagg1_virtual_kernel<<<nvir, kDiaggBlockThreads, dyn_shared>>>(va);
     if (!cuda_context_ok(cudaGetLastError(),
                          "resident diagg1 virtual kernels")) break;
+    split_resident_stage_profile(ctx, "resident diagg1_fill stop event");
     diagg_debug_checkpoint("resident diagg1 virtual passes");
     diagg_debug_dump_ints("resident diagg1 work ints", dev.diagg_work_ints.ptr,
                           kDiaggWorkIntCount);
