@@ -169,6 +169,11 @@ __device__ bool side_terms(const PairGeom &g, int s0, int nb, int natx, bool sec
                            SideResult *out) {
   const double pi = 3.14159265358979323846;
   const int H = 8;
+  // The Fortran writes the acceptor-side shifts as pi/(180.d0/109.48) and
+  // pi/(180.d0/54.74): single-precision literals (109.480003..., 54.740001...),
+  // while the donor side uses 109.48d0 / 54.74d0.  Reproduce both exactly.
+  const double a109 = second ? 109.48 : static_cast<double>(109.48f);
+  const double a54 = second ? 54.74 : static_cast<double>(54.74f);
   double torsion_shift = 0.0, angle2_shift = 0.0, angle2_shift_2 = 0.0;
   double torsion_check = 0.0, torsion_check_bac;
   bool torsion_check_set = false, torsion_check_set2 = false;
@@ -179,9 +184,9 @@ __device__ bool side_terms(const PairGeom &g, int s0, int nb, int natx, bool sec
       torsion_shift = 0.0;
       torsion_check_set2 = true;
     } else {
-      angle2_shift = pi / (180.0 / 109.48);
+      angle2_shift = pi / (180.0 / a109);
       angle2_shift_2 = angle2_shift;
-      torsion_shift = pi / (180.0 / 54.74);
+      torsion_shift = pi / (180.0 / a54);
     }
   } else if (natx == 7) {
     if (nb == 2) {
@@ -189,9 +194,9 @@ __device__ bool side_terms(const PairGeom &g, int s0, int nb, int natx, bool sec
       angle2_shift_2 = angle2_shift;
       torsion_shift = 0.0;
     } else {
-      angle2_shift = pi / (180.0 / 109.48);
+      angle2_shift = pi / (180.0 / a109);
       angle2_shift_2 = angle2_shift;
-      torsion_shift = pi / (180.0 / 54.74);
+      torsion_shift = pi / (180.0 / a54);
       torsion_check_set = true;
     }
   }

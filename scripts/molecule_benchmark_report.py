@@ -1245,6 +1245,12 @@ def stage_input(input_path: Path, run_dir: Path) -> Path:
         src = input_path.parent / ref
         if src.exists():
             shutil.copy2(src, run_dir / src.name)
+    # A RESTART deck reads <stem>.res (and DENOUT/OLDENS decks <stem>.den)
+    # from its own directory: carry them along when present.
+    for ext in (".res", ".den"):
+        src = input_path.with_suffix(ext)
+        if src.exists():
+            shutil.copy2(src, run_dir / src.name)
     return staged
 
 
