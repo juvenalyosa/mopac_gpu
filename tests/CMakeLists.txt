@@ -89,6 +89,20 @@ if(GPU AND ENABLE_GPU_TESTS)
     LABELS "gpu"
     TIMEOUT 180)
 
+  # Acceptance test of the MOZYME GPU path (resident SCF, hcore, gradient, dispersion,
+  # H-bond corrections): CPU-vs-GPU heat tolerance (0.05 kcal/mol), gradient rms (1e-3
+  # kcal/mol/A) on a 3-cycle optimization, the DENOUT hand-back to the CPU, and the NOGPU
+  # kill switch.  Needs a CUDA device; about 3 minutes.
+  add_test(NAME "mozyme-gpu-tolerance"
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/check_mozyme_gpu_tolerance.py
+            $<TARGET_FILE:mopac>
+            ${CMAKE_SOURCE_DIR}/benchmarks/publication_inputs/mop/protein_crambin_1crn.mop
+            ${CMAKE_SOURCE_DIR}/benchmarks/publication_inputs/mop/protein_crambin_1crn_opt.mop
+            --handback ${CMAKE_SOURCE_DIR}/benchmarks/publication_inputs/mop/protein_crambin_1crn_denout.mop)
+  set_tests_properties(mozyme-gpu-tolerance PROPERTIES
+    LABELS "gpu"
+    TIMEOUT 1800)
+
   add_mopac_gpu_test("gpu-numeric-reference" mopac-gpu-numeric-reference gpu_numeric_reference.F90)
   set_tests_properties(gpu-numeric-reference PROPERTIES
     DISABLED TRUE

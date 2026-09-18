@@ -126,9 +126,16 @@ contains
   end function env_falsy
 
   logical function gpu_allowed()
+#ifdef GPU
+    use mod_vars_cuda, only : lgpu, mozyme_gpu
+#endif
     implicit none
 #ifdef GPU
-    gpu_allowed = .not. env_truthy('MOPAC_NOGPU') .and. .not. env_truthy('MOZYME_GPU_OFF')
+    ! One kill switch for every MOZYME GPU helper (hcore, gradient, dispersion,
+    ! H-bond correction): the NOGPU keyword (lgpu / mozyme_gpu cleared in
+    ! run_mopac) or MOPAC_NOGPU / MOZYME_GPU_OFF in the environment.
+    gpu_allowed = lgpu .and. mozyme_gpu .and. &
+      .not. env_truthy('MOPAC_NOGPU') .and. .not. env_truthy('MOZYME_GPU_OFF')
 #else
     gpu_allowed = .false.
 #endif
