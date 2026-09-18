@@ -38,7 +38,7 @@ subroutine iter_for_MOZYME (ee)
     use mozyme_gpu_scf_driver, only : mozyme_gpu_scf_early_probe, &
       mozyme_gpu_scf_force_final_reorth, &
       mozyme_gpu_scf_requested, mozyme_gpu_scf_no_fallback_required, &
-      mozyme_gpu_scf_try
+      mozyme_gpu_scf_try, mozyme_gpu_scf_note_host_modified
     use mozyme_gpu_makvec, only : mozyme_gpu_makvec_try
     use mozyme_gpu_relocalize, only : mozyme_gpu_relocalize_try
     use mozyme_gpu_reorth, only : mozyme_gpu_reorth_try
@@ -838,6 +838,7 @@ subroutine iter_for_MOZYME (ee)
         end if
         icalcn = step_num
         imol = numcal
+        call mozyme_gpu_scf_note_host_modified()  ! p, f, partp, partf rewritten on the host
       end if
       if (.not. resident_initial_setup_needed .and. niter <= 10) then
         resident_loop_control_needed = (.not. bigscf .and. numcal == 1+numcal0)
@@ -1086,6 +1087,7 @@ subroutine iter_for_MOZYME (ee)
       else
         indi = 0
       end if
+      call mozyme_gpu_scf_note_host_modified()  ! a CPU SCF iteration rewrites p, f, pold, partp
       if (bigscf .or. numcal /= 1+numcal0) then
           call mozyme_section_timer_begin('iter_diagg', mozyme_timer)
           call diagg (f, nocc1, nvir1,  idiagg,  partp, indi)
@@ -1307,6 +1309,7 @@ subroutine iter_for_MOZYME (ee)
         call mozyme_section_timer_begin('iter_helecz_reorth', mozyme_timer)
         ee = helecz ()
         call mozyme_section_timer_end('iter_helecz_reorth', mozyme_timer)
+        call mozyme_gpu_scf_note_host_modified()  ! p and f rebuilt on the host after reorth
       end if
       escf = (ee+enuclr) * fpc_9 + atheat
       if (useps) then

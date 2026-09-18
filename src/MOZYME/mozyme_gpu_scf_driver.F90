@@ -31,7 +31,8 @@ module mozyme_gpu_scf_driver
     GPU_MOZYME_SCF_STAGE_CHECK, &
     mopac_cuda_mozyme_scf_setup, mopac_cuda_mozyme_scf_register_state, &
     mopac_cuda_mozyme_scf_run, mopac_cuda_mozyme_scf_destroy, &
-    mopac_cuda_mozyme_scf_status
+    mopac_cuda_mozyme_scf_status, mopac_cuda_mozyme_scf_host_modified, &
+    mopac_cuda_mozyme_scf_host_density_modified
 #endif
   implicit none
   private
@@ -58,6 +59,8 @@ module mozyme_gpu_scf_driver
   public :: mozyme_gpu_scf_early_probe
   public :: mozyme_gpu_scf_try
   public :: mozyme_gpu_scf_release_context
+  public :: mozyme_gpu_scf_note_host_modified
+  public :: mozyme_gpu_scf_note_host_density_modified
 
 contains
 
@@ -2208,5 +2211,27 @@ contains
     call destroy_scf_context()
 #endif
   end subroutine mozyme_gpu_scf_release_context
+
+  ! The host is rewriting the SCF arrays (a CPU SCF iteration, host initial
+  ! setup, reorthogonalisation): the kept device context must take everything
+  ! from the host at its next upload instead of keeping the copies a lazy
+  ! publish left on the device.  Cheap (three flags); safe to call anywhere.
+  subroutine mozyme_gpu_scf_note_host_modified()
+    implicit none
+#ifdef GPU
+    if (c_associated(scf_context)) then
+      call mopac_cuda_mozyme_scf_host_modified(scf_context)
+    end if
+#endif
+  end subroutine mozyme_gpu_scf_note_host_modified
+
+  subroutine mozyme_gpu_scf_note_host_density_modified()
+    implicit none
+#ifdef GPU
+    if (c_associated(scf_context)) then
+      call mopac_cuda_mozyme_scf_host_density_modified(scf_context)
+    end if
+#endif
+  end subroutine mozyme_gpu_scf_note_host_density_modified
 
 end module mozyme_gpu_scf_driver

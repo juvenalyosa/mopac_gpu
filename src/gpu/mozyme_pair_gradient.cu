@@ -761,6 +761,10 @@ int finish_launch(const char *label, const DeviceArray<int> &status, int *d_pair
 // arguments, 2 on CUDA failure, 3 when some pair failed on the device
 // (caller must recompute on the CPU).  d_pairs_out receives the number of
 // pairs left to the CPU (d orbitals / sparkles).
+// Published density of the kept resident SCF context (mozyme_scf_context.cu),
+// null when the host copy is not known to equal it.
+extern "C" const double *mopac_cuda_mozyme_resident_density_device(int mpack);
+
 extern "C" int mopac_cuda_mozyme_pair_gradient(
     int numat, int mpack, int npairs, const int *pair_i, const int *pair_j,
     const int *pair_off, const int *row_start, const int *diag_off,
@@ -783,9 +787,13 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
   PairGradArgs a;
   std::memset(&a, 0, sizeof(a));
   const size_t na = static_cast<size_t>(numat);
+  // The resident SCF just published this density: read it in place instead of
+  // re-uploading mpack doubles (identical values; the host copy came from it).
+  const double *resident_p = mopac_cuda_mozyme_resident_density_device(mpack);
   if (!geom.upload(numat, npairs, pair_i, pair_j, pair_off, row_start, diag_off, iorbs, nat,
                    coord, a.g) ||
-      !tab.upload(*tables) || !d_p.upload(p, static_cast<size_t>(mpack)) ||
+      !tab.upload(*tables) ||
+      (!resident_p && !d_p.upload(p, static_cast<size_t>(mpack))) ||
       !d_dxyz.upload(dxyz, 3 * na) || !d_q.alloc(na) ||
       (d_on_device && !d_energies.alloc(static_cast<size_t>(kProbesPerPair) *
                                          static_cast<size_t>(std::max(npairs, 1))))) {
@@ -797,7 +805,7 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
   a.g.d_on_device = d_on_device;
   a.g.cutof1 = tables->cutof1;
   a.g.cutof2 = cutof2;
-  a.p = d_p.ptr;
+  a.p = resident_p ? resident_p : d_p.ptr;
   a.tore = tab.tore.ptr;
   a.ovl = tab.ovl;
   a.core = tab.core;

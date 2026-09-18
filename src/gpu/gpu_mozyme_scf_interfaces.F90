@@ -287,6 +287,8 @@ module gpu_mozyme_scf_interfaces
   public :: mopac_cuda_mozyme_scf_run
   public :: mopac_cuda_mozyme_scf_destroy
   public :: mopac_cuda_mozyme_scf_status
+  public :: mopac_cuda_mozyme_scf_host_modified
+  public :: mopac_cuda_mozyme_scf_host_density_modified
 
   interface
     function mopac_cuda_mozyme_scf_setup(config, context) &
@@ -327,6 +329,21 @@ module gpu_mozyme_scf_interfaces
       type(gpu_mozyme_scf_status), intent(out) :: status
       integer(c_int) :: code
     end function mopac_cuda_mozyme_scf_status
+
+    ! The host rewrote the SCF arrays (a CPU SCF iteration, host setup): the
+    ! device copies kept by a lazy publish are no longer authoritative.
+    subroutine mopac_cuda_mozyme_scf_host_modified(context) &
+      bind(C, name='mopac_cuda_mozyme_scf_host_modified')
+      import :: c_ptr
+      type(c_ptr), value :: context
+    end subroutine mopac_cuda_mozyme_scf_host_modified
+
+    ! The host rewrote the density only: the GPU gradient must upload it.
+    subroutine mopac_cuda_mozyme_scf_host_density_modified(context) &
+      bind(C, name='mopac_cuda_mozyme_scf_host_density_modified')
+      import :: c_ptr
+      type(c_ptr), value :: context
+    end subroutine mopac_cuda_mozyme_scf_host_density_modified
   end interface
 
 end module gpu_mozyme_scf_interfaces
