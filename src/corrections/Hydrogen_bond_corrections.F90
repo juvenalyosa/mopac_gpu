@@ -23,6 +23,12 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
   use parameters_C, only : tore
   use common_arrays_C, only: coord, nat, q, p, hblist, dxyz, cell_ijk
   use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
+#ifdef GPU
+  use iso_c_binding, only : c_int, c_double
+  use chanel_C, only : iw
+  use funcon_C, only : a0, eV, fpc_9
+  use mozyme_gpu_gradient, only : mozyme_gpu_disp_enabled, mozyme_gpu_disp_check_enabled
+#endif
   implicit none
   logical, intent (in) :: l_grad, prt
 !
@@ -35,6 +41,26 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
   double precision :: EC, ER, vector(numat), sum, sum1, delta = 1.d-5, covrad(94), hb_timer
   double precision, external :: EC_plus_ER, EH_plus, h_bonds4
   logical, external :: connected
+#ifdef GPU
+  interface
+    function mopac_cuda_dh_plus_hbonds(numat_c, nrpairs_c, max_c, nat_c, coord_c, hblist_c, &
+        nra_c, nrb_c, pm7_c, lgrad_c, delta_c, a0_c, ev_c, fpc9_c, e_c, nhb_c, dxyz_c, ms_c) &
+        bind(C, name='mopac_cuda_dh_plus_hbonds') result(rc)
+      use iso_c_binding, only : c_int, c_double
+      integer(c_int), value :: numat_c, nrpairs_c, max_c, pm7_c, lgrad_c
+      integer(c_int) :: nat_c(*), hblist_c(*), nra_c(*), nrb_c(*), nhb_c
+      real(c_double), value :: delta_c, a0_c, ev_c, fpc9_c
+      real(c_double) :: coord_c(*), dxyz_c(*), e_c, ms_c
+      integer(c_int) :: rc
+    end function mopac_cuda_dh_plus_hbonds
+  end interface
+  integer(c_int), allocatable :: nat_c(:)
+  integer(c_int) :: rc, nhb_c
+  real(c_double) :: e_c, ms_c
+  double precision, allocatable :: dxyz_ref(:), dxyz_gpu(:)
+  double precision :: gpu_timer, e_gpu, gmax
+  logical :: gpu_check, gpu_done
+#endif
 
   save
    data covrad /&
@@ -92,6 +118,55 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
     call all_h_bonds(hblist(1,1), hblist(1,2), hblist(1,3), max_h_bonds, nrpairs, covrad)
   end if
   call mozyme_section_timer_begin('hbonds_energy_grad', hb_timer)
+#ifdef GPU
+  !
+  !  GPU path (PM6-DH+ / PM7, non-periodic, no per-bond printout): pair
+  !  energies and the finite-difference gradient on the device; same
+  !  arithmetic as EH_plus below, summation order of dxyz differs (atomics).
+  !  MOPAC_GPU_DISP_CHECK=1 runs the CPU loop too, prints the differences and
+  !  keeps the CPU result.
+  !
+  gpu_done = .false.
+  if ((method_pm6_dh_plus .or. method_pm7) .and. id == 0 .and. .not. prt .and. &
+      nrpairs > 0 .and. mozyme_gpu_disp_enabled()) then
+    gpu_check = mozyme_gpu_disp_check_enabled()
+    allocate(nat_c(numat))
+    nat_c = int(nat(1:numat), kind=c_int)
+    if (gpu_check .and. l_grad) then
+      allocate(dxyz_ref(3*numat))
+      dxyz_ref(1:3*numat) = dxyz(1:3*numat)
+    end if
+    e_c = 0.d0
+    ms_c = 0.d0
+    nhb_c = 0_c_int
+    call mozyme_section_timer_begin('hbonds_gpu', gpu_timer)
+    rc = mopac_cuda_dh_plus_hbonds(int(numat, kind=c_int), int(nrpairs, kind=c_int), &
+      int(max_h_bonds, kind=c_int), nat_c, coord, hblist, nrbondsa, nrbondsb, &
+      merge(1_c_int, 0_c_int, method_PM7), merge(1_c_int, 0_c_int, l_grad), delta, &
+      a0, eV, fpc_9, e_c, nhb_c, dxyz, ms_c)
+    call mozyme_section_timer_end('hbonds_gpu', gpu_timer)
+    deallocate(nat_c)
+    if (rc == 0) then
+      gpu_done = .true.
+      if (gpu_check) then
+        e_gpu = e_c
+        if (l_grad) then
+          allocate(dxyz_gpu(3*numat))
+          dxyz_gpu(1:3*numat) = dxyz(1:3*numat)
+          dxyz(1:3*numat) = dxyz_ref(1:3*numat)
+        end if
+        ! fall through to the CPU loop (kept as the result), then compare
+      else
+        E_hb = e_c
+        N_Hbonds = int(nhb_c)
+        Hydrogen_bond_corrections = E_hb
+        call mozyme_section_timer_end('hbonds_energy_grad', hb_timer)
+        return
+      end if
+    end if
+    if (allocated(dxyz_ref) .and. .not. gpu_done) deallocate(dxyz_ref)
+  end if
+#endif
   if (method_pm6_dh2 .or. method_pm6_dh2x) then
     call chrge (p, vector)  ! PM6-DH2 needs partial charges
     do i = 1, numat
@@ -190,6 +265,19 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
     end if
   end do
   call mozyme_section_timer_end('hbonds_energy_grad', hb_timer)
+#ifdef GPU
+  if (gpu_done) then
+    gmax = 0.d0
+    if (l_grad) then
+      gmax = maxval(abs(dxyz(1:3*numat) - dxyz_gpu(1:3*numat)))
+      deallocate(dxyz_gpu, dxyz_ref)
+    end if
+    write (iw, '(1x,a,f14.6,a,f14.6,a,es12.4,a,i0,a,i0,a,es12.4,a,f10.3)') &
+      '[MOZYME GPU hbond] check E_gpu=', e_gpu, ' E_cpu=', E_hb, ' dE=', e_gpu - E_hb, &
+      ' N_gpu=', int(nhb_c), ' N_cpu=', N_Hbonds, ' max_abs_dgrad=', gmax, ' ms=', ms_c
+    call flush(iw)
+  end if
+#endif
   Hydrogen_bond_corrections = E_hb
   return
   end function Hydrogen_bond_corrections

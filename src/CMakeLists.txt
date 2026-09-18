@@ -80,6 +80,8 @@ if(GPU)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/mozyme_pair_gradient.cu)
     # CUDA PM6-DH/PM7 dispersion correction (energy + analytic gradient)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/dh_dispersion.cu)
+    # CUDA PM6-DH+/PM7 hydrogen-bond correction (EH_plus energies + FD gradient)
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hbond_dh_plus.cu)
     # CUDA HMTR optimizer kernels
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hmtr_optimizer.cu)
 endif()
@@ -104,6 +106,7 @@ if(GPU)
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/grad_kernels.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/mozyme_pair_gradient.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/dh_dispersion.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hbond_dh_plus.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hmtr_optimizer.cu
         PROPERTIES LANGUAGE CUDA
     )
