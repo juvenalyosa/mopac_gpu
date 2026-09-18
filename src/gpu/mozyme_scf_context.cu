@@ -10,6 +10,7 @@
 #include <cmath>
 #include <new>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -1176,9 +1177,34 @@ inline bool cuda_context_ok(cudaError_t status, const char *where) {
 // to/from a pinned bounce buffer while the host memcpy of the previous chunk
 // runs, which reaches the PCIe rate.  Falls back to cudaMemcpy when pinned
 // memory is unavailable.
+// memcpy split over a few threads: the pinned staging was memcpy-bound (a
+// single core copies ~5 GB/s, the measured host<->device rate was 2.3-4.8 GB/s
+// at 7000 atoms while the DMA side of a pinned chunk runs at >15 GB/s).
+constexpr int kStagingCopyThreads = 4;
+constexpr std::size_t kStagingParallelMin = static_cast<std::size_t>(4) << 20;
+inline void parallel_memcpy(void *dst, const void *src, std::size_t bytes) {
+  if (bytes < kStagingParallelMin) {
+    std::memcpy(dst, src, bytes);
+    return;
+  }
+  auto *d = static_cast<char *>(dst);
+  const auto *s = static_cast<const char *>(src);
+  const std::size_t part = (bytes + kStagingCopyThreads - 1) / kStagingCopyThreads;
+  std::thread workers[kStagingCopyThreads - 1];
+  for (int t = 1; t < kStagingCopyThreads; ++t) {
+    const std::size_t off = part * static_cast<std::size_t>(t);
+    const std::size_t len = off < bytes ? std::min(part, bytes - off) : 0;
+    workers[t - 1] = std::thread([d, s, off, len]() {
+      if (len) std::memcpy(d + off, s + off, len);
+    });
+  }
+  std::memcpy(d, s, std::min(part, bytes));
+  for (auto &w : workers) w.join();
+}
+
 class PinnedStaging {
  public:
-  static constexpr std::size_t kChunkBytes = static_cast<std::size_t>(16) << 20;
+  static constexpr std::size_t kChunkBytes = static_cast<std::size_t>(32) << 20;
   static constexpr std::size_t kMinStagedBytes = static_cast<std::size_t>(2) << 20;
 
   static PinnedStaging &instance() {
@@ -1217,14 +1243,14 @@ class PinnedStaging {
           cudaStreamSynchronize(stream_);
           return false;
         }
-        std::memcpy(dst + prev_off, buf_[prev], prev_len);
+        parallel_memcpy(dst + prev_off, buf_[prev], prev_len);
       }
       prev_off = off;
       prev_len = len;
     }
     const int last = (k - 1) & 1;
     if (!cuda_context_ok(cudaEventSynchronize(ev_[last]), label)) return false;
-    std::memcpy(dst + prev_off, buf_[last], prev_len);
+    parallel_memcpy(dst + prev_off, buf_[last], prev_len);
     return true;
   }
 
@@ -1245,7 +1271,7 @@ class PinnedStaging {
         cudaStreamSynchronize(stream_);
         return false;
       }
-      std::memcpy(buf_[buf], src + off, len);
+      parallel_memcpy(buf_[buf], src + off, len);
       if (!cuda_context_ok(cudaMemcpyAsync(dst + off, buf_[buf], len,
                                            cudaMemcpyHostToDevice, stream_), label) ||
           !cuda_context_ok(cudaEventRecord(ev_[buf], stream_), label)) {

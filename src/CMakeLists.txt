@@ -107,6 +107,10 @@ if(GPU)
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hmtr_optimizer.cu
         PROPERTIES LANGUAGE CUDA
     )
+    # The pinned host<->device staging in mozyme_scf_context.cu splits its
+    # memcpy over std::thread workers.
+    find_package(Threads REQUIRED)
+    target_link_libraries(mopac-core PUBLIC Threads::Threads)
 endif()
 
 #===============================================
