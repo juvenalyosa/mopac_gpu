@@ -4700,7 +4700,9 @@ __global__ void mozyme_hbond_commit_kernel(int fmo_dim, int npairs_capacity,
 }
 
 // Warp per LMO normalisation check (replaces the one-thread-per-block kernel).
-__global__ void __launch_bounds__(kDiaggRotateThreads)
+// Launched with kDiaggBlockThreads (256): the launch bound must match or the
+// launch fails with cudaErrorInvalidValue.
+__global__ void __launch_bounds__(kDiaggBlockThreads)
 mozyme_check_lmo_warp_kernel(int nvec, int numat, int ic_dim, int c_dim,
                              const int *nnc, const int *nc, const int *icvec,
                              const int *iorbs, const int *ncvec, double *cvec,
