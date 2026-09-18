@@ -28,6 +28,15 @@ module fillij_changes_C
   ! Number of completed fill passes (not counts); consumers that derive
   ! lists from nijbo (GPU pair lists) use it as their cache key.
   integer, save :: nijbo_fill_count = 0
+  ! Persistent list of the atom pairs (i, j < i) with a stored density block,
+  ! sorted by (i, j), with their nijbo offsets: hcore and the GPU gradient use
+  ! it instead of scanning nijbo (O(numat^2), 57 ms at 7000 atoms per call).
+  ! Pairs are never demoted, so an update pass only merges its promotions.
+  ! Valid when pl_fill == nijbo_fill_count (the grid pass maintains it; the
+  ! scan fallback invalidates it).
+  integer, allocatable, save :: pl_i(:), pl_j(:), pl_off(:)
+  integer, save :: pl_n = 0
+  integer, save :: pl_fill = -1
 contains
   subroutine fillij_changes_reset()
     implicit none
@@ -46,6 +55,258 @@ contains
   end subroutine fillij_changes_reset
 end module fillij_changes_C
 
+
+! Cell-grid pass of fillij for discrete, direct/semidirect, nijbo-based runs:
+! visits only the atom pairs within the point-charge cutoff (cell = cutoff/2,
+! 125 cells per atom) instead of all numat*(numat-1)/2 pairs (85 ms per pass
+! at 7000 atoms, 247 ms for the first fill).  The classification uses the same
+! distance expression as the scan, and mpack is assigned in the scan's order
+! (per atom i: block pairs j < i ascending, then the diagonal), so nijbo, mpack
+! and the CPU results are identical.  Also maintains the sorted pair list of
+! fillij_changes_C.
+module fillij_grid_C
+  implicit none
+  private
+  public :: fillij_grid_pass
+contains
+  subroutine fillij_grid_pass(first, numat, coord, iorbs, cutof1, cutof2, nijbo, mpack, &
+      n2elec, ok)
+    use fillij_changes_C, only: nchg_cap, nchg, chg_overflow, chg_i, chg_j, chg_v, &
+      pl_i, pl_j, pl_off, pl_n, pl_fill, nijbo_fill_count
+    implicit none
+    logical, intent(in) :: first
+    integer, intent(in) :: numat
+    double precision, intent(in) :: coord(3, *)
+    integer, intent(in) :: iorbs(*)
+    double precision, intent(in) :: cutof1, cutof2
+    integer, intent(inout) :: nijbo(numat, numat)
+    integer, intent(inout) :: mpack, n2elec
+    logical, intent(out) :: ok
+    integer, parameter :: max_cells_per_atom = 16
+    integer :: i, j, k, m, n, ix, iy, iz, jx, jy, jz, nx, ny, nz, ncell, ic, jc, stat
+    integer :: io, jo, ii, ncand, cap, row, next_row, merged, a, b, nold
+    integer, allocatable :: cell_of(:), cell_count(:), cell_start(:), cell_atoms(:)
+    integer, allocatable :: cand_i(:), cand_j(:), row_count(:), row_start(:)
+    integer, allocatable :: srt_i(:), srt_j(:), new_i(:), new_j(:), new_off(:)
+    double precision :: lo(3), hi(3), inv, cell, r, x1, x2, x3
+
+    ok = .false.
+    if (numat < 30 .or. cutof1 <= 0.d0 .or. cutof2 <= 0.d0 .or. cutof1 > 1.d5) return
+    cell = 0.5d0*sqrt(cutof1)
+    if (cell < 1.d0) cell = 1.d0
+    lo = coord(1:3, 1)
+    hi = lo
+    do i = 2, numat
+      do k = 1, 3
+        lo(k) = min(lo(k), coord(k, i))
+        hi(k) = max(hi(k), coord(k, i))
+      end do
+    end do
+    inv = 1.d0/cell
+    nx = int((hi(1) - lo(1))*inv) + 1
+    ny = int((hi(2) - lo(2))*inv) + 1
+    nz = int((hi(3) - lo(3))*inv) + 1
+    if (dble(nx)*dble(ny)*dble(nz) > dble(max_cells_per_atom)*dble(numat) + 1000.d0) return
+    ncell = nx*ny*nz
+    allocate (cell_of(numat), cell_count(ncell), cell_start(ncell + 1), cell_atoms(numat), &
+      row_count(numat), row_start(numat + 1), stat=stat)
+    if (stat /= 0) return
+    cell_count = 0
+    do i = 1, numat
+      ix = int((coord(1, i) - lo(1))*inv)
+      iy = int((coord(2, i) - lo(2))*inv)
+      iz = int((coord(3, i) - lo(3))*inv)
+      ic = 1 + ix + nx*(iy + ny*iz)
+      cell_of(i) = ic
+      cell_count(ic) = cell_count(ic) + 1
+    end do
+    cell_start(1) = 1
+    do ic = 1, ncell
+      cell_start(ic + 1) = cell_start(ic) + cell_count(ic)
+    end do
+    cell_count = 0
+    do i = 1, numat   ! ascending i => each cell's member list is ascending
+      ic = cell_of(i)
+      cell_atoms(cell_start(ic) + cell_count(ic)) = i
+      cell_count(ic) = cell_count(ic) + 1
+    end do
+    !
+    ! First pass: every pair starts as a point-charge pair.
+    !
+    if (first) nijbo = -1
+    !
+    ! Candidates for a density block, gathered with j as the outer loop and
+    ! i > j inside: the candidate sequence is ascending in j, and a stable
+    ! counting sort by i below gives every row i its partners j ascending.
+    ! Dipole promotions (-2) need no order and are written directly.
+    !
+    ! ~100 block pairs per atom in proteins at the 9.9 A cutoff (crambin 64202
+    ! pairs / 642 atoms, adenylate kinase 700k / 6700); an overflow falls back
+    ! to the scan, so keep a wide margin.
+    cap = max(400*numat + 4096, 2*pl_n + 1024)
+    allocate (cand_i(cap), cand_j(cap), stat=stat)
+    if (stat /= 0) return
+    ncand = 0
+    row_count = 0
+    do j = 1, numat
+      x1 = coord(1, j)
+      x2 = coord(2, j)
+      x3 = coord(3, j)
+      ix = int((x1 - lo(1))*inv)
+      iy = int((x2 - lo(2))*inv)
+      iz = int((x3 - lo(3))*inv)
+      do jz = max(0, iz - 2), min(nz - 1, iz + 2)
+        do jy = max(0, iy - 2), min(ny - 1, iy + 2)
+          do jx = max(0, ix - 2), min(nx - 1, ix + 2)
+            jc = 1 + jx + nx*(jy + ny*jz)
+            do m = cell_start(jc), cell_start(jc + 1) - 1
+              i = cell_atoms(m)
+              if (i <= j) cycle
+              r = (coord(1, i)-x1) ** 2 + (coord(2, i)-x2) ** 2 + (coord(3, i)-x3) ** 2
+              if (r < cutof2) then
+                if (first .or. nijbo(j, i) < 0) then
+                  if (ncand >= cap) then
+                    deallocate (cand_i, cand_j)
+                    return
+                  end if
+                  ncand = ncand + 1
+                  cand_i(ncand) = i
+                  cand_j(ncand) = j
+                  row_count(i) = row_count(i) + 1
+                end if
+              else if (r < cutof1) then
+                if (first) then
+                  nijbo(j, i) = -2
+                  nijbo(i, j) = -2
+                else if (nijbo(j, i) == -1) then
+                  nijbo(i, j) = -2
+                  nijbo(j, i) = -2
+                  if (nchg < nchg_cap .and. .not. chg_overflow) then
+                    nchg = nchg + 1
+                    chg_i(nchg) = i
+                    chg_j(nchg) = j
+                    chg_v(nchg) = -2
+                  else
+                    chg_overflow = .true.
+                  end if
+                end if
+              end if
+            end do
+          end do
+        end do
+      end do
+    end do
+    !
+    ! Stable counting sort of the candidates by i (rows keep ascending j).
+    !
+    row_start(1) = 1
+    do i = 1, numat
+      row_start(i + 1) = row_start(i) + row_count(i)
+    end do
+    allocate (srt_i(max(1, ncand)), srt_j(max(1, ncand)), stat=stat)
+    if (stat /= 0) return
+    row_count = 0
+    do k = 1, ncand
+      i = cand_i(k)
+      m = row_start(i) + row_count(i)
+      srt_i(m) = i
+      srt_j(m) = cand_j(k)
+      row_count(i) = row_count(i) + 1
+    end do
+    deallocate (cand_i, cand_j)
+    !
+    ! Assign mpack in the scan's order and merge the new pairs into the
+    ! persistent sorted pair list.
+    !
+    nold = 0
+    if (.not. first .and. pl_fill == nijbo_fill_count .and. allocated(pl_i)) nold = pl_n
+    allocate (new_i(max(1, nold + ncand)), new_j(max(1, nold + ncand)), &
+      new_off(max(1, nold + ncand)), stat=stat)
+    if (stat /= 0) return
+    merged = 0
+    a = 1
+    do i = 1, numat
+      io = iorbs(i)
+      ii = (io*(io+1)) / 2
+      if (first) n2elec = n2elec + ii * ii
+      ! existing pairs of row i come first in the merge only when j is smaller:
+      ! walk the old row and the new row together.
+      b = row_start(i)
+      next_row = row_start(i + 1)
+      do
+        if (a <= nold) then
+          if (pl_i(a) < i) then
+            ! rows below i are copied unchanged (loop entered with a on row i or later)
+            merged = merged + 1
+            new_i(merged) = pl_i(a)
+            new_j(merged) = pl_j(a)
+            new_off(merged) = pl_off(a)
+            a = a + 1
+            cycle
+          end if
+        end if
+        if (b < next_row) then
+          j = srt_j(b)
+          if (a <= nold) then
+            if (pl_i(a) == i .and. pl_j(a) < j) then
+              merged = merged + 1
+              new_i(merged) = i
+              new_j(merged) = pl_j(a)
+              new_off(merged) = pl_off(a)
+              a = a + 1
+              cycle
+            end if
+          end if
+          jo = iorbs(j)
+          nijbo(j, i) = mpack
+          nijbo(i, j) = mpack
+          if (.not. first) then
+            if (nchg < nchg_cap .and. .not. chg_overflow) then
+              nchg = nchg + 1
+              chg_i(nchg) = i
+              chg_j(nchg) = j
+              chg_v(nchg) = mpack
+            else
+              chg_overflow = .true.
+            end if
+          end if
+          merged = merged + 1
+          new_i(merged) = i
+          new_j(merged) = j
+          new_off(merged) = mpack
+          mpack = mpack + io * jo
+          b = b + 1
+          cycle
+        end if
+        if (a <= nold) then
+          if (pl_i(a) == i) then
+            merged = merged + 1
+            new_i(merged) = i
+            new_j(merged) = pl_j(a)
+            new_off(merged) = pl_off(a)
+            a = a + 1
+            cycle
+          end if
+        end if
+        exit
+      end do
+      if (first) nijbo(i, i) = mpack
+      if (first) mpack = mpack + ii
+    end do
+    ! (on update passes existing pairs and diagonals leave mpack unchanged,
+    !  exactly as the scan's "mpack = mpack - io*jo; mpack = mpack + io*jo")
+    n = merged
+    if (allocated(pl_i)) deallocate (pl_i, pl_j, pl_off)
+    call move_alloc(new_i, pl_i)
+    call move_alloc(new_j, pl_j)
+    call move_alloc(new_off, pl_off)
+    pl_n = n
+    pl_fill = nijbo_fill_count + 1   ! the caller increments the fill count next
+    deallocate (srt_i, srt_j, cell_of, cell_count, cell_start, cell_atoms, row_count, row_start)
+    ok = .true.
+  end subroutine fillij_grid_pass
+end module fillij_grid_C
+
   subroutine fillij (count)
 #ifdef GPU
       use iso_c_binding, only: c_int, c_double
@@ -60,7 +321,8 @@ end module fillij_changes_C
       use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
       use mozyme_section_timers, only: mozyme_section_timer_begin, mozyme_section_timer_end
       use fillij_changes_C, only: fillij_changes_reset, nchg_cap, &
-        nchg, chg_overflow, chg_i, chg_j, chg_v, nijbo_fill_count
+        nchg, chg_overflow, chg_i, chg_j, chg_v, nijbo_fill_count, pl_fill
+      use fillij_grid_C, only: fillij_grid_pass
 !
       implicit none
       !
@@ -76,7 +338,7 @@ end module fillij_changes_C
            & kp, lp, ix
       double precision :: r, rmin, rr, x1, x2, x3
       save :: ix
-      logical :: first
+      logical :: first, grid_path, grid_ok
       integer :: ib, jb
       integer, parameter :: nblk = 64
       double precision :: fillij_timer
@@ -302,6 +564,18 @@ end module fillij_changes_C
       !
       call mozyme_section_timer_begin('fillij_pairs', fillij_timer)
       call fillij_changes_reset()
+      ! Cell-grid pass (discrete, direct/semidirect, nijbo): same nijbo/mpack
+      ! as the scan below, without the O(numat^2) distance loop; it also keeps
+      ! the sorted pair list used by hcore and the GPU gradient.
+      grid_path = lijbo .and. (.not. count) .and. allocated(nijbo) .and. id == 0 .and. &
+        direct .and. semidr .and. numat >= 30
+      grid_ok = .false.
+      if (grid_path) then
+        call fillij_grid_pass(first, numat, coord, iorbs, cutof1, cutof2, nijbo, mpack, &
+          n2elec, grid_ok)
+      end if
+      if (.not. grid_ok) pl_fill = -1
+      if (.not. grid_ok) then
       i = 0
       do iloop = 1, numat
           io = iorbs(iloop)
@@ -463,6 +737,7 @@ end module fillij_changes_C
           end do
         end do
       end if
+      end if   ! .not. grid_ok (scan)
       call mozyme_section_timer_end('fillij_pairs', fillij_timer)
       if (.not. count) nijbo_fill_count = nijbo_fill_count + 1
 #ifdef GPU

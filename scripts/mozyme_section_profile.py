@@ -26,8 +26,11 @@ from molecule_benchmark_report import parse_mozyme_section_times, referenced_fil
 MODES: dict[str, dict[str, str | None]] = {
     "cpu": {"MOPAC_NOGPU": "1", "MOZYME_GPU_OFF": "1", "MOPAC_FORCEGPU": None, "MOZYME_GPU_FORCE": None},
     "gpu": {"MOPAC_FORCEGPU": "1", "MOZYME_GPU_FORCE": "1", "MOPAC_NOGPU": None, "MOZYME_GPU_OFF": None},
-    # CPU-owned SCF loop with only the DIAGG stages offloaded to the parallel
-    # kernels: the cleanest A/B correctness test for those kernels.
+    # CPU-owned SCF loop with the DIAGG1/DIAGG2 stages offloaded to the parallel
+    # kernels (the other legacy per-call helpers are opt-in since 2026-09-18 and
+    # stay off): the cleanest A/B correctness test for those kernels.  Note that
+    # MOPAC's own defaults still enable the resident SCF here; the CPU loop only
+    # runs on a hand-back.
     "gpu-diagg": {
         "MOPAC_FORCEGPU": "1",
         "MOZYME_GPU_FORCE": "1",
@@ -276,7 +279,7 @@ def main() -> None:
             capture_output=True, text=True, timeout=20, check=False,
         )
         if smi.returncode == 0 and smi.stdout.strip():
-            print(f"GPU: {smi.stdout.strip()}")
+            print(f"GPU: {smi.stdout.strip()}  host CPUs: {os.cpu_count()}")
     except (OSError, subprocess.TimeoutExpired):
         pass
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]

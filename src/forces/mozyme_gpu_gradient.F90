@@ -262,7 +262,7 @@ contains
     use common_arrays_C, only : nat
     use molkst_C, only : numat, mpack
     use MOZYME_C, only : iorbs, lijbo, nijbo, iij, numij, ijall, iijj
-    use fillij_changes_C, only : nijbo_fill_count
+    use fillij_changes_C, only : nijbo_fill_count, pl_i, pl_j, pl_off, pl_n, pl_fill
     implicit none
     integer(c_int), allocatable, intent(out) :: pair_i(:), pair_j(:), pair_off(:), row_start(:), diag_off(:)
     integer(c_int), allocatable, intent(out) :: iorbs_c(:), nat_c(:)
@@ -302,6 +302,42 @@ contains
     else
       if (.not. allocated(iij) .or. .not. allocated(numij) .or. .not. allocated(ijall) &
           .or. .not. allocated(iijj)) return
+    end if
+    ! The fillij grid pass keeps the sorted (ii, jj < ii) block-pair list with
+    ! its offsets: take it and only derive the row starts (O(numat)).
+    if (lijbo .and. pl_fill == nijbo_fill_count .and. pl_n > 0 .and. allocated(pl_i)) then
+      npairs = pl_n
+      allocate(pair_i(npairs), pair_j(npairs), pair_off(npairs))
+      allocate(row_start(numat + 1), diag_off(numat), iorbs_c(numat), nat_c(numat))
+      pair_i(1:npairs) = int(pl_i(1:npairs), kind=c_int)
+      pair_j(1:npairs) = int(pl_j(1:npairs), kind=c_int)
+      pair_off(1:npairs) = int(pl_off(1:npairs), kind=c_int)
+      row_start = 0_c_int
+      do ix = 1, npairs
+        row_start(pl_i(ix) + 1) = row_start(pl_i(ix) + 1) + 1_c_int
+      end do
+      do ii = 1, numat
+        row_start(ii + 1) = row_start(ii + 1) + row_start(ii)
+        diag_off(ii) = int(nijbo(ii, ii), kind=c_int)
+        if (diag_off(ii) < 0) return
+        iorbs_c(ii) = int(iorbs(ii), kind=c_int)
+        nat_c(ii) = int(nat(ii), kind=c_int)
+      end do
+      ok = .true.
+      c_pair_i = pair_i
+      c_pair_j = pair_j
+      c_pair_off = pair_off
+      c_row_start = row_start
+      c_diag_off = diag_off
+      c_iorbs = iorbs_c
+      c_nat = nat_c
+      c_npairs = npairs
+      c_gate = distance_gate
+      c_fill = nijbo_fill_count
+      c_numat = numat
+      c_mpack = mpack
+      c_lijbo = lijbo
+      return
     end if
     ! nijbo is symmetric; index it as nijbo(jj, ii) so the inner loop walks a
     ! contiguous column (the strided form cost ~0.3 s per call for 7000 atoms).

@@ -1191,15 +1191,25 @@ inline void parallel_memcpy(void *dst, const void *src, std::size_t bytes) {
   const auto *s = static_cast<const char *>(src);
   const std::size_t part = (bytes + kStagingCopyThreads - 1) / kStagingCopyThreads;
   std::thread workers[kStagingCopyThreads - 1];
-  for (int t = 1; t < kStagingCopyThreads; ++t) {
-    const std::size_t off = part * static_cast<std::size_t>(t);
-    const std::size_t len = off < bytes ? std::min(part, bytes - off) : 0;
-    workers[t - 1] = std::thread([d, s, off, len]() {
-      if (len) std::memcpy(d + off, s + off, len);
-    });
+  int spawned = 0;
+  try {
+    for (int t = 1; t < kStagingCopyThreads; ++t) {
+      const std::size_t off = part * static_cast<std::size_t>(t);
+      const std::size_t len = off < bytes ? std::min(part, bytes - off) : 0;
+      workers[t - 1] = std::thread([d, s, off, len]() {
+        if (len) std::memcpy(d + off, s + off, len);
+      });
+      ++spawned;
+    }
+  } catch (...) {
+    // Thread creation failed (resource limits): finish the rest serially.
   }
   std::memcpy(d, s, std::min(part, bytes));
-  for (auto &w : workers) w.join();
+  for (int t = 1; t <= spawned; ++t) workers[t - 1].join();
+  for (int t = spawned + 1; t < kStagingCopyThreads; ++t) {
+    const std::size_t off = part * static_cast<std::size_t>(t);
+    if (off < bytes) std::memcpy(d + off, s + off, std::min(part, bytes - off));
+  }
 }
 
 class PinnedStaging {

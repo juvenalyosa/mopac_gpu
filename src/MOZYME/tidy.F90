@@ -18,6 +18,7 @@ subroutine tidy (nmos_loc, nc, ic, n01, c, n02, nnc_loc, ncmo, ln, mn, mode)
     use molkst_C, only: numat, step_num, step_num0, norbs, moperr, keywrd, numcal, use_disk
     use chanel_C, only: iw
     use mozyme_gpu_scf_driver, only: mozyme_gpu_scf_no_fallback_required
+    use mozyme_section_timers, only: mozyme_section_timers_enabled
     implicit none
     integer, intent (in) :: mode,  n02, nmos_loc
     integer, intent (inout) :: n01
@@ -33,6 +34,7 @@ subroutine tidy (nmos_loc, nc, ic, n01, c, n02, nnc_loc, ncmo, ln, mn, mode)
     integer :: i, in, isnew, ispace, j, j1, jdash, jsav, jspace, jtop, &
          & k, l, li, ll, mdash, mm, momax, momin, msav, mtop, n
     integer :: nmol = 0
+    integer :: atoms_before, coeffs_before
     double precision :: sum
     integer, dimension(:), allocatable :: iused, jused, kused, lused
     integer, dimension (2) :: imode
@@ -56,6 +58,16 @@ subroutine tidy (nmos_loc, nc, ic, n01, c, n02, nnc_loc, ncmo, ln, mn, mode)
       large = (Index (keywrd, " LARGE") /= 0)
     end if
     if (nmos_loc == 0) return
+    atoms_before = 0
+    coeffs_before = 0
+    if (mozyme_section_timers_enabled()) then
+      do i = 1, nmos_loc
+        atoms_before = atoms_before + nc(i)
+        do j1 = nnc_loc(i) + 1, nnc_loc(i) + nc(i)
+          coeffs_before = coeffs_before + iorbs(ic(j1))
+        end do
+      end do
+    end if
     isnew = 0
     if (nmol /= numcal) then
       !
@@ -140,6 +152,13 @@ subroutine tidy (nmos_loc, nc, ic, n01, c, n02, nnc_loc, ncmo, ln, mn, mode)
    !
    !   DIVIDE AVAILABLE SPACE EQUALLY AMONG THE LMO'S
    !
+    if (mozyme_section_timers_enabled()) then
+      ! Profile aid: how much the host tidy changed (a device-tidied LMO set
+      ! published by the resident SCF should show dropped=0).
+      write (iw, '(1x,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0)') '[MOZYME tidy] mode=', mode, &
+        ' lmos=', nmos_loc, ' atoms_before=', atoms_before, ' atoms_after=', ln, &
+        ' coeffs_before=', coeffs_before, ' coeffs_after=', mn
+    end if
     ispace = (n01-ln) / nmos_loc
     jspace = (n02-mn) / nmos_loc
    !
