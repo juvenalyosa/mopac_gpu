@@ -104,16 +104,19 @@ contains
     integer :: env_len, env_status
     character(len=16) :: env_value
 
-    mozyme_helecz_gpu_enabled = lgpu .and. mozyme_gpu .and. lijbo .and. allocated(nijbo)
-    if (.not. mozyme_helecz_gpu_enabled) return
+    mozyme_helecz_gpu_enabled = .false.
+    ! Opt-in (2026-09-18): these per-call helpers predate the resident SCF, are
+    ! slower than the CPU code they replace and at least two of them (diagg1_avir
+    ! and another one) give wrong energies in the CPU fallback loop after a
+    ! resident hand-back (crambin: SCF failed / -2899.57 vs -2901.68).  The
+    ! resident SCF has its own kernels; set the variable to 1 to use this helper.
+    if (.not. (lgpu .and. mozyme_gpu .and. lijbo .and. allocated(nijbo))) return
     env_value = ' '
     call get_environment_variable('MOPAC_MOZYME_HELECZ_GPU', env_value, &
       length=env_len, status=env_status)
     if (env_status == 0 .and. env_len > 0) then
       select case (trim(env_value))
-      case ('0', 'off', 'OFF', 'false', 'FALSE', 'no', 'NO')
-        mozyme_helecz_gpu_enabled = .false.
-      case default
+      case ('1', 'on', 'ON', 'true', 'TRUE', 'yes', 'YES')
         mozyme_helecz_gpu_enabled = .true.
       end select
     end if

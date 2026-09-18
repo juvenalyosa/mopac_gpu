@@ -266,13 +266,17 @@ Separately, standalone `eimp`, `density_batch`, `diagg1_construct`,
 `diagg1_aocc`, `diagg1_avir`, `diagg2_rotate`, `diagg2_rotprep`, `cnvgz`,
 `helecz`, and `isitsc` GPU stage calls run inside the existing CPU-owned SCF
 loop when MOZYME GPU is active.
-They can be controlled individually with
-`MOPAC_MOZYME_EIMP_GPU=0`, `MOPAC_MOZYME_DENSITY_BATCH_GPU=0`,
-`MOPAC_MOZYME_DIAGG1_CONSTRUCT_GPU=0`,
-`MOPAC_MOZYME_DIAGG1_AOCC_GPU=0`, `MOPAC_MOZYME_DIAGG1_AVIR_GPU=0`,
-`MOPAC_MOZYME_DIAGG2_ROTATE_GPU=0`, `MOPAC_MOZYME_DIAGG2_ROTPREP_GPU=0`,
-`MOPAC_MOZYME_CNVGZ_GPU=0`, and `MOPAC_MOZYME_HELECZ_GPU=0`. The standalone
-`isitsc` helper is opt-in with `MOPAC_MOZYME_ISITSC_GPU=1`. `eimp` writes the packed `p` scratch entries
+Since 2026-09-18 all of them are opt-in (set the variable to `1`):
+`MOPAC_MOZYME_EIMP_GPU`, `MOPAC_MOZYME_DENSITY_BATCH_GPU`,
+`MOPAC_MOZYME_DIAGG1_CONSTRUCT_GPU`,
+`MOPAC_MOZYME_DIAGG1_AOCC_GPU`, `MOPAC_MOZYME_DIAGG1_AVIR_GPU`,
+`MOPAC_MOZYME_DIAGG2_ROTATE_GPU`, `MOPAC_MOZYME_DIAGG2_ROTPREP_GPU`,
+`MOPAC_MOZYME_CNVGZ_GPU`, `MOPAC_MOZYME_HELECZ_GPU` and
+`MOPAC_MOZYME_ISITSC_GPU`. The legacy per-call helpers were turned off by
+default because the CPU loop that continues an SCF after a resident hand-back
+did not converge with them (crambin, `DENOUT=5`: ITRY exhausted; with only
+`diagg1_avir` off, -2899.57 instead of -2901.68 kcal/mol) and they were slower
+than the CPU code; the production path is the resident SCF. `eimp` writes the packed `p` scratch entries
 consumed by `diagg`, `diagg1_construct` builds `fmo/ifmo`, pseudo-eigenvalues,
 `nfmo`, and DIAGG control scalars on GPU, `diagg1_aocc` and `diagg1_avir`
 remain as substage fallbacks, `density_batch` builds the sparse packed density
