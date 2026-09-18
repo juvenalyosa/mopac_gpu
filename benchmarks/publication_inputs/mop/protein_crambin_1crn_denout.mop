@@ -1,0 +1,2 @@
+PM7 GEO_DAT="protein_crambin_1crn_hydrogenated.pdb" 1SCF MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=70 NEWPDB PDB GEO-OK NOCOMMENTS DENOUT=5
+Hand-back regression (1SCF): DENOUT=5 hands the SCF back after 4 GPU iterations, the CPU finishes it; ITRY=70 bounds a diverging fallback

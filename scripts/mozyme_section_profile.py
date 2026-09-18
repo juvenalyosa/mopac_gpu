@@ -72,8 +72,9 @@ HELPER_RE = re.compile(r"\[MOZYME GPU (\w+)\]\s+(success|fallback_cpu)")
 RESIDENT_STAGE_RE = re.compile(r"\[PROFILE\]\s+MOZYME_RESIDENT_STAGE\s+name=(\S+)\s+calls=(\d+)\s+ms=([+\-0-9.Ee]+)")
 
 
-def run_mode(mopac: Path, input_path: Path, mode: str, out_dir: Path, timeout: float) -> dict:
-    run_dir = out_dir / input_path.stem / mode
+def run_mode(mopac: Path, input_path: Path, mode: str, out_dir: Path, timeout: float,
+             overrides: dict[str, str | None] | None = None, tag: str = "") -> dict:
+    run_dir = out_dir / input_path.stem / (mode + tag)
     run_dir.mkdir(parents=True, exist_ok=True)
     staged = stage_input(input_path, run_dir)
     for ref in referenced_files(input_path):
@@ -85,6 +86,12 @@ def run_mode(mopac: Path, input_path: Path, mode: str, out_dir: Path, timeout: f
     env["MOPAC_GPU_DEBUG"] = "1"
     env["MOPAC_DETERMINISTIC"] = "1"
     for key, value in MODES[mode].items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    # --set KEY=VALUE overrides applied after the mode (KEY= removes the variable)
+    for key, value in (overrides or {}).items():
         if value is None:
             env.pop(key, None)
         else:
@@ -250,7 +257,14 @@ def main() -> None:
     )
     parser.add_argument("--out-dir", default="mozyme_section_profile")
     parser.add_argument("--timeout", type=float, default=7200.0)
+    parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                        help="environment override applied after the mode (repeatable; KEY= unsets)")
+    parser.add_argument("--tag", default="", help="suffix for the run directory (with --set variants)")
     args = parser.parse_args()
+    overrides: dict[str, str | None] = {}
+    for item in args.set:
+        key, _, value = item.partition("=")
+        overrides[key.strip()] = value if value != "" else None
 
     mopac = Path(args.mopac).resolve()
     if not mopac.exists():
@@ -276,7 +290,7 @@ def main() -> None:
         results = []
         for mode in modes:
             print(f"[{mode}] {input_path.name} ...", flush=True)
-            results.append(run_mode(mopac, input_path, mode, out_dir, args.timeout))
+            results.append(run_mode(mopac, input_path, mode, out_dir, args.timeout, overrides, args.tag))
             print(f"    {results[-1]['wall']:.2f}s", flush=True)
         print_table(input_path, results)
 

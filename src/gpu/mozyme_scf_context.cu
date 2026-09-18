@@ -1841,6 +1841,7 @@ bool finish_resident_stage_timing(MozymeScfContext &ctx, bool time_stage,
                                   double *wall_ms);
 bool env_enabled(const char *name);
 bool strict_resident_request_enabled();
+bool strict_proof_requested();
 bool resident_scf_request_enabled();
 bool host_commit_marker_enabled();
 
@@ -10440,6 +10441,16 @@ bool strict_resident_request_enabled() {
          env_enabled("MOPAC_MOZYME_FULL_SCF_GPU");
 }
 
+// The strict *proof* contract (abort instead of any CPU fallback, full host
+// publication counted in the status): only the explicit strict switches.
+// MOPAC_MOZYME_SCF_GPU alone (the production default) selects the strict
+// asynchronous loop but keeps the CPU fallback and may publish lazily.
+bool strict_proof_requested() {
+  return env_enabled("MOPAC_MOZYME_SCF_STRICT_RESIDENT") ||
+         env_enabled("MOPAC_MOZYME_GPU_STRICT") ||
+         env_enabled("MOPAC_MOZYME_FULL_SCF_GPU");
+}
+
 bool resident_scf_request_enabled() {
   return strict_resident_request_enabled() ||
          env_enabled("MOPAC_MOZYME_RESIDENT_SCF");
@@ -11216,9 +11227,15 @@ bool copy_resident_state_to_host(const MozymeScfContext &ctx,
        2 * fmo_count) *
           sizeof(int) +
       (has_cosmo ? sizeof(double) * kCosmoScalarCount : 0);
-  const int host_commit_arrays = has_cosmo ? 32 : 26;
+  const std::size_t lazy_skipped_bytes =
+      (mpack_count + partp_count + partf_count + mpack_count + fmo_count) *
+          sizeof(double) +
+      2 * fmo_count * sizeof(int);
+  const int host_commit_arrays = (has_cosmo ? 32 : 26) - (full ? 0 : 6);
   const ResidentFinalPublicationProof final_publication_proof{
-      host_commit_arrays, host_commit_bytes, has_cosmo ? 1 : 0};
+      host_commit_arrays,
+      full ? host_commit_bytes : host_commit_bytes - lazy_skipped_bytes,
+      has_cosmo ? 1 : 0};
 
   if (!stage_and_commit_device_vector(ctx.state.p, dev.p, mpack_count,
                                       "resident final p stage")) return false;
@@ -11505,6 +11522,10 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
   };
   if (uploaded) {
     const bool strict_resident = strict_resident_request_enabled();
+    // Full publication contract only under the explicit strict switches; the
+    // production default (MOPAC_MOZYME_SCF_GPU) publishes lazily and hands a
+    // full copy to the CPU only when the SCF falls back.
+    const bool strict_proof = strict_proof_requested();
     double accumulated_ms = 0.0;
     bool have_checkpoint = false;
     MozymeScfStatus checkpoint{};
@@ -11596,7 +11617,8 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
                  !apply_final_reorth_on_gpu(*ctx, &final_status,
                                             &accumulated_ms)) ||
                 !timed_copy_resident_state_to_host(*ctx,
-                                                   &final_publication_proof)) {
+                                                   &final_publication_proof,
+                                                   /*full=*/strict_proof)) {
               final_code = kMozymeScfNotReady;
             } else {
               mark_final_publication_done(&final_status,
@@ -11604,25 +11626,28 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
               publish_resident_control_to_status(&final_status, control);
               *status = final_status;
               final_code = kMozymeScfSuccess;
-              ctx->device.host_synced = true;
-              ctx->device.lazy_authoritative = false;
+              ctx->device.host_synced = strict_proof;
+              ctx->device.lazy_authoritative = !strict_proof;
               ctx->device.p_published = true;
             }
           } else if (return_decision == ResidentReturnDecision::CpuBoundary) {
             if (publish_strict_stage_status_or_not_ready()) {
               final_code = kMozymeScfCpuBoundary;
               status->ready = 0;
+              hand_back_to_host(!strict_proof);
             }
           } else if (return_decision == ResidentReturnDecision::PlsRestart) {
             if (publish_strict_stage_status_or_not_ready()) {
               final_code = kMozymeScfUnsupported;
               status->ready = 0;
+              hand_back_to_host(!strict_proof);
             }
           } else if (return_decision ==
                      ResidentReturnDecision::IterationExhausted) {
             if (publish_strict_stage_status_or_not_ready()) {
               final_code = kMozymeScfUnsupported;
               status->ready = 0;
+              hand_back_to_host(!strict_proof);
             }
           } else if (return_decision == ResidentReturnDecision::StageFailed) {
             if (publish_strict_stage_status_or_not_ready()) {
