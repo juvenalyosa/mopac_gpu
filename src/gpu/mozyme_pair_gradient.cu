@@ -776,6 +776,7 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
   if (d_pairs_out) *d_pairs_out = 0;
 
   EventTimer timer;
+  const HostClock::time_point t_start = HostClock::now();
   GeomBuffers geom;
   PairTables tab;
   DeviceArray<double> d_p, d_dxyz, d_q, d_energies;
@@ -790,6 +791,8 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
                                          static_cast<size_t>(std::max(npairs, 1))))) {
     return 2;
   }
+  const HostClock::time_point t_uploaded = HostClock::now();
+  add_section_ms("grad_gpu_upload", host_ms_between(t_start, t_uploaded));
   a.g.distance_gate = distance_gate;
   a.g.d_on_device = d_on_device;
   a.g.cutof1 = tables->cutof1;
@@ -824,11 +827,14 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
     mozyme_point_gradient_kernel<<<grid, kPointThreads>>>(a, d_q.ptr);
   }
   int code = finish_launch("MOZYME GPU gradient", geom.status, d_pairs_out);
+  const HostClock::time_point t_kernels = HostClock::now();
+  add_section_ms("grad_gpu_kernels", host_ms_between(t_uploaded, t_kernels));
   if (code == 0) {
     if (cudaMemcpy(dxyz, d_dxyz.ptr, 3 * na * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess) {
       code = 2;
     }
   }
+  add_section_ms("grad_gpu_download", host_ms_between(t_kernels, HostClock::now()));
   const double ms = timer.stop_ms();
   if (ms_out) *ms_out = ms;
   return code;

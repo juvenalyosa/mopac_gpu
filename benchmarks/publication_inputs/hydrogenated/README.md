@@ -6,4 +6,4 @@ files in `mop/` reference these hydrogenated geometries through `GEO_DAT`.
 
 Prepared labels:
 
-- `protein_ubiquitin_1ubq`
+- `protein_adenylate_kinase_1ake_apo`

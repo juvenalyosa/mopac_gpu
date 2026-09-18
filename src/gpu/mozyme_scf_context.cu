@@ -2100,77 +2100,79 @@ bool valid_state(const MozymeScfConfig &config, const MozymeScfState &state) {
 }
 
 #ifdef __CUDACC__
+__device__ inline double block_sum_double(double value, double *scratch);
+
 __global__ void mozyme_helecz_kernel(int numat, int mpack, const int *iorbs,
                                      const int *nijbo, const double *p,
                                      const double *h, const double *f,
                                      double *atom_sums,
                                      double *atom_diag_sums, int *ok_out,
                                      const int *resident_control_ints) {
+  // Block per atom i, threads over the atoms j < i: each thread sums the
+  // p.(h+f) terms of its block pair (nijbo is symmetric; the row of atom i is
+  // read contiguously), then a block reduction.  The diagonal block is done
+  // by thread 0.
+  __shared__ double s_red[8];
   if (resident_control_terminal(resident_control_ints)) return;
   const int atom_i = blockIdx.x + 1;
   const int tid = threadIdx.x;
-  if (tid != 0) return;
+  if (atom_i > numat) return;
 
   double offdiag = 0.0;
   double diag = 0.0;
-  if (atom_i <= numat) {
-    const int ni = iorbs[atom_i - 1];
-    if (ni <= 0) {
+  const int ni = iorbs[atom_i - 1];
+  if (ni <= 0) {
+    if (tid == 0) {
       atomicExch(ok_out, 0);
       atom_sums[blockIdx.x] = 0.0;
       atom_diag_sums[blockIdx.x] = 0.0;
-      return;
     }
-    for (int atom_j = 1; atom_j < atom_i; ++atom_j) {
-      const int base = nijbo[(atom_i - 1) + (atom_j - 1) * numat];
-      if (base < 0) continue;
-      const int nj = iorbs[atom_j - 1];
-      if (nj <= 0) {
-        atomicExch(ok_out, 0);
-        continue;
-      }
-      const int terms = ni * nj;
-      if (base > mpack || terms < 0 || base + terms > mpack) {
-        atomicExch(ok_out, 0);
-        continue;
-      }
-      for (int offset = 0; offset < terms; ++offset) {
-        const int idx = base + offset;
-        offdiag += p[idx] * (h[idx] + f[idx]);
-      }
-    }
-
-    const int base = nijbo[(atom_i - 1) + (atom_i - 1) * numat];
-    if (base < 0) {
+    return;
+  }
+  const int *row_i = nijbo + static_cast<std::size_t>(atom_i - 1) * numat;
+  for (int atom_j = 1 + tid; atom_j < atom_i; atom_j += blockDim.x) {
+    const int base = row_i[atom_j - 1];
+    if (base < 0) continue;
+    const int nj = iorbs[atom_j - 1];
+    if (nj <= 0) {
       atomicExch(ok_out, 0);
-      atom_sums[blockIdx.x] = 0.0;
-      atom_diag_sums[blockIdx.x] = 0.0;
-      return;
+      continue;
     }
-    const int terms = (ni * (ni + 1)) / 2;
+    const int terms = ni * nj;
     if (base > mpack || terms < 0 || base + terms > mpack) {
       atomicExch(ok_out, 0);
-      atom_sums[blockIdx.x] = 0.0;
-      atom_diag_sums[blockIdx.x] = 0.0;
-      return;
+      continue;
     }
-    int packed = 0;
-    for (int row = 1; row <= ni; ++row) {
-      for (int col = 1; col <= row; ++col) {
-        if (row == col) {
+    for (int offset = 0; offset < terms; ++offset) {
+      const int idx = base + offset;
+      offdiag += p[idx] * (h[idx] + f[idx]);
+    }
+  }
+  if (tid == 0) {
+    const int base = row_i[atom_i - 1];
+    const int terms = (ni * (ni + 1)) / 2;
+    if (base < 0 || base > mpack || terms < 0 || base + terms > mpack) {
+      atomicExch(ok_out, 0);
+    } else {
+      int packed = 0;
+      for (int row = 1; row <= ni; ++row) {
+        for (int col = 1; col <= row; ++col) {
           const int idx = base + packed;
-          diag += p[idx] * (h[idx] + f[idx]);
-        } else {
-          const int idx = base + packed;
-          offdiag += p[idx] * (h[idx] + f[idx]);
+          if (row == col) {
+            diag += p[idx] * (h[idx] + f[idx]);
+          } else {
+            offdiag += p[idx] * (h[idx] + f[idx]);
+          }
+          ++packed;
         }
-        ++packed;
       }
     }
   }
-
-  atom_sums[blockIdx.x] = offdiag;
-  atom_diag_sums[blockIdx.x] = diag;
+  const double offdiag_total = block_sum_double(offdiag, s_red);
+  if (tid == 0) {
+    atom_sums[blockIdx.x] = offdiag_total;
+    atom_diag_sums[blockIdx.x] = diag;
+  }
 }
 
 __global__ void mozyme_helecz_reduce_kernel(int count,
@@ -4705,62 +4707,71 @@ mozyme_check_lmo_warp_kernel(int nvec, int numat, int ic_dim, int c_dim,
                              double *errors, int *bad_index, int *ok_flag,
                              int error_slot,
                              const int *resident_control_ints) {
+  // Warp per LMO; the normalisation errors are reduced over the block before
+  // the single atomic per block (one atomic per LMO on the same address
+  // serialised ~14k warps at 7000 atoms).  No early returns: every warp
+  // reaches the block reduction.
+  __shared__ double s_red[8];
   if (resident_control_terminal(resident_control_ints)) return;
   const int lane = threadIdx.x & 31;
   const int lmo0 = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
-  if (lmo0 >= nvec) return;
+  const bool active = lmo0 < nvec;
   const int lmo = lmo0 + 1;
-
-  const int base = nnc[lmo0];
-  const int count = nc[lmo0];
-  const int coeff_base = ncvec[lmo0];
-  int bad = (count <= 0 || base < 0 || base + count > ic_dim) ? 1 : 0;
-  int span = 0;
-  if (!bad) {
-    int running = 0;
-    for (int chunk = 0; chunk < count; chunk += 32) {
-      const int e = chunk + lane;
-      int norb = 0;
-      if (e < count) {
-        const int atom = icvec[base + e];
-        if (atom < 1 || atom > numat) {
-          bad = 1;
-        } else {
-          norb = iorbs[atom - 1];
-          if (norb <= 0) bad = 1;
+  double err = 0.0;
+  if (active) {
+    const int base = nnc[lmo0];
+    const int count = nc[lmo0];
+    const int coeff_base = ncvec[lmo0];
+    int bad = (count <= 0 || base < 0 || base + count > ic_dim) ? 1 : 0;
+    int span = 0;
+    if (!bad) {
+      int running = 0;
+      for (int chunk = 0; chunk < count; chunk += 32) {
+        const int e = chunk + lane;
+        int norb = 0;
+        if (e < count) {
+          const int atom = icvec[base + e];
+          if (atom < 1 || atom > numat) {
+            bad = 1;
+          } else {
+            norb = iorbs[atom - 1];
+            if (norb <= 0) bad = 1;
+          }
         }
+        running += __shfl_sync(0xffffffffu, warp_inclusive_scan_int(norb), 31);
       }
-      running += __shfl_sync(0xffffffffu, warp_inclusive_scan_int(norb), 31);
+      span = running;
+      if (coeff_base < 0 || coeff_base + span > c_dim) bad = 1;
     }
-    span = running;
-    if (coeff_base < 0 || coeff_base + span > c_dim) bad = 1;
-  }
-  if (__any_sync(0xffffffffu, bad)) {
-    if (lane == 0) {
-      *ok_flag = 0;
-      atomicMin(&bad_index[error_slot], lmo);
+    if (__any_sync(0xffffffffu, bad)) {
+      if (lane == 0) {
+        *ok_flag = 0;
+        atomicMin(&bad_index[error_slot], lmo);
+      }
+    } else {
+      double part = 0.0;
+      for (int k = lane; k < span; k += 32) {
+        const double v = cvec[coeff_base + k];
+        part += v * v;
+      }
+      const double norm = warp_sum_double(part);
+      if (!(norm > 0.0) || norm != norm || norm > 1.0e300) {
+        if (lane == 0) {
+          *ok_flag = 0;
+          atomicMin(&bad_index[error_slot], lmo);
+        }
+      } else {
+        if (lane == 0) {
+          err = fabs(1.0 - norm);
+          if (fabs(norm - 1.0) > 0.1) atomicMin(&bad_index[error_slot], lmo);
+        }
+        const double scale = 1.0 / sqrt(norm);
+        for (int k = lane; k < span; k += 32) cvec[coeff_base + k] *= scale;
+      }
     }
-    return;
   }
-  double part = 0.0;
-  for (int k = lane; k < span; k += 32) {
-    const double v = cvec[coeff_base + k];
-    part += v * v;
-  }
-  const double norm = warp_sum_double(part);
-  if (!(norm > 0.0) || norm != norm || norm > 1.0e300) {
-    if (lane == 0) {
-      *ok_flag = 0;
-      atomicMin(&bad_index[error_slot], lmo);
-    }
-    return;
-  }
-  if (lane == 0) {
-    atomicAdd_double(&errors[error_slot], fabs(1.0 - norm));
-    if (fabs(norm - 1.0) > 0.1) atomicMin(&bad_index[error_slot], lmo);
-  }
-  const double scale = 1.0 / sqrt(norm);
-  for (int k = lane; k < span; k += 32) cvec[coeff_base + k] *= scale;
+  const double block_err = block_sum_double(err, s_red);
+  if (threadIdx.x == 0 && block_err != 0.0) atomicAdd_double(&errors[error_slot], block_err);
 }
 
 // ---- Parallel resident tidy ------------------------------------------------
@@ -8304,16 +8315,16 @@ bool compute_check_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
     diagg_debug_checkpoint("resident tidy");
     diagg_debug_dump_ints("resident tidy results", dev.tidy_result.ptr,
                           2 * kTidyResultCount);
-    const int occ_blocks = (nocc * 32 + kDiaggRotateThreads - 1) /
-                           kDiaggRotateThreads;
-    const int vir_blocks = (nvir * 32 + kDiaggRotateThreads - 1) /
-                           kDiaggRotateThreads;
-    mozyme_check_lmo_warp_kernel<<<occ_blocks, kDiaggRotateThreads>>>(
+    const int occ_blocks = (nocc * 32 + kDiaggBlockThreads - 1) /
+                           kDiaggBlockThreads;
+    const int vir_blocks = (nvir * 32 + kDiaggBlockThreads - 1) /
+                           kDiaggBlockThreads;
+    mozyme_check_lmo_warp_kernel<<<occ_blocks, kDiaggBlockThreads>>>(
         nocc, numat, ctx.state.icocc_dim, ctx.state.cocc_dim, dev.nncf.ptr,
         dev.ncf.ptr, dev.icocc.ptr, dev.iorbs.ptr, dev.ncocc.ptr,
         dev.cocc.ptr, dev.check_errors.ptr, dev.check_ints.ptr,
         dev.check_ints.ptr + kCheckIntOk, 0, dev.resident_control_ints.ptr);
-    mozyme_check_lmo_warp_kernel<<<vir_blocks, kDiaggRotateThreads>>>(
+    mozyme_check_lmo_warp_kernel<<<vir_blocks, kDiaggBlockThreads>>>(
         nvir, numat, ctx.state.icvir_dim, ctx.state.cvir_dim, dev.nnce.ptr,
         dev.nce.ptr, dev.icvir.ptr, dev.iorbs.ptr, dev.ncvir.ptr,
         dev.cvir.ptr, dev.check_errors.ptr, dev.check_ints.ptr,
