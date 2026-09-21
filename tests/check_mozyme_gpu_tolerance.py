@@ -5,12 +5,14 @@ Usage:
   check_mozyme_gpu_tolerance.py <mopac> <deck.mop> [<deck.mop> ...] [--hof-tol 0.05]
       [--grad-rms-tol 1e-3] [--handback <deck.mop>] [--work-dir DIR]
 
-For every deck: run it once with the GPU disabled (MOPAC_NOGPU=1) and once with MOPAC's
-production defaults (GPU on a capable device); the final heats of formation must agree within
---hof-tol kcal/mol and the GPU run must report a successful resident SCF.  Decks whose keywords
-request a geometry optimization or GRADIENTS are additionally run with MOPAC_GPU_GRAD_CHECK=1,
-and every "[MOZYME GPU gradient] check" line must report rms_diff <= --grad-rms-tol
-kcal/mol/A.  The optional --handback deck (DENOUT=n) must complete on the CPU after the resident
+For every single-point deck: run it once with the GPU disabled (MOPAC_NOGPU=1) and once with
+MOPAC's production defaults (GPU on a capable device); the final heats of formation must agree
+within --hof-tol kcal/mol and the GPU run must report a successful resident SCF.  Decks whose
+keywords request a geometry optimization are run with MOPAC_GPU_GRAD_CHECK=1 (every
+"[MOZYME GPU gradient] check" line must report rms_diff <= --grad-rms-tol kcal/mol/A) and, since
+optimizer trajectories diverge from the nondeterministic diagg2 order, their heats are compared at
+a common geometry: the GPU run's restart file (.res) is re-evaluated as RESTART 1SCF with the GPU
+disabled and enabled, and those two heats must agree within --hof-tol.  The optional --handback deck (DENOUT=n) must complete on the CPU after the resident
 SCF hands back, again within --hof-tol of the CPU-only heat.  Finally, the first deck is run in the
 GPU build with the NOGPU keyword: no GPU helper may run and the heat must equal the
 MOPAC_NOGPU run bit for bit.
@@ -29,7 +31,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-HEAT_RE = re.compile(r"FINAL HEAT OF FORMATION\s*=\s*([-+0-9.EeDd]+)\s*KCAL/MOL")
+HEAT_RE = re.compile(r"(?:FINAL HEAT OF FORMATION|CURRENT VALUE OF HEAT OF FORMATION)\s*=\s*([-+0-9.EeDd]+)")
 SCF_STATUS_RE = re.compile(r"\[MOZYME GPU SCF\]\s+status=(\S+)")
 GRAD_CHECK_RE = re.compile(r"\[MOZYME GPU gradient\] check .*?rms_diff=\s*([-+0-9.EeDd]+)")
 GPU_SUCCESS_RE = re.compile(r"\[MOZYME GPU \w+\]\s+(?:status=)?success")
@@ -128,12 +130,13 @@ def main() -> int:
         check("success" in statuses, f"{name}: GPU run reports a successful resident SCF (statuses: {sorted(set(statuses))})")
         check("strict_abort" not in statuses and "[GPU ERROR]" not in gpu_text,
               f"{name}: no GPU error or strict abort in the GPU run")
-        if cpu_heat is not None and gpu_heat is not None:
+        keywords = deck.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+        is_opt = OPT_RE.search(keywords) is not None
+        if cpu_heat is not None and gpu_heat is not None and not is_opt:
             diff = abs(gpu_heat - cpu_heat)
             check(diff <= args.hof_tol,
                   f"{name}: |dHf(GPU - CPU)| = {diff:.4f} kcal/mol <= {args.hof_tol} (CPU {cpu_heat:.5f}, GPU {gpu_heat:.5f})")
-        keywords = deck.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
-        if OPT_RE.search(keywords):
+        if is_opt:
             chk_text, _ = run_mopac(mopac, deck, work / name / "gradcheck",
                                     clean_env({"MOPAC_GPU_GRAD_CHECK": "1"}), timeout=args.timeout)
             rms = [to_float(v) for v in GRAD_CHECK_RE.findall(chk_text)]
@@ -141,6 +144,31 @@ def main() -> int:
             if rms:
                 check(max(rms) <= args.grad_rms_tol,
                       f"{name}: max gradient rms_diff {max(rms):.3e} kcal/mol/A <= {args.grad_rms_tol:g}")
+            # Common-geometry heat: RESTART 1SCF from the GPU run's restart file, CPU vs GPU.
+            res = next(iter((work / name / "gpu").glob("*.res")), None)
+            check(res is not None, f"{name}: GPU optimization left a restart file (.res)")
+            if res is not None:
+                rst_dir = work / name / "restart"
+                rst_dir.mkdir(parents=True, exist_ok=True)
+                rst_deck = rst_dir / f"{name}_restart_1scf.mop"
+                shutil.copy2(res, rst_dir / f"{name}_restart_1scf.res")
+                for quoted, bare in GEO_DAT_RE.findall(deck.read_text(encoding="utf-8", errors="ignore")):
+                    ref = deck.parent / (quoted or bare)
+                    if ref.exists():
+                        shutil.copy2(ref, rst_dir / ref.name)
+                first = re.sub(r"(?i)(^|\s)(CYCLES\s*=\s*\S+|GRADIENTS|BFGS|LBFGS|EF|TS)(?=\s|$)", " ", keywords)
+                rst_deck.write_text(first.rstrip() + " 1SCF RESTART\n"
+                                    f"1SCF at the GPU optimization's current geometry (restart file)\n\n",
+                                    encoding="utf-8")
+                _, rc_heat = run_mopac(mopac, rst_deck, rst_dir / "cpu", clean_env({"MOPAC_NOGPU": "1"}),
+                                       timeout=args.timeout)
+                rg_text, rg_heat = run_mopac(mopac, rst_deck, rst_dir / "gpu", clean_env(), timeout=args.timeout)
+                check(rc_heat is not None and rg_heat is not None,
+                      f"{name}: RESTART 1SCF heats at the GPU geometry (CPU {rc_heat}, GPU {rg_heat})")
+                if rc_heat is not None and rg_heat is not None:
+                    diff = abs(rg_heat - rc_heat)
+                    check(diff <= args.hof_tol,
+                          f"{name}: |dHf(GPU - CPU)| at the same geometry = {diff:.4f} kcal/mol <= {args.hof_tol}")
 
     if args.handback:
         deck = Path(args.handback).resolve()
