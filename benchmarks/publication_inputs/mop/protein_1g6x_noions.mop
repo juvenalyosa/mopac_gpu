@@ -1,0 +1,2 @@
+PM7 GEO_DAT="protein_1g6x_noions_hydrogenated.pdb" 1SCF MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 NEWPDB PDB GEO-OK NOCOMMENTS
+Published-timing benchmark variant: PDB 1G6X without the sulfate and ethylene glycol groups
