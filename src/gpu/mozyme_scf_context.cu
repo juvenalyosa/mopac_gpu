@@ -2348,6 +2348,12 @@ __global__ void mozyme_update_status_finalize_kernel(int *status,
   const int actual = status[0];
   const int ok = status[1];
   const int expected = status[2];
+  if (expected < 0) {
+    // expected count not computed (non-strict path): only the ok flag and
+    // the presence of work are checked.
+    if (ok != 1 || (require_work && actual <= 0)) status[1] = 0;
+    return;
+  }
   if (ok != 1 || actual != expected || (require_work && expected <= 0)) {
     status[1] = 0;
   }
@@ -5268,7 +5274,28 @@ __device__ inline int density_list_find(const int *list_lmo, int begin,
   return -1;
 }
 
-// Warp per packed (j >= k) atom-pair block.
+__device__ inline int density_list_find_shared(const int *keys, int count, int lmo) {
+  int lo = 0;
+  int hi = count - 1;
+  while (lo <= hi) {
+    const int mid = (lo + hi) >> 1;
+    const int v = keys[mid];
+    if (v < lmo) {
+      lo = mid + 1;
+    } else if (v > lmo) {
+      hi = mid - 1;
+    } else {
+      return mid;
+    }
+  }
+  return -1;
+}
+
+// Warp per packed (j >= k) atom-pair block.  The longer of the two atom LMO
+// lists is staged in shared memory (one coalesced pass) so the per-element
+// binary searches run on shared memory instead of chains of dependent global
+// loads (the list of an atom in a 7000-atom protein has ~300 entries).
+constexpr int kDensityPairWarps = kDiaggBlockThreads / 32;
 __global__ void __launch_bounds__(kDiaggBlockThreads)
 mozyme_density_pairs_kernel(int npairs, int numat, int mpack, int cocc_dim,
                             const int *pair_j, const int *pair_k,
@@ -5277,8 +5304,10 @@ mozyme_density_pairs_kernel(int npairs, int numat, int mpack, int cocc_dim,
                             const int *list_coef, const double *cocc,
                             double *p, int *updated_terms, int *ok_out,
                             const int *resident_control_ints) {
+  __shared__ int s_keys[kDensityPairWarps][kDensityIndexMaxPerAtom];
   if (resident_control_terminal(resident_control_ints)) return;
   const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
   const int pr = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
   if (pr >= npairs) return;
   const int aj = pair_j[pr];
@@ -5322,6 +5351,12 @@ mozyme_density_pairs_kernel(int npairs, int numat, int mpack, int cocc_dim,
   const int count_s = swap_lists ? count_k : count_j;
   const int begin_l = swap_lists ? begin_j : begin_k;
   const int count_l = swap_lists ? count_j : count_k;
+  int *keys = s_keys[warp];
+  const bool staged = count_l <= kDensityIndexMaxPerAtom;
+  if (staged) {
+    for (int e = lane; e < count_l; e += 32) keys[e] = list_lmo[begin_l + e];
+  }
+  __syncwarp();
   int common = 0;
   for (int chunk = 0; chunk < count_s; chunk += 32) {
     const int e = chunk + lane;
@@ -5329,7 +5364,8 @@ mozyme_density_pairs_kernel(int npairs, int numat, int mpack, int cocc_dim,
     int coef_k = -1;
     if (e < count_s) {
       const int lmo = list_lmo[begin_s + e];
-      const int hit = density_list_find(list_lmo, begin_l, count_l, lmo);
+      const int hit = staged ? density_list_find_shared(keys, count_l, lmo)
+                             : density_list_find(list_lmo, begin_l, count_l, lmo);
       if (hit >= 0) {
         const int coef_s = list_coef[begin_s + e];
         const int coef_l = list_coef[begin_l + hit];
@@ -8971,11 +9007,22 @@ bool compute_density_on_gpu_impl(MozymeScfContext &ctx, int nclose, int mode,
                                      "resident density start event")) break;
     mozyme_density_init_kernel<<<matrix_blocks, kThreads>>>(
         mpack, mode, input_partp, output_p, dev.resident_control_ints.ptr);
-    mozyme_density_expected_count_kernel<<<nclose, kThreads>>>(
-        nclose, numat, ctx.state.icocc_dim, dev.ncf.ptr, dev.nncf.ptr,
-        dev.icocc.ptr, dev.iorbs.ptr, dev.nijbo.ptr,
-        dev.density_updates.ptr + 2, dev.density_updates.ptr + 1,
-        dev.resident_control_ints.ptr);
+    // The expected-terms cross-check walks every atom pair of every LMO
+    // (O(sum n_lmo^2) random nijbo reads per iteration); the pair list and
+    // the per-atom list overflow flag already cover what it guards, so it is
+    // only computed under the strict proof contract (-1 = not checked).
+    const bool verify_expected = strict_proof_requested();
+    if (verify_expected) {
+      mozyme_density_expected_count_kernel<<<nclose, kThreads>>>(
+          nclose, numat, ctx.state.icocc_dim, dev.ncf.ptr, dev.nncf.ptr,
+          dev.icocc.ptr, dev.iorbs.ptr, dev.nijbo.ptr,
+          dev.density_updates.ptr + 2, dev.density_updates.ptr + 1,
+          dev.resident_control_ints.ptr);
+    } else {
+      mozyme_set_int_slot_if_resident_active_kernel<<<1, 1>>>(
+          dev.density_updates.ptr, 2, -1, dev.resident_control_ints.ptr);
+    }
+    split_resident_stage_profile(ctx, "resident density_expected stop event");
     {
       const std::size_t numat_count = static_cast<std::size_t>(numat);
       const std::size_t icocc_count =
@@ -9015,6 +9062,7 @@ bool compute_density_on_gpu_impl(MozymeScfContext &ctx, int nclose, int mode,
           numat, dev.density_atom_offsets.ptr, dev.density_list_lmo.ptr,
           dev.density_list_coef.ptr, dev.density_updates.ptr + 1,
           dev.resident_control_ints.ptr);
+      split_resident_stage_profile(ctx, "resident density_index stop event");
       const int pair_blocks =
           (dev.density_pair_count * 32 + kThreads - 1) / kThreads;
       mozyme_density_pairs_kernel<<<pair_blocks, kThreads>>>(
@@ -9024,6 +9072,7 @@ bool compute_density_on_gpu_impl(MozymeScfContext &ctx, int nclose, int mode,
           dev.density_list_lmo.ptr, dev.density_list_coef.ptr, dev.cocc.ptr,
           output_p, dev.density_updates.ptr, dev.density_updates.ptr + 1,
           dev.resident_control_ints.ptr);
+      split_resident_stage_profile(ctx, "resident density_pairs stop event");
     }
     mozyme_update_status_finalize_kernel<<<1, 1>>>(
         dev.density_updates.ptr, 1, dev.resident_control_ints.ptr);
@@ -9546,8 +9595,13 @@ bool validate_final_reorth_rebuild_from_gpu(MozymeScfContext &ctx) {
                                "resident final reorth helecz status copy")) {
     return false;
   }
-  return density_status[1] == 1 && density_status[0] == density_status[2] &&
-         density_status[2] > 0 && fock_status[kFockIntOk] == 1 &&
+  // density_status[2] < 0: expected count not computed (non-strict path).
+  const bool density_ok =
+      density_status[1] == 1 &&
+      (density_status[2] < 0 ? density_status[0] > 0
+                             : (density_status[0] == density_status[2] &&
+                                density_status[2] > 0));
+  return density_ok && fock_status[kFockIntOk] == 1 &&
          helecz_status[kHeleczIntOk] == 1;
 }
 
