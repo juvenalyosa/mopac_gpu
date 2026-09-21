@@ -72,7 +72,9 @@ MODES["default"] = {key: None for key in MODES["resident"]}
 HEAT_RE = re.compile(r"FINAL HEAT OF FORMATION\s*=\s*([+\-0-9.EeDd]+)")
 SCF_STATUS_RE = re.compile(r"\[MOZYME GPU SCF\]\s+status=(\S+)(?:.*?reason=(\S+))?")
 HELPER_RE = re.compile(r"\[MOZYME GPU (\w+)\]\s+(success|fallback_cpu)")
-RESIDENT_STAGE_RE = re.compile(r"\[PROFILE\]\s+MOZYME_RESIDENT_STAGE\s+name=(\S+)\s+calls=(\d+)\s+ms=([+\-0-9.Ee]+)")
+RESIDENT_STAGE_RE = re.compile(r"\[PROFILE\]\s+MOZYME_RESIDENT_STAGE\s+name=(\S+)\s+calls=(\d+)\s+ms=([+\-0-9.Ee]+)"
+                               r"(?:\s+min=([+\-0-9.Ee]+)\s+max=([+\-0-9.Ee]+))?")
+RESIDENT_LOOP_RE = re.compile(r"\[MOZYME GPU SCF\]\s+resident_loop\s+launched=(\d+)\s+terminal_at=(-?\d+)")
 
 
 def run_mode(mopac: Path, input_path: Path, mode: str, out_dir: Path, timeout: float,
@@ -132,9 +134,24 @@ def run_mode(mopac: Path, input_path: Path, mode: str, out_dir: Path, timeout: f
     status = SCF_STATUS_RE.findall(text)
     last_cycle = last_cycle_sections(text)
     resident_stages: dict[str, tuple[int, float]] = {}
-    for m in RESIDENT_STAGE_RE.finditer(text):
-        calls, ms = resident_stages.get(m.group(1), (0, 0.0))
-        resident_stages[m.group(1)] = (calls + int(m.group(2)), ms + float(m.group(3)))
+    # per-run blocks: the backend prints one block of stage lines per mopac_cuda_mozyme_scf_run
+    stage_runs: list[dict[str, tuple[int, float, float | None, float | None]]] = []
+    current_run: dict[str, tuple[int, float, float | None, float | None]] = {}
+    for line in text.splitlines():
+        m = RESIDENT_STAGE_RE.search(line)
+        if m:
+            calls, ms = resident_stages.get(m.group(1), (0, 0.0))
+            resident_stages[m.group(1)] = (calls + int(m.group(2)), ms + float(m.group(3)))
+            current_run[m.group(1)] = (int(m.group(2)), float(m.group(3)),
+                                       float(m.group(4)) if m.group(4) else None,
+                                       float(m.group(5)) if m.group(5) else None)
+        elif current_run:
+            stage_runs.append(current_run)
+            current_run = {}
+    if current_run:
+        stage_runs.append(current_run)
+    loop_stats = [(int(a), int(b)) for a, b in RESIDENT_LOOP_RE.findall(text)]
+    iterations = [int(v) for v in re.findall(r"\[MOZYME GPU SCF\] status=\S+ reason=\S+ code=\S+ iterations=(\d+)", text)]
     helpers: dict[str, dict[str, int]] = {}
     for m in HELPER_RE.finditer(text):
         entry = helpers.setdefault(m.group(1), {"success": 0, "fallback_cpu": 0})
@@ -149,6 +166,9 @@ def run_mode(mopac: Path, input_path: Path, mode: str, out_dir: Path, timeout: f
         "sections": {r["name"]: r for r in parse_mozyme_section_times(text)},
         "last_cycle": last_cycle,
         "resident_stages": resident_stages,
+        "last_run_stages": stage_runs[-1] if stage_runs else {},
+        "loop_stats": loop_stats,
+        "iterations": iterations,
     }
 
 
@@ -247,6 +267,14 @@ def print_table(input_path: Path, results: list[dict]) -> None:
             print(f"\n  resident GPU stages ({r['mode']}):")
             for name, (calls, ms) in sorted(r["resident_stages"].items(), key=lambda kv: -kv[1][1]):
                 print(f"    {name:<28}{ms:>12.1f} ms{calls:>8} calls")
+        if r.get("last_run_stages"):
+            it = r["iterations"][-1] if r["iterations"] else None
+            loop = r["loop_stats"][-1] if r["loop_stats"] else None
+            print(f"\n  last resident run ({r['mode']}): iterations={it} "
+                  f"launched={loop[0] if loop else '?'} terminal_at={loop[1] if loop else '?'}")
+            for name, (calls, ms, mn, mx) in sorted(r["last_run_stages"].items(), key=lambda kv: -kv[1][1]):
+                extra = f"  min {mn:>7.3f}  max {mx:>7.3f}" if mn is not None else ""
+                print(f"    {name:<28}{ms:>10.1f} ms{calls:>6} calls{extra}")
 
 
 def main() -> None:

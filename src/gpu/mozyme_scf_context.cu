@@ -10088,6 +10088,8 @@ void report_resident_stage_profile(MozymeScfContext &ctx) {
     std::string name;
     long calls;
     double ms;
+    double min_ms;
+    double max_ms;
   };
   std::vector<Total> totals;
   for (const auto &entry : dev.stage_timings) {
@@ -10107,15 +10109,18 @@ void report_resident_stage_profile(MozymeScfContext &ctx) {
     auto it = std::find_if(totals.begin(), totals.end(),
                            [&](const Total &t) { return t.name == name; });
     if (it == totals.end()) {
-      totals.push_back({name, 1L, static_cast<double>(elapsed)});
+      totals.push_back({name, 1L, static_cast<double>(elapsed), static_cast<double>(elapsed),
+                        static_cast<double>(elapsed)});
     } else {
       ++it->calls;
       it->ms += static_cast<double>(elapsed);
+      it->min_ms = std::min(it->min_ms, static_cast<double>(elapsed));
+      it->max_ms = std::max(it->max_ms, static_cast<double>(elapsed));
     }
   }
   for (const auto &t : totals) {
-    std::printf("[PROFILE] MOZYME_RESIDENT_STAGE name=%s calls=%ld ms=%.3f\n",
-                t.name.c_str(), t.calls, t.ms);
+    std::printf("[PROFILE] MOZYME_RESIDENT_STAGE name=%s calls=%ld ms=%.3f min=%.3f max=%.3f\n",
+                t.name.c_str(), t.calls, t.ms, t.min_ms, t.max_ms);
   }
   std::fflush(stdout);
   dev.cleanup_stage_timings();
@@ -11572,28 +11577,61 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
     if (strict_resident) {
       int resident_loop_guard = 0;
       const int strict_loop_limit = strict_resident_loop_limit(ctx->config);
-      // Non-blocking early exit: the device decision slot is copied into
-      // pinned memory after each iteration and polled with cudaEventQuery, so
-      // the host stops launching no-op iterations once the loop is terminal
-      // without ever synchronizing inside the resident sweep.
+      // Non-blocking early exit with a bounded look-ahead: after every
+      // iteration the device decision slot is copied into a pinned ring slot
+      // with an event.  Completed slots are polled without blocking; when
+      // kMaxInflight iterations are queued beyond the last decision read, the
+      // host waits for the oldest one instead of launching further ahead.
+      // (The previous single outstanding poll let the host queue dozens of
+      // iterations past convergence; those still executed on the device,
+      // doubling the SCF time of short warm-start runs.)
+      constexpr int kDecisionSlots = 8;
+      constexpr int kMaxInflight = 2;
       int *decision_pinned = nullptr;
-      cudaEvent_t decision_event = nullptr;
-      bool decision_pending = false;
+      cudaEvent_t decision_events[kDecisionSlots] = {};
+      int inflight = 0, head = 0, tail = 0;
+      int launched = 0, terminal_at = -1;
+      bool decision_ok = true;
       if (cudaHostAlloc(reinterpret_cast<void **>(&decision_pinned),
-                        sizeof(int), cudaHostAllocDefault) != cudaSuccess) {
+                        kDecisionSlots * sizeof(int), cudaHostAllocDefault) != cudaSuccess) {
         decision_pinned = nullptr;
+        decision_ok = false;
       }
-      if (decision_pinned &&
-          cudaEventCreateWithFlags(&decision_event, cudaEventDisableTiming) !=
-              cudaSuccess) {
-        decision_event = nullptr;
+      for (int i = 0; decision_ok && i < kDecisionSlots; ++i) {
+        if (cudaEventCreateWithFlags(&decision_events[i], cudaEventDisableTiming) != cudaSuccess) {
+          decision_events[i] = nullptr;
+          decision_ok = false;
+        }
       }
+      // Reads the oldest queued decision (blocking when wait is true);
+      // returns true when the loop must stop.
+      auto pop_decision = [&](bool wait) -> bool {
+        if (inflight <= 0) return false;
+        if (wait) {
+          if (cudaEventSynchronize(decision_events[head]) != cudaSuccess) return true;
+        } else if (cudaEventQuery(decision_events[head]) != cudaSuccess) {
+          return false;
+        }
+        const bool stop = decision_pinned[head] != kResidentDecisionContinue;
+        head = (head + 1) % kDecisionSlots;
+        --inflight;
+        if (stop && terminal_at < 0) terminal_at = launched - inflight;
+        return stop;
+      };
+      bool stop_loop = false;
       while (resident_loop_guard < strict_loop_limit) {
-        if (decision_pending && cudaEventQuery(decision_event) == cudaSuccess) {
-          decision_pending = false;
-          if (*decision_pinned != kResidentDecisionContinue) break;
+        if (decision_ok) {
+          while (inflight > 0 && cudaEventQuery(decision_events[head]) == cudaSuccess) {
+            if (pop_decision(false)) { stop_loop = true; break; }
+          }
+          if (stop_loop) break;
+          while (inflight >= kMaxInflight) {
+            if (pop_decision(true)) { stop_loop = true; break; }
+          }
+          if (stop_loop) break;
         }
         ++resident_loop_guard;
+        ++launched;
         if (!run_resident_iteration_on_gpu(*ctx, status, &accumulated_ms,
                                            false)) {
           final_code = (status->code == kMozymeScfSuccess)
@@ -11607,23 +11645,30 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
           status->ready = 0;
           break;
         }
-        if (decision_pinned && decision_event && !decision_pending &&
-            ctx->device.resident_control_ints.ptr) {
-          if (cudaMemcpyAsync(decision_pinned,
+        if (decision_ok && ctx->device.resident_control_ints.ptr) {
+          if (cudaMemcpyAsync(decision_pinned + tail,
                               ctx->device.resident_control_ints.ptr +
                                   kResidentControlDecision,
                               sizeof(int), cudaMemcpyDeviceToHost,
                               nullptr) == cudaSuccess &&
-              cudaEventRecord(decision_event, nullptr) == cudaSuccess) {
-            decision_pending = true;
+              cudaEventRecord(decision_events[tail], nullptr) == cudaSuccess) {
+            tail = (tail + 1) % kDecisionSlots;
+            ++inflight;
           }
         }
       }
-      if (decision_event) {
-        cudaEventSynchronize(decision_event);
-        cudaEventDestroy(decision_event);
+      if (decision_ok) {
+        while (inflight > 0) pop_decision(true);
+      }
+      for (int i = 0; i < kDecisionSlots; ++i) {
+        if (decision_events[i]) cudaEventDestroy(decision_events[i]);
       }
       if (decision_pinned) cudaFreeHost(decision_pinned);
+      if (host_profile) {
+        std::fprintf(stdout, "[MOZYME GPU SCF] resident_loop launched=%d terminal_at=%d\n",
+                     launched, terminal_at);
+        std::fflush(stdout);
+      }
       if (final_code == kMozymeScfUnsupported) {
         ResidentControlSnapshot control{};
         if (!copy_resident_control_snapshot_from_gpu(*ctx, &control, false)) {
