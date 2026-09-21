@@ -2898,26 +2898,36 @@ __device__ __forceinline__ int lmo_hash_slot(int atom) {
   return static_cast<int>((static_cast<unsigned>(atom) * 0x9E3779B1u) >>
                           (32 - kDiaggHashBits));
 }
-// Inserts entry e (atom s_atoms[e]) into `table` (slots hold -1 when free).
-__device__ __forceinline__ void lmo_hash_insert(int *table, const int *atoms, int e) {
+// Slots are 16-bit entry indices (kDiaggMaxLmoAtoms <= 1024), kLmoHashFree when
+// empty: 4 KB per block instead of 8, one more resident block per SM.
+constexpr unsigned short kLmoHashFree = 0xFFFFu;
+// Inserts entry e (atom s_atoms[e]) into `table`; called by one thread per
+// block (a few hundred sequential probes, no 16-bit atomics needed).
+__device__ __forceinline__ void lmo_hash_insert(unsigned short *table, const int *atoms, int e) {
   int slot = lmo_hash_slot(atoms[e]);
   for (int probe = 0; probe < kDiaggHashSlots; ++probe) {
-    const int prev = atomicCAS(table + slot, -1, e);
-    if (prev == -1 || atoms[prev] == atoms[e]) return;
+    const unsigned short prev = table[slot];
+    if (prev == kLmoHashFree) {
+      table[slot] = static_cast<unsigned short>(e);
+      return;
+    }
+    if (atoms[prev] == atoms[e]) return;
     slot = (slot + 1) & (kDiaggHashSlots - 1);
   }
 }
 // Entry index of `atom` or -1.
-__device__ __forceinline__ int lmo_hash_find(const int *table, const int *atoms, int atom) {
+__device__ __forceinline__ int lmo_hash_find(const unsigned short *table, const int *atoms,
+                                             int atom) {
   int slot = lmo_hash_slot(atom);
   for (int probe = 0; probe < kDiaggHashSlots; ++probe) {
-    const int e = table[slot];
-    if (e < 0) return -1;
+    const unsigned short e = table[slot];
+    if (e == kLmoHashFree) return -1;
     if (atoms[e] == atom) return e;
     slot = (slot + 1) & (kDiaggHashSlots - 1);
   }
   return -1;
 }
+
 
 // Packed Fock/density block element (row atom k1 with orbital i4, column atom
 // j1 with orbital jx; both orbitals 0-based) at block base `base` (0-based).
@@ -3140,15 +3150,65 @@ __global__ void mozyme_occ_head_fill_kernel(int nocc, int numat, int icocc_dim,
   }
 }
 
+// Overlap sum of an occupied LMO (atoms icocc[jbase .. jbase+ncf_j), coefficient
+// base loopj) with the block's virtual: sum_k ws(k) * cocc(k) over the shared
+// atoms that pass the aocc*aov screen.  Atoms are visited four at a time so
+// that their icocc / iorbs / aocc loads and table probes are in flight
+// together; the accumulation order (kk ascending, orbital ascending) is the
+// CPU's.  Returns false on a coefficient range error.
+__device__ __forceinline__ bool diagg1_overlap_sum(const DiaggVirtualArgs &a, int jbase,
+                                                   int ncf_j, int loopj, double cutoff,
+                                                   const unsigned short *s_map,
+                                                   const int *s_atoms, const double *s_aov,
+                                                   const unsigned short *s_off,
+                                                   const double *s_ws, double &sum,
+                                                   bool &lij) {
+  int kl = 0;
+  for (int kk0 = 0; kk0 < ncf_j; kk0 += 4) {
+    int k1[4], norb[4], e[4];
+    double ao[4];
+#pragma unroll
+    for (int q = 0; q < 4; ++q) {
+      const int kk = kk0 + q;
+      k1[q] = (kk < ncf_j) ? a.icocc[jbase + kk] : 0;
+    }
+#pragma unroll
+    for (int q = 0; q < 4; ++q) {
+      const int kk = kk0 + q;
+      norb[q] = (k1[q] > 0) ? a.iorbs[k1[q] - 1] : 0;
+      ao[q] = (kk < ncf_j) ? a.aocc[jbase + kk] : 0.0;
+      e[q] = (k1[q] > 0) ? lmo_hash_find(s_map, s_atoms, k1[q]) : -1;
+    }
+#pragma unroll
+    for (int q = 0; q < 4; ++q) {
+      if (kk0 + q >= ncf_j) break;
+      if (e[q] < 0 || ao[q] * s_aov[e[q]] < cutoff) {
+        kl += norb[q];
+        continue;
+      }
+      lij = true;
+      const int off = s_off[e[q]];
+      const int cbase = loopj + kl;
+      if (cbase < 0 || cbase + norb[q] > a.cocc_dim) return false;
+      const double *cc = a.cocc + cbase;
+      const int n = norb[q];
+      for (int k = 0; k < n; ++k) sum += s_ws[off + k] * cc[k];
+      kl += n;
+    }
+  }
+  return true;
+}
+
 // Occupied candidate j of virtual i (even mode): the CPU prescreen on the
 // Fock elements between the first two atoms of each LMO, then the full
 // overlap sum over the shared atoms.  Returns true when the pair is emitted.
 __device__ __forceinline__ bool diagg1_candidate(const DiaggVirtualArgs &a, int j,
                                                  int i1, int i2, double flim,
                                                  double cutoff, double oldlim,
-                                                 const int *s_map,
+                                                 const unsigned short *s_map,
                                                  const int *s_atoms, const double *s_aov,
-                                                 const int *s_off, const double *s_ws,
+                                                 const unsigned short *s_off,
+                                                 const double *s_ws,
                                                  double &sumt_local, double &tiny_local,
                                                  double &value, int *s_fail) {
   const int jbase = a.nncf[j - 1];
@@ -3173,24 +3233,10 @@ __device__ __forceinline__ bool diagg1_candidate(const DiaggVirtualArgs &a, int 
   const int loopj = a.ncocc[j - 1];
   bool lij = false;
   double sum = 0.0;
-  int kl = 0;
-  for (int kk = 0; kk < ncf_j; ++kk) {
-    const int k1 = a.icocc[jbase + kk];
-    const int norb = a.iorbs[k1 - 1];
-    const int e = lmo_hash_find(s_map, s_atoms, k1);
-    if (e < 0 || a.aocc[jbase + kk] * s_aov[e] < cutoff) {
-      kl += norb;
-      continue;
-    }
-    lij = true;
-    const int off = s_off[e];
-    const int cbase = loopj + kl;
-    if (cbase < 0 || cbase + norb > a.cocc_dim) {
-      *s_fail = 1;
-      return false;
-    }
-    for (int k = 0; k < norb; ++k) sum += s_ws[off + k] * a.cocc[cbase + k];
-    kl += norb;
+  if (!diagg1_overlap_sum(a, jbase, ncf_j, loopj, cutoff, s_map, s_atoms, s_aov, s_off,
+                          s_ws, sum, lij)) {
+    *s_fail = 1;
+    return false;
   }
   sumt_local += fabs(sum);
   tiny_local = fmax(tiny_local, fabs(sum));
@@ -3201,11 +3247,13 @@ __device__ __forceinline__ bool diagg1_candidate(const DiaggVirtualArgs &a, int 
   return false;
 }
 
-__global__ void __launch_bounds__(kDiaggBlockThreads)
+// Four resident blocks per SM (ncu: latency-bound at 3 blocks, 80 registers,
+// 45 KB shared; achieved occupancy 18-37 %, no eligible warp 60-90 % of cycles).
+__global__ void __launch_bounds__(kDiaggBlockThreads, 4)
 mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   __shared__ int s_atoms[kDiaggMaxLmoAtoms];
-  __shared__ int s_off[kDiaggMaxLmoAtoms];
-  __shared__ int s_map[kDiaggHashSlots];   // atom -> entry (same 8 KB as the old sorted keys)
+  __shared__ unsigned short s_off[kDiaggMaxLmoAtoms];   // orbital offsets (span <= 2048)
+  __shared__ unsigned short s_map[kDiaggHashSlots];     // atom -> entry table
   __shared__ double s_ws[kDiaggMaxLmoCoeffs];
   __shared__ double s_aov[kDiaggMaxLmoAtoms];
   __shared__ int s_warp[8];
@@ -3314,7 +3362,7 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
     int prefix = block_exclusive_scan_int(local_sum, s_warp, &total);
     for (int q = 0; q < 4; ++q) {
       const int e = tid * 4 + q;
-      if (e < nce_i) s_off[e] = prefix;
+      if (e < nce_i) s_off[e] = static_cast<unsigned short>(prefix);
       prefix += local[q];
     }
     if (tid == 0) s_span = total;
@@ -3328,9 +3376,11 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   }
 
   // atom -> entry table for the membership lookups.
-  for (int q = tid; q < kDiaggHashSlots; q += blockDim.x) s_map[q] = -1;
+  for (int q = tid; q < kDiaggHashSlots; q += blockDim.x) s_map[q] = kLmoHashFree;
   __syncthreads();
-  for (int e = tid; e < nce_i; e += blockDim.x) lmo_hash_insert(s_map, s_atoms, e);
+  if (tid == 0) {
+    for (int e = 0; e < nce_i; ++e) lmo_hash_insert(s_map, s_atoms, e);
+  }
   __syncthreads();
 
   // ws = F . c_vir restricted to the LMO's atom blocks: one thread per atom
@@ -3347,11 +3397,29 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
     double w[9];
 #pragma unroll
     for (int q = 0; q < 9; ++q) w[q] = 0.0;
-    for (int kk = 0; kk < nce_i; ++kk) {
-      const int k1 = s_atoms[kk];
-      const int kj = mozyme_nijbo_at(a.nijbo, a.numat, k1, j1);
+    // Four atoms per step: the nijbo lookups, then the density / norm loads,
+    // are issued together instead of one dependent chain per atom.
+    for (int kk0 = 0; kk0 < nce_i; kk0 += 4) {
+      int kjv[4];
+      double pv[4], av[4];
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        const int kk = kk0 + q;
+        kjv[q] = (kk < nce_i) ? mozyme_nijbo_at(a.nijbo, a.numat, s_atoms[kk], j1) : -1;
+      }
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        const int kk = kk0 + q;
+        pv[q] = (kjv[q] >= 0) ? a.p[kjv[q]] : 0.0;
+        av[q] = (kk < nce_i) ? a.avir_entry[ibase + kk] : 0.0;
+      }
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+      const int kk = kk0 + q;
+      const int kj = kjv[q];
       if (kj < 0) continue;
-      if (!(a.avir_entry[ibase + kk] * a.p[kj] > cutoff)) continue;
+      if (!(av[q] * pv[q] > cutoff)) continue;
+      const int k1 = s_atoms[kk];
       const int nk = a.iorbs[k1 - 1];
       const int cbase = loopi + s_off[kk];
       const int bsize = (k1 == j1) ? (nj * (nj + 1)) / 2 : nk * nj;
@@ -3393,6 +3461,7 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
             w[jx] = acc;
           }
         }
+      }
       }
     }
     const int offj = s_off[jj];
@@ -3598,23 +3667,11 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
       const int ncf_j = a.ncf[j - 1];
       const int loopj = a.ncocc[j - 1];
       double sum = 0.0;
-      int kl = 0;
-      for (int kk = 0; kk < ncf_j; ++kk) {
-        const int k1 = a.icocc[jbase + kk];
-        const int norb = a.iorbs[k1 - 1];
-        const int e = lmo_hash_find(s_map, s_atoms, k1);
-        if (e < 0 || s_aov[e] * a.aocc[jbase + kk] < cutoff) {
-          kl += norb;
-          continue;
-        }
-        const int off = s_off[e];
-        const int cbase = loopj + kl;
-        if (cbase < 0 || cbase + norb > a.cocc_dim) {
-          s_fail = 1;
-          break;
-        }
-        for (int k = 0; k < norb; ++k) sum += s_ws[off + k] * a.cocc[cbase + k];
-        kl += norb;
+      bool lij = false;
+      if (!diagg1_overlap_sum(a, jbase, ncf_j, loopj, cutoff, s_map, s_atoms, s_aov, s_off,
+                              s_ws, sum, lij)) {
+        s_fail = 1;
+        break;
       }
       sumt_local += fabs(sum);
       tiny_local = fmax(tiny_local, fabs(sum));
