@@ -53,6 +53,37 @@ PDB_CASES = [
         "dna",
         "1SCF MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 NEWPDB PDB GEO-OK NOCOMMENTS",
     ),
+    # Systems of the openmopac.net "Reducing computation time" table (conventional
+    # MOPAC2016 1SCF times on a 2 x 2.93 GHz 6-core Xeon Mac Pro): 1G6X, 1EZG, 1RNB
+    # and bacteriorhodopsin (the page names no PDB code; 1C3W is used here).
+    PdbCase(
+        "protein_1g6x",
+        "1G6X",
+        "Published-timing benchmark: PDB 1G6X (openmopac.net table, 1455 atoms)",
+        "protein",
+        "1SCF MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 NEWPDB PDB GEO-OK NOCOMMENTS",
+    ),
+    PdbCase(
+        "protein_antifreeze_1ezg",
+        "1EZG",
+        "Published-timing benchmark: antifreeze protein, PDB 1EZG (openmopac.net table, 2064 atoms)",
+        "protein",
+        "1SCF MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 NEWPDB PDB GEO-OK NOCOMMENTS",
+    ),
+    PdbCase(
+        "protein_barnase_1rnb",
+        "1RNB",
+        "Published-timing benchmark: barnase, PDB 1RNB (openmopac.net table, 2066 atoms)",
+        "protein",
+        "1SCF MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 NEWPDB PDB GEO-OK NOCOMMENTS",
+    ),
+    PdbCase(
+        "protein_bacteriorhodopsin_1c3w",
+        "1C3W",
+        "Published-timing benchmark: bacteriorhodopsin, PDB 1C3W (openmopac.net table lists 3352 atoms, PDB code not given)",
+        "protein",
+        "1SCF MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 NEWPDB PDB GEO-OK NOCOMMENTS",
+    ),
     PdbCase(
         "rna_trna_1ehz",
         "1EHZ",

@@ -10,6 +10,10 @@ coordinate records relevant for MOPAC single-point benchmarking.
 | protein_ubiquitin_1ubq | protein | 602 | `protein_ubiquitin_1ubq.mop` |
 | protein_adenylate_kinase_1ake | protein | 3438 | `protein_adenylate_kinase_1ake.mop` |
 | dna_dodecamer_1bna | dna | 486 | `dna_dodecamer_1bna.mop` |
+| protein_1g6x | protein | 553 | `protein_1g6x.mop` |
+| protein_antifreeze_1ezg | protein | 1106 | `protein_antifreeze_1ezg.mop` |
+| protein_barnase_1rnb | protein | 912 | `protein_barnase_1rnb.mop` |
+| protein_bacteriorhodopsin_1c3w | protein | 2050 | `protein_bacteriorhodopsin_1c3w.mop` |
 | rna_trna_1ehz | rna | 1661 | `rna_trna_1ehz.mop` |
 | material_graphene_nanoflake_c192h38 | material_cluster | 230 | `material_graphene_nanoflake_c192h38.mop` |
 
