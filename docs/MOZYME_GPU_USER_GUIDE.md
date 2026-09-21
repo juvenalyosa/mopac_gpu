@@ -56,7 +56,9 @@ The GPU path silently hands the work back to the CPU code (same results, CPU spe
 ## Accuracy
 
 The GPU SCF is not bit-identical to the CPU one: the DIAGG rotation order on the device is
-nondeterministic, so heats of formation vary at the 0.01 kcal/mol level between runs. The
+nondeterministic, and the initial LMO construction on the device also varies discretely between
+runs (the same candidate pairs, slightly different first-iteration sums), so heats of formation
+vary at the 0.01 kcal/mol level between runs (about 0.05 at 7000 atoms). The
 acceptance criterion is |ΔHf| ≤ 0.05 kcal/mol against the single-core CPU run, and gradients
 within 1e-3 kcal/mol/Å RMS. Measured (A100):
 
@@ -86,17 +88,21 @@ the GPU rather than the 20 to 60 times shown here.
 | Crambin 1SCF (642 atoms) | 28.6 s | 1.13 s | 25x |
 | Ubiquitin 1SCF (1231) | 41.7 s | 1.35 s | 31x |
 | DNA dodecamer 1BNA 1SCF (781) | 24.6 s | 1.13 s | 22x |
-| Adenylate kinase apo 1SCF (6689) | ~600 s | 8.1 s | ~70x |
+| Adenylate kinase apo 1SCF (6689) | ~600 s | 7.2 to 7.6 s | ~80x |
 | Crambin optimization, 3 cycles | 48 s | 1.5 s | 32x |
 | Crambin optimization, 100 cycles | 1042 s | 17.7 s | 59x |
 | Crambin, one warm optimization cycle | 6.9 to 8.5 s | 0.15 to 0.17 s | ~45x |
-| Adenylate kinase apo, one warm optimization cycle | (not measured) | 1.03 s | |
+| Adenylate kinase apo, optimization, 3 cycles | (not measured) | 8.6 s | |
+| Adenylate kinase apo, one warm optimization cycle | (not measured) | 0.88 s | |
 
 In the small systems about one second is fixed cost (MOPAC start-up, PDB reading, the initial LMO
 construction on the device); the SCF itself is 0.35 s for crambin. For optimizations and
-molecular dynamics the number that matters is the warm cycle: 0.15 s for crambin, 1.0 s for a
-6700-atom protein, of which about 60 % is the SCF and the rest hcore, gradient, corrections and
-host bookkeeping.
+molecular dynamics the number that matters is the warm cycle: 0.15 s for crambin, 0.88 s for a
+6700-atom protein, of which about 55 % is the SCF (7 iterations of about 68 ms), 13 % the
+one-electron matrix, 13 % the gradient, 7 % the two-electron integral pack, and the rest
+dispersion, hydrogen bonds and host/device transfers. Between geometry steps the LMOs and the
+density stay on the device (the host tidy pass is skipped and the post-SCF corrections are
+evaluated once per geometry, for the energy and the gradient together).
 
 ## Profiling and debugging
 
