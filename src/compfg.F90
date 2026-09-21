@@ -22,6 +22,7 @@
 !
       USE chanel_C, only : iw
 !
+      use post_scf_cache_C, only : post_scf_gradient_expected
       use elemts_C, only : elemnt
 !
       USE molmec_C, only : nnhco, nhco, htype
@@ -403,7 +404,9 @@
         end do
       end if
       if (dh) then
+        post_scf_gradient_expected = lgrad
         call post_scf_corrections(sum, .false.)
+        post_scf_gradient_expected = .false.
         if (moperr) return
         atheat =  sum + atheat
       end if
@@ -456,7 +459,9 @@
             escf = escf + solv_energy * fpc_9
       end if
       if (.not. dh) then
+        post_scf_gradient_expected = lgrad
         call post_scf_corrections(sum, .false.)
+        post_scf_gradient_expected = .false.
         if (moperr) return
         escf =  sum + escf
       end if
