@@ -264,7 +264,7 @@ Positive-orbital real pairs outside device coverage are reported as CPU
 fallback; inactive zero-orbital pairs are reported separately as no-op coverage.
 A complete MOZYME SCF GPU claim is valid only when the strict resident-SCF
 readiness contract reports `full_scf_gpu_status=complete` and
-`full_scf_gpu_ready=1`; see `docs/GPU_GUIDE.md`.
+`full_scf_gpu_ready=1`; see `docs/GPU_GUIDE.md`. For running MOZYME jobs on a GPU (requirements, accuracy, speed, how to switch it off) see `docs/MOZYME_GPU_USER_GUIDE.md`.
 
 HMTR (geometry optimization)
 HMTR evaluates many candidate geometries per outer iteration and uses a trust‑region micro‑solver to refine them. Barranquilla batches the energy/gradient calls across the candidate set and assigns them to GPU(s) in round‑robin fashion, using one CUDA stream per host thread. The trust‑region algebra (model assembly, radius adaptation, BFGS updates) remains on the host, while the dominant cost — the electronic energy and gradient at each candidate geometry — is evaluated on device. This division leverages GPU throughput where it counts without complicating the optimizer math.
