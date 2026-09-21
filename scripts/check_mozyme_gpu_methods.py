@@ -20,6 +20,7 @@ from pathlib import Path
 
 HEAT_RE = re.compile(r"(?:FINAL HEAT OF FORMATION|CURRENT VALUE OF HEAT OF FORMATION)\s*=\s*([-+0-9.EeDd]+)")
 STATUS_RE = re.compile(r"\[MOZYME GPU SCF\] status=(\w+)")
+STATUS_LINE_RE = re.compile(r"\[MOZYME GPU SCF\] status=\w+ reason=[^\n]*")
 CHECK_RE = re.compile(r"\[MOZYME GPU (hcore|gradient|disp|hbond)\] check.*")
 ERROR_RE = re.compile(r"GPU ERROR|strict abort|Backtrace", re.IGNORECASE)
 REF_RE = re.compile(r'"([^"]+)"')
@@ -105,6 +106,9 @@ def main() -> int:
         print(f"{method:10s} {cpu_heat if cpu_heat is not None else float('nan'):14.4f} "
               f"{gpu_heat if gpu_heat is not None else float('nan'):14.4f} "
               f"{d if d is not None else float('nan'):9.4f} {cpu_s:7.1f} {gpu_s:7.1f}  {note}", flush=True)
+        if statuses != ["success"]:
+            for line in STATUS_LINE_RE.findall(gpu_text):
+                print("    " + line.strip()[:200])
         if args.opt:
             opt_deck = rewrite(args.opt_deck, method, args.work_dir / method / "opt_gpu_check")
             text, secs = run(args.mopac, opt_deck, True, args.timeout,

@@ -127,6 +127,11 @@ def clean_pdb(raw_path: Path, clean_path: Path) -> int:
                 if residue in {"HOH", "WAT", "DOD"}:
                     continue
             if record in {"ATOM", "HETATM"}:
+                # alternate conformers: keep only the first one (altLoc blank or A);
+                # keeping both duplicates atoms at nearly the same position
+                altloc = line[16] if len(line) > 16 else " "
+                if altloc not in (" ", "A"):
+                    continue
                 atoms += 1
             dst.write(line.rstrip() + "\n")
         dst.write("END\n")

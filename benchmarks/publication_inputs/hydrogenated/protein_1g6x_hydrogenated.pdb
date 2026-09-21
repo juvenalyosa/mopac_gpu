@@ -1,6 +1,6 @@
 HEADER  data-set: protein_1g6x_addh
 REMARK  MOPAC, Version: 23.1.2
-REMARK  Date: Sep 21 2026 19:40
+REMARK  Date: Sep 21 2026 20:34
 ATOM      1  N   ARG A   1      38.395  21.948   7.640  1.0   0.00      PROT N 
 ATOM      2  CA  ARG A   1      39.228  20.989   8.286  1.0   0.00      PROT C 
 ATOM      3  C   ARG A   1      38.425  20.285   9.371  1.0   0.00      PROT C 

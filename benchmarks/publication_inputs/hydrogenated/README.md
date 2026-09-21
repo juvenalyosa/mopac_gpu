@@ -7,6 +7,3 @@ files in `mop/` reference these hydrogenated geometries through `GEO_DAT`.
 Prepared labels:
 
 - `protein_1g6x`
-- `protein_antifreeze_1ezg`
-- `protein_bacteriorhodopsin_1c3w`
-- `protein_barnase_1rnb`
