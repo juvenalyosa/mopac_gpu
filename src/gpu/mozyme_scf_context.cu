@@ -5292,9 +5292,13 @@ __device__ inline int density_list_find_shared(const int *keys, int count, int l
 }
 
 // Warp per packed (j >= k) atom-pair block.  The longer of the two atom LMO
-// lists is staged in shared memory (one coalesced pass) so the per-element
-// binary searches run on shared memory instead of chains of dependent global
-// loads (the list of an atom in a 7000-atom protein has ~300 entries).
+// lists is staged in shared memory and the shorter one is walked 32 entries
+// at a time; every lane that finds a common LMO accumulates that LMO's whole
+// outer-product tile (up to 4 x 4 orbitals) in registers, so the coefficient
+// loads of the ~100 common LMOs of a pair are issued by 32 lanes in parallel
+// instead of one dependent shuffle/load step per LMO.  One warp reduction of
+// the 16 accumulators closes the pair.  Blocks with d orbitals (more than
+// 16 elements) take the element-per-lane path.
 constexpr int kDensityPairWarps = kDiaggBlockThreads / 32;
 __global__ void __launch_bounds__(kDiaggBlockThreads)
 mozyme_density_pairs_kernel(int npairs, int numat, int mpack, int cocc_dim,
@@ -5321,25 +5325,7 @@ mozyme_density_pairs_kernel(int npairs, int numat, int mpack, int cocc_dim,
     if (lane == 0) atomicExch(ok_out, 0);
     return;
   }
-  // Each lane owns up to three packed elements of the block (<= 81).
-  int rows[3], cols[3];
-  double acc[3] = {0.0, 0.0, 0.0};
-  for (int q = 0; q < 3; ++q) {
-    const int idx = lane + 32 * q;
-    rows[q] = -1;
-    cols[q] = -1;
-    if (idx < elements) {
-      if (diagonal) {
-        int r = 0;
-        while ((r + 1) * (r + 2) / 2 <= idx) ++r;
-        rows[q] = r;
-        cols[q] = idx - (r * (r + 1)) / 2;
-      } else {
-        rows[q] = idx / nk;
-        cols[q] = idx - rows[q] * nk;
-      }
-    }
-  }
+  const bool tile_path = (nj <= 4 && nk <= 4);
 
   int begin_j = atom_offsets[aj - 1];
   int count_j = atom_offsets[aj] - begin_j;
@@ -5357,6 +5343,32 @@ mozyme_density_pairs_kernel(int npairs, int numat, int mpack, int cocc_dim,
     for (int e = lane; e < count_l; e += 32) keys[e] = list_lmo[begin_l + e];
   }
   __syncwarp();
+
+  // Element-per-lane accumulators (d-orbital path) ...
+  int rows[3], cols[3];
+  double acc[3] = {0.0, 0.0, 0.0};
+  // ... and the 4 x 4 register tile (sp path), index row * 4 + col.
+  double tile[16];
+  for (int q = 0; q < 16; ++q) tile[q] = 0.0;
+  if (!tile_path) {
+    for (int q = 0; q < 3; ++q) {
+      const int idx = lane + 32 * q;
+      rows[q] = -1;
+      cols[q] = -1;
+      if (idx < elements) {
+        if (diagonal) {
+          int r = 0;
+          while ((r + 1) * (r + 2) / 2 <= idx) ++r;
+          rows[q] = r;
+          cols[q] = idx - (r * (r + 1)) / 2;
+        } else {
+          rows[q] = idx / nk;
+          cols[q] = idx - rows[q] * nk;
+        }
+      }
+    }
+  }
+
   int common = 0;
   for (int chunk = 0; chunk < count_s; chunk += 32) {
     const int e = chunk + lane;
@@ -5373,22 +5385,61 @@ mozyme_density_pairs_kernel(int npairs, int numat, int mpack, int cocc_dim,
         coef_k = swap_lists ? coef_s : coef_l;
       }
     }
-    unsigned mask = __ballot_sync(0xffffffffu, coef_j >= 0);
-    common += __popc(mask);
-    while (mask) {
-      const int src = __ffs(mask) - 1;
-      mask &= mask - 1;
-      const int cj = __shfl_sync(0xffffffffu, coef_j, src);
-      const int ck = __shfl_sync(0xffffffffu, coef_k, src);
-      for (int q = 0; q < 3; ++q) {
-        if (rows[q] >= 0) {
-          acc[q] += cocc[cj + rows[q]] * cocc[ck + cols[q]];
+    if (tile_path) {
+      common += __popc(__ballot_sync(0xffffffffu, coef_j >= 0));
+      if (coef_j >= 0) {
+        double cj[4] = {0.0, 0.0, 0.0, 0.0};
+        double ck[4] = {0.0, 0.0, 0.0, 0.0};
+        for (int r = 0; r < nj; ++r) cj[r] = cocc[coef_j + r];
+        for (int c = 0; c < nk; ++c) ck[c] = cocc[coef_k + c];
+        for (int r = 0; r < 4; ++r) {
+          for (int c = 0; c < 4; ++c) tile[r * 4 + c] += cj[r] * ck[c];
+        }
+      }
+    } else {
+      unsigned mask = __ballot_sync(0xffffffffu, coef_j >= 0);
+      common += __popc(mask);
+      while (mask) {
+        const int src = __ffs(mask) - 1;
+        mask &= mask - 1;
+        const int cj = __shfl_sync(0xffffffffu, coef_j, src);
+        const int ck = __shfl_sync(0xffffffffu, coef_k, src);
+        for (int q = 0; q < 3; ++q) {
+          if (rows[q] >= 0) {
+            acc[q] += cocc[cj + rows[q]] * cocc[ck + cols[q]];
+          }
         }
       }
     }
   }
-  for (int q = 0; q < 3; ++q) {
-    if (rows[q] >= 0) p[base + lane + 32 * q] += acc[q];
+  if (tile_path) {
+    // Reduce the tile over the warp; lane q then owns element q.
+    double mine = 0.0;
+    for (int q = 0; q < 16; ++q) {
+      const double total = warp_sum_double(tile[q]);
+      if (lane == q) mine = total;
+    }
+    // element (r, c) lives in tile slot r * 4 + c, owned by lane r * 4 + c;
+    // one shuffle for the whole warp (no divergent __shfl_sync call sites).
+    int src = 0;
+    if (lane < elements) {
+      int r, c;
+      if (diagonal) {
+        r = 0;
+        while ((r + 1) * (r + 2) / 2 <= lane) ++r;
+        c = lane - (r * (r + 1)) / 2;
+      } else {
+        r = lane / nk;
+        c = lane - r * nk;
+      }
+      src = r * 4 + c;
+    }
+    const double v = __shfl_sync(0xffffffffu, mine, src);
+    if (lane < elements) p[base + lane] += v;
+  } else {
+    for (int q = 0; q < 3; ++q) {
+      if (rows[q] >= 0) p[base + lane + 32 * q] += acc[q];
+    }
   }
   if (lane == 0 && common > 0) atomicAdd(updated_terms, common * elements);
 }
