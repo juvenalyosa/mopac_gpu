@@ -8629,6 +8629,12 @@ bool compute_check_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
     mozyme_check_finalize_kernel<<<1, 1>>>(nocc, nvir, dev.check_errors.ptr,
                                            dev.check_ints.ptr,
                                            dev.resident_control_ints.ptr);
+    // Debug: [occ_bad, vir_bad, ok] (bad = first LMO with |norm-1| > 0.1 or a
+    // broken entry, nvec+1 when none) and the summed |1-norm| of each set.
+    diagg_debug_dump_ints("resident check ints (occ_bad, vir_bad, ok)",
+                          dev.check_ints.ptr, kCheckIntCount);
+    diagg_debug_dump_doubles("resident check errors (occ, vir)",
+                             dev.check_errors.ptr, 2);
     if (!finish_resident_stage_timing(
             ctx, time_stage, "resident check stop event",
             "resident check kernels", "resident check synchronize",
