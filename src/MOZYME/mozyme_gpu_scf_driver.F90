@@ -32,7 +32,8 @@ module mozyme_gpu_scf_driver
     mopac_cuda_mozyme_scf_setup, mopac_cuda_mozyme_scf_register_state, &
     mopac_cuda_mozyme_scf_run, mopac_cuda_mozyme_scf_destroy, &
     mopac_cuda_mozyme_scf_status, mopac_cuda_mozyme_scf_host_modified, &
-    mopac_cuda_mozyme_scf_host_density_modified
+    mopac_cuda_mozyme_scf_host_density_modified, &
+    mopac_cuda_mozyme_scf_host_lmos_modified, mopac_cuda_mozyme_scf_lmos_resident
 #endif
   implicit none
   private
@@ -61,6 +62,8 @@ module mozyme_gpu_scf_driver
   public :: mozyme_gpu_scf_release_context
   public :: mozyme_gpu_scf_note_host_modified
   public :: mozyme_gpu_scf_note_host_density_modified
+  public :: mozyme_gpu_scf_note_host_lmos_modified
+  public :: mozyme_gpu_scf_lmos_resident
 
 contains
 
@@ -2233,5 +2236,29 @@ contains
     end if
 #endif
   end subroutine mozyme_gpu_scf_note_host_density_modified
+
+  ! The host rewrote the LMO arrays (tidy/check between geometry steps).
+  subroutine mozyme_gpu_scf_note_host_lmos_modified()
+    implicit none
+#ifdef GPU
+    if (c_associated(scf_context)) then
+      call mopac_cuda_mozyme_scf_host_lmos_modified(scf_context)
+    end if
+#endif
+  end subroutine mozyme_gpu_scf_note_host_lmos_modified
+
+  ! True when the kept device context holds the current LMO arrays (published
+  ! by the previous resident run, untouched on the host since): the host
+  ! pre-SCF tidy can be skipped and the next upload keeps them.
+  logical function mozyme_gpu_scf_lmos_resident()
+    implicit none
+    mozyme_gpu_scf_lmos_resident = .false.
+#ifdef GPU
+    if (c_associated(scf_context)) then
+      mozyme_gpu_scf_lmos_resident = &
+        mopac_cuda_mozyme_scf_lmos_resident(scf_context) == 1_c_int
+    end if
+#endif
+  end function mozyme_gpu_scf_lmos_resident
 
 end module mozyme_gpu_scf_driver

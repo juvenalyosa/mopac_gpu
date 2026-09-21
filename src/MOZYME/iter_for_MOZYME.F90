@@ -38,13 +38,15 @@ subroutine iter_for_MOZYME (ee)
     use mozyme_gpu_scf_driver, only : mozyme_gpu_scf_early_probe, &
       mozyme_gpu_scf_force_final_reorth, &
       mozyme_gpu_scf_requested, mozyme_gpu_scf_no_fallback_required, &
-      mozyme_gpu_scf_try, mozyme_gpu_scf_note_host_modified
+      mozyme_gpu_scf_try, mozyme_gpu_scf_note_host_modified, &
+      mozyme_gpu_scf_note_host_lmos_modified, mozyme_gpu_scf_lmos_resident
     use mozyme_gpu_makvec, only : mozyme_gpu_makvec_try
     use mozyme_gpu_relocalize, only : mozyme_gpu_relocalize_try
     use mozyme_gpu_reorth, only : mozyme_gpu_reorth_try
     use mozyme_gpu_tidy, only : mozyme_gpu_tidy_try
     use mozyme_section_timers, only : mozyme_section_timer_begin, &
-      mozyme_section_timer_end, mozyme_section_timer_report_all
+      mozyme_section_timer_end, mozyme_section_timer_report_all, &
+      mozyme_section_timers_enabled
     implicit none
 !
     double precision, intent (out) :: ee
@@ -102,6 +104,7 @@ subroutine iter_for_MOZYME (ee)
     logical :: resident_tidy_done
     logical :: resident_tidy_select_lmos
     logical :: resident_tidy_mode_due
+    logical :: skip_host_tidy
     logical :: makvec_gpu_done
     double precision :: mozyme_timer, iter_pre_timer, iter_post_timer, iter_between_timer, iter_sub_timer
     iter_pre_timer = -1.d0
@@ -495,9 +498,26 @@ subroutine iter_for_MOZYME (ee)
           'MOZYME GPU strict resident SCF could not start before CPU tidy')
         return
       end if
+      ! Warm geometry step with the LMOs still resident on the device (published
+      ! by the previous resident SCF, untouched on the host since): the host tidy
+      ! is redundant, because the resident check stage tidies the LMOs on the
+      ! device at the start of every iteration, and skipping it lets the next
+      ! upload keep the device LMO arrays (no host tidy, no LMO re-upload).
+      skip_host_tidy = .not. resident_strict_required .and. &
+        .not. resident_initial_setup_needed .and. niter == 0 .and. &
+        mozyme_gpu_scf_requested() .and. mozyme_gpu_scf_lmos_resident()
+      if (skip_host_tidy .and. mozyme_section_timers_enabled()) then
+        write (iw, '(1x,a)') '[MOZYME tidy] skipped=device_resident'
+      end if
       do
         call mozyme_section_timer_begin('iter_tidy_occ', mozyme_timer)
-        call tidy (noccupied, ncf, icocc, icocc_dim, cocc, cocc_dim, nncf, ncocc, lno, mn, 1)
+        if (skip_host_tidy) then
+          lno = 0
+          mn = 0
+        else
+          call tidy (noccupied, ncf, icocc, icocc_dim, cocc, cocc_dim, nncf, ncocc, lno, mn, 1)
+          call mozyme_gpu_scf_note_host_lmos_modified()
+        end if
         call mozyme_section_timer_end('iter_tidy_occ', mozyme_timer)
         if (moperr) then
 !
@@ -604,7 +624,13 @@ subroutine iter_for_MOZYME (ee)
       end do
       do
         call mozyme_section_timer_begin('iter_tidy_virt', mozyme_timer)
-        call tidy (nvirtual, nce, icvir, icvir_dim, cvir, cvir_dim, nnce, ncvir, lnv, mn, 2)
+        if (skip_host_tidy) then
+          lnv = 0
+          mn = 0
+        else
+          call tidy (nvirtual, nce, icvir, icvir_dim, cvir, cvir_dim, nnce, ncvir, lnv, mn, 2)
+          call mozyme_gpu_scf_note_host_lmos_modified()
+        end if
         call mozyme_section_timer_end('iter_tidy_virt', mozyme_timer)
         if (moperr) then
 !  Delete old memory

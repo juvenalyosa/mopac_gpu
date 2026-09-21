@@ -1694,6 +1694,11 @@ struct MozymeScfDeviceState {
   // True between a publish and the next upload/host modification: the device
   // density equals the host density, so the GPU gradient can read it in place.
   bool p_published = false;
+  // True between a publish (which always commits the LMO arrays) and the next
+  // upload or host LMO modification: the device LMO arrays equal the host
+  // copies.  The host may then skip its pre-SCF tidy (the resident check stage
+  // tidies on the device at every iteration) and the upload keeps the arrays.
+  bool lmos_synced = false;
 
   // Non-blocking per-stage profile: event pairs are only read back after the run.
   struct StageTiming {
@@ -7593,10 +7598,18 @@ bool upload_registered_state(MozymeScfContext &ctx) {
   // grows the device arrays with a zero tail, exactly as the host does.
   const bool synced = dev.host_synced;
   const bool lazy = dev.lazy_authoritative;
+  // Published density / LMO arrays that the host has not rewritten since
+  // (p_published is what already lets the gradient read p in place).
+  const bool p_current = dev.p_published;
+  const bool lmos_current = dev.lmos_synced;
   dev.host_synced = false;
   dev.p_published = false;
+  dev.lmos_synced = false;
   auto keep = [&](const auto &buf, std::size_t n) {
     return (synced || lazy) && buf.ptr && buf.count == n;
+  };
+  auto keep_lmo = [&](const auto &buf, std::size_t n) {
+    return lmos_current && buf.ptr && buf.count == n;
   };
   // mpack-sized arrays: keep, grow (lazy) or report that an upload is needed.
   auto keep_or_grow = [&](auto &buf, std::size_t n, bool *ok) {
@@ -7610,7 +7623,8 @@ bool upload_registered_state(MozymeScfContext &ctx) {
   };
   bool grow_ok = true;
 
-  if (!dev.p.upload(static_cast<const double *>(ctx.state.p), mpack_count)) {
+  if (!(p_current && dev.p.ptr && dev.p.count == mpack_count) &&
+      !dev.p.upload(static_cast<const double *>(ctx.state.p), mpack_count)) {
     return false;
   }
   if (!keep_or_grow(dev.f, mpack_count, &grow_ok) &&
@@ -7687,40 +7701,48 @@ bool upload_registered_state(MozymeScfContext &ctx) {
       ctx.state.fmo_dim <= 0) {
     return false;
   }
-  if (!dev.ncf.upload(static_cast<const int *>(ctx.state.ncf), nocc_slots)) {
+  if (!keep_lmo(dev.ncf, nocc_slots) &&
+      !dev.ncf.upload(static_cast<const int *>(ctx.state.ncf), nocc_slots)) {
     return false;
   }
-  if (!dev.nncf.upload(static_cast<const int *>(ctx.state.nncf), nocc_slots)) {
+  if (!keep_lmo(dev.nncf, nocc_slots) &&
+      !dev.nncf.upload(static_cast<const int *>(ctx.state.nncf), nocc_slots)) {
     return false;
   }
-  if (!dev.ncocc.upload(static_cast<const int *>(ctx.state.ncocc),
-                        nocc_slots)) {
+  if (!keep_lmo(dev.ncocc, nocc_slots) &&
+      !dev.ncocc.upload(static_cast<const int *>(ctx.state.ncocc), nocc_slots)) {
     return false;
   }
-  if (!dev.icocc.upload(static_cast<const int *>(ctx.state.icocc),
-                        static_cast<std::size_t>(ctx.state.icocc_dim))) {
+  if (!keep_lmo(dev.icocc, static_cast<std::size_t>(ctx.state.icocc_dim)) &&
+      !dev.icocc.upload(static_cast<const int *>(ctx.state.icocc),
+                     static_cast<std::size_t>(ctx.state.icocc_dim))) {
     return false;
   }
-  if (!dev.cocc.upload(static_cast<const double *>(ctx.state.cocc),
-                       static_cast<std::size_t>(ctx.state.cocc_dim))) {
+  if (!keep_lmo(dev.cocc, static_cast<std::size_t>(ctx.state.cocc_dim)) &&
+      !dev.cocc.upload(static_cast<const double *>(ctx.state.cocc),
+                     static_cast<std::size_t>(ctx.state.cocc_dim))) {
     return false;
   }
-  if (!dev.nce.upload(static_cast<const int *>(ctx.state.nce), nvir_slots)) {
+  if (!keep_lmo(dev.nce, nvir_slots) &&
+      !dev.nce.upload(static_cast<const int *>(ctx.state.nce), nvir_slots)) {
     return false;
   }
-  if (!dev.nnce.upload(static_cast<const int *>(ctx.state.nnce), nvir_slots)) {
+  if (!keep_lmo(dev.nnce, nvir_slots) &&
+      !dev.nnce.upload(static_cast<const int *>(ctx.state.nnce), nvir_slots)) {
     return false;
   }
-  if (!dev.ncvir.upload(static_cast<const int *>(ctx.state.ncvir),
-                        nvir_slots)) {
+  if (!keep_lmo(dev.ncvir, nvir_slots) &&
+      !dev.ncvir.upload(static_cast<const int *>(ctx.state.ncvir), nvir_slots)) {
     return false;
   }
-  if (!dev.icvir.upload(static_cast<const int *>(ctx.state.icvir),
-                        static_cast<std::size_t>(ctx.state.icvir_dim))) {
+  if (!keep_lmo(dev.icvir, static_cast<std::size_t>(ctx.state.icvir_dim)) &&
+      !dev.icvir.upload(static_cast<const int *>(ctx.state.icvir),
+                     static_cast<std::size_t>(ctx.state.icvir_dim))) {
     return false;
   }
-  if (!dev.cvir.upload(static_cast<const double *>(ctx.state.cvir),
-                       static_cast<std::size_t>(ctx.state.cvir_dim))) {
+  if (!keep_lmo(dev.cvir, static_cast<std::size_t>(ctx.state.cvir_dim)) &&
+      !dev.cvir.upload(static_cast<const double *>(ctx.state.cvir),
+                     static_cast<std::size_t>(ctx.state.cvir_dim))) {
     return false;
   }
   if (!keep(dev.fmo, fmo_count)) {
@@ -11727,6 +11749,7 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
     ctx->device.host_synced = false;
     ctx->device.lazy_authoritative = false;
     ctx->device.p_published = false;
+    ctx->device.lmos_synced = false;
   };
   if (uploaded) {
     const bool strict_resident = strict_resident_request_enabled();
@@ -11877,6 +11900,7 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
               ctx->device.host_synced = strict_proof;
               ctx->device.lazy_authoritative = !strict_proof;
               ctx->device.p_published = true;
+              ctx->device.lmos_synced = true;
             }
           } else if (return_decision == ResidentReturnDecision::CpuBoundary) {
             if (publish_strict_stage_status_or_not_ready()) {
@@ -11967,6 +11991,7 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
               ctx->device.host_synced = false;
               ctx->device.lazy_authoritative = true;
               ctx->device.p_published = true;
+              ctx->device.lmos_synced = true;
             } else {
               final_code = kMozymeScfNotReady;
               hand_back_to_host(false);
@@ -12049,6 +12074,30 @@ extern "C" void mopac_cuda_mozyme_scf_host_modified(void *context) {
   ctx->device.host_synced = false;
   ctx->device.lazy_authoritative = false;
   ctx->device.p_published = false;
+  ctx->device.lmos_synced = false;
+#endif
+}
+
+// The host rewrote the LMO arrays only (host tidy/check between geometry
+// steps): the next upload takes them from the host again.
+extern "C" void mopac_cuda_mozyme_scf_host_lmos_modified(void *context) {
+  auto *ctx = static_cast<MozymeScfContext *>(context);
+  if (!ctx) return;
+#ifdef __CUDACC__
+  ctx->device.lmos_synced = false;
+#endif
+}
+
+// 1 when the kept context's device LMO arrays equal the host copies (published
+// by the previous run, not modified on the host since): the host pre-SCF tidy
+// is redundant with the device check stage and the upload will keep them.
+extern "C" int mopac_cuda_mozyme_scf_lmos_resident(void *context) {
+  auto *ctx = static_cast<MozymeScfContext *>(context);
+  if (!ctx) return 0;
+#ifdef __CUDACC__
+  return (ctx->device.uploaded && ctx->device.lmos_synced) ? 1 : 0;
+#else
+  return 0;
 #endif
 }
 

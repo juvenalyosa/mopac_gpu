@@ -289,6 +289,8 @@ module gpu_mozyme_scf_interfaces
   public :: mopac_cuda_mozyme_scf_status
   public :: mopac_cuda_mozyme_scf_host_modified
   public :: mopac_cuda_mozyme_scf_host_density_modified
+  public :: mopac_cuda_mozyme_scf_host_lmos_modified
+  public :: mopac_cuda_mozyme_scf_lmos_resident
 
   interface
     function mopac_cuda_mozyme_scf_setup(config, context) &
@@ -344,6 +346,22 @@ module gpu_mozyme_scf_interfaces
       import :: c_ptr
       type(c_ptr), value :: context
     end subroutine mopac_cuda_mozyme_scf_host_density_modified
+
+    ! The host rewrote the LMO arrays only (tidy/check between geometry steps).
+    subroutine mopac_cuda_mozyme_scf_host_lmos_modified(context) &
+      bind(C, name='mopac_cuda_mozyme_scf_host_lmos_modified')
+      import :: c_ptr
+      type(c_ptr), value :: context
+    end subroutine mopac_cuda_mozyme_scf_host_lmos_modified
+
+    ! 1 when the device LMO arrays equal the host copies (published by the
+    ! previous resident run and not modified on the host since).
+    function mopac_cuda_mozyme_scf_lmos_resident(context) &
+      bind(C, name='mopac_cuda_mozyme_scf_lmos_resident') result(flag)
+      import :: c_ptr, c_int
+      type(c_ptr), value :: context
+      integer(c_int) :: flag
+    end function mopac_cuda_mozyme_scf_lmos_resident
   end interface
 
 end module gpu_mozyme_scf_interfaces
