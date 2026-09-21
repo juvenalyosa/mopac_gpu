@@ -39,6 +39,11 @@ CASES = [
     ("Bacteriorhodopsin (1C3W)", "protein_bacteriorhodopsin_1c3w", 3352, 141773.0, 11192.0, 1394.0),
     ("Ubiquitin (1UBQ)", "protein_ubiquitin_1ubq", None, None, None, None),
     ("Adenylate kinase apo (1AKE)", "protein_adenylate_kinase_1ake_apo", None, None, None, None),
+    # Water clusters (scripts/make_water_cluster.py); the 7052-water cluster has the
+    # 42,312 orbitals of the largest system of Maia, Cabral and Rocha, J Mol Model 26,
+    # 313 (2020), who report up to 40x (GPU SP2 on one NVIDIA K40 vs one CPU thread).
+    ("Water cluster, 1000 H2O (6000 orbitals)", "water_cluster_1000", None, None, None, None),
+    ("Water cluster, 7052 H2O (42,312 orbitals, Maia 2020 size)", "water_cluster_7052", None, None, None, None),
 ]
 
 CPU_ENV_OFF = ("MOPAC_NOGPU", "MOZYME_GPU_OFF", "MOPAC_FORCEGPU")
@@ -121,11 +126,18 @@ def main() -> int:
         if args.only and not any(o in stem for o in args.only):
             continue
         deck = args.inputs_dir / f"{stem}.mop"
+        if not deck.exists() and stem.startswith("water_cluster_"):
+            n = int(stem.rsplit("_", 1)[1])
+            gen = Path(__file__).resolve().parent / "make_water_cluster.py"
+            subprocess.run([sys.executable, str(gen), str(n), "--out", str(deck)], check=False)
         if not deck.exists():
             print(f"[skip] {label}: {deck} not found", flush=True)
             continue
         refs = [deck.parent / Path(r).name for r in REF_RE.findall(deck.read_text(errors="ignore"))]
-        atoms = count_atoms(refs[0]) if refs and refs[0].exists() else None
+        if refs and refs[0].exists():
+            atoms = count_atoms(refs[0])
+        else:  # inline XYZ deck: atom lines after the three header lines
+            atoms = sum(1 for l in deck.read_text(errors="ignore").splitlines()[3:] if l.strip())
         row = {"label": label, "stem": stem, "atoms": atoms, "published_atoms": pub_atoms,
                "mopac2016_1thread_s": t1, "mopac2016_mkl_s": tmkl, "mopac2016_mkl_12threads_s": t12}
         for mode in modes:
