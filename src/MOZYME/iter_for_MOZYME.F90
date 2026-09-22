@@ -1313,6 +1313,7 @@ subroutine iter_for_MOZYME (ee)
     end if
     icalcn = step_num
     imol = numcal
+    if (mozyme_section_timers_enabled()) call mozyme_lmo_orthogonality_report()
     if (resident_final_reorth_due) then
       if (resident_strict_required) then
         if (.not. resident_final_reorth_done) then
