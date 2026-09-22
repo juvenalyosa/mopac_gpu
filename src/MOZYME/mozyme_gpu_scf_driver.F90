@@ -184,7 +184,7 @@ contains
     use common_arrays_C, only: coord, ifact, nat, wj => w, wk
     use molkst_C, only: id, keywrd, norbs, numat, nscf, numcal, use_disk, iscf
     use cosmo_C, only: useps, lpka
-    use MOZYME_C, only: icocc, icocc_dim, iorbs, kopt, ncf, nncf, &
+    use MOZYME_C, only: icocc, icocc_dim, icvir_dim, iorbs, kopt, ncf, nncf, &
       ovmax, tiny, sumt, sumb, ijc, pmax, shift, use_three_point_extrap
     use mozyme_diagg1_state, only: mozyme_diagg1_set_state
     use mozyme_diagg2_state, only: mozyme_diagg2_set_state
@@ -218,6 +218,9 @@ contains
     logical :: initial_setup_requested, block_failures
     logical :: final_reorth_requested
     logical :: initial_tidy_completed
+    integer :: storage_attempt, grow_status
+    integer, parameter :: max_storage_attempts = 4
+    external :: mozyme_gpu_grow_lmo_storage
 #ifdef GPU
     logical :: cosmo_state_supported
     integer(c_int) :: code
@@ -305,6 +308,10 @@ contains
 
     ! The device context is kept across SCF calls (geometry steps); setup below
     ! re-initialises it in place and the state is re-registered and re-uploaded.
+    ! When the device tidy runs out of LMO storage (tidy_code -506) the host
+    ! storage is grown 1.6x and the resident SCF is retried from the published
+    ! state instead of handing the rest of the SCF to the CPU.
+    storage_loop: do storage_attempt = 1, max_storage_attempts
     call mozyme_section_timer_begin('scf_try_prepare', try_timer)
     call init_config(config, nocc, nvir, resident_max_iter, niter, &
       fock_mode, idiagg, nhb, density_indi, selcon, previous_escf, &
@@ -522,6 +529,17 @@ contains
           trim(int_text(status%stage_missing)), .true.)
       end if
     else
+      if (status%tidy_code == -506_c_int .and. storage_attempt < max_storage_attempts) then
+        call destroy_scf_context()
+        grow_status = 0
+        call mozyme_gpu_grow_lmo_storage(grow_status)
+        if (grow_status == 0) then
+          write(iw,'(1x,a,i0,a,i0,a,i0)') '[MOZYME GPU SCF] lmo_storage_grown attempt=', &
+            storage_attempt, ' icocc_dim=', icocc_dim, ' icvir_dim=', icvir_dim
+          call flush(iw)
+          cycle storage_loop
+        end if
+      end if
       if (block_failures) blocked_nscf = nscf
       call trace_status(iw, trace, status, scf_failure_status())
       call destroy_scf_context()
@@ -532,6 +550,8 @@ contains
         ' status_code='//trim(int_text(status%code))// &
         ' stage_missing='//trim(int_text(status%stage_missing))), .true.)
     end if
+    exit storage_loop
+    end do storage_loop
 #else
     if (block_failures) blocked_nscf = nscf
       call trace_end(iw, trace, handled, start_time, &
@@ -1460,6 +1480,7 @@ contains
 
     status%version = GPU_MOZYME_SCF_ABI_VERSION
     status%code = GPU_MOZYME_SCF_NOT_READY
+    status%tidy_code = 0_c_int
     status%ready = 0_c_int
     status%resident = 0_c_int
     status%device_id = -1_c_int

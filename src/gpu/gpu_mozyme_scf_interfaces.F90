@@ -3,7 +3,7 @@ module gpu_mozyme_scf_interfaces
   implicit none
   private
 
-  integer(c_int), parameter, public :: GPU_MOZYME_SCF_ABI_VERSION = 33_c_int
+  integer(c_int), parameter, public :: GPU_MOZYME_SCF_ABI_VERSION = 34_c_int
   integer(c_int), parameter, public :: GPU_MOZYME_SCF_SUCCESS      = 0_c_int
   integer(c_int), parameter, public :: GPU_MOZYME_SCF_NOT_READY    = -1_c_int
   integer(c_int), parameter, public :: GPU_MOZYME_SCF_BAD_ARGUMENT = -2_c_int
@@ -280,6 +280,8 @@ module gpu_mozyme_scf_interfaces
      integer(c_int) :: cnvgz_noop_calls = 0_c_int
      integer(c_int) :: strict_resident_host_syncs = 0_c_int
      integer(c_int) :: strict_resident_control_polls = 0_c_int
+     ! -506 when the device tidy ran out of LMO storage (host grows it and retries)
+     integer(c_int) :: tidy_code = 0_c_int
   end type gpu_mozyme_scf_status
 
   public :: mopac_cuda_mozyme_scf_setup

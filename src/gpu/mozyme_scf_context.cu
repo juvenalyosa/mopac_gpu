@@ -435,7 +435,7 @@ __global__ void mozyme_reorth_kernel(
 
 namespace {
 
-constexpr int kMozymeScfAbiVersion = 33;
+constexpr int kMozymeScfAbiVersion = 34;
 constexpr int kMozymeScfSuccess = 0;
 constexpr int kMozymeScfNotReady = -1;
 constexpr int kMozymeScfBadArgument = -2;
@@ -1154,6 +1154,10 @@ struct MozymeScfStatus {
   int cnvgz_noop_calls;
   int strict_resident_host_syncs;
   int strict_resident_control_polls;
+  // Result code of the device tidy of the last (failed) iteration: -506 when
+  // the LMO storage (icocc/cocc, icvir/cvir) is too tight for the device tidy,
+  // in which case the host grows it and retries the resident SCF; 0 otherwise.
+  int tidy_code;
 };
 
 struct ResidentFinalPublicationProof {
@@ -1961,6 +1965,7 @@ void fill_status(MozymeScfStatus *status, const MozymeScfContext *context,
   if (!status) return;
   status->version = kMozymeScfAbiVersion;
   status->code = code;
+  status->tidy_code = 0;
   status->ready = context && context->state_registered ? 1 : 0;
   status->resident = 0;
   status->device_id = -1;
@@ -11931,6 +11936,21 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
             if (publish_strict_stage_status_or_not_ready()) {
               final_code = kMozymeScfUnsupported;
               status->ready = 0;
+              // A device tidy that ran out of LMO storage (-506) fails the
+              // check stage before touching the LMOs: the state is the
+              // consistent start of the iteration, so publish it and let the
+              // host grow the storage and retry the resident SCF.
+              int tidy_codes[2 * kTidyResultCount] = {0};
+              if (ctx->device.tidy_result.ptr &&
+                  ctx->device.tidy_result.count >= 2 * kTidyResultCount &&
+                  cudaDeviceSynchronize() == cudaSuccess &&
+                  cudaMemcpy(tidy_codes, ctx->device.tidy_result.ptr,
+                             sizeof(tidy_codes), cudaMemcpyDeviceToHost) == cudaSuccess) {
+                const int occ_code = tidy_codes[0];
+                const int vir_code = tidy_codes[kTidyResultCount];
+                status->tidy_code = (occ_code < 0) ? occ_code : vir_code;
+                if (status->tidy_code == -506) hand_back_to_host(!strict_proof);
+              }
             }
           } else {
             if (publish_strict_stage_status_or_not_ready()) {
