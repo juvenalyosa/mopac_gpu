@@ -548,7 +548,9 @@ contains
         status, niter, initial_setup_requested, initial_tidy_completed))// &
         ' stage=run code='//trim(int_text(code))// &
         ' status_code='//trim(int_text(status%code))// &
-        ' stage_missing='//trim(int_text(status%stage_missing))), .true.)
+        ' stage_missing='//trim(int_text(status%stage_missing))// &
+        ' decision='//trim(int_text(status%resident_decision))// &
+        ' tidy_code='//trim(int_text(status%tidy_code))), .true.)
     end if
     exit storage_loop
     end do storage_loop
