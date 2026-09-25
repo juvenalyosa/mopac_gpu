@@ -1317,16 +1317,6 @@ subroutine iter_for_MOZYME (ee)
     end if
     icalcn = step_num
     imol = numcal
-    if (mozyme_section_timers_enabled()) then
-      call mozyme_lmo_orthogonality_report()
-      ! Re-evaluate the energy on the host from the final LMOs (density -> Fock
-      ! -> helecz) and compare with the loop energy.  The loop energy comes from
-      ! the density after cnvgz (extrapolated/damped while three-point
-      ! extrapolation is on), so the CPU run prints the baseline difference.
-      ! Not in strict proof mode: buildf/density aborts there.
-      if (.not. resident_strict_required) call mozyme_gpu_energy_recheck(escf, &
-        resident_density_current, use_three_point_extrap, niter)
-    end if
     if (resident_final_reorth_due) then
       if (resident_strict_required) then
         if (.not. resident_final_reorth_done) then
@@ -1430,47 +1420,3 @@ subroutine mozyme_gpu_grow_lmo_storage(status)
   icvir_dim = new_icvir_dim
   cvir_dim = new_cvir_dim
 end subroutine mozyme_gpu_grow_lmo_storage
-
-! Profile aid for the resident SCF: rebuild the density from the published LMOs,
-! the Fock matrix from that density and the electronic energy on the host, and
-! print it next to the energy the device reported.  p and f are restored.
-subroutine mozyme_gpu_energy_recheck(escf_gpu, resident, three_point, niter)
-  use molkst_C, only: mpack, enuclr, atheat
-  use MOZYME_C, only: nelred, partp, partf
-  use common_arrays_C, only: f, p
-  use funcon_C, only: fpc_9
-  use cosmo_C, only: useps, solv_energy
-  use chanel_C, only: iw
-  implicit none
-  double precision, intent(in) :: escf_gpu
-  logical, intent(in) :: resident, three_point
-  integer, intent(in) :: niter
-  double precision, allocatable :: p_save(:), f_save(:)
-  double precision, external :: helecz
-  double precision :: ee, escf_host, max_dp
-  integer :: nocc, alloc_stat, i
-  if (mpack <= 0) return
-  allocate (p_save(mpack), f_save(mpack), stat=alloc_stat)
-  if (alloc_stat /= 0) return
-  p_save(1:mpack) = p(1:mpack)
-  f_save(1:mpack) = f(1:mpack)
-  nocc = nelred / 2
-  call density_for_MOZYME (p, 0, nocc, partp)
-  max_dp = 0.d0
-  do i = 1, mpack
-    max_dp = max(max_dp, abs(p(i) - p_save(i)))
-  end do
-  call buildf (f, partf, 0)
-  ee = helecz()
-  escf_host = (ee + enuclr) * fpc_9 + atheat
-  if (useps) escf_host = escf_host + solv_energy * fpc_9
-  write (iw, '(1x,a,a,a,f16.5,a,f16.5,a,f12.5,a,es12.4,a,l1,a,i0)') &
-    '[MOZYME GPU SCF] energy_recheck source=', trim(merge('gpu', 'cpu', resident)), &
-    ' loop_escf=', escf_gpu, ' host_escf_from_lmos=', escf_host, &
-    ' diff=', escf_host - escf_gpu, ' max_dp_vs_published=', max_dp, &
-    ' three_point=', three_point, ' niter=', niter
-  call flush(iw)
-  p(1:mpack) = p_save(1:mpack)
-  f(1:mpack) = f_save(1:mpack)
-  deallocate (p_save, f_save)
-end subroutine mozyme_gpu_energy_recheck
