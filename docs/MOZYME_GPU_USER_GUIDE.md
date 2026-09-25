@@ -56,6 +56,21 @@ neutral (use `ADD-H SITE=(IONIZE)` for pH ~7) and sulfate/phosphate in acid form
 because of 1G6X: two half sulfates on special positions became "SO2(2-)" fragments, and the SCF
 took 112 iterations (CPU) and gave run-dependent energies (GPU). Without them it converges in 29.
 
+## Molecular dynamics
+
+`DRC` runs the dynamics (adaptive time step, of the order of 0.1 fs with hydrogens; `T-PRIORITY=0.5` prints a
+row every 0.5 fs and the trajectory is written to `<name>.xyz`). Two ensembles:
+
+- `DRC NVE=300`: Maxwell-Boltzmann velocities at 300 K (zero net momentum, exact kinetic energy), then constant
+  energy.
+- `DRC NVT=300 NVT_TAU=100`: the same start plus the Bussi-Donadio-Parrinello stochastic velocity rescaling
+  thermostat (canonical ensemble), time constant in fs. The energy exchanged with the bath is booked
+  separately, so the ERROR column stays the integration error.
+
+`SEED=n` sets the random seed. There is no barostat (NPT): MOZYME treats a finite molecule, and with implicit
+solvent there is no box. Implicit water is COSMO (`EPS=78.4`). `scripts/mozyme_md_workflow.py` and
+`colab/mozyme_md_colab.ipynb` chain PDB preparation, optimization, NVT equilibration and NVE production.
+
 ## What stays on the CPU
 
 The GPU path silently hands the work back to the CPU code (same results, CPU speed) for:

@@ -1586,6 +1586,18 @@ subroutine wrtcon (allkey)
   else if (myword(allkey, " DRC")) then
     write (iw,'(" *  DRC        - DYNAMIC REACTION COORDINATE CALCULATION")')
   end if
+  if (myword(allkey, " NVT_TAU=")) write (iw,'(" *  NVT_TAU=   - THERMOSTAT TIME CONSTANT", f9.1, " FEMTOSECONDS")') &
+    reada (keywrd, Index (keywrd, " NVT_TAU="))
+  if (myword(allkey, " NVT=")) write (iw,'(" *  NVT=       - CANONICAL DRC: BUSSI THERMOSTAT AT", f9.2, " K")') &
+    reada (keywrd, Index (keywrd, " NVT="))
+  if (myword(allkey, " NVE=")) write (iw,'(" *  NVE=       - DRC FROM MAXWELL-BOLTZMANN VELOCITIES AT", f9.2, " K")') &
+    reada (keywrd, Index (keywrd, " NVE="))
+  if (myword(allkey, " SEED=")) write (iw,'(" *  SEED=      - RANDOM NUMBER SEED", i12)') &
+    nint(reada (keywrd, Index (keywrd, " SEED=")))
+  if ((Index (keywrd, " NVT=") + Index (keywrd, " NVE=") /= 0) .and. Index (keywrd, " DRC") == 0) then
+    write (iw, "(//10X,'NVT= OR NVE= REQUIRE KEYWORD DRC')")
+    call mopend("NVT= OR NVE= REQUIRE KEYWORD DRC")
+  end if
    mozyme = l_temp
 !
 !                       External parameters read from file

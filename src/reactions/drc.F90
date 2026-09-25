@@ -39,6 +39,16 @@
         escf_diff, stepx, escf_min, stepxx, dipvec(3), dip = 0.d0, cnvg
       logical :: addk, letot, let, velred, opend, parmax, debug, l_debug = .false., l_irc, &
         l_dipole, l_pdb
+!
+!  Ensembles (DRC only): NVE=T starts from Maxwell-Boltzmann velocities at T kelvin and then
+!  conserves the energy; NVT=T does the same and couples the system to a heat bath at T with
+!  the Bussi-Donadio-Parrinello stochastic velocity rescaling thermostat (canonical ensemble),
+!  time constant NVT_TAU (fs, default 100).  SEED=n sets the random number seed.
+!
+      logical :: l_nvt, l_mb
+      integer :: n_dof, nvt_steps
+      double precision :: t_target, tau_fs, e_bath, t_sum, t_inst, sim_fs
+      double precision, parameter :: kb_kcal = 0.0019872041d0   ! kcal/(mol K)
       double precision, external :: ddot, dipole, reada, seconds
 !***********************************************************************
 !                                                                      *
@@ -147,6 +157,41 @@
         if (l_irc) addonk=2.d0  ! Just a guess to get the IRC started
       end if
       velred = index(keywrd,'VELO') /= 0
+      l_nvt = (index(keywrd, " NVT=") /= 0 .and. .not. l_irc)
+      l_mb = (l_nvt .or. index(keywrd, " NVE=") /= 0) .and. .not. l_irc
+      t_target = 0.d0
+      if (l_nvt) then
+        t_target = reada(keywrd, index(keywrd, " NVT="))
+      else if (l_mb) then
+        t_target = reada(keywrd, index(keywrd, " NVE="))
+      end if
+      tau_fs = 100.d0
+      if (index(keywrd, " NVT_TAU=") /= 0) tau_fs = max(1.d0, reada(keywrd, index(keywrd, " NVT_TAU=")))
+      n_dof = max(1, 3*numat - 3)
+      e_bath = 0.d0
+      t_sum = 0.d0
+      sim_fs = 0.d0
+      nvt_steps = 0
+      if (l_mb .and. t_target > 0.d0 .and. .not. velred .and. index(keywrd, "RESTART") == 0) then
+!
+!  Maxwell-Boltzmann velocities (cm/s, as supplied by VELOCITY) at t_target, zero net
+!  momentum, scaled to the exact target kinetic energy; then handled as user velocities.
+!
+        call drc_seed_random()
+        call drc_maxwell_boltzmann(startv, t_target)
+        velred = .true.
+        if (l_nvt) then
+          write (iw,'(/10x,a,f9.2,a,f8.1,a,i8,a)') "NVT: Bussi thermostat at", t_target, &
+            " K, time constant", tau_fs, " fs,", n_dof, " degrees of freedom"
+        else
+          write (iw,'(/10x,a,f9.2,a,i8,a)') "NVE: Maxwell-Boltzmann velocities at", t_target, &
+            " K,", n_dof, " degrees of freedom"
+        end if
+      else if (l_nvt) then
+        call drc_seed_random()
+        write (iw,'(/10x,a,f9.2,a,f8.1,a)') "NVT: Bussi thermostat at", t_target, &
+          " K, time constant", tau_fs, " fs (starting velocities from the input)"
+      end if
       if (ddot(3*numat,startv,1,startv,1) > 0.001d0) then
 !
 !     PRINT OUT INITIAL VELOCITIES
@@ -651,6 +696,26 @@
 !
         if (letot .and. abs(half) > 0.00001d0) etot = etot - ekin/const**2 + ekin
         elost1 = elost1 + 0.5d0*elost/4.184D10
+        if (l_nvt .and. t_target > 0.d0 .and. ekin > 1.d-10 .and. iloop > 1) then
+!
+!  Bussi stochastic velocity rescaling.  The energy exchanged with the bath is booked in
+!  etot, so ERROR in the DRC table stays the integration error of the dynamics.
+!
+          sum = drc_bussi_factor(ekin, 0.5d0*n_dof*kb_kcal*t_target, n_dof, deltat*1.d15/tau_fs)
+          velo0(:nvar) = velo0(:nvar)*sum
+          e_bath = e_bath - (sum**2 - 1.d0)*ekin
+          etot = etot + (sum**2 - 1.d0)*ekin
+          ekin = ekin*sum**2
+        end if
+        if (l_mb) then
+          t_inst = 2.d0*ekin/(n_dof*kb_kcal)
+          sim_fs = sim_fs + deltat*1.d15
+          nvt_steps = nvt_steps + 1
+          t_sum = t_sum + t_inst
+          if (mod(nvt_steps, 50) == 0) write (iw,'(10x,a,i8,a,f10.3,a,f9.2,a,f9.2,a,f12.4)') &
+            "ENSEMBLE step", nvt_steps, "  time(fs)", sim_fs, "  T(K)", t_inst, &
+            "  <T>(K)", t_sum/nvt_steps, "  E_to_bath(kcal/mol)", e_bath
+        end if
 !
 ! STORE OLD GRADIENTS FOR DELTA - VELOCITY CALCULATION
 !
@@ -887,4 +952,101 @@
       end do
       iw0 = iw00
       return
+      contains
+
+      subroutine drc_seed_random()
+        integer :: n, k, seed0
+        integer, allocatable :: seed(:)
+        seed0 = 20260925
+        if (index(keywrd, " SEED=") /= 0) seed0 = nint(reada(keywrd, index(keywrd, " SEED=")))
+        call random_seed(size = n)
+        allocate (seed(n))
+        do k = 1, n
+          seed(k) = seed0 + 7919*k
+        end do
+        call random_seed(put = seed)
+        deallocate (seed)
+      end subroutine drc_seed_random
+
+      double precision function drc_gauss()
+        double precision :: u1, u2
+        call random_number(u1)
+        call random_number(u2)
+        u1 = max(u1, 1.d-300)
+        drc_gauss = sqrt(-2.d0*log(u1))*cos(6.283185307179586d0*u2)
+      end function drc_gauss
+
+      double precision function drc_gamma(shape)
+!       Marsaglia-Tsang sampler, shape >= 1
+        double precision, intent(in) :: shape
+        double precision :: d, c, x, v, u
+        d = shape - 1.d0/3.d0
+        c = 1.d0/sqrt(9.d0*d)
+        do
+          x = drc_gauss()
+          v = (1.d0 + c*x)**3
+          if (v <= 0.d0) cycle
+          call random_number(u)
+          if (log(max(u, 1.d-300)) < 0.5d0*x*x + d - d*v + d*log(v)) exit
+        end do
+        drc_gamma = d*v
+      end function drc_gamma
+
+      double precision function drc_bussi_factor(kk, sigma, nn, dt_over_tau)
+!
+!  Velocity scaling factor of the stochastic velocity rescaling thermostat
+!  (G. Bussi, D. Donadio, M. Parrinello, J. Chem. Phys. 126, 014101 (2007)).
+!  kk: current kinetic energy, sigma: target kinetic energy (same units), nn: degrees
+!  of freedom.
+!
+        double precision, intent(in) :: kk, sigma, dt_over_tau
+        integer, intent(in) :: nn
+        double precision :: factor, rr, sumn, knew
+        factor = exp(-dt_over_tau)
+        rr = drc_gauss()
+        if (nn > 2) then
+          sumn = 2.d0*drc_gamma(0.5d0*(nn - 1))
+        else if (nn == 2) then
+          sumn = drc_gauss()**2
+        else
+          sumn = 0.d0
+        end if
+        knew = kk + (1.d0 - factor)*(sigma*(sumn + rr**2)/nn - kk) + &
+          2.d0*rr*sqrt(kk*sigma/nn*(1.d0 - factor)*factor)
+        drc_bussi_factor = sqrt(max(knew, 0.d0)/kk)
+        if (rr + sqrt(factor*nn*kk/max((1.d0 - factor)*sigma, 1.d-300)) < 0.d0) &
+          drc_bussi_factor = -drc_bussi_factor
+      end function drc_bussi_factor
+
+      subroutine drc_maxwell_boltzmann(v, temp)
+!       Velocities in cm/s (the unit of the VELOCITY keyword), zero net momentum,
+!       kinetic energy scaled to exactly 0.5*n_dof*k*T.
+        double precision, intent(inout) :: v(*)
+        double precision, intent(in) :: temp
+        double precision, parameter :: r_erg = 8.314462618d7   ! erg/(mol K)
+        double precision :: p(3), mtot, ke, target
+        integer :: ia, ic, ix
+        p = 0.d0
+        mtot = 0.d0
+        do ia = 1, numat
+          do ic = 1, 3
+            ix = 3*(ia - 1) + ic
+            v(ix) = drc_gauss()*sqrt(r_erg*temp/atmass(ia))
+            p(ic) = p(ic) + atmass(ia)*v(ix)
+          end do
+          mtot = mtot + atmass(ia)
+        end do
+        ke = 0.d0
+        do ia = 1, numat
+          do ic = 1, 3
+            ix = 3*(ia - 1) + ic
+            v(ix) = v(ix) - p(ic)/mtot
+            ke = ke + atmass(ia)*v(ix)**2
+          end do
+        end do
+        ke = 0.5d0*ke/4.184d10
+        target = 0.5d0*n_dof*kb_kcal*temp
+        if (ke > 0.d0) v(:3*numat) = v(:3*numat)*sqrt(target/ke)
+      end subroutine drc_maxwell_boltzmann
+
       end subroutine drc
