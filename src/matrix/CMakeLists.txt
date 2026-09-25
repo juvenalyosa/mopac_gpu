@@ -17,7 +17,7 @@
 # Create a list of source files (src_list) with the .F90 extension
 set(src_list 
     schmib linpack densit density_for_GPU mtxmc
-    mxmt mat33 interp mxv diag_for_GPU
+    mxmt mat33 interp mxv
     eigenvectors_LAPACK mult_symm_AB mtxm supdot
     molval schmit mxm diag rsp mult dot minv
     mamult esp_utilities osinv ddiag gpu_diag_state
