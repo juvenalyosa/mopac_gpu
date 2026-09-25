@@ -411,7 +411,10 @@ void getGPUInfo(bool *hasGpu,
     name[i][255] = '\0';
     name_size[i] = static_cast<int>(std::strlen(name[i]));
     totalMem[i] = prop.totalGlobalMem;
-    clockRate[i] = prop.clockRate;
+    // cudaDeviceProp::clockRate was removed in CUDA 13; the attribute query works in 12 and 13.
+    int clock_khz = 0;
+    if (cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, i) != cudaSuccess) clock_khz = 0;
+    clockRate[i] = clock_khz;
     major[i] = prop.major;
     minor[i] = prop.minor;
     // FP64 support heuristic: CC >= 2.0 generally has native FP64
