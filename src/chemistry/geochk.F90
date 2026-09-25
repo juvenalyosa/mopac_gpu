@@ -47,6 +47,7 @@ subroutine geochk ()
     use atomradii_C, only: atom_radius_covalent
     use parameters_C, only : ams, natorb, tore, main_group
     use elemts_C, only : elemnt
+    use input_chemistry_check_C, only : input_chemistry_check
     implicit none
 !
     integer, parameter :: max_sites = 400
@@ -1057,7 +1058,12 @@ subroutine geochk ()
       if (index(keywrd, " RESEQ") == 0) return
     end if
     ibad = 0
-    if (.not. mozyme) goto 99
+    if (.not. mozyme) then
+      ! No Lewis structure in this run (e.g. ADD-H): structural checks only.
+      call input_chemistry_check(ions, .false.)
+      if (moperr) return
+      goto 99
+    end if
 !
 !  MODIFY IONS SO THAT IT REFERS TO ALL ATOMS (REAL AND DUMMY)
 !
@@ -1241,6 +1247,13 @@ subroutine geochk ()
       end do
       if (l == 1) call web_message(iw,"Lewis_structures.html")
     end if
+!
+!  Chemical/electronic sanity of the input (fragments, special positions,
+!  impossible formal charges); errors stop the job unless LET.
+!
+    call input_chemistry_check(ions, noccupied /= 0 .and. &
+      index(keywrd, " ADD-H") + index(keywrd, " SITE=") == 0)
+    if (moperr) return
 !
 ! Check for sulfate and phosphate
 !

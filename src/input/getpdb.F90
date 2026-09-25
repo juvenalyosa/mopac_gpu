@@ -21,6 +21,8 @@ subroutine getpdb (geo)
     use chanel_C, only: iw, ir
     use parameters_C, only: ams
     use elemts_C, only : elemnt
+    use input_chemistry_check_C, only : pdb_check_reset, pdb_check_record_atom, &
+      pdb_check_record_remark
     implicit none
  !
  !***********************************************************************
@@ -157,6 +159,7 @@ subroutine getpdb (geo)
     if (.not. allocated(tmp_comments)) allocate(tmp_comments(10000))
 !
     l_BABEL = .false.
+    call pdb_check_reset()
     outer_loop: do
 !
       read (ir, "(A)", end=1020, err=1020) line
@@ -175,6 +178,7 @@ subroutine getpdb (geo)
             ncomments = ncomments + 1
             tmp_comments(ncomments) = "*"//line(:80)
           end if
+          if (line(1:10) == "REMARK 375") call pdb_check_record_remark(line)
           cycle
         end if
         if (line(1:3) == "TER" .and. natoms > 0) then
@@ -248,6 +252,7 @@ subroutine getpdb (geo)
         if (line(17:17) /= typea) cycle
       end if
       natoms = natoms + 1
+      call pdb_check_record_atom(line)
 !   CLEAN THE INPUT DATA
       call upcase (line, 80)
       icomma = Ichar (comma)

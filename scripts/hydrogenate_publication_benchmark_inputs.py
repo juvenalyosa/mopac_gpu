@@ -93,6 +93,17 @@ def main() -> int:
         copy_outputs(run_dir, hydro_dir, label)
 
         produced = choose_hydrogenated_geometry(run_dir, label)
+        addh_out = run_dir / f"{label}_addh.out"
+        addh_text = addh_out.read_text(encoding="utf-8", errors="ignore") if addh_out.exists() else ""
+        if "INPUT CHEMISTRY CHECK FOUND ERRORS" in addh_text:
+            # MOPAC still writes the PDB; the chemistry check (fragments,
+            # special positions) says it must not be used.
+            failures.append(label)
+            for line in addh_text.splitlines():
+                if line.strip().startswith("ERROR "):
+                    print(f"    {line.strip()}")
+            print(f"[FAIL] {label}: MOPAC input chemistry check found errors (see {addh_out.name})")
+            continue
         if proc.returncode != 0 or produced is None:
             failures.append(label)
             print(f"[FAIL] {label}: ADD-H did not produce a usable PDB/ARC")

@@ -19,7 +19,7 @@ set(src_list
     findn1 atomrs atomradii_C names reseq lewis
     lyse geochk_bits_2 greek txtype 
     add_hydrogen_atoms chklew nxtmer geochk_bits_1
-    chkion orient_water geochk ligand PDB3
+    chkion orient_water geochk ligand PDB3 input_chemistry_check
    )
 #-----------------------------------------------
 # Add a list of source files to the target

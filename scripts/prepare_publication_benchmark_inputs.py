@@ -115,12 +115,41 @@ def download_pdb(case: PdbCase, raw_dir: Path, force: bool, no_download: bool) -
     return raw_path
 
 
+def special_position_residues(raw_path: Path) -> set[tuple[str, str, str]]:
+    """Multi-atom residues on a crystallographic special position (REMARK 375).
+
+    Only part of such a group is in the file (e.g. S, O1, O3 of a sulfate on a
+    two-fold axis); the rest is a symmetry mate.  MOZYME turns the fragment into
+    a charged "SO2(2-)" and the SCF becomes ill-conditioned (1G6X).
+    """
+    marked: set[tuple[str, str, str]] = set()
+    atoms: dict[tuple[str, str, str], int] = {}
+    with raw_path.open("r", encoding="utf-8", errors="ignore") as src:
+        for line in src:
+            if line.startswith("REMARK 375") and "SPECIAL POSITION" in line:
+                tokens = line[10:].split()
+                if len(tokens) >= 4 and len(tokens[2]) == 1:
+                    marked.add((tokens[1].upper(), tokens[2], tokens[3]))
+                elif len(tokens) >= 3:
+                    marked.add((tokens[1].upper(), " ", tokens[2]))
+            elif line[:6] in ("ATOM  ", "HETATM"):
+                key = (line[17:20].strip().upper(), line[21], line[22:26].strip())
+                atoms[key] = atoms.get(key, 0) + 1
+    return {key for key in marked if atoms.get(key, 0) > 1}
+
+
 def clean_pdb(raw_path: Path, clean_path: Path) -> int:
     atoms = 0
+    drop = special_position_residues(raw_path)
+    for name, chain, seq in sorted(drop):
+        print(f"[clean] {raw_path.name}: dropping {name} {chain} {seq} (partial group on a special position)")
     with raw_path.open("r", encoding="utf-8", errors="ignore") as src, clean_path.open("w", encoding="utf-8") as dst:
         for line in src:
             record = line[:6].strip()
             if record not in {"ATOM", "HETATM", "TER"}:
+                continue
+            if record in {"ATOM", "HETATM"} and \
+                    (line[17:20].strip().upper(), line[21], line[22:26].strip()) in drop:
                 continue
             if record == "HETATM":
                 residue = line[17:20].strip().upper()
