@@ -18,7 +18,7 @@
 !   M o d u l e s
 !-----------------------------------------------
       USE molkst_C, only : numat, keywrd, nvar, mers, id
-      USE common_arrays_C, only : atmass, coord, tvec
+      USE common_arrays_C, only : atmass, coord, tvec, loc
       USE funcon_C, only : fpc_10, fpc_8, fpc_6, pi
       USE chanel_C, only : iw, brillouin_fn, ibrz
       use to_screen_C, only : redmas, cnorml
@@ -122,6 +122,15 @@
         l = l + 3
         wtmass(l) = weight
       end do
+      if (ts) then
+!
+!  FORCETS: the coordinates are those of the atoms flagged for optimization, which need not be
+!  the first nvar/3 atoms, so each coordinate is weighted with the mass of its own atom.
+!
+        do i = 1, nvar
+          wtmass(i) = 1.D0/sqrt(atmass(loc(1,i)))
+        end do
+      end if
 !    CONVERT TO MASS WEIGHTED FMATRX
       linear = 0
       do i = 1, nvar
@@ -167,9 +176,14 @@
         ii = (i - 1)*nvar
         summ = 0.D0
         do j = 1, nvar/3
+          if (ts) then
+            weight = atmass(loc(1,j*3))
+          else
+            weight = atmass(j)
+          end if
           summ = summ + (cnorml(ii+j*3-2)**2 + &
                          cnorml(ii+j*3-1)**2 + &
-                         cnorml(ii+j*3  )**2)**2*atmass(j)
+                         cnorml(ii+j*3  )**2)**2*weight
         end do
         sum = 0.D0
         do j = 1, nvar

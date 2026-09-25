@@ -112,10 +112,12 @@ def prepare_pdb(mopac: Path, raw_pdb: Path, work: Path, ionize: bool = False) ->
 
 
 def optimize(mopac: Path, pdb: Path, work: Path, cycles: int = 100, eps: float | None = None,
-             env_extra: dict[str, str] | None = None) -> tuple[Path, RunResult]:
-    """Geometry optimization; returns (optimized PDB, run)."""
+             env_extra: dict[str, str] | None = None, extra: str = "") -> tuple[Path, RunResult]:
+    """Geometry optimization; returns (optimized PDB, run).  extra: more keywords, e.g. "GNORM=0.5"."""
     name = "opt"
-    r = run_mopac(mopac, work, name, f'{BASE_KEYS}{solvent_keys(eps)} GEO_DAT="{pdb.name}" CYCLES={cycles} PDBOUT',
+    extra = f" {extra.strip()}" if extra.strip() else ""
+    r = run_mopac(mopac, work, name,
+                  f'{BASE_KEYS}{solvent_keys(eps)} GEO_DAT="{pdb.name}" CYCLES={cycles} PDBOUT{extra}',
                   "geometry optimization", [pdb], env_extra)
     cycles_seen = CYCLE_RE.findall(r.out_text)
     if cycles_seen:

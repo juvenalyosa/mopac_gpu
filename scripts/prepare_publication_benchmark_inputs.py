@@ -146,6 +146,8 @@ def clean_pdb(raw_path: Path, clean_path: Path) -> int:
     with raw_path.open("r", encoding="utf-8", errors="ignore") as src, clean_path.open("w", encoding="utf-8") as dst:
         for line in src:
             record = line[:6].strip()
+            if record == "ENDMDL":   # NMR ensembles: keep the first model only
+                break
             if record not in {"ATOM", "HETATM", "TER"}:
                 continue
             if record in {"ATOM", "HETATM"} and \
