@@ -3,7 +3,8 @@
 
 Usage:
   check_mozyme_gpu_thermo.py <mopac> [--pdb-id 1UAO] [--partial A9=4] [--large-pdb-id 1CRN]
-      [--temperature 298] [--gnorm 1] [--opt-cycles 3000] [--precise] [--skip-large]
+      [--temperature 298] [--gnorm 1] [--opt-cycles 3000] [--precise] [--scfcrt 0.0001]
+      [--gpu-repeat 2] [--skip-large]
       [--work-dir DIR] [--reuse]
 
 Small system (default chignolin, PDB 1UAO, 140 atoms with hydrogens; the GPU path needs more
@@ -11,7 +12,8 @@ than 100 atoms):
   1. prepare the PDB (first NMR model, ADD-H, MOPAC input chemistry check) and optimize it on the
      GPU to GNORM=--gnorm (THERMO needs a stationary point);
   2. FORCE THERMO(T) at that geometry with the GPU disabled and enabled: the harmonic
-     frequencies, the zero-point energy, H, Cp, S and G = H - T*S are compared;
+     frequencies, the zero-point energy, H, Cp, S and the free-energy correction
+     G = ZPE + H(T) - T*S are compared;
   3. FORCETS THERMO(T) OPT("chain+residue"=radius): partial Hessian of the atoms within the
      radius of the selected residue (e.g. A9=4: 4 Angstrom around residue 9 of chain A), CPU vs GPU.
 
@@ -74,7 +76,9 @@ def thermo(text: str, temperature: float) -> dict:
     out = {"zpe": float(zpe[-1]) if zpe else None, "freqs": frequencies(text)}
     if tot:
         hof, h_cal, cp, s = (float(x) for x in tot[0])
-        out.update(hof=hof, H=h_cal / 1000.0, Cp=cp, S=s, G=h_cal / 1000.0 - temperature * s / 1000.0)
+        # G: free-energy correction ZPE + H(T) - T*S (kcal/mol), the quantity added to a heat of formation
+        zp = out["zpe"] or 0.0
+        out.update(hof=hof, H=h_cal / 1000.0, Cp=cp, S=s, G=zp + h_cal / 1000.0 - temperature * s / 1000.0)
     return out
 
 
@@ -97,6 +101,11 @@ def main() -> int:
     ap.add_argument("--gnorm", type=float, default=1.0)
     ap.add_argument("--opt-cycles", type=int, default=3000)
     ap.add_argument("--precise", action="store_true", help="also run the GPU FORCE with PRECISE")
+    ap.add_argument("--scfcrt", type=float, default=None,
+                    help="SCF criterion (kcal/mol) for every FORCE/FORCETS run, CPU and GPU (MOZYME default 0.01)")
+    ap.add_argument("--gpu-repeat", type=int, default=1, help="number of GPU FORCE runs (run-to-run spread)")
+    ap.add_argument("--scfcrt-scan", default="",
+                    help="comma-separated SCF criteria for a GPU-only FORCE convergence scan, e.g. 0.01,0.001,0.0001")
     ap.add_argument("--skip-large", action="store_true")
     ap.add_argument("--work-dir", type=Path, default=Path("mozyme_gpu_thermo"))
     ap.add_argument("--reuse", action="store_true", help="skip MOPAC runs whose .out already exists")
@@ -147,8 +156,10 @@ def main() -> int:
             hi = [(c, g) for c, g in pairs if c >= 100.0]
             rms_hi = (sum((c - g) ** 2 for c, g in hi) / len(hi)) ** 0.5 if hi else 0.0
             worst = max(pairs, key=lambda p: abs(p[0] - p[1]))
+            mean_hi = sum(g - c for c, g in hi) / len(hi) if hi else 0.0
             lo = [(c, g) for c, g in pairs if c < 100.0]
-            print(f"     {label}: frequencies >= 100 cm-1: RMS diff {rms_hi:.3f} cm-1; largest diff "
+            print(f"     {label}: frequencies >= 100 cm-1: mean shift {mean_hi:+.3f} cm-1, RMS diff {rms_hi:.3f} cm-1; "
+                  f"largest diff "
                   f"{abs(worst[0] - worst[1]):.2f} cm-1 at {worst[0]:.1f}; {len(lo)} modes below 100 cm-1 "
                   f"(lowest CPU {pairs[0][0]:.1f} / GPU {pairs[0][1]:.1f})", flush=True)
             check(rms_hi <= 2.0, f"{label}: RMS frequency difference above 100 cm-1 = {rms_hi:.3f} <= 2 cm-1")
@@ -160,11 +171,18 @@ def main() -> int:
     # ---------------- small system: CPU vs GPU ----------------
     small = a.pdb_id
     opt_pdb = prepared_and_optimized(small)
-    thermo_kw = f"THERMO({T:g})"
+    thermo_kw = f"THERMO({T:g})" + (f" SCFCRT={a.scfcrt:g}" if a.scfcrt else "")
+    tag = f"_scfcrt{a.scfcrt:g}" if a.scfcrt else ""   # separate directories per SCF criterion
     full_kw = f'{md.BASE_KEYS} FORCE {thermo_kw} GEO_DAT="{opt_pdb.name}"'
-    ctext, cwall, _ = run(work / small / "force_cpu", "force", full_kw, opt_pdb, CPU_ENV)
-    gtext, gwall, gstat = run(work / small / "force_gpu", "force", full_kw, opt_pdb, None)
+    ctext, cwall, _ = run(work / small / f"force_cpu{tag}", "force", full_kw, opt_pdb, CPU_ENV)
+    gtext, gwall, gstat = run(work / small / f"force_gpu{tag}", "force", full_kw, opt_pdb, None)
     cth, gth = thermo(ctext, T), thermo(gtext, T)
+    for rep in range(2, a.gpu_repeat + 1):
+        rtext, rwall, rstat = run(work / small / f"force_gpu_rep{rep}{tag}", "force", full_kw, opt_pdb, None)
+        rth = thermo(rtext, T)
+        summary(f"{small} FORCE GPU repeat {rep}", rth, rwall, rstat)
+        print(f"     {small} FORCE GPU repeat {rep} - first GPU run: ZPE {rth['zpe'] - gth['zpe']:+.4f}, "
+              f"G {rth['G'] - gth['G']:+.4f} kcal/mol", flush=True)
     summary(f"{small} FORCE CPU", cth, cwall, [])
     summary(f"{small} FORCE GPU", gth, gwall, gstat)
     check(bool(gstat) and all(s == "success" for s in gstat),
@@ -173,15 +191,33 @@ def main() -> int:
     if gwall > 0:
         print(f"     {small} FORCE: speed-up {cwall / gwall:.1f}x", flush=True)
     if a.precise:
-        ptext, pwall, pstat = run(work / small / "force_gpu_precise", "force", full_kw + " PRECISE", opt_pdb, None)
+        ptext, pwall, pstat = run(work / small / f"force_gpu_precise{tag}", "force", full_kw + " PRECISE", opt_pdb, None)
         pth = thermo(ptext, T)
         summary(f"{small} FORCE GPU PRECISE", pth, pwall, pstat)
         compare(f"{small} FORCE PRECISE(GPU) vs CPU", cth, pth)
 
+    if a.scfcrt_scan:
+        # How the harmonic frequencies depend on the SCF criterion of every displaced gradient
+        # (MOZYME default 0.01 kcal/mol): GPU only, each value against the tightest one.
+        scan = []
+        for value in sorted((float(v) for v in a.scfcrt_scan.split(",") if v.strip()), reverse=True):
+            kw = f'{md.BASE_KEYS} FORCE THERMO({T:g}) SCFCRT={value:g} GEO_DAT="{opt_pdb.name}"'
+            text, wall, stat = run(work / small / f"scan_gpu_scfcrt{value:g}", "force", kw, opt_pdb, None)
+            th = thermo(text, T)
+            summary(f"{small} FORCE GPU SCFCRT={value:g}", th, wall, stat)
+            scan.append((value, th))
+        ref_value, ref = scan[-1]
+        for value, th in scan[:-1]:
+            if len(th["freqs"]) == len(ref["freqs"]) and th["freqs"]:
+                d = [x - y for y, x in zip(sorted(ref["freqs"]), sorted(th["freqs"])) if y >= 100.0]
+                print(f"     SCFCRT={value:g} vs {ref_value:g}: mean frequency shift {sum(d) / len(d):+.2f} cm-1, "
+                      f"ZPE {th['zpe'] - ref['zpe']:+.3f}, S {th['S'] - ref['S']:+.3f} cal/(mol K), "
+                      f"G {th['G'] - ref['G']:+.3f} kcal/mol", flush=True)
+
     sel, _, rad = a.partial.partition("=")
     part_kw = f'{md.BASE_KEYS} FORCETS {thermo_kw} OPT("{sel}"={rad}) GEO_DAT="{opt_pdb.name}"'
-    ctext, cwall, _ = run(work / small / "forcets_cpu", "forcets", part_kw, opt_pdb, CPU_ENV)
-    gtext, gwall, gstat = run(work / small / "forcets_gpu", "forcets", part_kw, opt_pdb, None)
+    ctext, cwall, _ = run(work / small / f"forcets_cpu{tag}", "forcets", part_kw, opt_pdb, CPU_ENV)
+    gtext, gwall, gstat = run(work / small / f"forcets_gpu{tag}", "forcets", part_kw, opt_pdb, None)
     cth, gth = thermo(ctext, T), thermo(gtext, T)
     summary(f"{small} FORCETS {a.partial} CPU", cth, cwall, [])
     summary(f"{small} FORCETS {a.partial} GPU", gth, gwall, gstat)
@@ -195,7 +231,7 @@ def main() -> int:
         # timing run: LET so that FORCE continues if the optimization stopped above GNORM
         kw = f'{md.BASE_KEYS} FORCE {thermo_kw} LET GEO_DAT="{big_pdb.name}"'
         t0 = time.perf_counter()
-        text, wall, stat = run(work / big / "force_gpu", "force", kw, big_pdb, None)
+        text, wall, stat = run(work / big / f"force_gpu{tag}", "force", kw, big_pdb, None)
         th = thermo(text, T)
         summary(f"{big} FORCE GPU ({natoms} atoms, {6 * natoms} gradients)", th, wall, stat)
         if wall > 0:
@@ -204,7 +240,7 @@ def main() -> int:
               f"(expected {3 * natoms - 6})")
         sel, _, rad = a.large_partial.partition("=")
         kw = f'{md.BASE_KEYS} FORCETS {thermo_kw} LET OPT("{sel}"={rad}) GEO_DAT="{big_pdb.name}"'
-        text, wall, stat = run(work / big / "forcets_gpu", "forcets", kw, big_pdb, None)
+        text, wall, stat = run(work / big / f"forcets_gpu{tag}", "forcets", kw, big_pdb, None)
         summary(f"{big} FORCETS {a.large_partial} GPU", thermo(text, T), wall, stat)
 
     print(f"work dir: {work}")
