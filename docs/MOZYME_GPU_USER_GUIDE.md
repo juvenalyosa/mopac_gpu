@@ -88,6 +88,9 @@ within 1e-3 kcal/mol/Å RMS. Measured (A100):
 | DNA dodecamer 1BNA 1SCF, the same seven methods | within 0.005 |
 | 1G6X, 1EZG, 1RNB, 1C3W 1SCF (944 to 4473 atoms) | +0.001, −0.007, −0.002, −0.004 |
 | Water cluster, 1000 H2O | +0.034 |
+| Adenylate kinase apo, 50-cycle GPU optimization, final geometry re-evaluated on the CPU | −35936.8859 (CPU) vs −35936.8946 (GPU), 0.009 kcal/mol; all 100 SCFs resident |
+| Molecular dynamics (DRC), crambin, 40 points / 19.5 fs | energy conservation max \|ERROR\| 0.24 kcal/mol (GPU) vs 0.40 (CPU) |
+| Molecular dynamics (DRC), adenylate kinase apo, 20 points / 9.5 fs | max \|ERROR\| 1.49 kcal/mol = 5.6e-4 of the kinetic energy (CPU crambin: 1.4e-3) |
 
 Optimization trajectories diverge between CPU and GPU (the rounding-level SCF differences are
 amplified by the line search), so cycle-by-cycle heats are not comparable; only energies at the
@@ -116,7 +119,10 @@ the GPU rather than the 20 to 60 times shown here.
 | Crambin optimization, 100 cycles | 1042 s | 17.7 s | 59x |
 | Crambin, one warm optimization cycle | 6.9 to 8.5 s | 0.15 to 0.17 s | ~45x |
 | Adenylate kinase apo, optimization, 3 cycles | (not measured) | 8.6 s | |
+| Adenylate kinase apo, optimization, 50 cycles | (not measured) | 57 s (1.0 s per cycle) | |
 | Adenylate kinase apo, one warm optimization cycle | (not measured) | 0.88 s | |
+| Crambin molecular dynamics (DRC), 195 steps | 1273 s | 21.9 s | 58x |
+| Adenylate kinase apo molecular dynamics (DRC), 95 steps | (not measured) | 87 s (0.9 s per step) | |
 
 In the small systems about one second is fixed cost (MOPAC start-up, PDB reading, the initial LMO
 construction on the device); the SCF itself is 0.35 s for crambin. For optimizations and

@@ -17,7 +17,8 @@ conservation: after the first points (DRC start-up), the largest |ERROR| (drift 
 energy) of the GPU run must not exceed max(1.0, 3 x the CPU run's) kcal/mol, and the first
 potential energies must agree within --hof-tol.
 
---drc-gpu-deck (e.g. 1AKE apo, DRC): GPU only; reports speed and energy conservation.
+--drc-gpu-deck (e.g. 1AKE apo, DRC): GPU only; energy conservation relative to the largest kinetic
+energy must stay within 3 x the CPU reference (the --drc-deck CPU run, else 1.4e-3).
 
 Exit status 0 when every check passes; the report is printed either way.
 """
@@ -40,8 +41,8 @@ FLOAT_RE = re.compile(r"-?\d+\.\d+")
 DRC_START_POINTS = 3   # points skipped before measuring energy conservation
 
 
-def drc_rows(text: str) -> list[tuple[float, float, float, float]]:
-    """(time fs, potential, total, error) of every DRC printout row.
+def drc_rows(text: str) -> list[tuple[float, float, float, float, float]]:
+    """(time fs, potential, total, error, kinetic) of every DRC printout row.
 
     GPU trace lines ("[MOZYME GPU SCF] ...") are printed between the rows, so every
     row-shaped line after the table header counts, not just a contiguous block.
@@ -60,8 +61,8 @@ def drc_rows(text: str) -> list[tuple[float, float, float, float]]:
         # glued columns ("-3109.0971-227.41577") -> take the floats by pattern
         values = [float(v) for v in FLOAT_RE.findall(line)]
         if len(values) >= 5:
-            fs, potential, _kinetic, total, error = values[:5]
-            rows.append((fs, potential, total, error))
+            fs, potential, kinetic, total, error = values[:5]
+            rows.append((fs, potential, total, error, kinetic))
     return rows
 
 
@@ -153,25 +154,37 @@ def main() -> int:
                 check(abs(diff) <= args.hof_tol,
                       f"{name}: |dHf(GPU - CPU)| at the final geometry = {abs(diff):.4f} kcal/mol <= {args.hof_tol}")
 
-    def drc_summary(label: str, text: str, wall: float) -> tuple[list, float | None]:
+    def drc_summary(label: str, text: str, wall: float) -> tuple[list, float | None, float | None]:
+        """Rows, max |ERROR| after the start-up points, and that error relative to the
+        largest kinetic energy of the run (the DRC integration error scales with it)."""
         rows = drc_rows(text)
         tail = rows[DRC_START_POINTS:]
         max_err = max((abs(r[3]) for r in tail), default=None)
+        max_kin = max((abs(r[4]) for r in rows), default=0.0)
+        rel = max_err / max_kin if max_err is not None and max_kin > 0 else None
         if rows:
             print(f"     {label}: wall {wall:.1f} s, {len(rows)} points to {rows[-1][0]:.1f} fs, "
-                  f"total energy {rows[0][2]:.3f} -> {rows[-1][2]:.3f}, max |ERROR| after point "
-                  f"{DRC_START_POINTS}: {max_err if max_err is None else round(max_err, 4)} kcal/mol", flush=True)
+                  f"total energy {rows[0][2]:.3f} -> {rows[-1][2]:.3f} (includes the KINETIC= energy added), "
+                  f"max |ERROR| after point {DRC_START_POINTS}: "
+                  f"{'n/a' if max_err is None else f'{max_err:.4f}'} kcal/mol, max kinetic {max_kin:.1f}, "
+                  f"relative {'n/a' if rel is None else f'{rel:.2e}'}", flush=True)
         else:
             print(f"     {label}: wall {wall:.1f} s, no DRC rows found", flush=True)
-        return rows, max_err
+        return rows, max_err, rel
+
+    # Relative energy-conservation reference: the CPU DRC run when one was made in this
+    # invocation, else the crambin CPU value measured on the A100 Colab host (1.4e-3).
+    cpu_rel_ref = 1.4e-3
 
     if args.drc_deck:
         deck = args.drc_deck.resolve()
         name = deck.stem
         ctext, _, cwall = timed(deck, work / name / "cpu", clean_env({"MOPAC_NOGPU": "1"}))
         gtext, _, gwall = timed(deck, work / name / "gpu", clean_env())
-        crows, cerr = drc_summary(f"{name} CPU", ctext, cwall)
-        grows, gerr = drc_summary(f"{name} GPU", gtext, gwall)
+        crows, cerr, crel = drc_summary(f"{name} CPU", ctext, cwall)
+        grows, gerr, grel = drc_summary(f"{name} GPU", gtext, gwall)
+        if crel is not None:
+            cpu_rel_ref = crel
         statuses = SCF_STATUS_RE.findall(gtext)
         check(len(grows) > DRC_START_POINTS and len(crows) > DRC_START_POINTS,
               f"{name}: DRC ran on CPU ({len(crows)} points) and GPU ({len(grows)} points)")
@@ -191,13 +204,17 @@ def main() -> int:
         deck = args.drc_gpu_deck.resolve()
         name = deck.stem
         gtext, _, gwall = timed(deck, work / name / "gpu", clean_env())
-        grows, gerr = drc_summary(f"{name} GPU", gtext, gwall)
+        grows, gerr, grel = drc_summary(f"{name} GPU", gtext, gwall)
         statuses = SCF_STATUS_RE.findall(gtext)
         check(len(grows) > DRC_START_POINTS, f"{name}: DRC ran on the GPU ({len(grows)} points)")
         check(len(statuses) > 0 and all(s == "success" for s in statuses),
               f"{name}: every GPU SCF was a successful resident SCF ({sorted(set(statuses))})")
-        if gerr is not None:
-            check(gerr <= 1.0, f"{name}: energy conservation max |ERROR| {gerr:.4f} <= 1.0 kcal/mol")
+        if grel is not None:
+            # An absolute limit does not transfer between system sizes: the integration
+            # error grows with the kinetic energy (10x the atoms, ~10x the error).
+            limit = 3.0 * cpu_rel_ref
+            check(grel <= limit, f"{name}: energy conservation max |ERROR| / max kinetic = {grel:.2e} "
+                  f"<= 3 x CPU reference {cpu_rel_ref:.2e} (max |ERROR| {gerr:.4f} kcal/mol)")
 
     print(f"work dir: {work}")
     if failures:
