@@ -1,0 +1,3 @@
+PM7 GEO_DAT="protein_crambin_1crn_hydrogenated.pdb" MOZYME MOZYME_GPU MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 DRC KINETIC=20 T-PRIORITY=0.5 CYCLES=40 GEO-OK NOCOMMENTS
+Molecular dynamics (DRC, 0.5 fs printout, 40 points): crambin, PDB 1CRN, hydrogenated
+
