@@ -1599,7 +1599,8 @@ subroutine wrtcon (allkey)
   else if (myword(allkey, " DRC")) then
     write (iw,'(" *  DRC        - DYNAMIC REACTION COORDINATE CALCULATION")')
   end if
-  if (myword(allkey, " TEMPERATURE=")) write (iw,'(" *  TEMPERATURE= - DRC STARTS FROM MAXWELL-BOLTZMANN VELOCITIES AT", f9.2, " K")') &
+  if (myword(allkey, " TEMPERATURE=")) &
+    write (iw,'(" *  TEMPERATURE= - DRC STARTS FROM MAXWELL-BOLTZMANN VELOCITIES AT", f9.2, " K")') &
     reada (keywrd, Index (keywrd, " TEMPERATURE="))
   if (myword(allkey, " BUSSI=")) then
     write (iw,'(" *  BUSSI=     - BUSSI THERMOSTAT, TIME CONSTANT", f9.1, " FEMTOSECONDS")') &
