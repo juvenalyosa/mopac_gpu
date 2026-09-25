@@ -43,6 +43,19 @@ Inputs from the PDB must be complete: heavy-atom-only structures do not converge
 the CPU either. Run `ADD-H` first (`scripts/hydrogenate_publication_benchmark_inputs.py` does it
 for the benchmark decks).
 
+MOPAC checks PDB-derived inputs before the calculation (`INPUT CHEMISTRY CHECK` in the output).
+Errors stop the job unless `LET` is present:
+
+- a group of several atoms on a crystallographic special position (`REMARK 375`): the file holds
+  only part of it, the rest is a symmetry mate;
+- an incomplete small group (SO4, PO4, NO3, EDO, GOL, ACT, ...);
+- a formal charge of ±2 or more on H, B, C, N, O or F in the Lewis structure.
+
+Warnings only: amino acids with missing side-chain atoms, partial occupancy, all ARG/LYS/ASP/GLU/HIS
+neutral (use `ADD-H SITE=(IONIZE)` for pH ~7) and sulfate/phosphate in acid form. The check exists
+because of 1G6X: two half sulfates on special positions became "SO2(2-)" fragments, and the SCF
+took 112 iterations (CPU) and gave run-dependent energies (GPU). Without them it converges in 29.
+
 ## What stays on the CPU
 
 The GPU path silently hands the work back to the CPU code (same results, CPU speed) for:
@@ -71,6 +84,10 @@ within 1e-3 kcal/mol/Å RMS. Measured (A100):
 | GPU gradient vs CPU finite differences (crambin) | RMS 5e-8, max 3e-7 kcal/mol/Å |
 | hcore, dispersion, H-bond energies vs CPU | 8e-12 eV, 4e-12 kcal/mol, 1e-12 kcal/mol |
 | Crambin after 100 GPU optimization cycles, re-evaluated at the same geometry on the CPU | −3468.5422 (CPU) vs −3468.5459 (GPU), 0.004 kcal/mol |
+| Crambin 1SCF, other methods: MNDO, AM1, PM3, RM1, PM6, PM6-D3H4 | within 0.024 kcal/mol (PM3 +0.023, PM6-D3H4 −0.011, others ≤ 0.004) |
+| DNA dodecamer 1BNA 1SCF, the same seven methods | within 0.005 |
+| 1G6X, 1EZG, 1RNB, 1C3W 1SCF (944 to 4473 atoms) | +0.001, −0.007, −0.002, −0.004 |
+| Water cluster, 1000 H2O | +0.034 |
 
 Optimization trajectories diverge between CPU and GPU (the rounding-level SCF differences are
 amplified by the line search), so cycle-by-cycle heats are not comparable; only energies at the
@@ -89,6 +106,12 @@ the GPU rather than the 20 to 60 times shown here.
 | Ubiquitin 1SCF (1231) | 41.7 s | 1.35 s | 31x |
 | DNA dodecamer 1BNA 1SCF (781) | 24.6 s | 1.13 s | 22x |
 | Adenylate kinase apo 1SCF (6689) | ~600 s | 7.2 to 7.6 s | ~80x |
+| 1G6X 1SCF (944) | 30.2 s | 1.2 s | 25x |
+| Barnase 1RNB 1SCF (1778) | 71.0 s | 1.8 s | 39x |
+| Antifreeze protein 1EZG 1SCF (2064) | 130.1 s | 2.5 s | 52x |
+| Bacteriorhodopsin 1C3W 1SCF (4473) | 343.3 s | 4.5 s | 76x |
+| Water cluster 1000 H2O 1SCF (3000 atoms) | 52.9 s | 1.7 s | 31x |
+| Water cluster 7052 H2O 1SCF (21156 atoms, 42,312 orbitals) | (not measured) | 25.7 s | |
 | Crambin optimization, 3 cycles | 48 s | 1.5 s | 32x |
 | Crambin optimization, 100 cycles | 1042 s | 17.7 s | 59x |
 | Crambin, one warm optimization cycle | 6.9 to 8.5 s | 0.15 to 0.17 s | ~45x |
