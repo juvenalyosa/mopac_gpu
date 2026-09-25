@@ -76,7 +76,8 @@ solvent there is no box. Implicit water is COSMO (`EPS=78.4`). `scripts/mozyme_m
 
 The GPU path silently hands the work back to the CPU code (same results, CPU speed) for:
 
-- periodic systems (`id > 0`), COSMO solvation and pKa calculations;
+- periodic systems (`id > 0`) and pKa calculations (COSMO solvation runs on the GPU: crambin 1SCF
+  2.1 s vs 33 s on the CPU, |ΔHf| 0.001 kcal/mol);
 - the per-bond hydrogen-bond printout (`0SCF` / `PRT` with `DISP`);
 - sparkles and any atom without device parameters in the gradient and hcore pair kernels;
 - an SCF that does not converge on the device (iteration budget, PLS restart): the CPU continues

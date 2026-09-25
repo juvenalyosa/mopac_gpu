@@ -25,6 +25,8 @@ It also adds **molecular dynamics at a temperature** (NVE and NVT with the Bussi
 | Crambin, geometry optimization, 100 cycles | 642 | 1 042 s | 17.7 s | **59×** |
 | Adenylate kinase, geometry optimization, 50 cycles | 6 689 | — | 57 s (1.0 s/cycle) | |
 | Crambin, molecular dynamics, 195 steps (19.5 fs) | 642 | 1 273 s | 21.9 s | **58×** |
+| Crambin in implicit water (COSMO), single point | 642 | 33.0 s | 2.1 s | **16×** |
+| Crambin, NVT or NVE dynamics, 100 fs (~1 000 steps) | 642 | — | 114 s | |
 | Adenylate kinase, molecular dynamics, 95 steps | 6 689 | — | 87 s (0.9 s/step) | |
 
 Energies agree with the CPU within 0.05 kcal/mol (details in [Accuracy](#7-accuracy)). The CPU
@@ -374,7 +376,11 @@ Crambin, NVT at 300 K, Bussi thermostat, 100 fs coupling
 
 ```
 
-Tighter coupling for a fast equilibration, then a looser one for sampling:
+**Equilibrate first.** Starting from an optimized structure (an energy minimum), half of the
+kinetic energy flows into potential energy in the first ~10 fs, so the temperature drops to about
+T/2; the thermostat brings it back with an effective time of about 2 × `BUSSI` (it has to heat the
+potential energy too). Measured on crambin: with `BUSSI=100` the mean temperature after 100 fs was
+still 199 K. Use a tight coupling to equilibrate, then a loose one (or NVE) to sample:
 
 ```
 PM7 MOZYME DRC TEMPERATURE=300 BUSSI=10 T-PRIORITY=0.5 CYCLES=100 GEO_DAT="1crn_optimized.pdb"
@@ -498,7 +504,8 @@ statistical averages.
 - **NVE after NVT** restarts from the last NVT geometry with fresh velocities at the same
   temperature: MOPAC cannot read velocities together with a PDB geometry.
 - **Runs on the CPU instead of the GPU:** periodic systems, pKa calculations, and the programming
-  interface (`libmopac` API). COSMO: check the `[MOZYME GPU SCF] status=` lines of your run.
+  interface (`libmopac` API). COSMO implicit water does run on the GPU (crambin: 2.1 s vs 33 s on the
+  CPU, energies within 0.002 kcal/mol).
 - **Reproducibility.** GPU runs are not bit-reproducible; `SEED` fixes the random numbers but not
   the order of the parallel rotations.
 - **Inputs.** Hydrogens are required; broken crystal fragments are refused (see the chemistry
