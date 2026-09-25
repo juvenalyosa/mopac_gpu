@@ -122,7 +122,7 @@ subroutine post_scf_corrections(correction, l_grad)
     method_pm6_dh_plus, method_pm6_dh2, method_pm6_d3h4, method_pm6_dh2x, method_pm6_d3h4x, &
     method_pm6_d3, method_pm6_d3_not_h4, method_pm7_hh, method_pm7_minus, method_pm6_org, method_PM8
   use common_arrays_C, only: dxyz
-  use molkst_C, only : numat, moperr
+  use molkst_C, only : numat, moperr, id
   use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
   use post_scf_cache_C, only : post_scf_gradient_expected, post_scf_cache_hit, &
     post_scf_cache_restore, post_scf_cache_begin_grad, post_scf_cache_store
@@ -172,7 +172,9 @@ subroutine post_scf_corrections(correction, l_grad)
 ! 2013 , 9 (1), 118�129.
 !
   prt = (index(keywrd," 0SCF ") + index(keywrd," PRT ") /= 0 .and. index(keywrd," DISP") /= 0)
-  use_cache = .not. prt .and. numat > 0
+  ! Molecules only: for solids dxyz holds 3*numat*l123 per-cell entries and
+  ! the geometry also depends on tvec, neither of which the cache tracks.
+  use_cache = .not. prt .and. numat > 0 .and. id == 0
   if (use_cache) then
     if (post_scf_cache_hit(l_grad)) then
       call post_scf_cache_restore(correction, l_grad)

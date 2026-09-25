@@ -134,9 +134,10 @@ __global__ void dh_dispersion_kernel(DispArgs a) {
       }
     }
     if (a.l_grad) {
-      a.dxyz[3 * i] += g[0];
-      a.dxyz[3 * i + 1] += g[1];
-      a.dxyz[3 * i + 2] += g[2];
+      // CPU (cpu_fd_gradient): a component with |dE/dx| >= 50 is dropped.
+      for (int c = 0; c < 3; ++c) {
+        if (fabs(g[c]) < 50.0) a.dxyz[3 * i + c] += g[c];
+      }
     }
   }
   __shared__ double red[kThreads];

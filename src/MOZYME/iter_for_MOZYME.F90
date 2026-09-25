@@ -257,6 +257,9 @@ subroutine iter_for_MOZYME (ee)
         end if
       end if
       if (moperr) return
+      ! New LMOs (makvec, GPU makvec or OLDEN) and density on the host: a kept
+      ! device context must not reuse its own copies at the next upload.
+      call mozyme_gpu_scf_note_host_modified()
       !
       !  A NEW MOLECULE, THEREFORE SEARCH FOR ALL WEAK INTERACTIONS.
       !
@@ -295,6 +298,7 @@ subroutine iter_for_MOZYME (ee)
         call local_for_MOZYME("VIRTUAL")
         call mozyme_section_timer_end('iter_reloc_virt', mozyme_timer)
       end if
+      call mozyme_gpu_scf_note_host_lmos_modified()  ! re-localized on the host
     end if
     useps = store_useps
     if (lpka) useps = .true.
@@ -1315,9 +1319,13 @@ subroutine iter_for_MOZYME (ee)
     imol = numcal
     if (mozyme_section_timers_enabled()) then
       call mozyme_lmo_orthogonality_report()
-      ! Resident SCF: re-evaluate the energy on the host from the published LMOs
-      ! (density -> Fock -> helecz) and compare with the energy the device reported.
-      if (resident_density_current) call mozyme_gpu_energy_recheck(escf)
+      ! Re-evaluate the energy on the host from the final LMOs (density -> Fock
+      ! -> helecz) and compare with the loop energy.  The loop energy comes from
+      ! the density after cnvgz (extrapolated/damped while three-point
+      ! extrapolation is on), so the CPU run prints the baseline difference.
+      ! Not in strict proof mode: buildf/density aborts there.
+      if (.not. resident_strict_required) call mozyme_gpu_energy_recheck(escf, &
+        resident_density_current, use_three_point_extrap, niter)
     end if
     if (resident_final_reorth_due) then
       if (resident_strict_required) then
@@ -1426,7 +1434,7 @@ end subroutine mozyme_gpu_grow_lmo_storage
 ! Profile aid for the resident SCF: rebuild the density from the published LMOs,
 ! the Fock matrix from that density and the electronic energy on the host, and
 ! print it next to the energy the device reported.  p and f are restored.
-subroutine mozyme_gpu_energy_recheck(escf_gpu)
+subroutine mozyme_gpu_energy_recheck(escf_gpu, resident, three_point, niter)
   use molkst_C, only: mpack, enuclr, atheat
   use MOZYME_C, only: nelred, partp, partf
   use common_arrays_C, only: f, p
@@ -1435,6 +1443,8 @@ subroutine mozyme_gpu_energy_recheck(escf_gpu)
   use chanel_C, only: iw
   implicit none
   double precision, intent(in) :: escf_gpu
+  logical, intent(in) :: resident, three_point
+  integer, intent(in) :: niter
   double precision, allocatable :: p_save(:), f_save(:)
   double precision, external :: helecz
   double precision :: ee, escf_host, max_dp
@@ -1454,9 +1464,11 @@ subroutine mozyme_gpu_energy_recheck(escf_gpu)
   ee = helecz()
   escf_host = (ee + enuclr) * fpc_9 + atheat
   if (useps) escf_host = escf_host + solv_energy * fpc_9
-  write (iw, '(1x,a,f16.5,a,f16.5,a,f12.5,a,es12.4)') &
-    '[MOZYME GPU SCF] energy_recheck gpu_escf=', escf_gpu, ' host_escf_from_lmos=', escf_host, &
-    ' diff=', escf_host - escf_gpu, ' max_dp_vs_published=', max_dp
+  write (iw, '(1x,a,a,a,f16.5,a,f16.5,a,f12.5,a,es12.4,a,l1,a,i0)') &
+    '[MOZYME GPU SCF] energy_recheck source=', trim(merge('gpu', 'cpu', resident)), &
+    ' loop_escf=', escf_gpu, ' host_escf_from_lmos=', escf_host, &
+    ' diff=', escf_host - escf_gpu, ' max_dp_vs_published=', max_dp, &
+    ' three_point=', three_point, ' niter=', niter
   call flush(iw)
   p(1:mpack) = p_save(1:mpack)
   f(1:mpack) = f_save(1:mpack)

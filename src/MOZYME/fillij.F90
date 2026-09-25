@@ -85,6 +85,7 @@ contains
     integer, parameter :: max_cells_per_atom = 16
     integer :: i, j, k, m, n, ix, iy, iz, jx, jy, jz, nx, ny, nz, ncell, ic, jc, stat
     integer :: io, jo, ii, ncand, cap, row, next_row, merged, a, b, nold
+    logical :: list_was_valid
     integer, allocatable :: cell_of(:), cell_count(:), cell_start(:), cell_atoms(:)
     integer, allocatable :: cand_i(:), cand_j(:), row_count(:), row_start(:)
     integer, allocatable :: srt_i(:), srt_j(:), new_i(:), new_j(:), new_off(:)
@@ -219,7 +220,8 @@ contains
     ! persistent sorted pair list.
     !
     nold = 0
-    if (.not. first .and. pl_fill == nijbo_fill_count .and. allocated(pl_i)) nold = pl_n
+    list_was_valid = (.not. first .and. pl_fill == nijbo_fill_count .and. allocated(pl_i))
+    if (list_was_valid) nold = pl_n
     allocate (new_i(max(1, nold + ncand)), new_j(max(1, nold + ncand)), &
       new_off(max(1, nold + ncand)), stat=stat)
     if (stat /= 0) return
@@ -301,7 +303,14 @@ contains
     call move_alloc(new_j, pl_j)
     call move_alloc(new_off, pl_off)
     pl_n = n
-    pl_fill = nijbo_fill_count + 1   ! the caller increments the fill count next
+    if (first .or. list_was_valid) then
+      pl_fill = nijbo_fill_count + 1   ! the caller increments the fill count next
+    else
+      ! Update pass on top of a fill the grid did not track (scan fallback,
+      ! allocation failure): the merged list holds only the new promotions,
+      ! so it must not be offered to hcore/gradient as the full pair list.
+      pl_fill = -1
+    end if
     deallocate (srt_i, srt_j, cell_of, cell_count, cell_start, cell_atoms, row_count, row_start)
     ok = .true.
   end subroutine fillij_grid_pass

@@ -4582,7 +4582,8 @@ mozyme_diagg2_block_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
       if (fabs(f) < tiny) continue;
       const double c = f * a.rot_const;
       const double d = a.eigs[j - 1] - a.eigv[i - 1] - a.shift;
-      if (fabs(c / d) < biglim) continue;
+      // Same test as the CPU (Abs(c/d) >= biglim): a NaN ratio (d == 0) is skipped.
+      if (!(fabs(c / d) >= biglim)) continue;
       if (tid == 0) {
         while (atomicCAS(olock + j - 1, 0, 1) != 0) {
           __nanosleep(100);
@@ -5137,6 +5138,25 @@ __global__ void mozyme_tidy_layout_kernel(
   result[2] = mn;
 }
 
+// The layout kernel writes nc before its space checks and nnc/ncmo inside
+// its placement loop, so a -506/-507/-510 failure leaves the counts and
+// offsets half rewritten over the untouched ic/c.  Put the old layout back so
+// a failed tidy leaves the LMOs exactly as they were (the hand-back and the
+// storage-growth retry publish them).
+__global__ void mozyme_tidy_restore_on_failure_kernel(
+    int nmos, const int *result, const int *nc_old, const int *nnc_old,
+    const int *ncmo_old, int *nc, int *nnc, int *ncmo,
+    const int *resident_control_ints) {
+  if (resident_control_terminal(resident_control_ints)) return;
+  if (result[0] == 0) return;
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < nmos;
+       i += gridDim.x * blockDim.x) {
+    nc[i] = nc_old[i];
+    nnc[i] = nnc_old[i];
+    ncmo[i] = ncmo_old[i];
+  }
+}
+
 __global__ void mozyme_tidy_scatter_kernel(
     int nmos, int n01, int n02, const int *ic_src, const double *c_src,
     const int *entry_rank, const int *entry_dst_orb,
@@ -5583,7 +5603,7 @@ __device__ int mozyme_pls_supervisor_device(double ovmax, double escf,
 
 __global__ void mozyme_resident_control_advance_kernel(
     int current_iter, int max_iter, int strict_resident, int use_three_point,
-    int lstart, double shift, const int *diagg_ints,
+    int lstart, double shift, double emin, const int *diagg_ints,
     const double *diagg_scalars, const int *addhb_ints,
     const double *addhb_scalars, const int *isitsc_ints,
     const double *isitsc_scalars, int *pls_ints, double *pls_scalars,
@@ -5603,7 +5623,10 @@ __global__ void mozyme_resident_control_advance_kernel(
       current_iter < 2147483647 ? current_iter + 1 : current_iter;
   const int isitsc_ok = isitsc_ints[kIsitscIntOkscf];
   int decision = kResidentDecisionContinue;
-  if (isitsc_ok == 1) {
+  // CPU exit test (iter_for_MOZYME): okscf .and. niter > 1 .and.
+  // (emin /= 0 .or. niter > 3); an okscf that fails it keeps iterating.
+  if (isitsc_ok == 1 && completed_iter > 1 &&
+      (emin != 0.0 || completed_iter > 3)) {
     decision = kResidentDecisionComplete;
   } else if (completed_iter >= max_iter) {
     decision = kResidentDecisionIterationExhausted;
@@ -8134,7 +8157,10 @@ bool upload_registered_state(MozymeScfContext &ctx) {
     if (!dev.hb_pair_j.resize(hb_capacity)) return false;
     if (!dev.hb_entry_counts.resize(hb_capacity)) return false;
     if (!dev.hb_entry_offsets.resize(hb_capacity + 1)) return false;
-    const std::size_t lmo_count = std::max(nocc_count, nvir_count);
+    // The tidy covers every LMO (total counts), like the CPU tidy; the SCF
+    // itself only works on the first nocc1/nvir1 of them in a partial SCF.
+    const std::size_t lmo_count = static_cast<std::size_t>(std::max(
+        1, std::max(ctx.config.total_occupied, ctx.config.total_virtual)));
     const std::size_t ic_max = static_cast<std::size_t>(
         std::max(1, std::max(ctx.state.icocc_dim, ctx.state.icvir_dim)));
     const std::size_t c_max = static_cast<std::size_t>(
@@ -8522,9 +8548,11 @@ bool launch_resident_tidy(MozymeScfContext &ctx, int nmos, int n01, int n02,
       !device_buffer_ready(dev.tidy_c_scratch, c_count)) {
     return false;
   }
-  if (!cuda_context_ok(cudaMemsetAsync(result, 0,
-                                       kTidyResultCount * sizeof(int)),
-                       "resident tidy result reset")) {
+  // Gated reset: a look-ahead iteration launched after the one whose tidy
+  // failed must not wipe the failure code (-506 drives the storage-growth
+  // retry, read by the host only after the loop has drained).
+  if (!zero_ints_if_resident_active(ctx, result, kTidyResultCount,
+                                    "resident tidy result reset")) {
     return false;
   }
   const int warp_blocks =
@@ -8560,6 +8588,9 @@ bool launch_resident_tidy(MozymeScfContext &ctx, int nmos, int n01, int n02,
       dev.tidy_entry_src_orb.ptr, dev.tidy_nnc_old.ptr, dev.tidy_ncmo_old.ptr,
       nnc, ncmo, dev.tidy_nc_old.ptr, dev.iorbs.ptr, ic, c, result,
       dev.resident_control_ints.ptr);
+  mozyme_tidy_restore_on_failure_kernel<<<ceil_div(nmos, 256), 256>>>(
+      nmos, result, dev.tidy_nc_old.ptr, dev.tidy_nnc_old.ptr,
+      dev.tidy_ncmo_old.ptr, nc, nnc, ncmo, dev.resident_control_ints.ptr);
   return cuda_context_ok(cudaGetLastError(), "resident tidy kernels");
 }
 
@@ -8600,14 +8631,16 @@ bool compute_check_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
     // The CPU loop tidies both LMO sets at the top of every iteration
     // (compaction + even redistribution of free space); without it the
     // resident sweep runs out of room to grow LMOs and rejects every rotation.
-    if (!launch_resident_tidy(ctx, nocc, ctx.state.icocc_dim,
+    // CPU: tidy(noccupied, ...) / tidy(nvirtual, ...) over all LMOs, then
+    // check(nocc1, ...) / check(nvir1, ...) over the SCF set.
+    if (!launch_resident_tidy(ctx, ctx.config.total_occupied, ctx.state.icocc_dim,
                               ctx.state.cocc_dim, dev.ncf.ptr, dev.icocc.ptr,
                               dev.cocc.ptr, dev.nncf.ptr, dev.ncocc.ptr,
                               dev.tidy_result.ptr,
                               dev.check_ints.ptr + kCheckIntOk)) {
       break;
     }
-    if (!launch_resident_tidy(ctx, nvir, ctx.state.icvir_dim,
+    if (!launch_resident_tidy(ctx, ctx.config.total_virtual, ctx.state.icvir_dim,
                               ctx.state.cvir_dim, dev.nce.ptr, dev.icvir.ptr,
                               dev.cvir.ptr, dev.nnce.ptr, dev.ncvir.ptr,
                               dev.tidy_result.ptr + kTidyResultCount,
@@ -10872,7 +10905,8 @@ bool advance_resident_control_on_gpu(MozymeScfContext &ctx,
   mozyme_resident_control_advance_kernel<<<1, 1>>>(
       ctx.config.current_iter, ctx.config.max_iter, strict_resident ? 1 : 0,
       ctx.config.use_three_point, ctx.config.lstart, ctx.config.shift,
-      dev.diagg_ints.ptr, dev.diagg_scalars.ptr, dev.addhb_ints.ptr,
+      ctx.config.emin, dev.diagg_ints.ptr, dev.diagg_scalars.ptr,
+      dev.addhb_ints.ptr,
       dev.addhb_scalars.ptr, dev.isitsc_ints.ptr, dev.isitsc_scalars.ptr,
       dev.pls_ints.ptr, dev.pls_scalars.ptr, dev.resident_control_ints.ptr,
       dev.resident_control_scalars.ptr);
@@ -11756,6 +11790,27 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
     handed_back = true;
     if (publish_device_state && ctx->device.uploaded) {
       timed_copy_resident_state_to_host(*ctx, nullptr, /*full=*/true);
+    } else if (ctx->device.lazy_authoritative && ctx->device.uploaded) {
+      // After a lazy publish only the device holds current f/partp/partf
+      // (the host copies are from the last full publish, possibly many
+      // geometries ago).  The CPU restarts from its own p/LMOs but its first
+      // diagg uses f, and the partial Fock uses partp/partf: hand those over.
+      // pold/p1 are not copied: iter_for_MOZYME zeroes them at SCF start.
+      const std::size_t mpack_count =
+          static_cast<std::size_t>(std::max(0, ctx->config.mpack));
+      const std::size_t partp_count = std::min(
+          static_cast<std::size_t>(std::max(0, ctx->state.partp_dim)), mpack_count);
+      const std::size_t partf_count = std::min(
+          static_cast<std::size_t>(std::max(0, ctx->state.partf_dim)), mpack_count);
+      if (ctx->state.f && mpack_count > 0)
+        stage_and_commit_device_vector(ctx->state.f, ctx->device.f, mpack_count,
+                                       "resident hand-back f stage");
+      if (ctx->state.partp && partp_count > 0)
+        stage_and_commit_device_vector(ctx->state.partp, ctx->device.partp,
+                                       partp_count, "resident hand-back partp stage");
+      if (ctx->state.partf && partf_count > 0)
+        stage_and_commit_device_vector(ctx->state.partf, ctx->device.partf,
+                                       partf_count, "resident hand-back partf stage");
     }
     ctx->device.host_synced = false;
     ctx->device.lazy_authoritative = false;
@@ -11809,7 +11864,12 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
       auto pop_decision = [&](bool wait) -> bool {
         if (inflight <= 0) return false;
         if (wait) {
-          if (cudaEventSynchronize(decision_events[head]) != cudaSuccess) return true;
+          if (cudaEventSynchronize(decision_events[head]) != cudaSuccess) {
+            // Sticky device fault: nothing queued will ever complete; drop the
+            // queue so the drain below cannot spin forever.
+            inflight = 0;
+            return true;
+          }
         } else if (cudaEventQuery(decision_events[head]) != cudaSuccess) {
           return false;
         }
