@@ -9,9 +9,10 @@ Steps (each one is a function, the Colab notebook colab/mozyme_md_colab.ipynb ca
   optimize        geometry optimization (CYCLES=n); the final geometry is written as a PDB
                   (from the .arc when the optimization converged, else RESTART 1SCF PDBOUT
                   from the restart file)
-  dynamics        DRC molecular dynamics: NVT=T (Bussi thermostat) or NVE=T (Maxwell-Boltzmann
-                  start at T, then constant energy); returns the DRC table, the temperature
-                  log and the trajectory (.xyz); last_frame_pdb writes the final frame as a PDB
+  dynamics        DRC molecular dynamics from Maxwell-Boltzmann velocities (TEMPERATURE=T):
+                  NVT adds the Bussi thermostat (BUSSI=tau), NVE keeps the energy constant;
+                  returns the DRC table, the temperature log and the trajectory (.xyz);
+                  last_frame_pdb writes the final frame as a PDB
 
 Implicit solvent: pass eps=78.4 (COSMO, water).  No barostat exists (NPT): MOZYME runs a
 finite molecule, with implicit solvent there is no box and no pressure.
@@ -39,8 +40,8 @@ from prepare_publication_benchmark_inputs import clean_pdb  # noqa: E402
 HEAT_RE = re.compile(r"(?:FINAL HEAT OF FORMATION|CURRENT VALUE OF HEAT OF FORMATION)\s*=\s*([-+0-9.EeDd]+)")
 CYCLE_RE = re.compile(r"CYCLE:\s*(\d+)\s+TIME:\s*([0-9.]+).*?GRAD\.:\s*([-+0-9.EeDd]+)\s+HEAT:\s*([-+0-9.EeDd]+)")
 STATUS_RE = re.compile(r"\[MOZYME GPU SCF\]\s+status=(\S+)")
-ENSEMBLE_RE = re.compile(r"ENSEMBLE step\s+(\d+)\s+time\(fs\)\s+([-0-9.]+)\s+T\(K\)\s+([-0-9.]+)\s+<T>\(K\)\s+([-0-9.]+)"
-                         r"\s+E_to_bath\(kcal/mol\)\s+([-0-9.]+)")
+ENSEMBLE_RE = re.compile(r"TEMPERATURE: STEP\s+(\d+)\s+TIME\(FS\)\s+([-0-9.]+)\s+T\(K\)\s+([-0-9.]+)\s+<T>\(K\)\s+([-0-9.]+)"
+                         r"\s+ENERGY TO BATH \(KCAL/MOL\)\s+([-0-9.]+)")
 FLOAT_RE = re.compile(r"-?\d+\.\d+")
 CHECK_ERROR = "INPUT CHEMISTRY CHECK FOUND ERRORS"
 BASE_KEYS = "PM7 MOZYME MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 GEO-OK"
@@ -172,7 +173,7 @@ def dynamics(mopac: Path, pdb: Path, work: Path, ensemble: str, temperature: flo
     ens = ensemble.upper()
     if ens not in ("NVT", "NVE"):
         raise ValueError("ensemble must be NVT or NVE (no barostat exists for NPT)")
-    extra = f" NVT={temperature:g} NVT_TAU={tau_fs:g}" if ens == "NVT" else f" NVE={temperature:g}"
+    extra = f" TEMPERATURE={temperature:g}" + (f" BUSSI={tau_fs:g}" if ens == "NVT" else "")
     name = ens.lower()
     r = run_mopac(mopac, work, name,
                   f'{BASE_KEYS}{solvent_keys(eps)} GEO_DAT="{pdb.name}" DRC{extra} T-PRIORITY={interval_fs:g} '

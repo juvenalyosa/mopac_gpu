@@ -17,7 +17,7 @@
 # Create a list of source files (src_list) with the .F90 extension
 set(src_list 
     pathk react1 paths write_trajectory maps_C
-    grid set_up_RAPID drc drcout prtdrc
+    grid set_up_RAPID drc drcout prtdrc drc_ensemble
     quadr picopt big_swap
    )
 #-----------------------------------------------

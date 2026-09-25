@@ -262,6 +262,19 @@ subroutine wrtchk (allkey)
     call mopend ("INT cannot be used with XYZ")
   end if
 !
+!   Check TEMPERATURE MUST have DRC, and BUSSI MUST have TEMPERATURE
+!
+  if (Index (keywrd, " TEMPERATURE=") /= 0 .and. Index (keywrd, " DRC") == 0) then
+    write (iw, "(//10X,'TEMPERATURE AND NO DRC')")
+    write (iw, 10000)
+    go to 1020
+  end if
+  if (Index (keywrd, " BUSSI") /= 0 .and. Index (keywrd, " TEMPERATURE=") == 0) then
+    write (iw, "(//10X,'BUSSI AND NO TEMPERATURE')")
+    write (iw, 10000)
+    go to 1020
+  end if
+!
 !   Check T-PRIO MUST have DRC
 !
   if (Index (keywrd, " T-PRIO") /= 0 .and. Index (keywrd, " DRC") == 0) then
@@ -1586,18 +1599,16 @@ subroutine wrtcon (allkey)
   else if (myword(allkey, " DRC")) then
     write (iw,'(" *  DRC        - DYNAMIC REACTION COORDINATE CALCULATION")')
   end if
-  if (myword(allkey, " NVT_TAU=")) write (iw,'(" *  NVT_TAU=   - THERMOSTAT TIME CONSTANT", f9.1, " FEMTOSECONDS")') &
-    reada (keywrd, Index (keywrd, " NVT_TAU="))
-  if (myword(allkey, " NVT=")) write (iw,'(" *  NVT=       - CANONICAL DRC: BUSSI THERMOSTAT AT", f9.2, " K")') &
-    reada (keywrd, Index (keywrd, " NVT="))
-  if (myword(allkey, " NVE=")) write (iw,'(" *  NVE=       - DRC FROM MAXWELL-BOLTZMANN VELOCITIES AT", f9.2, " K")') &
-    reada (keywrd, Index (keywrd, " NVE="))
-  if (myword(allkey, " SEED=")) write (iw,'(" *  SEED=      - RANDOM NUMBER SEED", i12)') &
-    nint(reada (keywrd, Index (keywrd, " SEED=")))
-  if ((Index (keywrd, " NVT=") + Index (keywrd, " NVE=") /= 0) .and. Index (keywrd, " DRC") == 0) then
-    write (iw, "(//10X,'NVT= OR NVE= REQUIRE KEYWORD DRC')")
-    call mopend("NVT= OR NVE= REQUIRE KEYWORD DRC")
+  if (myword(allkey, " TEMPERATURE=")) write (iw,'(" *  TEMPERATURE= - DRC STARTS FROM MAXWELL-BOLTZMANN VELOCITIES AT", f9.2, " K")') &
+    reada (keywrd, Index (keywrd, " TEMPERATURE="))
+  if (myword(allkey, " BUSSI=")) then
+    write (iw,'(" *  BUSSI=     - BUSSI THERMOSTAT, TIME CONSTANT", f9.1, " FEMTOSECONDS")') &
+      reada (keywrd, Index (keywrd, " BUSSI="))
+  else if (myword(allkey, " BUSSI")) then
+    write (iw,'(" *  BUSSI      - BUSSI THERMOSTAT, TIME CONSTANT 100 FEMTOSECONDS")')
   end if
+  if (myword(allkey, " SEED=")) write (iw,'(" *  SEED=      - SEED FOR RANDOM NUMBERS", i12)') &
+    nint(reada (keywrd, Index (keywrd, " SEED=")))
    mozyme = l_temp
 !
 !                       External parameters read from file

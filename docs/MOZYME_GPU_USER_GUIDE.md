@@ -61,11 +61,12 @@ took 112 iterations (CPU) and gave run-dependent energies (GPU). Without them it
 `DRC` runs the dynamics (adaptive time step, of the order of 0.1 fs with hydrogens; `T-PRIORITY=0.5` prints a
 row every 0.5 fs and the trajectory is written to `<name>.xyz`). Two ensembles:
 
-- `DRC NVE=300`: Maxwell-Boltzmann velocities at 300 K (zero net momentum, exact kinetic energy), then constant
-  energy.
-- `DRC NVT=300 NVT_TAU=100`: the same start plus the Bussi-Donadio-Parrinello stochastic velocity rescaling
-  thermostat (canonical ensemble), time constant in fs. The energy exchanged with the bath is booked
-  separately, so the ERROR column stays the integration error.
+- `DRC TEMPERATURE=300`: Maxwell-Boltzmann velocities at 300 K (zero net momentum, exact kinetic
+  energy), then constant energy (NVE).
+- `DRC TEMPERATURE=300 BUSSI=100`: the same start plus the Bussi-Donadio-Parrinello stochastic
+  velocity rescaling thermostat (NVT, canonical ensemble), time constant in fs (`BUSSI` alone: 100 fs).
+  The energy exchanged with the bath is booked separately, so the ERROR column stays the integration
+  error.
 
 `SEED=n` sets the random seed. There is no barostat (NPT): MOZYME treats a finite molecule, and with implicit
 solvent there is no box. Implicit water is COSMO (`EPS=78.4`). `scripts/mozyme_md_workflow.py` and
