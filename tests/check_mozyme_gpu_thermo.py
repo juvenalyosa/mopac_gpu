@@ -206,11 +206,16 @@ def main() -> int:
             th = thermo(text, T)
             summary(f"{small} FORCE GPU SCFCRT={value:g}", th, wall, stat)
             scan.append((value, th))
-        ref_value, ref = scan[-1]
-        for value, th in scan[:-1]:
+        # Reference: the conventional (non-MOZYME) SCF, fully converged at every displaced geometry.
+        conv_kw = f'PM7 FORCE THERMO({T:g}) GEO-OK GEO_DAT="{opt_pdb.name}"'
+        rtext, rwall, _ = run(work / small / "reference_conventional_cpu", "force", conv_kw, opt_pdb, CPU_ENV)
+        ref = thermo(rtext, T)
+        summary(f"{small} FORCE conventional SCF (reference, CPU)", ref, rwall, [])
+        compare(f"{small} MOZYME GPU SCFCRT={scan[-1][0]:g} vs conventional", ref, scan[-1][1])
+        for value, th in scan:
             if len(th["freqs"]) == len(ref["freqs"]) and th["freqs"]:
                 d = [x - y for y, x in zip(sorted(ref["freqs"]), sorted(th["freqs"])) if y >= 100.0]
-                print(f"     SCFCRT={value:g} vs {ref_value:g}: mean frequency shift {sum(d) / len(d):+.2f} cm-1, "
+                print(f"     SCFCRT={value:g} vs conventional: mean frequency shift {sum(d) / len(d):+.2f} cm-1, "
                       f"ZPE {th['zpe'] - ref['zpe']:+.3f}, S {th['S'] - ref['S']:+.3f} cal/(mol K), "
                       f"G {th['G'] - ref['G']:+.3f} kcal/mol", flush=True)
 
