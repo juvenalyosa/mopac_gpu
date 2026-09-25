@@ -32,8 +32,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_mozyme_gpu_tolerance import (GEO_DAT_RE, SCF_STATUS_RE, clean_env,  # noqa: E402
-                                        run_mopac, to_float)
+from check_mozyme_gpu_tolerance import (GEO_DAT_RE, HEAT_RE, SCF_STATUS_RE,  # noqa: E402
+                                        clean_env, run_mopac, to_float)
 
 CYCLE_RE = re.compile(r"CYCLE:\s*(\d+).*?GRAD\.:\s*([-+0-9.EeDd]+)\s+HEAT:\s*([-+0-9.EeDd]+)")
 FLOAT_RE = re.compile(r"-?\d+\.\d+")
@@ -41,7 +41,11 @@ DRC_START_POINTS = 3   # points skipped before measuring energy conservation
 
 
 def drc_rows(text: str) -> list[tuple[float, float, float, float]]:
-    """(time fs, potential, total, error) of every DRC printout row."""
+    """(time fs, potential, total, error) of every DRC printout row.
+
+    GPU trace lines ("[MOZYME GPU SCF] ...") are printed between the rows, so every
+    row-shaped line after the table header counts, not just a contiguous block.
+    """
     rows = []
     in_table = False
     for line in text.splitlines():
@@ -52,10 +56,6 @@ def drc_rows(text: str) -> list[tuple[float, float, float, float]]:
             continue
         head = line.split()
         if len(head) < 2 or not re.fullmatch(r"-?\d+\.\d+", head[0]) or not head[1].isdigit():
-            if rows and line.strip() == "":
-                continue
-            if rows:
-                in_table = False
             continue
         # glued columns ("-3109.0971-227.41577") -> take the floats by pattern
         values = [float(v) for v in FLOAT_RE.findall(line)]
@@ -91,13 +91,15 @@ def main() -> int:
     parser.add_argument("--hof-tol", type=float, default=0.05)
     parser.add_argument("--work-dir", type=Path, default=Path("mozyme_gpu_production"))
     parser.add_argument("--timeout", type=float, default=7200.0)
+    parser.add_argument("--reuse", action="store_true",
+                        help="re-analyse the outputs already in --work-dir instead of running MOPAC again")
     args = parser.parse_args()
 
     mopac = Path(args.mopac).resolve()
     work = args.work_dir.resolve()
-    if work.exists():
+    if work.exists() and not args.reuse:
         shutil.rmtree(work)
-    work.mkdir(parents=True)
+    work.mkdir(parents=True, exist_ok=True)
     failures: list[str] = []
 
     def check(cond: bool, message: str) -> None:
@@ -106,6 +108,12 @@ def main() -> int:
             failures.append(message)
 
     def timed(deck: Path, run_dir: Path, env: dict[str, str]) -> tuple[str, float | None, float]:
+        out = run_dir / (deck.stem + ".out")
+        if args.reuse and out.exists():
+            text = out.read_text(encoding="utf-8", errors="ignore")
+            heats = HEAT_RE.findall(text)
+            wall = re.findall(r"TOTAL JOB TIME:\s*([0-9.]+)", text)
+            return text, (to_float(heats[-1]) if heats else None), (float(wall[-1]) if wall else 0.0)
         t0 = time.perf_counter()
         text, heat = run_mopac(mopac, deck, run_dir, env, timeout=args.timeout)
         return text, heat, time.perf_counter() - t0
