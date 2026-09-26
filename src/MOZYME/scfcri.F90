@@ -25,7 +25,7 @@ subroutine scfcri (selcon)
     double precision, intent (inout) :: selcon
    !
    !.. Local Scalars ..
-    logical :: precis
+    logical :: precis, force
     integer :: i
     integer :: icalcn = 0
     double precision, save  :: scfcrt, scfref
@@ -45,7 +45,19 @@ subroutine scfcri (selcon)
       !
       i = Index (keywrd, " TS") + Index (keywrd, " FORCETS") + Index (keywrd, " IRC=")
       if (i /= 0) scfcrt = 2.0d-3
-      precis = (Index (keywrd, " PRECIS") /= 0)
+      !
+      !  VIBRATIONAL FREQUENCIES (FORCE, FORCETS, THERMO) ARE FINITE DIFFERENCES OF THE GRADIENT,
+      !  SO THE SCF MUST BE CONVERGED AT EVERY DISPLACED GEOMETRY: WITH 1.D-2 THE ZERO POINT ENERGY
+      !  OF A SMALL PROTEIN WAS WRONG BY 50 KCAL/MOL, WITH 1.D-6 IT AGREED WITH THE CONVENTIONAL SCF
+      !  WITHIN 0.05 KCAL/MOL.  SUCH A CRITERION ALSO NEEDS A SMALLER LMO THRESHOLD (ITER_FOR_MOZYME).
+      !
+      force = (Index (keywrd, " FORCE") + Index (keywrd, " THERMO") /= 0 .and. &
+        Index (keywrd, " SCFCRT") + Index (keywrd, " RELSCF") == 0)
+      if (force) then
+        scfcrt = 1.d-6
+        write (iw, "('  SCF CRITERION =',G14.4,' (FORCE: VIBRATIONAL FREQUENCIES NEED A CONVERGED SCF)')") scfcrt
+      end if
+      precis = (Index (keywrd, " PRECIS") /= 0 .and. .not. force)
       i = Index (keywrd, " RELSCF")
       if (i /= 0) then
         scfcrt = reada (keywrd, i) * scfcrt

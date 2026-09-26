@@ -133,6 +133,12 @@ subroutine iter_for_MOZYME (ee)
       !   IF THRESH IS CHANGED, THEN ALSO CHANGE DEFAULT IN WRTKEY
       !
       thresh = 1.d-13
+      !
+      !  FORCE, FORCETS, THERMO: SCF CRITERION 1.D-6 (SCFCRI).  THE SCF CAN ONLY CONVERGE TO ABOUT
+      !  |E(OCC)-E(VIR)|*SQRT(THRESH), 1.D-5 WITH 1.D-13, BECAUSE SMALLER ROTATIONS CANNOT ADD ATOMS
+      !  TO THE LMOS, SO THE THRESHOLD IS REDUCED TO MATCH (THRESH OR RELTHR STILL SET IT).
+      !
+      if (Index (keywrd, " FORCE") + Index (keywrd, " THERMO") /= 0) thresh = 1.d-15
       scfref = 0.d0
       i = Index (keywrd, " RELTHR")
       if (i /= 0) then

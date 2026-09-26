@@ -72,6 +72,38 @@ row every 0.5 fs and the trajectory is written to `<name>.xyz`). Two ensembles:
 solvent there is no box. Implicit water is COSMO (`EPS=78.4`). `scripts/mozyme_md_workflow.py` and
 `colab/mozyme_md_colab.ipynb` chain PDB preparation, optimization, NVT equilibration and NVE production.
 
+## Vibrational frequencies and thermochemistry (FORCE, FORCETS, THERMO)
+
+MOPAC builds the Hessian by finite differences of the gradient (two gradients per Cartesian coordinate),
+so every displaced SCF must be converged far more tightly than for an energy or an optimization. With the
+MOZYME default criterion (`SCFCRT=0.01`) the zero-point energy of chignolin came out 52 kcal/mol too high.
+With `FORCE`, `FORCETS` or `THERMO` in the keywords, MOZYME therefore uses:
+
+- `SCFCRT=0.000001` (printed as `SCF CRITERION = 0.1000E-05 (FORCE: ...)`), unless `SCFCRT` or `RELSCF`
+  is given;
+- `THRESH=1.D-15` for the LMO coefficients, unless `THRESH` or `RELTHR` is given. With the default
+  1.D-13 the MOZYME SCF cannot converge below about 1e-5 eV (rotations smaller than sqrt(THRESH)
+  cannot add atoms to the LMOs), so a 1e-6 criterion would never be met.
+
+Against the conventional (non-MOZYME) SCF, CPU, same geometry:
+
+| System | ZPE | RMS freq. ≥ 100 cm⁻¹ | S (modes ≥ 20 cm⁻¹) | G = ZPE + H − TS |
+|---|---|---|---|---|
+| Chignolin, 140 atoms (protein) | +0.05 kcal/mol | 0.2 cm⁻¹ | −0.6 cal/(mol K) (all modes) | +0.19 kcal/mol |
+| PET oligomer, 76 atoms (polymer) | +0.04 | 0.15 | −0.2 | +0.13 |
+| d(TpA), 64 atoms (DNA) | +0.05 | 0.18 | −0.2 | +1.2 (see below) |
+
+The harmonic entropy of the modes below ~20 cm⁻¹ (residual translations and rotations, which should be
+zero) is not reliable in either method: finite differences leave them at ±10 cm⁻¹, and whether one comes
+out as +3 or −1 cm⁻¹ changes S by several cal/(mol K). In d(TpA) three such modes change sign and account
+for all of the S and G difference. For free energies of large flexible molecules use the quasi-harmonic
+treatment of your choice on the printed frequencies, or compare only systems with the same low modes.
+
+Cost: the tight criterion makes each gradient about three times slower than the default. For large
+systems compute the partial Hessian of the region that matters (`FORCETS` with `OPT("A25"=5)`: atoms within
+5 Å of residue 25 of chain A) and spread the Hessian rows over several processes with
+`scripts/mozyme_parallel_force.py` (several processes can share one GPU through NVIDIA MPS).
+
 ## What stays on the CPU
 
 The GPU path silently hands the work back to the CPU code (same results, CPU speed) for:

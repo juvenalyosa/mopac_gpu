@@ -103,10 +103,10 @@ def main() -> int:
     ap.add_argument("--opt-cycles", type=int, default=3000)
     ap.add_argument("--precise", action="store_true", help="also run the GPU FORCE with PRECISE")
     ap.add_argument("--scfcrt", type=float, default=None,
-                    help="SCF criterion (kcal/mol) for every FORCE/FORCETS run, CPU and GPU (MOZYME default 0.01)")
+                    help="SCF criterion (kcal/mol) for every FORCE/FORCETS run, CPU and GPU (MOZYME with FORCE: 1e-6)")
     ap.add_argument("--thresh", type=float, default=None,
-                    help="MOZYME LMO threshold THRESH for every FORCE/FORCETS run (default 1.D-13); an SCF "
-                         "criterion below 1.D-5 needs a smaller one, e.g. --scfcrt 0.000001 --thresh 1e-15")
+                    help="MOZYME LMO threshold THRESH for every FORCE/FORCETS run (MOZYME with FORCE: 1.D-15); "
+                         "an SCF criterion below 1.D-5 needs a smaller one than the 1.D-13 of other jobs")
     ap.add_argument("--gpu-repeat", type=int, default=1, help="number of GPU FORCE runs (run-to-run spread)")
     ap.add_argument("--itry-scan", default="",
                     help="comma-separated ITRY values: GPU FORCE with SCFCRT=0.00001 (never met, so every SCF "
