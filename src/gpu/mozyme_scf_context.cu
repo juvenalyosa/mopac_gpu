@@ -505,6 +505,9 @@ MOPAC_UNUSED_SYMBOL constexpr int kCosmoStatusDoubleCount = 5;
 constexpr int kMozymeScfPlsSupervisorLastIter = 10;
 constexpr int kMozymeScfFlagInitialSetup = 1;
 constexpr int kMozymeScfFlagFinalReorth = 2;
+// The iteration limit is the real ITRY: accept the SCF once it is passed, as the CPU does
+// (isitsc: okscf when niter > itrmax), instead of handing it back.
+constexpr int kMozymeScfFlagAcceptIterationLimit = 4;
 constexpr int kMozymeFockPlanFull = 0;
 constexpr int kMozymeFockPlanPartial = 1;
 constexpr int kMozymeFockPlanFullMask = 1;
@@ -5603,7 +5606,8 @@ __device__ int mozyme_pls_supervisor_device(double ovmax, double escf,
 
 __global__ void mozyme_resident_control_advance_kernel(
     int current_iter, int max_iter, int strict_resident, int use_three_point,
-    int lstart, double shift, double emin, const int *diagg_ints,
+    int lstart, double shift, double emin, int accept_iteration_limit,
+    const int *diagg_ints,
     const double *diagg_scalars, const int *addhb_ints,
     const double *addhb_scalars, const int *isitsc_ints,
     const double *isitsc_scalars, int *pls_ints, double *pls_scalars,
@@ -5628,8 +5632,11 @@ __global__ void mozyme_resident_control_advance_kernel(
   if (isitsc_ok == 1 && completed_iter > 1 &&
       (emin != 0.0 || completed_iter > 3)) {
     decision = kResidentDecisionComplete;
-  } else if (completed_iter >= max_iter) {
-    decision = kResidentDecisionIterationExhausted;
+  } else if (completed_iter >= max_iter + (accept_iteration_limit != 0 ? 1 : 0)) {
+    // With the real ITRY as limit, isitsc accepts at niter > itrmax (Complete above); this
+    // branch then only catches a missing isitsc result.
+    decision = accept_iteration_limit != 0 ? kResidentDecisionComplete
+                                           : kResidentDecisionIterationExhausted;
   } else if (strict_resident == 0 &&
              completed_iter > kMozymeScfPlsSupervisorLastIter) {
     decision = kResidentDecisionCpuBoundary;
@@ -10905,8 +10912,9 @@ bool advance_resident_control_on_gpu(MozymeScfContext &ctx,
   mozyme_resident_control_advance_kernel<<<1, 1>>>(
       ctx.config.current_iter, ctx.config.max_iter, strict_resident ? 1 : 0,
       ctx.config.use_three_point, ctx.config.lstart, ctx.config.shift,
-      ctx.config.emin, dev.diagg_ints.ptr, dev.diagg_scalars.ptr,
-      dev.addhb_ints.ptr,
+      ctx.config.emin,
+      (ctx.config.flags & kMozymeScfFlagAcceptIterationLimit) != 0 ? 1 : 0,
+      dev.diagg_ints.ptr, dev.diagg_scalars.ptr, dev.addhb_ints.ptr,
       dev.addhb_scalars.ptr, dev.isitsc_ints.ptr, dev.isitsc_scalars.ptr,
       dev.pls_ints.ptr, dev.pls_scalars.ptr, dev.resident_control_ints.ptr,
       dev.resident_control_scalars.ptr);

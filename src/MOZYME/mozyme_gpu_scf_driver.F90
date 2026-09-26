@@ -316,6 +316,9 @@ contains
     call init_config(config, nocc, nvir, resident_max_iter, niter, &
       fock_mode, idiagg, nhb, density_indi, selcon, previous_escf, &
       iemin, iemax, lstart, initial_setup_requested, final_reorth_requested)
+    ! The limit is the real ITRY (not a DENOUT checkpoint): like the CPU (isitsc: okscf once
+    ! niter > itrmax), the device accepts the SCF at that point instead of handing it back.
+    if (resident_max_iter >= itrmax) config%flags = ior(config%flags, 4_c_int)
     call init_status(status)
     call init_state(state, cosmo_state_supported)
 
