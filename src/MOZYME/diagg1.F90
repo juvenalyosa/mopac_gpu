@@ -68,6 +68,8 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
          & jj, jl, jx, k, k1, kk, kl, l, loopi, loopj, kj, i1j1, &
          & i1j2, i2j1, i2j2, k1j1
     logical :: lij
+    integer, dimension (:), allocatable :: nbfirst, nbatom, nboff
+    double precision, dimension (:), allocatable :: nbp
     logical, save :: times
     double precision :: cutlim, flim
     double precision :: cutoff, sum, sum1
@@ -153,7 +155,13 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
     !    1.D-6      0.004
     !    1.D-7      0.00004
     !
+    !   A TERM OF SIZE SQRT(CUTOFF) IS LEFT OUT OF EACH OCCUPIED - VIRTUAL
+    !   INTERACTION.  NEAR SELF-CONSISTENCY THAT MUST STAY WELL BELOW THE
+    !   LARGEST INTERACTION (OVMAX, FROM THE LAST ITERATION), OR THE LEFT-OUT
+    !   TERMS, WHICH CHANGE AS THE LMOS ROTATE, SET A FLOOR TO THE SCF.
+    !
     cutlim = 1.d-8
+    if (ovmax > 0.d0) cutlim = Min (cutlim, Max ((1.d-2*ovmax)**2, 1.d-20))
     cutoff = Max (cutlim, tiny*10.d0*cutlim)
     flim = Min (3.d0, fref*0.5d0)
     fref = 0.d0
@@ -317,6 +325,14 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
     ijc = 0
     tiny = 0.d0
     !
+    !   ATOM NEIGHBOUR LISTS, SORTED BY THE SIZE OF THE FOCK BLOCK
+    !
+    allocate (nbfirst(numat+1), nbatom(1), nboff(1), nbp(1))
+    call diagg1_neighbours (0, cutoff, nbfirst, nbatom, nboff, nbp)
+    k = Max (nbfirst(numat+1) - 1, 1)
+    deallocate (nbatom, nboff, nbp)
+    allocate (nbatom(k), nboff(k), nbp(k))
+    call diagg1_neighbours (1, cutoff, nbfirst, nbatom, nboff, nbp)
     !
     do i = 1, nvir
       !
@@ -346,119 +362,28 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
         latoms(icvir(j)) = .true.
       end do
       !
-      if (lijbo) then
-        do jj = nnce(i) + 1, nnce(i) + nce(i)
-          j1 = icvir(jj)
-          do jx = 1, iorbs(j1)
-            ws(nfirst(j1)+jx-1) = 0.0d00
-          end do
-          !
-          kl = loopi
-          do kk = nnce(i) + 1, nnce(i) + nce(i)
-            k1 = icvir(kk)
-            kj = nijbo(k1, j1)
-            if (kj >= 0) then
-              if (avir(k1)*p(kj+1) > cutoff) then
-                !
-                !  EXTRACT THE ATOM-ATOM INTERSECTION OF FAO
-                !
-                if (iorbs(k1) .eq. 1 .and. iorbs(j1) .eq. 1) then
-                  ws(nfirst(j1)) = ws(nfirst(j1)) + fao(kj+1) * cvir(kl+1)
-                else
-                  if (k1 > j1) then
-                    ii = kj
-                    do i4 = 1, iorbs(k1)
-                      do jx = 1, iorbs(j1)
-                        ii = ii + 1
-                        ws(nfirst(j1)+jx-1) = ws(nfirst(j1)+jx-1) + fao(ii) &
-                             & * cvir(kl+i4)
-                      end do
-                    end do
-                  else if (k1 < j1) then
-                    ii = kj
-                    do jx = 1, iorbs(j1)
-                      do i4 = 1, iorbs(k1)
-                        ii = ii + 1
-                        ws(nfirst(j1)+jx-1) = ws(nfirst(j1)+jx-1) + fao(ii) &
-                             & * cvir(kl+i4)
-                      end do
-                    end do
-                  else
-                    do jx = 1, iorbs(j1)
-                      do i4 = 1, iorbs(j1)
-                        if (i4 > jx) then
-                          ii = kj + (i4*(i4-1)) / 2 + jx
-                        else
-                          ii = kj + (jx*(jx-1)) / 2 + i4
-                        end if
-                        ws(nfirst(j1)+jx-1) = ws(nfirst(j1)+jx-1) + fao(ii) &
-                             & * cvir(kl+i4)
-                      end do
-                    end do
-                  end if
-                end if
-              end if
-            end if
-            kl = kl + iorbs(k1)
-          end do
+      !
+      !   WS = FAO * (VIRTUAL LMO I), OVER THE ATOMS OF LMO I AND OVER EVERY
+      !   ATOM OUTSIDE IT THAT HAS A SIGNIFICANT FOCK BLOCK WITH AN ATOM OF
+      !   LMO I.  THE OCCUPIED - VIRTUAL INTERACTION <I|F|J> RUNS OVER EVERY
+      !   ATOM OF THE OCCUPIED LMO J: IF THE ATOMS OUTSIDE LMO I WERE LEFT
+      !   OUT, THE INTERACTION WOULD DEPEND ON WHETHER A BOUNDARY ATOM OF
+      !   LMO J HAPPENED TO BE IN LMO I, WHICH CHANGES WHEN DIAGG2 ADDS THE
+      !   ATOM AND TIDY REMOVES IT AGAIN, AND THE SCF WOULD CYCLE WITHOUT
+      !   CONVERGING.  LATOMS MARKS THE ATOMS WHERE WS IS SET.
+      !
+      do jj = nnce(i) + 1, nnce(i) + nce(i)
+        j1 = icvir(jj)
+        do jx = nfirst(j1), nlast(j1)
+          ws(jx) = 0.d0
         end do
-      else
-        do jj = nnce(i) + 1, nnce(i) + nce(i)
-          j1 = icvir(jj)
-          do jx = 1, iorbs(j1)
-            ws(nfirst(j1)+jx-1) = 0.0d00
-          end do
-          !
-          kl = loopi
-          do kk = nnce(i) + 1, nnce(i) + nce(i)
-            k1 = icvir(kk)
-            kj = ijbo (k1, j1)
-            if (kj >= 0) then
-              if (avir(k1)*p(kj+1) > cutoff) then
-                !
-                !  EXTRACT THE ATOM-ATOM INTERSECTION OF FAO
-                !
-                if (iorbs(k1) == 1 .and. iorbs(j1) == 1) then
-                  ws(nfirst(j1)) = ws(nfirst(j1)) + fao(kj+1) * cvir(kl+1)
-                else
-                  if (k1 > j1) then
-                    ii = kj
-                    do i4 = 1, iorbs(k1)
-                      do jx = 1, iorbs(j1)
-                        ii = ii + 1
-                        ws(nfirst(j1)+jx-1) = ws(nfirst(j1)+jx-1) + fao(ii) &
-                             & * cvir(kl+i4)
-                      end do
-                    end do
-                  else if (k1 < j1) then
-                    ii = kj
-                    do jx = 1, iorbs(j1)
-                      do i4 = 1, iorbs(k1)
-                        ii = ii + 1
-                        ws(nfirst(j1)+jx-1) = ws(nfirst(j1)+jx-1) + fao(ii) &
-                             & * cvir(kl+i4)
-                      end do
-                    end do
-                  else
-                    do jx = 1, iorbs(j1)
-                      do i4 = 1, iorbs(j1)
-                        if (i4 > jx) then
-                          ii = kj + (i4*(i4-1)) / 2 + jx
-                        else
-                          ii = kj + (jx*(jx-1)) / 2 + i4
-                        end if
-                        ws(nfirst(j1)+jx-1) = ws(nfirst(j1)+jx-1) + fao(ii) &
-                             & * cvir(kl+i4)
-                      end do
-                    end do
-                  end if
-                end if
-              end if
-            end if
-            kl = kl + iorbs(k1)
-          end do
-        end do
-      end if
+      end do
+      kl = loopi
+      do kk = nnce(i) + 1, nnce(i) + nce(i)
+        k1 = icvir(kk)
+        call diagg1_ws (fao, k1, kl, avir(k1), cutoff, nbfirst, nbatom, nboff, nbp, ws, latoms)
+        kl = kl + iorbs(k1)
+      end do
       !
       do j = 1, numat
         if (latoms(j)) then
@@ -661,6 +586,7 @@ subroutine diagg1 (fao, nocc, nvir, eigv, ws, latoms, ifmo, fmo, fmo_dim, nij, i
         end do
       end if
     end do
+    deallocate (nbfirst, nbatom, nboff, nbp)
     !
     if (ijc == nij) then
       !
@@ -943,3 +869,169 @@ contains
   end function mozyme_diagg1_aocc_trace
 #endif
 end subroutine diagg1
+subroutine diagg1_neighbours (mode, cutoff, nbfirst, nbatom, nboff, nbp)
+   !**********************************************************************
+   !
+   !  For every atom J, list the atoms K that share a Fock block with J whose
+   !  square (from EIMP, in P) exceeds CUTOFF: NBATOM(NBFIRST(J):NBFIRST(J+1)-1),
+   !  with the block address NBOFF (as IJBO) and the square NBP, sorted by
+   !  decreasing NBP, so that a search for significant blocks stops early.
+   !
+   !  MODE = 0: only NBFIRST is set (the lists need NBFIRST(NUMAT+1) - 1
+   !            elements); MODE = 1: the lists are filled.
+   !
+   !**********************************************************************
+    use molkst_C, only: numat
+    use MOZYME_C, only : iorbs
+    use common_arrays_C, only : p
+    implicit none
+    integer, intent (in) :: mode
+    double precision, intent (in) :: cutoff
+    integer, dimension (numat+1), intent (inout) :: nbfirst
+    integer, dimension (*), intent (inout) :: nbatom, nboff
+    double precision, dimension (*), intent (inout) :: nbp
+    integer :: gap, i, j, k, kj, m, n, ia, io
+    integer, dimension (:), allocatable :: nfill
+    double precision :: pa
+    integer, external :: ijbo
+    allocate (nfill(numat))
+    nfill(:) = 0
+    if (mode == 0) then
+      do j = 1, numat
+        do k = 1, j - 1
+          kj = ijbo (j, k)
+          if (kj >= 0) then
+            if (iorbs(j)*iorbs(k) /= 0 .and. p(kj+1) > cutoff) then
+              nfill(j) = nfill(j) + 1
+              nfill(k) = nfill(k) + 1
+            end if
+          end if
+        end do
+      end do
+      nbfirst(1) = 1
+      do j = 1, numat
+        nbfirst(j+1) = nbfirst(j) + nfill(j)
+      end do
+      deallocate (nfill)
+      return
+    end if
+    do j = 1, numat
+      do k = 1, j - 1
+        kj = ijbo (j, k)
+        if (kj >= 0) then
+          if (iorbs(j)*iorbs(k) /= 0 .and. p(kj+1) > cutoff) then
+            m = nbfirst(j) + nfill(j)
+            nbatom(m) = k
+            nboff(m) = kj
+            nbp(m) = p(kj+1)
+            nfill(j) = nfill(j) + 1
+            m = nbfirst(k) + nfill(k)
+            nbatom(m) = j
+            nboff(m) = kj
+            nbp(m) = p(kj+1)
+            nfill(k) = nfill(k) + 1
+          end if
+        end if
+      end do
+    end do
+    !
+    !  Shell sort of each list, largest block first
+    !
+    do j = 1, numat
+      n = nfill(j)
+      gap = 1
+      do while (gap < n/3)
+        gap = 3*gap + 1
+      end do
+      do while (gap >= 1)
+        do i = nbfirst(j) + gap, nbfirst(j) + n - 1
+          pa = nbp(i)
+          ia = nbatom(i)
+          io = nboff(i)
+          m = i
+          do while (m - gap >= nbfirst(j))
+            if (nbp(m-gap) >= pa) exit
+            nbp(m) = nbp(m-gap)
+            nbatom(m) = nbatom(m-gap)
+            nboff(m) = nboff(m-gap)
+            m = m - gap
+          end do
+          nbp(m) = pa
+          nbatom(m) = ia
+          nboff(m) = io
+        end do
+        gap = gap/3
+      end do
+    end do
+    deallocate (nfill)
+end subroutine diagg1_neighbours
+subroutine diagg1_ws (fao, k1, kl, avirk, cutoff, nbfirst, nbatom, nboff, nbp, ws, latoms)
+   !**********************************************************************
+   !
+   !  Add to WS the contribution of atom K1 of a virtual LMO: for every atom
+   !  J1 (K1 itself and its neighbours), WS(J1) += FAO(J1,K1) * CVIR(K1), if
+   !  AVIRK*P(J1,K1) exceeds CUTOFF (AVIRK is the square of the coefficients
+   !  of K1, P holds the density on the diagonal block and the square of the
+   !  Fock block, from EIMP, elsewhere).  KL is the address of K1 in CVIR.
+   !  An atom J1 that is not yet in LATOMS is added, and its WS zeroed.
+   !  The neighbour lists are sorted by decreasing P, so the search stops at
+   !  the first block that fails the test.
+   !
+   !**********************************************************************
+    use molkst_C, only: numat, norbs, mpack
+    use MOZYME_C, only : iorbs, cvir
+    use common_arrays_C, only : nfirst, nlast, p
+    implicit none
+    integer, intent (in) :: k1, kl
+    double precision, intent (in) :: avirk, cutoff
+    integer, dimension (numat+1), intent (in) :: nbfirst
+    integer, dimension (*), intent (in) :: nbatom, nboff
+    double precision, dimension (*), intent (in) :: nbp
+    double precision, dimension (mpack), intent (in) :: fao
+    double precision, dimension (norbs), intent (inout) :: ws
+    logical, dimension (numat), intent (inout) :: latoms
+    integer :: i4, ii, j1, jx, kj, m
+    integer, external :: ijbo
+    !
+    !  Diagonal block
+    !
+    kj = ijbo (k1, k1)
+    if (avirk*p(kj+1) > cutoff) then
+      do jx = 1, iorbs(k1)
+        do i4 = 1, iorbs(k1)
+          if (i4 > jx) then
+            ii = kj + (i4*(i4-1)) / 2 + jx
+          else
+            ii = kj + (jx*(jx-1)) / 2 + i4
+          end if
+          ws(nfirst(k1)+jx-1) = ws(nfirst(k1)+jx-1) + fao(ii) * cvir(kl+i4)
+        end do
+      end do
+    end if
+    do m = nbfirst(k1), nbfirst(k1+1) - 1
+      if (avirk*nbp(m) <= cutoff) exit
+      j1 = nbatom(m)
+      if (.not. latoms(j1)) then
+        latoms(j1) = .true.
+        do jx = nfirst(j1), nlast(j1)
+          ws(jx) = 0.d0
+        end do
+      end if
+      ii = nboff(m)
+      if (k1 > j1) then
+        do i4 = 1, iorbs(k1)
+          do jx = 1, iorbs(j1)
+            ii = ii + 1
+            ws(nfirst(j1)+jx-1) = ws(nfirst(j1)+jx-1) + fao(ii) * cvir(kl+i4)
+          end do
+        end do
+      else
+        do jx = 1, iorbs(j1)
+          do i4 = 1, iorbs(k1)
+            ii = ii + 1
+            ws(nfirst(j1)+jx-1) = ws(nfirst(j1)+jx-1) + fao(ii) * cvir(kl+i4)
+          end do
+        end do
+      end if
+    end do
+end subroutine diagg1_ws

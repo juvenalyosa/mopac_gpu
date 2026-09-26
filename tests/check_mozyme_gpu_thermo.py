@@ -104,6 +104,9 @@ def main() -> int:
     ap.add_argument("--precise", action="store_true", help="also run the GPU FORCE with PRECISE")
     ap.add_argument("--scfcrt", type=float, default=None,
                     help="SCF criterion (kcal/mol) for every FORCE/FORCETS run, CPU and GPU (MOZYME default 0.01)")
+    ap.add_argument("--thresh", type=float, default=None,
+                    help="MOZYME LMO threshold THRESH for every FORCE/FORCETS run (default 1.D-13); an SCF "
+                         "criterion below 1.D-5 needs a smaller one, e.g. --scfcrt 0.000001 --thresh 1e-15")
     ap.add_argument("--gpu-repeat", type=int, default=1, help="number of GPU FORCE runs (run-to-run spread)")
     ap.add_argument("--itry-scan", default="",
                     help="comma-separated ITRY values: GPU FORCE with SCFCRT=0.00001 (never met, so every SCF "
@@ -201,8 +204,10 @@ def main() -> int:
         ref_cache["ref"] = ref
         return ref
 
+    thresh_kw = f" THRESH={a.thresh:g}" if a.thresh else ""
+
     def keywords(itry: int, scfcrt: float) -> str:
-        return md.BASE_KEYS.replace("ITRY=200", f"ITRY={itry}") + f" THERMO({T:g}) SCFCRT={scfcrt:g}"
+        return md.BASE_KEYS.replace("ITRY=200", f"ITRY={itry}") + f" THERMO({T:g}) SCFCRT={scfcrt:g}" + thresh_kw
 
     def versus_reference(label: str, th: dict, wall: float) -> None:
         ref = reference()
@@ -215,8 +220,9 @@ def main() -> int:
     # ---------------- small system: CPU vs GPU ----------------
     small = a.pdb_id
     opt_pdb = prepared_and_optimized(small)
-    thermo_kw = f"THERMO({T:g})" + (f" SCFCRT={a.scfcrt:g}" if a.scfcrt else "")
-    tag = f"_scfcrt{a.scfcrt:g}" if a.scfcrt else ""   # separate directories per SCF criterion
+    thermo_kw = f"THERMO({T:g})" + (f" SCFCRT={a.scfcrt:g}" if a.scfcrt else "") + thresh_kw
+    # separate directories per SCF criterion and LMO threshold
+    tag = (f"_scfcrt{a.scfcrt:g}" if a.scfcrt else "") + (f"_thresh{a.thresh:g}" if a.thresh else "")
     full_kw = f'{md.BASE_KEYS} FORCE {thermo_kw} GEO_DAT="{opt_pdb.name}"'
     ctext, cwall, _ = run(work / small / f"force_cpu{tag}", "force", full_kw, opt_pdb, CPU_ENV)
     gtext, gwall, gstat = run(work / small / f"force_gpu{tag}", "force", full_kw, opt_pdb, None)
@@ -234,6 +240,12 @@ def main() -> int:
     compare(f"{small} FORCE", cth, gth)
     if gwall > 0:
         print(f"     {small} FORCE: speed-up {cwall / gwall:.1f}x", flush=True)
+    if a.scfcrt:
+        # an explicit (tight) criterion: both against the conventional SCF
+        versus_reference(f"{small} FORCE CPU", cth, cwall)
+        versus_reference(f"{small} FORCE GPU", gth, gwall)
+        ref = reference()
+        compare(f"{small} FORCE GPU vs conventional", ref, gth)
     if a.precise:
         ptext, pwall, pstat = run(work / small / f"force_gpu_precise{tag}", "force", full_kw + " PRECISE", opt_pdb, None)
         pth = thermo(ptext, T)
@@ -245,8 +257,8 @@ def main() -> int:
         # (MOZYME default 0.01 kcal/mol): GPU only, each value against the tightest one.
         scan = []
         for value in sorted((float(v) for v in a.scfcrt_scan.split(",") if v.strip()), reverse=True):
-            kw = f'{md.BASE_KEYS} FORCE THERMO({T:g}) SCFCRT={value:g} GEO_DAT="{opt_pdb.name}"'
-            text, wall, stat = run(work / small / f"scan_gpu_scfcrt{value:g}", "force", kw, opt_pdb, None)
+            kw = f'{md.BASE_KEYS} FORCE THERMO({T:g}) SCFCRT={value:g}{thresh_kw} GEO_DAT="{opt_pdb.name}"'
+            text, wall, stat = run(work / small / f"scan_gpu_scfcrt{value:g}{tag}", "force", kw, opt_pdb, None)
             th = thermo(text, T)
             summary(f"{small} FORCE GPU SCFCRT={value:g}", th, wall, stat)
             scan.append((value, th))
