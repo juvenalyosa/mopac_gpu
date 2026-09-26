@@ -207,9 +207,18 @@ def main() -> int:
             summary(f"{small} FORCE GPU SCFCRT={value:g}", th, wall, stat)
             scan.append((value, th))
         # Reference: the conventional (non-MOZYME) SCF, fully converged at every displaced geometry.
-        conv_kw = f'PM7 FORCE THERMO({T:g}) GEO-OK GEO_DAT="{opt_pdb.name}"'
-        rtext, rwall, _ = run(work / small / "reference_conventional_cpu", "force", conv_kw, opt_pdb, CPU_ENV)
-        ref = thermo(rtext, T)
+        # Converger aids: the plain conventional SCF oscillated on the GPU-optimized geometry
+        # ("THE SCF CALCULATION FAILED" after 2542 s on Colab); PULAY first, then CAMP KING.
+        ref, rwall = {"freqs": []}, 0.0
+        for attempt, aids in enumerate(("PULAY ITRY=500", "CAMP KING ITRY=500"), start=1):
+            conv_kw = f'PM7 FORCE THERMO({T:g}) {aids} GEO-OK GEO_DAT="{opt_pdb.name}"'
+            rtext, rwall, _ = run(work / small / f"reference_conventional_cpu_{attempt}", "force", conv_kw,
+                                  opt_pdb, CPU_ENV)
+            ref = thermo(rtext, T)
+            if ref["freqs"]:
+                break
+            print(f"     conventional reference with {aids}: SCF failed, "
+                  f"{'trying the next converger' if attempt == 1 else 'no reference'}", flush=True)
         summary(f"{small} FORCE conventional SCF (reference, CPU)", ref, rwall, [])
         compare(f"{small} MOZYME GPU SCFCRT={scan[-1][0]:g} vs conventional", ref, scan[-1][1])
         for value, th in scan:
