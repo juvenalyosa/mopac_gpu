@@ -36,6 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import mozyme_md_workflow as md  # noqa: E402
+import mozyme_parallel_force as pf  # noqa: E402
 
 ZPE_RE = re.compile(r"ZERO POINT ENERGY\s+([-0-9.]+)\s+KCAL/MOL")
 TOT_RE = re.compile(r"^\s+TOT\.\s+([-0-9.]+)\s+([-0-9.]+)\s+([-0-9.]+)\s+([-0-9.]+)", re.M)
@@ -104,6 +105,15 @@ def main() -> int:
     ap.add_argument("--scfcrt", type=float, default=None,
                     help="SCF criterion (kcal/mol) for every FORCE/FORCETS run, CPU and GPU (MOZYME default 0.01)")
     ap.add_argument("--gpu-repeat", type=int, default=1, help="number of GPU FORCE runs (run-to-run spread)")
+    ap.add_argument("--itry-scan", default="",
+                    help="comma-separated ITRY values: GPU FORCE with SCFCRT=0.00001 (never met, so every SCF "
+                         "runs exactly ITRY iterations) against the conventional reference, e.g. 30,60,100,200")
+    ap.add_argument("--parallel-workers", type=int, default=0,
+                    help="also compute the GPU FORCE (SCFCRT=--parallel-scfcrt) with this many MOPAC processes at once")
+    ap.add_argument("--parallel-scfcrt", type=float, default=0.00001)
+    ap.add_argument("--parallel-itry", type=int, default=200)
+    ap.add_argument("--large-workers", type=int, default=0,
+                    help="crambin: accurate FORCE (SCFCRT=--parallel-scfcrt, ITRY=--parallel-itry) with this many processes")
     ap.add_argument("--scfcrt-scan", default="",
                     help="comma-separated SCF criteria for a GPU-only FORCE convergence scan, e.g. 0.01,0.001,0.0001")
     ap.add_argument("--skip-large", action="store_true")
@@ -168,6 +178,40 @@ def main() -> int:
                 d = gpu[key] - cpu[key]
                 check(abs(d) <= tol, f"{label}: {key} GPU - CPU = {d:+.4f} {unit} (tolerance {tol})")
 
+    ref_cache: dict = {}
+
+    def reference() -> dict:
+        """Conventional (non-MOZYME) SCF FORCE, fully converged at every displaced geometry."""
+        if "ref" in ref_cache:
+            return ref_cache["ref"]
+        # Reference: the conventional (non-MOZYME) SCF, fully converged at every displaced geometry.
+        # Converger aids: the plain conventional SCF oscillated on the GPU-optimized geometry
+        # ("THE SCF CALCULATION FAILED" after 2542 s on Colab); PULAY first, then CAMP KING.
+        ref, rwall = {"freqs": []}, 0.0
+        for attempt, aids in enumerate(("PULAY ITRY=500", "CAMP KING ITRY=500"), start=1):
+            conv_kw = f'PM7 FORCE THERMO({T:g}) {aids} GEO-OK GEO_DAT="{opt_pdb.name}"'
+            rtext, rwall, _ = run(work / small / f"reference_conventional_cpu_{attempt}", "force", conv_kw,
+                                  opt_pdb, CPU_ENV)
+            ref = thermo(rtext, T)
+            if ref["freqs"]:
+                break
+            print(f"     conventional reference with {aids}: SCF failed, "
+                  f"{'trying the next converger' if attempt == 1 else 'no reference'}", flush=True)
+        summary(f"{small} FORCE conventional SCF (reference, CPU)", ref, rwall, [])
+        ref_cache["ref"] = ref
+        return ref
+
+    def keywords(itry: int, scfcrt: float) -> str:
+        return md.BASE_KEYS.replace("ITRY=200", f"ITRY={itry}") + f" THERMO({T:g}) SCFCRT={scfcrt:g}"
+
+    def versus_reference(label: str, th: dict, wall: float) -> None:
+        ref = reference()
+        if len(th["freqs"]) == len(ref["freqs"]) and th["freqs"]:
+            d = [x - y for y, x in zip(sorted(ref["freqs"]), sorted(th["freqs"])) if y >= 100.0]
+            print(f"     {label} vs conventional: {wall:.1f} s, mean frequency shift {sum(d) / len(d):+.2f} cm-1, "
+                  f"ZPE {th['zpe'] - ref['zpe']:+.3f}, S {th['S'] - ref['S']:+.3f} cal/(mol K), "
+                  f"G {th['G'] - ref['G']:+.3f} kcal/mol", flush=True)
+
     # ---------------- small system: CPU vs GPU ----------------
     small = a.pdb_id
     opt_pdb = prepared_and_optimized(small)
@@ -206,20 +250,7 @@ def main() -> int:
             th = thermo(text, T)
             summary(f"{small} FORCE GPU SCFCRT={value:g}", th, wall, stat)
             scan.append((value, th))
-        # Reference: the conventional (non-MOZYME) SCF, fully converged at every displaced geometry.
-        # Converger aids: the plain conventional SCF oscillated on the GPU-optimized geometry
-        # ("THE SCF CALCULATION FAILED" after 2542 s on Colab); PULAY first, then CAMP KING.
-        ref, rwall = {"freqs": []}, 0.0
-        for attempt, aids in enumerate(("PULAY ITRY=500", "CAMP KING ITRY=500"), start=1):
-            conv_kw = f'PM7 FORCE THERMO({T:g}) {aids} GEO-OK GEO_DAT="{opt_pdb.name}"'
-            rtext, rwall, _ = run(work / small / f"reference_conventional_cpu_{attempt}", "force", conv_kw,
-                                  opt_pdb, CPU_ENV)
-            ref = thermo(rtext, T)
-            if ref["freqs"]:
-                break
-            print(f"     conventional reference with {aids}: SCF failed, "
-                  f"{'trying the next converger' if attempt == 1 else 'no reference'}", flush=True)
-        summary(f"{small} FORCE conventional SCF (reference, CPU)", ref, rwall, [])
+        ref = reference()
         compare(f"{small} MOZYME GPU SCFCRT={scan[-1][0]:g} vs conventional", ref, scan[-1][1])
         for value, th in scan:
             if len(th["freqs"]) == len(ref["freqs"]) and th["freqs"]:
@@ -227,6 +258,38 @@ def main() -> int:
                 print(f"     SCFCRT={value:g} vs conventional: mean frequency shift {sum(d) / len(d):+.2f} cm-1, "
                       f"ZPE {th['zpe'] - ref['zpe']:+.3f}, S {th['S'] - ref['S']:+.3f} cal/(mol K), "
                       f"G {th['G'] - ref['G']:+.3f} kcal/mol", flush=True)
+
+    if a.itry_scan:
+        # With an unreachable criterion every SCF runs exactly ITRY iterations: how many are needed?
+        for itry in sorted(int(v) for v in a.itry_scan.split(",") if v.strip()):
+            kw = keywords(itry, 0.00001) + f' FORCE GEO_DAT="{opt_pdb.name}"'
+            text, wall, stat = run(work / small / f"itry_gpu_{itry}", "force", kw, opt_pdb, None)
+            th = thermo(text, T)
+            summary(f"{small} FORCE GPU ITRY={itry}", th, wall, stat)
+            versus_reference(f"{small} ITRY={itry}", th, wall)
+
+    if a.parallel_workers > 0:
+        # sequential counterpart: the ITRY scan run with the same ITRY (SCFCRT=0.00001)
+        seq_dir = work / small / f"itry_gpu_{a.parallel_itry}"
+        out, tim = pf.parallel_force(mopac, opt_pdb, keywords(a.parallel_itry, a.parallel_scfcrt), a.parallel_workers,
+                                     work / small / f"parallel_gpu_w{a.parallel_workers}")
+        th = thermo(out.read_text(errors="ignore"), T)
+        wall = tim["template_s"] + tim["workers_s"] + tim["final_s"]
+        summary(f"{small} parallel FORCE GPU, {tim['workers']} workers", th, wall, [])
+        versus_reference(f"{small} parallel FORCE", th, wall)
+        seq_out = seq_dir / "force.out"
+        if seq_out.exists():
+            seq_text = seq_out.read_text(errors="ignore")
+            seq_wall = re.findall(r"TOTAL JOB TIME:\s*([0-9.]+)", seq_text)
+            seq = thermo(seq_text, T)
+            # Informational: each worker starts its SCF from scratch, so with a fixed ITRY the two runs
+            # differ at the level of the ITRY error itself; both are checked against the reference.
+            if len(seq["freqs"]) == len(th["freqs"]) and th["freqs"]:
+                print(f"     {small} parallel - sequential: ZPE {th['zpe'] - seq['zpe']:+.3f}, "
+                      f"S {th['S'] - seq['S']:+.3f} cal/(mol K), G {th['G'] - seq['G']:+.3f} kcal/mol", flush=True)
+            if seq_wall:
+                print(f"     {small} parallel FORCE: {float(seq_wall[-1]):.1f} s sequential -> {wall:.1f} s "
+                      f"({float(seq_wall[-1]) / wall:.1f}x)", flush=True)
 
     sel, _, rad = a.partial.partition("=")
     part_kw = f'{md.BASE_KEYS} FORCETS {thermo_kw} OPT("{sel}"={rad}) GEO_DAT="{opt_pdb.name}"'
@@ -252,6 +315,13 @@ def main() -> int:
             print(f"     {big} FORCE GPU: {wall / (6 * natoms):.3f} s per gradient", flush=True)
         check(len(th["freqs"]) == 3 * natoms - 6, f"{big} FORCE GPU: {len(th['freqs'])} frequencies "
               f"(expected {3 * natoms - 6})")
+        if a.large_workers > 0:
+            out, tim = pf.parallel_force(mopac, big_pdb, keywords(a.parallel_itry, a.parallel_scfcrt) + " LET",
+                                         a.large_workers, work / big / f"parallel_gpu_w{a.large_workers}")
+            th = thermo(out.read_text(errors="ignore"), T)
+            wall = tim["template_s"] + tim["workers_s"] + tim["final_s"]
+            summary(f"{big} accurate FORCE GPU (SCFCRT={a.parallel_scfcrt:g}, ITRY={a.parallel_itry}), "
+                    f"{tim['workers']} workers", th, wall, [])
         sel, _, rad = a.large_partial.partition("=")
         kw = f'{md.BASE_KEYS} FORCETS {thermo_kw} LET OPT("{sel}"={rad}) GEO_DAT="{big_pdb.name}"'
         text, wall, stat = run(work / big / f"forcets_gpu{tag}", "forcets", kw, big_pdb, None)
