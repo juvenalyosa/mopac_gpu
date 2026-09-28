@@ -3474,6 +3474,9 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
       for (int idx = b0; idx < b1; ++idx) {
         const int b = have_nbr ? a.nbr_list[idx] : idx;
         if (b == k1 || b < 1 || b > a.numat) continue;
+        // An atom without orbitals (sparkle) has an empty block whose nijbo
+        // is the address of the next block (fillij), as in diagg1_neighbours.
+        if (a.iorbs[b - 1] < 1) continue;
         const int kj = mozyme_nijbo_at(a.nijbo, a.numat, k1, b);
         if (kj < 0 || !(av * a.p[kj] > cutoff)) continue;
         if (lmo_hash_find(s_map, s_atoms, b) >= 0) continue;
