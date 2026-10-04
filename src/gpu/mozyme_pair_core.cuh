@@ -1817,10 +1817,12 @@ static __device__ __forceinline__ void mpc_tx_full(const MozymePairRotD &rot, co
 // Fortran ww(indw(i,j)) with indw = (indx(i,j)-1)*limkl + kl.
 static __device__ __forceinline__ void mpc_rotate_w_full(const MozymePairRotD &rot,
                                                          const double *rep, int ii, int kk,
-                                                         double *ww) {
+                                                         double *ww, double *v_scratch) {
   const int met[45] = {1, 2, 3, 2, 3, 3, 2, 3, 3, 3, 4, 5, 5, 5, 6, 4, 5, 5, 5, 6, 6, 4, 5,
                        5, 5, 6, 6, 6, 4, 5, 5, 5, 6, 6, 6, 6, 4, 5, 5, 5, 6, 6, 6, 6, 6};
-  double v[45][45];
+  // v (45 x 45) lives in the caller's scratch, not on the stack (see
+  // kMozymePairCoreScratchD).
+  double (*v)[45] = reinterpret_cast<double (*)[45]>(v_scratch);
   for (int n = 0; n < 2025; ++n) ww[n] = 0.0;
   if (ii * kk <= 0) return;
   const int limkl = mpc_indx(kk, kk);
@@ -1950,9 +1952,14 @@ static __device__ __forceinline__ void mpc_elenuc_full(const MozymePairRotD &rot
 // true is returned (rotate zeroes w but does not advance kr).
 // Local storage: about 40 KB per call (ww, v, rep, rotation matrices).
 // ---------------------------------------------------------------------------
+// Scratch of mozyme_pair_core_dev, per thread: rep(491), ww(2025), v(45 x 45).
+// These arrays used to be locals; ~36 KB of stack per thread made the driver
+// reserve local memory for every thread the GPU can hold (~10 GB on an A100).
+constexpr int kMozymePairCoreScratchD = 491 + 2025 + 2025;
+
 static __device__ __forceinline__ bool mozyme_pair_core_dev(
     int ni, int nj, const double *xi, const double *xj, const MozymePairCoreParams &prm,
-    double *w, int *w_count, double *e1b, double *e2a, double *enuc) {
+    double *w, int *w_count, double *e1b, double *e2a, double *enuc, double *scratch) {
   if (ni < 1 || ni > 107 || nj < 1 || nj > 107) return false;
   const int li = prm.natorb[ni - 1];
   const int lj = prm.natorb[nj - 1];
@@ -2000,7 +2007,7 @@ static __device__ __forceinline__ bool mozyme_pair_core_dev(
     cnst = 1.0;
     point = 0.0;
   }
-  double rep[491];
+  double *rep = scratch;
   mpc_reppd2(prm, ni, nj, r, ri, rep, cored1, cored2);
   point = -(prm.ev / r) * prm.tore[nj - 1];
   cored1[0] = cored1[0] * cnst + (1.0 - cnst) * point;
@@ -2026,8 +2033,8 @@ static __device__ __forceinline__ bool mozyme_pair_core_dev(
   cored2[9] = cored2[9] * cnst + (1.0 - cnst) * point;
 
   // two-electron integrals in the molecular frame, ww(2025)
-  double ww[2025];
-  mpc_rotate_w_full(rot, rep, li, lj, ww);
+  double *ww = scratch + 491;
+  mpc_rotate_w_full(rot, rep, li, lj, ww, scratch + 491 + 2025);
 
   // PM7 "d"-orbital balance block of rotatd, complete.  Fortran 1-based
   // ww(n) -> ww[n-1].

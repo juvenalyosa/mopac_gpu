@@ -102,6 +102,10 @@ constexpr int kPointThreads = 256;
 // allocation cap the number of resident threads per SM, which bounds the
 // local-memory reservation the driver makes at launch.
 constexpr int kPairThreadsD = 32;
+// d kernels: fixed grid of kGridD x kPairThreadsD threads (grid-stride), each
+// with w(2025) and the mozyme_pair_core_dev scratch in global memory.
+constexpr int kGridD = 128;
+constexpr int kPairScratchD = mozyme_pair::kMaxWD + kMozymePairCoreScratchD;
 constexpr size_t kPairSharedD = 40 * 1024;
 
 template <typename T>
@@ -224,6 +228,7 @@ struct PairGradArgs {
   double ev;
   int force;             // central differences (FORCE/PRECISE)
   double *dxyz;          // 3 x numat, accumulated
+  double *scratch_d;     // d kernels: kPairScratchD doubles per launched thread
 };
 
 struct HcoreArgs {
@@ -233,6 +238,7 @@ struct HcoreArgs {
   const int *nijbo;      // numat x numat block index (lijbo route), nullptr on the compact route
   double *h;             // packed MOZYME one-electron matrix (mpack), accumulated
   double *enuc;          // accumulated core-core repulsion
+  double *scratch_d;     // d kernels: kPairScratchD doubles per launched thread
 };
 
 __device__ __forceinline__ double coord_at(const double *coord, int atom1, int k) {
@@ -276,7 +282,7 @@ __device__ __forceinline__ int pair_class(const PairGeom &g, int idx, int *ii_ou
 template <bool D>
 __device__ bool pair_energy(const PairGradArgs &a, int nat1, int nat2, int n1, int n2,
                             const double *x1, const double *x2, const double *pdi,
-                            double *dener) {
+                            double *dener, double *scratch) {
   constexpr int kL = D ? mozyme_pair::kMaxLinearD : mozyme_pair::kMaxLinear;
   constexpr int kW = D ? mozyme_pair::kMaxWD : mozyme_pair::kMaxW;
   double smat[81];
@@ -287,12 +293,15 @@ __device__ bool pair_energy(const PairGradArgs &a, int nat1, int nat2, int n1, i
     if (!ok) return false;
     smat_ptr = smat;
   }
-  double e_at2[45], e_at1[45], w[kW];
+  double e_at2[45], e_at1[45];
+  double w_local[D ? 1 : kW];
+  double *w = D ? scratch : w_local;   // D: w(2025) then the core scratch
   double enuc = 0.0;
   int w_count = 0;
   // dhc(): rotate(ni = nat(ii), nj = nat(jj), xi = coord(ii), xj = coord(jj), w, kr, e2a, e1b, enuc)
   // i.e. rotate's first block belongs to atom ii (= atom 2 here).
-  const bool ok = D ? mozyme_pair_core_dev(nat2, nat1, x2, x1, a.core, w, &w_count, e_at2, e_at1, &enuc)
+  const bool ok = D ? mozyme_pair_core_dev(nat2, nat1, x2, x1, a.core, w, &w_count, e_at2, e_at1, &enuc,
+                                           scratch + mozyme_pair::kMaxWD)
                     : mozyme_pair_core_sp_dev(nat2, nat1, x2, x1, a.core, w, &w_count, e_at2, e_at1, &enuc);
   if (!ok) return false;
   // w_count == 0 only for coincident atoms (rotate's small-rij exit): all
@@ -336,14 +345,18 @@ __device__ __forceinline__ void load_pair_density(const PairGradArgs &a, int idx
 // probes 4..6 the -chnge/2 references per coordinate.  energies[7*idx+probe].
 constexpr int kProbesPerPair = 7;
 
+// Fixed grid (kGridD blocks), grid-stride over pair x probe: every launched
+// thread owns kPairScratchD doubles of a.scratch_d for the large d arrays.
 __global__ void mozyme_pair_energy_d_kernel(PairGradArgs a, double *energies) {
-  const int gid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  double *scratch = a.scratch_d + static_cast<size_t>(tid) * kPairScratchD;
   const int nprobe = a.force ? 6 : 4;
+  const int work = a.g.npairs * nprobe;
+  for (int gid = tid; gid < work; gid += gridDim.x * blockDim.x) {
   const int idx = gid / nprobe;
   const int probe = gid - idx * nprobe;
-  if (idx >= a.g.npairs) return;
   int ii, jj;
-  if (pair_class(a.g, idx, &ii, &jj, false) != 2) return;
+  if (pair_class(a.g, idx, &ii, &jj, false) != 2) continue;
   const int n2 = a.g.iorbs[ii - 1];
   const int n1 = a.g.iorbs[jj - 1];
   const int nat1 = a.g.nat[jj - 1];
@@ -371,11 +384,12 @@ __global__ void mozyme_pair_energy_d_kernel(PairGradArgs a, double *energies) {
     x2[slot - 4] -= a.chnge2;
   }
   double e = 0.0;
-  if (!pair_energy<true>(a, nat1, nat2, n1, n2, x1, x2, pdi, &e)) {
+  if (!pair_energy<true>(a, nat1, nat2, n1, n2, x1, x2, pdi, &e, scratch)) {
     atomicAdd(a.g.status, 1);
-    return;
+    continue;
   }
   energies[kProbesPerPair * idx + slot] = e;
+  }
 }
 
 __global__ void mozyme_pair_deriv_d_kernel(PairGradArgs a, const double *energies) {
@@ -418,19 +432,19 @@ __global__ void mozyme_pair_gradient_kernel(PairGradArgs a) {
     x1[0] += a.chnge2;
     x1[1] += a.chnge2;
     x1[2] += a.chnge2;
-    ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &aa);
+    ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &aa, nullptr);
   }
   for (int k = 0; k < 3 && ok; ++k) {
     const double x0 = x2[k];
     if (a.force) {
       x2[k] = x0 - a.chnge2;
-      ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &aa);
+      ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &aa, nullptr);
       if (!ok) break;
       x2[k] = x0 + a.chnge2;
     } else {
       x2[k] = x0 + a.chnge;
     }
-    ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &ee);
+    ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &ee, nullptr);
     x2[k] = x0;
     if (!ok) break;
     const double deriv = (aa - ee) * a.cnst / a.chnge;
@@ -497,12 +511,16 @@ __global__ void mozyme_atom_charge_kernel(PairGradArgs a, double *qatom) {
 // enuclr += enuc, for atom i = ii (first in the pair loop) and j = jj < ii.
 template <bool D>
 __global__ void mozyme_hcore_pairs_kernel(HcoreArgs a) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  // D: fixed grid, grid-stride over the pairs, kPairScratchD doubles of
+  // a.scratch_d per launched thread.  sp: one thread per pair (one pass).
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  double *scratch = D ? a.scratch_d + static_cast<size_t>(tid) * kPairScratchD : nullptr;
+  double enuc_sum = 0.0;
+  for (int idx = tid; idx < a.g.npairs; idx += gridDim.x * blockDim.x) {
   bool ok = true;
   double enuc = 0.0;
   int ii = 0, jj = 0;
-  const bool active =
-      idx < a.g.npairs && pair_class(a.g, idx, &ii, &jj, !D) == (D ? 2 : 1);
+  const bool active = pair_class(a.g, idx, &ii, &jj, !D) == (D ? 2 : 1);
   if (active) {
     const int ni = a.g.nat[ii - 1];
     const int nj = a.g.nat[jj - 1];
@@ -521,9 +539,12 @@ __global__ void mozyme_hcore_pairs_kernel(HcoreArgs a) {
           hij[(i1 - 1) * norb_j + (j1 - 1)] += smat[(i1 - 1) + 9 * (j1 - 1)];
         }
       }
-      double e1b[45], e2a[45], w[D ? mozyme_pair::kMaxWD : mozyme_pair::kMaxW];
+      double e1b[45], e2a[45];
+      double w_local[D ? 1 : mozyme_pair::kMaxW];
+      double *w = D ? scratch : w_local;
       int w_count = 0;
-      ok = D ? mozyme_pair_core_dev(ni, nj, xi, xj, a.core, w, &w_count, e1b, e2a, &enuc)
+      ok = D ? mozyme_pair_core_dev(ni, nj, xi, xj, a.core, w, &w_count, e1b, e2a, &enuc,
+                                    scratch + mozyme_pair::kMaxWD)
              : mozyme_pair_core_sp_dev(ni, nj, xi, xj, a.core, w, &w_count, e1b, e2a, &enuc);
       if (ok) {
         const int ti = (norb_i * (norb_i + 1)) / 2;
@@ -539,9 +560,11 @@ __global__ void mozyme_hcore_pairs_kernel(HcoreArgs a) {
       enuc = 0.0;
     }
   }
+  enuc_sum += enuc;
+  }
   // Block reduction of enuc.
   __shared__ double red[kPairThreads];
-  red[threadIdx.x] = enuc;
+  red[threadIdx.x] = enuc_sum;
   __syncthreads();
   for (int s = blockDim.x / 2; s > 0; s >>= 1) {
     if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
@@ -680,6 +703,35 @@ __global__ void mozyme_hcore_point_kernel(HcoreArgs a) {
   if (threadIdx.x == 0 && red[0] != 0.0) atomicAdd(a.enuc, red[0]);
 }
 
+// The d-pair kernels keep ~60 KB of local arrays per thread (45x45 integral
+// blocks).  The driver reserves local memory for every thread the device can
+// hold at once (A100: 108 SMs x 2048 threads), ~13 GB, and keeps it after the
+// launch.  Several MOPAC processes on one GPU (parallel FORCE) then run out of
+// memory and their SCFs fall back to the CPU.  So the d kernels are launched
+// only when some atom has d orbitals, and the stack limit is put back to its
+// value before the launch once they have finished, which releases the memory.
+bool any_d_atom(int numat, const int *iorbs) {
+  for (int i = 0; i < numat; ++i) {
+    if (iorbs[i] == 9) return true;
+  }
+  return false;
+}
+
+struct StackLimitRestore {
+  size_t saved = 0;
+  bool have = false;
+  StackLimitRestore() { have = cudaDeviceGetLimit(&saved, cudaLimitStackSize) == cudaSuccess; }
+  // Call after the kernels have completed (finish_launch synchronises).
+  void restore() {
+    if (!have) return;
+    size_t now = 0;
+    if (cudaDeviceGetLimit(&now, cudaLimitStackSize) == cudaSuccess && now > saved) {
+      if (cudaDeviceSetLimit(cudaLimitStackSize, saved) != cudaSuccess) cudaGetLastError();
+    }
+    have = false;
+  }
+};
+
 bool grad_verbose() {
   const char *v = std::getenv("MOPAC_GPU_VERBOSE");
   return v && *v && *v != '0';
@@ -783,7 +835,7 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
   const HostClock::time_point t_start = HostClock::now();
   GeomBuffers geom;
   PairTables tab;
-  DeviceArray<double> d_p, d_dxyz, d_q, d_energies;
+  DeviceArray<double> d_p, d_dxyz, d_q, d_energies, d_scratch;
   PairGradArgs a;
   std::memset(&a, 0, sizeof(a));
   const size_t na = static_cast<size_t>(numat);
@@ -819,14 +871,15 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
   a.dxyz = d_dxyz.ptr;
 
   mozyme_atom_charge_kernel<<<(numat + 255) / 256, 256>>>(a, d_q.ptr);
+  const bool launch_d = d_on_device && any_d_atom(numat, iorbs);
+  StackLimitRestore stack_limit;
   if (npairs > 0) {
     const int grid = (npairs + kPairThreads - 1) / kPairThreads;
     mozyme_pair_gradient_kernel<false><<<grid, kPairThreads>>>(a);
-    if (d_on_device) {
-      const int nprobe = force ? 6 : 4;
-      const int work = npairs * nprobe;
-      const int grid_e = (work + kPairThreadsD - 1) / kPairThreadsD;
-      mozyme_pair_energy_d_kernel<<<grid_e, kPairThreadsD, kPairSharedD>>>(a, d_energies.ptr);
+    if (launch_d) {
+      if (!d_scratch.alloc(static_cast<size_t>(kGridD) * kPairThreadsD * kPairScratchD)) return 2;
+      a.scratch_d = d_scratch.ptr;
+      mozyme_pair_energy_d_kernel<<<kGridD, kPairThreadsD, kPairSharedD>>>(a, d_energies.ptr);
       mozyme_pair_deriv_d_kernel<<<grid, kPairThreads>>>(a, d_energies.ptr);
     }
   }
@@ -835,6 +888,7 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
     mozyme_point_gradient_kernel<<<grid, kPointThreads>>>(a, d_q.ptr);
   }
   int code = finish_launch("MOZYME GPU gradient", geom.status, d_pairs_out);
+  stack_limit.restore();
   const HostClock::time_point t_kernels = HostClock::now();
   add_section_ms("grad_gpu_kernels", host_ms_between(t_uploaded, t_kernels));
   if (code == 0) {
@@ -870,7 +924,7 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
   const HostClock::time_point t_start = HostClock::now();
   GeomBuffers geom;
   PairTables tab;
-  DeviceArray<double> d_h, d_enuc;
+  DeviceArray<double> d_h, d_enuc, d_scratch;
   DeviceArray<int> d_nijbo;
   HcoreArgs a;
   std::memset(&a, 0, sizeof(a));
@@ -901,12 +955,15 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
   a.h = d_h.ptr;
   a.enuc = d_enuc.ptr;
 
+  const bool launch_d = d_on_device && any_d_atom(numat, iorbs);
+  StackLimitRestore stack_limit;
   if (npairs > 0) {
     const int grid = (npairs + kPairThreads - 1) / kPairThreads;
     mozyme_hcore_pairs_kernel<false><<<grid, kPairThreads>>>(a);
-    if (d_on_device) {
-      const int grid_d = (npairs + kPairThreadsD - 1) / kPairThreadsD;
-      mozyme_hcore_pairs_kernel<true><<<grid_d, kPairThreadsD, kPairSharedD>>>(a);
+    if (launch_d) {
+      if (!d_scratch.alloc(static_cast<size_t>(kGridD) * kPairThreadsD * kPairScratchD)) return 2;
+      a.scratch_d = d_scratch.ptr;
+      mozyme_hcore_pairs_kernel<true><<<kGridD, kPairThreadsD, kPairSharedD>>>(a);
     }
   }
   if (point_on_device && numat >= 2) {
@@ -914,6 +971,7 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
     mozyme_hcore_point_kernel<<<grid, kPointThreads>>>(a);
   }
   int code = finish_launch("MOZYME GPU hcore", geom.status, d_pairs_out);
+  stack_limit.restore();
   const HostClock::time_point t_kernels = HostClock::now();
   add_section_ms("hcore_gpu_kernels", host_ms_between(t_uploaded, t_kernels));
   if (code == 0) {
