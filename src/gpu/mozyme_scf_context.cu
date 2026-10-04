@@ -4805,6 +4805,411 @@ mozyme_diagg2_block_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
   }
 }
 
+// ---- diagg2 with the LMO coefficients staged in shared memory -------------
+//
+// Same sweep as mozyme_diagg2_block_kernel (one block per virtual from the
+// cursor, its pairs in list order, the occupied LMO under its spin lock), but
+// the coefficients are worked on in shared memory: the block owns virtual i
+// for the whole chain, so cvir(i) is loaded once, rotated in shared memory
+// and written back when the chain ends; occupied j is owned only inside its
+// lock, so cocc(j) is loaded after the lock is taken and written back before
+// it is released.  The growth tests then read shared memory instead of
+// global, and each rotation makes one global pass over j instead of two
+// passes over both LMOs.  The arithmetic and its order are those of
+// block_rotate_pair_indexed, so for a given schedule the coefficients are the
+// same; as for the lock sweep, the schedule (which virtual touches an
+// occupied LMO first) still varies from run to run.  A pair whose occupied
+// LMO does not fit in the stage (kDiaggStageCoeffs), or a virtual that does
+// not fit, goes through block_rotate_pair_indexed on global memory.
+// Opt-in: MOPAC_MOZYME_DIAGG2_STAGED=1.
+constexpr int kDiaggStageCoeffs = kDiaggMaxLmoCoeffs;   // doubles per staged LMO
+constexpr std::size_t kDiaggStagedSharedBytes = 2 * kDiaggStageCoeffs * sizeof(double);
+
+// Rotation of pair ij with cvir(i) in s_cv (mle0 coefficients, in the order
+// of ilist / ioff) and cocc(j) staged into s_co here.  Same interface and
+// exits as block_rotate_pair_indexed; returns false (nothing changed) when
+// cocc(j), with the growth it may get, does not fit in the stage.
+__device__ bool block_rotate_pair_staged(const DiaggRotateArgs &a, int ij, int retry,
+                                         int *joff, int *ioff, int *jlist, int *ilist,
+                                         short *imap, short *jmap,
+                                         unsigned char *s_fi, unsigned char *s_fj,
+                                         int *s_warp, double *s_cv, double *s_co,
+                                         int &ncei0, int &mle0,
+                                         double &sumb_acc, int &nrej_acc, int &error) {
+  const int tid = threadIdx.x;
+  const int i = a.ifmo[2 * ij];
+  const int j = a.ifmo[2 * ij + 1];
+  const double c = a.fmo[ij] * a.rot_const;
+  const double d = a.eigs[j - 1] - a.eigv[i - 1] - a.shift;
+
+  const int ncfj0 = ld_shared_int(a.ncf + j - 1);
+  const int jbase = a.nncf[j - 1];
+  const int ibase = a.nnce[i - 1];
+  const int loopj = a.ncocc[j - 1];
+  const int loopi = a.ncvir[i - 1];
+  if (ncfj0 < 0 || ncfj0 > kDiaggMaxLmoAtoms || jbase < 0 || ibase < 0 ||
+      jbase + ncfj0 > a.icocc_dim || ibase + ncei0 > a.icvir_dim) {
+    error = 1;
+    return true;
+  }
+  int jur = (j != a.nocc) ? a.ncocc[j] : a.cocc_dim;
+  const int jncf = (j != a.nocc) ? a.nncf[j] : a.icocc_dim;
+  if (jur > loopj + a.norbs) jur = loopj + a.norbs;
+  int iur = (i != a.nvir) ? a.ncvir[i] : a.cvir_dim;
+  const int incv = (i != a.nvir) ? a.nnce[i] : a.icvir_dim;
+  if (iur > loopi + a.norbs) iur = loopi + a.norbs;
+  // The occupied LMO can only grow inside its storage (jur), which must fit.
+  if (jur - loopj > kDiaggStageCoeffs) return false;
+
+  for (int e = tid; e < ncfj0; e += blockDim.x) jlist[e] = ld_shared_int(a.icocc + jbase + e);
+  __syncthreads();
+  int local_error = 0;
+  const int mlf0 = block_build_offsets(jlist, ncfj0, a.iorbs, a.numat, joff, s_warp, &local_error);
+  if (__syncthreads_or(local_error) || loopj < 0 || loopi < 0 ||
+      loopj + mlf0 > a.cocc_dim || loopi + mle0 > a.cvir_dim) {
+    error = 1;
+    return true;
+  }
+  if (mlf0 > kDiaggStageCoeffs) return false;   // block-uniform; nothing changed yet
+  block_map_set(jmap, jlist, ncfj0);
+  for (int q = tid; q < mlf0; q += blockDim.x) s_co[q] = ld_shared_double(a.cocc + loopj + q);
+  __syncthreads();
+
+  const double e = copysign(sqrt(4.0 * c * c + d * d), d);
+  double alpha = sqrt(0.5 * (1.0 + d / e));
+
+  while (true) {
+    const double beta = -copysign(sqrt(fmax(0.0, 1.0 - alpha * alpha)), c);
+    if (tid == 0) sumb_acc += fabs(beta);
+    const double beta2 = beta * beta;
+
+    // Count growth: virtual atoms missing from the occupied LMO.
+    int n_new_occ = 0;
+    int orb_new_occ = 0;
+    for (int chunk = 0; chunk < ncei0; chunk += blockDim.x) {
+      const int le = chunk + tid;
+      int flag = 0;
+      int norb = 0;
+      if (le < ncei0) {
+        const int mie = ilist[le];
+        if (jmap[mie - 1] == 0) {
+          norb = a.iorbs[mie - 1];
+          const double *cv = s_cv + ioff[le];
+          double s = 0.0;
+          for (int k = 0; k < norb; ++k) s += cv[k] * cv[k];
+          flag = (beta2 * s > a.thresh) ? 1 : 0;
+        }
+        s_fi[le] = static_cast<unsigned char>(flag);
+      }
+      int n = 0;
+      int orb = 0;
+      block_scan_flag_orbs(flag, norb, s_warp, &n, &orb);
+      n_new_occ += n;
+      orb_new_occ += orb;
+    }
+    // Occupied atoms missing from the virtual LMO.
+    int n_new_vir = 0;
+    int orb_new_vir = 0;
+    for (int chunk = 0; chunk < ncfj0; chunk += blockDim.x) {
+      const int lf = chunk + tid;
+      int flag = 0;
+      int norb = 0;
+      if (lf < ncfj0) {
+        const int ii = jlist[lf];
+        if (imap[ii - 1] == 0) {
+          norb = a.iorbs[ii - 1];
+          const double *co = s_co + joff[lf];
+          double s = 0.0;
+          for (int k = 0; k < norb; ++k) s += co[k] * co[k];
+          flag = (beta2 * s > a.thresh) ? 1 : 0;
+        }
+        s_fj[lf] = static_cast<unsigned char>(flag);
+      }
+      int n = 0;
+      int orb = 0;
+      block_scan_flag_orbs(flag, norb, s_warp, &n, &orb);
+      n_new_vir += n;
+      orb_new_vir += orb;
+    }
+
+    const bool reject = (jbase + ncfj0 + n_new_occ > jncf) ||
+                        (loopj + mlf0 + orb_new_occ > jur) ||
+                        (ibase + ncei0 + n_new_vir > incv) ||
+                        (loopi + mle0 + orb_new_vir > iur);
+    if (reject) {
+      if (tid == 0) ++nrej_acc;
+      if (retry != 0) {
+        alpha = 0.5 * (alpha + 1.0);
+        continue;
+      }
+      __syncthreads();
+      block_map_clear(jmap, jlist, ncfj0);
+      __syncthreads();
+      return true;
+    }
+    if (ncei0 + n_new_vir > kDiaggMaxLmoAtoms || mle0 + orb_new_vir > kDiaggStageCoeffs) {
+      error = 1;
+      __syncthreads();
+      block_map_clear(jmap, jlist, ncfj0);
+      __syncthreads();
+      return true;
+    }
+
+    // Apply: rotate common atoms, append new occupied atoms in virtual order.
+    int running_new = 0;
+    int running_orb = 0;
+    for (int chunk = 0; chunk < ncei0; chunk += blockDim.x) {
+      const int le = chunk + tid;
+      int flag = 0;
+      int norb = 0;
+      int mie = 0;
+      if (le < ncei0) {
+        mie = ilist[le];
+        norb = a.iorbs[mie - 1];
+        const int jpos = jmap[mie - 1] - 1;
+        if (jpos >= 0) {
+          double *co = s_co + joff[jpos];
+          double *cv = s_cv + ioff[le];
+          for (int k = 0; k < norb; ++k) {
+            const double av = co[k];
+            const double bv = cv[k];
+            co[k] = alpha * av + beta * bv;
+            cv[k] = alpha * bv - beta * av;
+          }
+        } else {
+          flag = s_fi[le];
+        }
+      }
+      int n = 0;
+      int orb = 0;
+      const int prefix = block_scan_flag_orbs(flag, norb, s_warp, &n, &orb);
+      if (flag) {
+        const int slot = ncfj0 + running_new + (prefix & 0xffff);
+        a.icocc[jbase + slot] = mie;
+        double *co = s_co + mlf0 + running_orb + (prefix >> 16);
+        double *cv = s_cv + ioff[le];
+        for (int k = 0; k < norb; ++k) {
+          const double v = cv[k];
+          co[k] = beta * v;
+          cv[k] = alpha * v;
+        }
+      }
+      running_new += n;
+      running_orb += orb;
+    }
+    // Append new virtual atoms in occupied order (original entries only); see
+    // block_rotate_pair_indexed.
+    running_new = 0;
+    running_orb = 0;
+    for (int chunk = 0; chunk < ncfj0; chunk += blockDim.x) {
+      const int lf = chunk + tid;
+      int flag = 0;
+      int norb = 0;
+      int ii = 0;
+      if (lf < ncfj0) {
+        ii = jlist[lf];
+        flag = s_fj[lf];
+        if (flag) norb = a.iorbs[ii - 1];
+      }
+      int n = 0;
+      int orb = 0;
+      const int prefix = block_scan_flag_orbs(flag, norb, s_warp, &n, &orb);
+      if (flag) {
+        const int slot = ncei0 + running_new + (prefix & 0xffff);
+        const int off_new = mle0 + running_orb + (prefix >> 16);
+        a.icvir[ibase + slot] = ii;
+        double *cv = s_cv + off_new;
+        double *co = s_co + joff[lf];
+        for (int k = 0; k < norb; ++k) {
+          const double v = co[k];
+          cv[k] = -beta * v;
+          co[k] = alpha * v;
+        }
+        ilist[slot] = ii;
+        ioff[slot] = off_new;
+        imap[ii - 1] = static_cast<short>(slot + 1);
+      }
+      running_new += n;
+      running_orb += orb;
+    }
+    __syncthreads();
+    // cocc(j) back to global memory (the caller fences before the unlock).
+    const int mlf1 = mlf0 + orb_new_occ;
+    for (int q = tid; q < mlf1; q += blockDim.x) a.cocc[loopj + q] = s_co[q];
+    if (tid == 0) {
+      a.ncf[j - 1] = ncfj0 + n_new_occ;
+      a.nce[i - 1] = ncei0 + n_new_vir;
+    }
+    ncei0 += n_new_vir;
+    mle0 += orb_new_vir;
+    block_map_clear(jmap, jlist, ncfj0);
+    __syncthreads();
+    return true;
+  }
+}
+
+__device__ inline void block_stage_store(double *dst, const double *src, int count) {
+  for (int q = threadIdx.x; q < count; q += blockDim.x) dst[q] = src[q];
+}
+
+__device__ inline void block_stage_load(double *dst, const double *src, int count) {
+  for (int q = threadIdx.x; q < count; q += blockDim.x) dst[q] = ld_shared_double(src + q);
+}
+
+__global__ void __launch_bounds__(kDiaggRotBlockThreads)
+mozyme_diagg2_staged_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
+                            short *maps, int *cursor) {
+  __shared__ int s_joff[kDiaggMaxLmoAtoms];
+  __shared__ int s_ioff[kDiaggMaxLmoAtoms];
+  __shared__ int s_jatoms[kDiaggMaxLmoAtoms];
+  __shared__ int s_iatoms[kDiaggMaxLmoAtoms];
+  __shared__ unsigned char s_fi[kDiaggMaxLmoAtoms];
+  __shared__ unsigned char s_fj[kDiaggMaxLmoAtoms];
+  __shared__ int s_warp[8];
+  __shared__ int s_next;
+  extern __shared__ double s_stage[];
+  double *s_cv = s_stage;
+  double *s_co = s_stage + kDiaggStageCoeffs;
+
+  if (resident_control_terminal(a.resident_control_ints)) return;
+  const int nij = a.control_ints[a.nij_slot];
+  const int retry = a.control_ints[a.retry_slot];
+  const double tiny = a.control_scalars[a.tiny_slot];
+  const double biglim = a.control_scalars[a.biglim_slot];
+  a.shift = resident_control_double_or(a.resident_control_scalars,
+                                       kResidentControlShift, a.shift);
+  if (nij <= 0) return;
+
+  const int tid = threadIdx.x;
+  short *imap = maps + static_cast<std::size_t>(2 * blockIdx.x) * a.numat;
+  short *jmap = imap + a.numat;
+  int *ilist = s_iatoms;
+  int *ioff = s_ioff;
+
+  double sumb_acc = 0.0;
+  int nrej_acc = 0;
+  int error = 0;
+  int rotated = 0;
+  int spins = 0;
+  while (error == 0) {
+    if (tid == 0) s_next = atomicAdd(cursor, 1);
+    __syncthreads();
+    const int i = s_next + 1;
+    __syncthreads();
+    if (i > a.nvir) break;
+    const int start = offsets[i - 1];
+    int end = offsets[i];
+    if (end > nij) end = nij;
+    if (start >= end) continue;
+
+    int ncei0 = ld_shared_int(a.nce + i - 1);
+    const int ibase = a.nnce[i - 1];
+    const int loopi = a.ncvir[i - 1];
+    if (ncei0 <= 0 || ncei0 > kDiaggMaxLmoAtoms || ibase < 0 || loopi < 0 ||
+        ibase + ncei0 > a.icvir_dim) {
+      error = 1;
+      break;
+    }
+    for (int e = tid; e < ncei0; e += blockDim.x) ilist[e] = ld_shared_int(a.icvir + ibase + e);
+    __syncthreads();
+    int local_error = 0;
+    int mle0 = block_build_offsets(ilist, ncei0, a.iorbs, a.numat, ioff, s_warp, &local_error);
+    if (__syncthreads_or(local_error) || loopi + mle0 > a.cvir_dim) {
+      error = 1;
+      break;
+    }
+    block_map_set(imap, ilist, ncei0);
+    // Stage cvir(i) for the whole chain when it fits; otherwise every pair of
+    // this virtual uses the global-memory rotation.
+    const bool staged = (mle0 <= kDiaggStageCoeffs);
+    if (staged) block_stage_load(s_cv, a.cvir + loopi, mle0);
+    __syncthreads();
+
+    for (int ij = start; ij < end; ++ij) {
+      const int j = a.ifmo[2 * ij + 1];
+      if (a.ifmo[2 * ij] != i || j < 1 || j > a.nocc) {
+        error = 1;
+        break;
+      }
+      const double f = a.fmo[ij];
+      if (fabs(f) < tiny) continue;
+      const double c = f * a.rot_const;
+      const double d = a.eigs[j - 1] - a.eigv[i - 1] - a.shift;
+      // Same test as the CPU (Abs(c/d) >= biglim): a NaN ratio (d == 0) is skipped.
+      if (!(fabs(c / d) >= biglim)) continue;
+      if (tid == 0) {
+        while (atomicCAS(olock + j - 1, 0, 1) != 0) {
+          __nanosleep(100);
+          ++spins;
+        }
+        __threadfence();
+      }
+      __syncthreads();
+      bool done = false;
+      if (staged) {
+        done = block_rotate_pair_staged(a, ij, retry, s_joff, ioff, s_jatoms, ilist, imap, jmap,
+                                        s_fi, s_fj, s_warp, s_cv, s_co, ncei0, mle0, sumb_acc,
+                                        nrej_acc, error);
+      }
+      if (!done) {
+        // Global-memory rotation: the staged virtual goes out first and is
+        // reloaded afterwards (the rotation may have grown it).
+        if (staged) {
+          block_stage_store(a.cvir + loopi, s_cv, mle0);
+          __syncthreads();
+          __threadfence_block();
+        }
+        block_rotate_pair_indexed(a, ij, retry, s_joff, ioff, s_jatoms, ilist, imap, jmap,
+                                  s_fi, s_fj, s_warp, ncei0, mle0, sumb_acc, nrej_acc, error);
+        __syncthreads();
+        if (staged) {
+          if (mle0 > kDiaggStageCoeffs) error = 1;
+          else block_stage_load(s_cv, a.cvir + loopi, mle0);
+        }
+      }
+      ++rotated;
+      __syncthreads();
+      __threadfence();
+      if (tid == 0) atomicExch(olock + j - 1, 0);
+      __syncthreads();
+      if (error != 0) break;
+    }
+    __syncthreads();
+    if (staged && mle0 <= kDiaggStageCoeffs) block_stage_store(a.cvir + loopi, s_cv, mle0);
+    block_map_clear(imap, ilist, ncei0);
+    __syncthreads();
+  }
+
+  if (blockIdx.x == 0 && tid == 0) a.work_ints[kDiaggWorkIntRounds] = 1;
+  if (tid == 0) {
+    if (rotated != 0) {
+      atomicAdd(a.work_ints + kDiaggWorkIntRotated, rotated);
+      atomicMax(a.work_ints + kDiaggWorkIntMaxChain, rotated);
+    }
+    if (spins != 0) atomicAdd(a.work_ints + kDiaggWorkIntLockSpins, spins);
+    if (sumb_acc != 0.0) atomicAdd_double(a.sumb_out, sumb_acc);
+    if (nrej_acc != 0) atomicAdd(a.nrej_out, nrej_acc);
+    if (error != 0) {
+      atomicExch(a.work_ints + kDiaggWorkIntError, 1);
+      if (a.ok_slot) atomicExch(a.ok_slot, 0);
+    }
+  }
+}
+
+// MOPAC_MOZYME_SCF_TRACE=1: diagg2 sweep statistics (critical path and lock
+// contention), one line per sweep.
+__global__ void mozyme_diagg2_trace_kernel(const int *work_ints, const int *nij,
+                                           const int *nrej,
+                                           const int *resident_control_ints, int staged) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  if (resident_control_terminal(resident_control_ints)) return;
+  printf(" [MOZYME GPU SCF trace] diagg2 staged=%d nij=%d rotated=%d max_chain=%d "
+         "lock_spins=%d nrej=%d\n",
+         staged, *nij, work_ints[kDiaggWorkIntRotated],
+         work_ints[kDiaggWorkIntMaxChain], work_ints[kDiaggWorkIntLockSpins],
+         nrej ? *nrej : -1);
+}
+
 // ---- addhb: hydrogen-bond pair discovery ----------------------------------
 
 __device__ inline bool hbond_pair_qualifies(int atom_i, int atom_j, int numat,
@@ -8619,9 +9024,33 @@ bool launch_diagg2_parallel(int max_pairs, DiaggRotateArgs args,
 
 // Lock-based diagg2 launch (see mozyme_diagg2_block_kernel).  Falls back to
 // the cooperative sweep when MOPAC_MOZYME_DIAGG2_COOPERATIVE is set.
+bool resident_scf_trace_enabled();
+
+// MOPAC_MOZYME_DIAGG2_STAGED=1: mozyme_diagg2_staged_kernel (coefficients in
+// shared memory) instead of mozyme_diagg2_block_kernel.  Needs more than the
+// default 48 KB of shared memory per block; if that cannot be set, the block
+// kernel is used.
+bool diagg2_staged_enabled() {
+  static const bool enabled = [] {
+    if (!env_enabled("MOPAC_MOZYME_DIAGG2_STAGED")) return false;
+    const cudaError_t err = cudaFuncSetAttribute(
+        mozyme_diagg2_staged_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(kDiaggStagedSharedBytes));
+    if (err != cudaSuccess) {
+      cudaGetLastError();
+      std::fprintf(stderr, "[MOZYME GPU] diagg2 staged kernel unavailable (%s); block kernel used\n",
+                   cudaGetErrorString(err));
+      return false;
+    }
+    return true;
+  }();
+  return enabled;
+}
+
 bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
                              DiaggRotateArgs args, const char *label) {
   static const bool cooperative = env_enabled("MOPAC_MOZYME_DIAGG2_COOPERATIVE");
+  const bool staged = !cooperative && diagg2_staged_enabled();
   auto &dev = ctx.device;
   if (cooperative || !dev.diagg_olock.ptr || !dev.diagg_offsets.ptr ||
       dev.diagg_olock.count < static_cast<std::size_t>(ctx.config.noccupied)) {
@@ -8635,8 +9064,12 @@ bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
   int blocks_per_sm = 0;
   if (!cuda_context_ok(cudaGetDevice(&device), label) ||
       !cuda_context_ok(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device), label) ||
-      !cuda_context_ok(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                           &blocks_per_sm, mozyme_diagg2_block_kernel, kDiaggRotBlockThreads, 0),
+      !cuda_context_ok(staged ? cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                                    &blocks_per_sm, mozyme_diagg2_staged_kernel,
+                                    kDiaggRotBlockThreads, kDiaggStagedSharedBytes)
+                              : cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                                    &blocks_per_sm, mozyme_diagg2_block_kernel,
+                                    kDiaggRotBlockThreads, 0),
                        label)) {
     return false;
   }
@@ -8655,10 +9088,23 @@ bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
       !cuda_context_ok(cudaMemsetAsync(dev.diagg_rot_cursor.ptr, 0, sizeof(int)), label)) {
     return false;
   }
-  mozyme_diagg2_block_kernel<<<grid, kDiaggRotBlockThreads>>>(
-      args, dev.diagg_offsets.ptr, dev.diagg_olock.ptr, dev.diagg_rot_maps.ptr,
-      dev.diagg_rot_cursor.ptr);
-  return cuda_context_ok(cudaGetLastError(), label);
+  if (staged) {
+    mozyme_diagg2_staged_kernel<<<grid, kDiaggRotBlockThreads, kDiaggStagedSharedBytes>>>(
+        args, dev.diagg_offsets.ptr, dev.diagg_olock.ptr, dev.diagg_rot_maps.ptr,
+        dev.diagg_rot_cursor.ptr);
+  } else {
+    mozyme_diagg2_block_kernel<<<grid, kDiaggRotBlockThreads>>>(
+        args, dev.diagg_offsets.ptr, dev.diagg_olock.ptr, dev.diagg_rot_maps.ptr,
+        dev.diagg_rot_cursor.ptr);
+  }
+  if (!cuda_context_ok(cudaGetLastError(), label)) return false;
+  if (resident_scf_trace_enabled() && dev.diagg_work_ints.ptr && args.control_ints) {
+    mozyme_diagg2_trace_kernel<<<1, 1>>>(dev.diagg_work_ints.ptr,
+                                         args.control_ints + args.nij_slot, args.nrej_out,
+                                         args.resident_control_ints, staged ? 1 : 0);
+    return cuda_context_ok(cudaGetLastError(), label);
+  }
+  return true;
 }
 
 DiaggRotateArgs make_diagg_rotate_args(MozymeScfContext &ctx,
