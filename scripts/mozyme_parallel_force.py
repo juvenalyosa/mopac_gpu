@@ -94,8 +94,11 @@ def deck(path: Path, keywords: str, title: str) -> None:
 
 
 def launch(mopac: Path, run_dir: Path, name: str, env: dict) -> subprocess.Popen:
+    # stdout/stderr kept: the GPU backend reports CUDA errors (e.g. a failed allocation that
+    # sends an SCF back to the CPU) there, not in the .out file
+    log = open(run_dir / f"{name}.stdout", "w")
     return subprocess.Popen([str(mopac), f"{name}.mop"], cwd=run_dir, env=env,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+                            stdout=log, stderr=subprocess.STDOUT)
 
 
 def parallel_force(mopac: Path, geometry: Path, keywords: str, workers: int, work: Path,
