@@ -616,12 +616,20 @@ constexpr int kResidentControlIntCount = 18;
 constexpr int kResidentControlDiaggFref = 0;
 constexpr int kResidentControlDiaggOldlim = 1;
 constexpr int kResidentControlDiaggSafety = 2;
+// The CPU's TINY after diagg2 (-1 on the full-rotation iterations, else 0.01 *
+// the largest occupied - virtual interaction): the second term of the diagg1
+// screen, cutoff = max(cutlim, tiny*10*cutlim).
 constexpr int kResidentControlOvmax = 3;
 constexpr int kResidentControlPreviousEscf = 4;
 constexpr int kResidentControlShift = 5;
 constexpr int kResidentControlPlsOvmaxDelta = 6;
 constexpr int kResidentControlPlsEnergyDelta = 7;
-constexpr int kResidentControlDoubleCount = 8;
+// The CPU's OVMAX: the largest occupied - virtual interaction of the last
+// diagg1, which sets cutlim = min(1e-8, (0.01*ovmax)^2).  Not the TINY above:
+// on the full-rotation iterations TINY is -1, which would put cutlim back at
+// 1e-8 every fifth iteration and the SCF into a five-iteration limit cycle.
+constexpr int kResidentControlRealOvmax = 8;
+constexpr int kResidentControlDoubleCount = 9;
 constexpr int kPlsLoopLimit = 6;
 constexpr int kPlsIntLoop = 0;
 constexpr int kPlsIntFault = 1;
@@ -784,6 +792,7 @@ MOPAC_UNUSED_SYMBOL constexpr int kNoCudaConstantReferences[] = {
     kResidentControlShift,
     kResidentControlPlsOvmaxDelta,
     kResidentControlPlsEnergyDelta,
+    kResidentControlRealOvmax,
     kResidentControlDoubleCount,
     kPlsLoopLimit,
     kPlsIntLoop,
@@ -3272,9 +3281,10 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   double flim = a.flim;
   double oldlim = a.oldlim;
   if (a.resident_control_scalars) {
-    const double ovmax = a.resident_control_scalars[kResidentControlOvmax];
-    const double cutlim = diagg1_cutlim(ovmax);
-    cutoff = fmax(cutlim, ovmax * 10.0 * cutlim);
+    const double tiny = a.resident_control_scalars[kResidentControlOvmax];
+    const double cutlim = diagg1_cutlim(
+        a.resident_control_scalars[kResidentControlRealOvmax]);
+    cutoff = fmax(cutlim, tiny * 10.0 * cutlim);
     flim = fmin(3.0,
                 a.resident_control_scalars[kResidentControlDiaggFref] * 0.5);
     oldlim = a.resident_control_scalars[kResidentControlDiaggOldlim];
@@ -3838,9 +3848,10 @@ mozyme_diagg1_occupied_eigs_kernel(
                                    kResidentControlDiaggMode, idiagg);
   if (idiagg > 2 && idiagg % 4 != 0) return;
   if (resident_control_scalars) {
-    const double ovmax = resident_control_scalars[kResidentControlOvmax];
-    const double cutlim = diagg1_cutlim(ovmax);
-    cutoff = fmax(cutlim, ovmax * 10.0 * cutlim);
+    const double tiny = resident_control_scalars[kResidentControlOvmax];
+    const double cutlim = diagg1_cutlim(
+        resident_control_scalars[kResidentControlRealOvmax]);
+    cutoff = fmax(cutlim, tiny * 10.0 * cutlim);
     if (idiagg <= 5) cutoff = cutlim;
   }
   const int i = blockIdx.x + 1;
@@ -5780,7 +5791,7 @@ __global__ void mozyme_resident_control_advance_kernel(
     const double *diagg_scalars, const int *addhb_ints,
     const double *addhb_scalars, const int *isitsc_ints,
     const double *isitsc_scalars, int *pls_ints, double *pls_scalars,
-    int *control_ints, double *control_scalars) {
+    int *control_ints, double *control_scalars, int trace) {
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
   if (resident_control_terminal(control_ints)) return;
 
@@ -5868,9 +5879,26 @@ __global__ void mozyme_resident_control_advance_kernel(
   control_scalars[kResidentControlDiaggSafety] =
       diagg_scalars[kDiaggDoubleSafety];
   control_scalars[kResidentControlOvmax] = addhb_scalars[kAddhbDoubleNextTiny];
+  control_scalars[kResidentControlRealOvmax] = diagg_scalars[kDiaggDoubleTiny];
   control_scalars[kResidentControlPreviousEscf] =
       isitsc_scalars[kIsitscEnergyScf];
   control_scalars[kResidentControlShift] = next_shift;
+  if (trace) {
+    // MOPAC_MOZYME_SCF_TRACE=1: one line per iteration, the quantities of the
+    // CPU 'PL' trace (iter_for_MOZYME) plus the diagg1 bookkeeping.
+    printf(" [MOZYME GPU SCF trace] iter=%d escf=%.10f de=%.3e ovmax=%.4e "
+           "sumt=%.4e nij=%d ijc=%d nf=%d nrej=%d oldlim=%.3e fref=%.3e "
+           "idiagg_next=%d okscf=%d scf1=%d shift=%.1f three_point=%d "
+           "decision=%d\n",
+           completed_iter, isitsc_scalars[kIsitscEnergyScf], energy_diff,
+           diagg_scalars[kDiaggDoubleTiny], diagg_scalars[kDiaggDoubleSumt],
+           diagg_ints[kDiaggIntNij], diagg_ints[kDiaggIntIjc],
+           diagg_ints[kDiaggIntNf], diagg_ints[kDiaggIntNrej],
+           diagg_scalars[kDiaggDoubleOldlim], diagg_scalars[kDiaggDoubleFref],
+           addhb_ints[kAddhbIntNextIdiagg], isitsc_ints[kIsitscIntOkscf],
+           isitsc_ints[kIsitscIntScf1], next_shift, next_use_three_point,
+           decision);
+  }
 }
 
 __global__ void mozyme_resident_pls_restart_zero_kernel(
@@ -6511,7 +6539,7 @@ __global__ void mozyme_cosmo_cg_init_control_kernel(
   }
 
   const double ovmax = resident_control_scalars
-                           ? resident_control_scalars[kResidentControlOvmax]
+                           ? resident_control_scalars[kResidentControlRealOvmax]
                            : fallback_ovmax;
   double c_proc = 1.0;
   if (fabs(ovmax) >= 5.0 * selcon && selcon > 0.0) {
@@ -8241,6 +8269,7 @@ bool upload_registered_state(MozymeScfContext &ctx) {
   initial_control_scalars[kResidentControlDiaggSafety] =
       ctx.config.diagg_safety;
   initial_control_scalars[kResidentControlOvmax] = ctx.config.ovmax;
+  initial_control_scalars[kResidentControlRealOvmax] = ctx.config.ovmax;
   initial_control_scalars[kResidentControlPreviousEscf] =
       ctx.config.previous_escf;
   initial_control_scalars[kResidentControlShift] = ctx.config.shift;
@@ -11059,6 +11088,14 @@ bool resident_pls_restart_resolved_on_device(
          control.pls_restart_done == 1;
 }
 
+bool resident_scf_trace_enabled() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("MOPAC_MOZYME_SCF_TRACE");
+    return v && *v && *v != '0';
+  }();
+  return enabled;
+}
+
 bool advance_resident_control_on_gpu(MozymeScfContext &ctx,
                                      bool strict_resident) {
   if (!ctx.device.uploaded) return false;
@@ -11086,7 +11123,7 @@ bool advance_resident_control_on_gpu(MozymeScfContext &ctx,
       dev.diagg_ints.ptr, dev.diagg_scalars.ptr, dev.addhb_ints.ptr,
       dev.addhb_scalars.ptr, dev.isitsc_ints.ptr, dev.isitsc_scalars.ptr,
       dev.pls_ints.ptr, dev.pls_scalars.ptr, dev.resident_control_ints.ptr,
-      dev.resident_control_scalars.ptr);
+      dev.resident_control_scalars.ptr, resident_scf_trace_enabled() ? 1 : 0);
   if (!cuda_context_ok(cudaGetLastError(),
                        "resident loop control advance kernel")) {
     return false;
