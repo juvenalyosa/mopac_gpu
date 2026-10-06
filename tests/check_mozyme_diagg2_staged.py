@@ -5,7 +5,8 @@ Usage:
   check_mozyme_diagg2_staged.py <mopac> [--pdb-ids 1UAO,1CRN] [--repeats 2] [--forcets A10=1]
       [--work-dir DIR] [--keep-going]
 
-Any CUDA GPU; needs internet once to download the PDB files (or put <ID>.pdb in <work-dir>/<ID>/).
+Any CUDA GPU; needs internet once to download the PDB files (or put <ID>.pdb in <work-dir>/<ID>/, or give
+hydrogenated geometries with --geometry ID=file.pdb).
 For every system (hydrogenated with ADD-H, no optimization needed):
   1. 1SCF GRADIENTS AUX SCFCRT=0.000001 THRESH=1.D-15 (the FORCE/THERMO SCF), default kernel and staged
      kernel, --repeats times each, with MOPAC_MOZYME_SCF_TRACE=1;
@@ -99,6 +100,9 @@ def main() -> int:
     ap.add_argument("--repeats", type=int, default=2)
     ap.add_argument("--forcets", default="A10=1", help='FORCETS region on the last system, "" to skip')
     ap.add_argument("--work-dir", type=Path, default=Path("mozyme_diagg2_staged"))
+    ap.add_argument("--geometry", action="append", default=[],
+                    help="ID=file.pdb: use this hydrogenated geometry for ID (no download, no ADD-H), "
+                         "e.g. 1CRN=tests/data/mozyme_gpu_reference/1CRN_opt.pdb")
     a = ap.parse_args()
     mopac = a.mopac.resolve()
     work = a.work_dir.resolve()
@@ -118,10 +122,14 @@ def main() -> int:
                 f"lock_spins mean {statistics.mean(spins):.0f}")
 
     ids = [x.strip() for x in a.pdb_ids.split(",") if x.strip()]
+    given = dict(g.split("=", 1) for g in a.geometry)
     pdbs: dict[str, Path] = {}
     for pdb_id in ids:
         base = work / pdb_id
-        pdbs[pdb_id] = md.prepare_pdb(mopac, th.get_pdb(pdb_id, base), base / "prepare")
+        if pdb_id in given:
+            pdbs[pdb_id] = Path(given[pdb_id]).resolve()
+        else:
+            pdbs[pdb_id] = md.prepare_pdb(mopac, th.get_pdb(pdb_id, base), base / "prepare")
 
     for pdb_id in ids:
         pdb = pdbs[pdb_id]
