@@ -171,7 +171,7 @@ def optimize_stationary(mopac: Path, geometry: Path, work: Path, gnorm: float = 
         if not arc.exists():
             raise RuntimeError(f"stage {stage} left no .arc geometry; see {sdir / 'opt.out'}")
         chk = run_mopac(mopac, sdir, "fresh",
-                        f'{BASE_KEYS}{solvent_keys(eps)} 1SCF GRADIENTS SCFCRT=0.000001 THRESH=1.D-14 GEO_DAT="opt.arc"',
+                        f'{BASE_KEYS}{solvent_keys(eps)} 1SCF GRADIENTS SCFCRT=0.000001 THRESH=1.D-15 GEO_DAT="opt.arc"',
                         "fresh gradient at the optimized geometry", [], env_extra)
         g_opt = GNORM_RE.findall(r.out_text)
         g_fresh = GNORM_RE.findall(chk.out_text)
