@@ -17,7 +17,10 @@ and `FORCE RESTART` continues from the line stored there.  This driver:
      MOPAC finds nothing left to compute and goes straight to the frequencies and THERMO.
 
 Several processes share one GPU (the resident SCF of a 600-atom protein leaves most of an A100
-idle); `nvidia-cuda-mps-control -d` lets their kernels overlap instead of time-slicing.
+idle); `nvidia-cuda-mps-control -d` lets their kernels overlap instead of time-slicing.  With
+several GPUs the workers are spread over them (worker k on GPU k mod n, through
+CUDA_VISIBLE_DEVICES): by default every GPU that nvidia-smi lists (or CUDA_VISIBLE_DEVICES, if
+set); --gpus 0,1 picks them, --gpus none leaves the environment alone.
 
 Usage:
   mozyme_parallel_force.py <mopac> <geometry.pdb> --keywords "PM7 MOZYME ... THERMO(298)" \\
@@ -101,8 +104,27 @@ def launch(mopac: Path, run_dir: Path, name: str, env: dict) -> subprocess.Popen
                             stdout=log, stderr=subprocess.STDOUT)
 
 
+def visible_gpus(spec: str | None = "auto") -> list[str]:
+    """GPU ids to spread the workers over: "auto" (CUDA_VISIBLE_DEVICES, else nvidia-smi -L),
+    "none", or a comma-separated list."""
+    if spec is None or spec == "none" or os.environ.get("MOPAC_NOGPU"):
+        return []
+    if spec != "auto":
+        return [g.strip() for g in spec.split(",") if g.strip()]
+    vis = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if vis is not None:
+        return [g.strip() for g in vis.split(",") if g.strip()]
+    if shutil.which("nvidia-smi") is None:
+        return []
+    try:
+        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [str(k) for k, line in enumerate(l for l in out.splitlines() if l.startswith("GPU "))]
+
+
 def parallel_force(mopac: Path, geometry: Path, keywords: str, workers: int, work: Path,
-                   env_extra: dict | None = None) -> tuple[Path, dict]:
+                   env_extra: dict | None = None, gpus: str | None = "auto") -> tuple[Path, dict]:
     """Returns (final .out file, timings).  `keywords` must contain FORCE's usual companions
     (method, MOZYME, THERMO(...), SCFCRT...) but not FORCE, CYCLES or RESTART."""
     env = os.environ.copy()
@@ -126,7 +148,9 @@ def parallel_force(mopac: Path, geometry: Path, keywords: str, workers: int, wor
     nvar = tpl.nvar
     timings["template_s"] = time.perf_counter() - t0
 
-    # 2. workers over coordinates 2..nvar
+    # 2. workers over coordinates 2..nvar (spread over the GPUs)
+    gpu_ids = visible_gpus(gpus)
+    timings["gpus"] = ",".join(gpu_ids) if gpu_ids else "-"
     todo = list(range(2, nvar + 1))
     workers = max(1, min(workers, len(todo)))
     size = -(-len(todo) // workers)
@@ -142,7 +166,10 @@ def parallel_force(mopac: Path, geometry: Path, keywords: str, workers: int, wor
         tpl.write(wdir / "force.res", first - 1, zero_f, [0.0] * (3 * (first - 1)), 0.0)
         deck(wdir / "force.mop", f"{kw} FORCE RESTART CYCLES={len(chunk)}",
              f"parallel FORCE worker {k}: coordinates {first}-{chunk[-1]}")
-        procs.append((wdir, chunk, launch(mopac, wdir, "force", env)))
+        wenv = env
+        if len(gpu_ids) > 1:
+            wenv = dict(env, CUDA_VISIBLE_DEVICES=gpu_ids[k % len(gpu_ids)])
+        procs.append((wdir, chunk, launch(mopac, wdir, "force", wenv)))
     for wdir, chunk, proc in procs:
         if proc.wait() != 0:
             raise RuntimeError(f"worker failed, see {wdir / 'force.out'}")
@@ -181,10 +208,11 @@ def main() -> int:
     ap.add_argument("--keywords", required=True)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--work-dir", type=Path, default=Path("parallel_force"))
+    ap.add_argument("--gpus", default="auto", help='"auto" (default), "none", or ids, e.g. 0,1')
     a = ap.parse_args()
     t0 = time.perf_counter()
     out, timings = parallel_force(a.mopac.resolve(), a.geometry.resolve(), a.keywords, a.workers,
-                                  a.work_dir.resolve())
+                                  a.work_dir.resolve(), gpus=a.gpus)
     print(f"final output: {out}")
     print(f"wall {time.perf_counter() - t0:.1f} s: " + ", ".join(f"{k} {v:.1f}" if isinstance(v, float) else f"{k} {v}"
                                                            for k, v in timings.items()))

@@ -63,7 +63,7 @@ step() {
   local rc=$?
   local dt=$((SECONDS - t0))
   # results of the test scripts (not the build output: ninja and the compiler also print '[' and indented lines)
-  if [ "$2" != build.log ]; then
+  if [ "$(basename "$log")" != build.log ]; then
     grep -E "^(PASS|FAIL) |^\[[a-zA-Z]|^ {5}[^ ]|all checks passed|check\(s\) failed|^work dir" "$log" >> "$REPORT"
   fi
   if [ $rc -ne 0 ]; then
