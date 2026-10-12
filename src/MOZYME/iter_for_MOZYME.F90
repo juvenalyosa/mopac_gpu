@@ -136,9 +136,11 @@ subroutine iter_for_MOZYME (ee)
       !
       !  FORCE, FORCETS, THERMO: SCF CRITERION 1.D-6 (SCFCRI).  THE SCF CAN ONLY CONVERGE TO ABOUT
       !  |E(OCC)-E(VIR)|*SQRT(THRESH), 1.D-5 WITH 1.D-13, BECAUSE SMALLER ROTATIONS CANNOT ADD ATOMS
-      !  TO THE LMOS, SO THE THRESHOLD IS REDUCED TO MATCH (THRESH OR RELTHR STILL SET IT).
+      !  TO THE LMOS, SO THE THRESHOLD IS REDUCED TO MATCH (THRESH OR RELTHR STILL SET IT).  1.D-14
+      !  GIVES THE SAME VIBRATIONAL FREQUENCIES AND THERMODYNAMICS AS 1.D-15 (CHIGNOLIN: ZPE -0.001
+      !  KCAL/MOL, S +0.013 CAL/(MOL K), RMS 0.02 CM-1) WITH SMALLER LMOS.
       !
-      if (Index (keywrd, " FORCE") + Index (keywrd, " THERMO") /= 0) thresh = 1.d-15
+      if (Index (keywrd, " FORCE") + Index (keywrd, " THERMO") /= 0) thresh = 1.d-14
       scfref = 0.d0
       i = Index (keywrd, " RELTHR")
       if (i /= 0) then

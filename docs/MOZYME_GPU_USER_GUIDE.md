@@ -81,9 +81,11 @@ With `FORCE`, `FORCETS` or `THERMO` in the keywords, MOZYME therefore uses:
 
 - `SCFCRT=0.000001` (printed as `SCF CRITERION = 0.1000E-05 (FORCE: ...)`), unless `SCFCRT` or `RELSCF`
   is given;
-- `THRESH=1.D-15` for the LMO coefficients, unless `THRESH` or `RELTHR` is given. With the default
+- `THRESH=1.D-14` for the LMO coefficients, unless `THRESH` or `RELTHR` is given. With the default
   1.D-13 the MOZYME SCF cannot converge below about 1e-5 eV (rotations smaller than sqrt(THRESH)
-  cannot add atoms to the LMOs), so a 1e-6 criterion would never be met.
+  cannot add atoms to the LMOs), so a 1e-6 criterion would never be met.  1.D-14 gives the same
+  thermochemistry as 1.D-15 (chignolin FORCE: ZPE -0.001 kcal/mol, S +0.013 cal/(mol K), frequencies
+  RMS 0.02 cm-1) with smaller LMOs (crambin SCF ~13 % faster on the CPU).
 
 Against the conventional (non-MOZYME) SCF, CPU, same geometry:
 
