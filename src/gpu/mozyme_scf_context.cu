@@ -7075,11 +7075,15 @@ __global__ void mozyme_cosmo_cg_init_control_kernel(
   const double ovmax = resident_control_scalars
                            ? resident_control_scalars[kResidentControlRealOvmax]
                            : fallback_ovmax;
+  // As in iter_for_MOZYME: the criterion behind the solver tolerance is at least 1e-3, otherwise a tight
+  // SCF criterion (FORCE: 1e-6) keeps the surface charges at 1e-2 and the SCF energy oscillates.
+  const double cosmo_selcon = fmax(selcon, 1.0e-3);
   double c_proc = 1.0;
-  if (fabs(ovmax) >= 5.0 * selcon && selcon > 0.0) {
-    c_proc = 5.0 * selcon / fabs(ovmax);
+  if (fabs(ovmax) >= 5.0 * cosmo_selcon && selcon > 0.0) {
+    c_proc = 5.0 * cosmo_selcon / fabs(ovmax);
   }
-  double target_tol = kStopTol;
+  // linear_cosmo cosmo_stop_tol: the final tolerance falls with the SCF criterion.
+  double target_tol = selcon > 0.0 ? fmin(kStopTol, 1.0e-3 * selcon) : kStopTol;
   if (c_proc < 0.2) {
     target_tol = kStartTol;
   } else if (c_proc < 0.4) {

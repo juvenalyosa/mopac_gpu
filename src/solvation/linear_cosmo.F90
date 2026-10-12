@@ -48,6 +48,12 @@
   public :: ini_linear_cosmo, coscavz, addnucz, addfckz, am1dft_solve, &
     mozyme_cosmo_prepare_gpu_state, mozyme_cosmo_gpu_state
   double precision, public :: c_proc
+  !
+  !  cosmo_stop_tol: final tolerance of the surface-charge solver.  The dielectric energy is first order
+  !  in the error of the charges, so it must fall with the SCF criterion (iter_for_MOZYME: 1.d-3*selcon):
+  !  with 1.d-6 and SCFCRT=1.D-6 the energy of a DNA anion jumped by 1.d-4 kcal/mol between iterations.
+  !
+  double precision, public :: cosmo_stop_tol = 1.d-6
 
 
   private
@@ -2380,7 +2386,7 @@ contains
     else if (c_proc < 0.8d0) then
       t = start_tol * 0.001d0
     else
-      t = stop_tol
+      t = Min (stop_tol, cosmo_stop_tol)
     end if
 
     t = Min (t, current_tol)

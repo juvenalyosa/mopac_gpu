@@ -34,7 +34,7 @@ subroutine iter_for_MOZYME (ee)
     use common_arrays_C, only : f, p
     use iter_C, only : pold
     use cosmo_C, only: useps, lpka, solv_energy
-    use linear_cosmo, only : c_proc
+    use linear_cosmo, only : c_proc, cosmo_stop_tol
     use mozyme_gpu_scf_driver, only : mozyme_gpu_scf_early_probe, &
       mozyme_gpu_scf_force_final_reorth, &
       mozyme_gpu_scf_requested, mozyme_gpu_scf_no_fallback_required, &
@@ -1203,11 +1203,18 @@ subroutine iter_for_MOZYME (ee)
 700   continue
       energy_diff = escf - eold
       eold = escf
-      if (Abs(ovmax) < 5.d0*selcon) then
+      !
+      !  c_proc sets the tolerance of the COSMO surface-charge solver (cgm_solve: 1.d-2 .. 1.d-6).
+      !  With a tight SCF criterion (FORCE: 1.d-6) 5*selcon/ovmax stayed below 0.2 to the end, the
+      !  surface charges were solved only to 1.d-2 and the energy of a DNA anion oscillated by
+      !  0.25 kcal/mol from one iteration to the next, so the SCF never converged: use at least 1.d-3.
+      !
+      if (Abs(ovmax) < 5.d0*Max (selcon, 1.d-3)) then
         c_proc = 1.d0
       else
-        c_proc = 5.d0*selcon/abs(ovmax)
+        c_proc = 5.d0*Max (selcon, 1.d-3)/abs(ovmax)
       end if
+      cosmo_stop_tol = Min (1.d-6, 1.d-3*selcon)
       escf = max(-999999.d0, min(999999.d0, escf))
       if (abs(energy_diff) > 9999.D0) energy_diff = 0.D0
       if (prtpls .or. debug .and. niter > itrmax - 20) then
