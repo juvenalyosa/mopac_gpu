@@ -31,8 +31,9 @@
 #   3 reference     tests/check_mozyme_gpu_reference.py: SCF + gradient (chignolin, crambin), chignolin FORCE THERMO
 #                   (1 and 4 GPU processes), crambin FORCETS, GPU memory peak, concurrent processes - all against
 #                   stored CPU references
-#   4 staged A/B    tests/check_mozyme_diagg2_staged.py: default vs MOPAC_MOZYME_DIAGG2_STAGED=1 diagg2 kernel
-#   5 reference     step 3 again with the staged kernel (timings side by side in the report)
+#   4 (RUN_STAGED=1) tests/check_mozyme_diagg2_staged.py: default vs MOPAC_MOZYME_DIAGG2_STAGED=1 diagg2 kernel
+#   5 (RUN_STAGED=1) step 3 again with the staged kernel (timings side by side in the report); the staged
+#                    kernel is 0.8x on T4 (Kaggle), kept opt-in, so these steps are off by default
 #   6 trace         chignolin and crambin SCF per iteration and per diagg2 sweep (MOPAC_MOZYME_SCF_TRACE=1)
 #   7 (RUN_NSYS=1)  nsys kernel summary of a crambin SCF, both kernels
 #   8 (RUN_LARGE=1) full crambin FORCE THERMO with 6 processes, both kernels
@@ -221,6 +222,7 @@ step "3 reference (default diagg2)" reference_default.log \
   python3 "$SRC/tests/check_mozyme_gpu_reference.py" "$MOPAC" --data "$DATA" --work-dir "$RUN/reference_default" \
   "${REF_OPTS[@]}"
 
+if [ "${RUN_STAGED:-0}" = 1 ]; then
 step "4 staged diagg2 A/B" staged_ab.log \
   python3 "$SRC/tests/check_mozyme_diagg2_staged.py" "$MOPAC" --work-dir "$RUN/staged_ab" "${AB_OPTS[@]}" \
   --geometry "1UAO=$DATA/1UAO_opt.pdb" --geometry "1CRN=$DATA/1CRN_opt.pdb"
@@ -228,7 +230,9 @@ step "4 staged diagg2 A/B" staged_ab.log \
 step "5 reference (staged diagg2)" reference_staged.log \
   env MOPAC_MOZYME_DIAGG2_STAGED=1 python3 "$SRC/tests/check_mozyme_gpu_reference.py" "$MOPAC" --data "$DATA" \
   --work-dir "$RUN/reference_staged" "${REF_STAGED_OPTS[@]}"
+fi
 
+if [ "${RUN_STAGED:-0}" = 1 ]; then
 # timings side by side
 section "TIMINGS default vs staged diagg2 (seconds; from summary.json)"
 python3 - "$RUN/reference_default/summary.json" "$RUN/reference_staged/summary.json" >> "$REPORT" 2>&1 <<'EOF'
@@ -245,6 +249,7 @@ for k in d:
         a = d[k]["wall"]; b = s.get(k, {}).get("wall") if isinstance(s.get(k), dict) else None
         print(f"{k:38s} {a:10.1f} {b if b is None else round(b, 1)!s:>10s} " + (f"{a / b:8.2f}x" if b else ""))
 EOF
+fi
 
 # ---------------------------------------------------------------- 6 trace
 trace() {
