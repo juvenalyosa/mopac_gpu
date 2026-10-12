@@ -18,7 +18,7 @@ import subprocess
 import threading
 import time
 
-BRANCH = "diagg2-lpt"
+BRANCH = "main"
 # base: the sweep before the fast path and the LPT order; fast: fast path only; fast+lpt: the new default
 VARIANTS = {
     "base": {"MOPAC_MOZYME_DIAGG2_LPT": "0", "MOPAC_MOZYME_DIAGG2_FASTPATH": "0"},
