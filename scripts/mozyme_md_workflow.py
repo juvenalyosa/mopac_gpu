@@ -153,6 +153,8 @@ def optimize_stationary(mopac: Path, geometry: Path, work: Path, gnorm: float = 
     grow (add_more_interactions), so at its end the gradient of a fresh calculation differs from the one the
     optimizer saw by ~0.3-0.4 kcal/(mol A); each further optimization starts fresh from the last result and
     moves less (chignolin, GNORM=0.1: ~700, ~1400, ~300, ~30 cycles; fresh gradient 1.35, 0.36, 0.13, 0.09).
+    Stops at GNORM or when a stage improves the fresh gradient by less than 10 % (GPU floor ~0.13 at
+    GNORM=0.1; FORCE at those chignolin minima: no imaginary mode).
     Returns (final .arc geometry, one dict per stage)."""
     work.mkdir(parents=True, exist_ok=True)
     geo = work / geometry.name
@@ -182,6 +184,11 @@ def optimize_stationary(mopac: Path, geometry: Path, work: Path, gnorm: float = 
         geo = work / f"stage{stage}.arc"
         shutil.copy2(arc, geo)
         if info["gnorm_fresh"] is not None and info["gnorm_fresh"] < gnorm:
+            break
+        # a floor (GPU, 2 x T4: ~0.13 for GNORM=0.1, the minimum is already real: no imaginary mode):
+        # stop when a stage gains less than 10 %
+        if len(stages) > 1 and None not in (info["gnorm_fresh"], stages[-2]["gnorm_fresh"]) and \
+                info["gnorm_fresh"] > 0.9 * stages[-2]["gnorm_fresh"]:
             break
     return geo, stages
 
