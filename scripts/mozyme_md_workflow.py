@@ -142,6 +142,50 @@ def optimize(mopac: Path, pdb: Path, work: Path, cycles: int = 100, eps: float |
     return out_pdb, r
 
 
+GNORM_RE = re.compile(r"GRADIENT NORM\s*=\s*([-0-9.]+)")
+
+
+def optimize_stationary(mopac: Path, geometry: Path, work: Path, gnorm: float = 0.1, cycles: int = 5000,
+                        max_stages: int = 6, eps: float | None = None, env_extra: dict[str, str] | None = None,
+                        extra: str = "") -> tuple[Path, list[dict]]:
+    """Optimize until the gradient of a fresh, tightly converged SCF at the result is below GNORM: the
+    geometry a FORCE / THERMO calculation needs.  During one MOZYME optimization the interaction lists only
+    grow (add_more_interactions), so at its end the gradient of a fresh calculation differs from the one the
+    optimizer saw by ~0.3-0.4 kcal/(mol A); each further optimization starts fresh from the last result and
+    moves less (chignolin, GNORM=0.1: ~700, ~1400, ~300, ~30 cycles; fresh gradient 1.35, 0.36, 0.13, 0.09).
+    Returns (final .arc geometry, one dict per stage)."""
+    work.mkdir(parents=True, exist_ok=True)
+    geo = work / geometry.name
+    if geometry.resolve() != geo.resolve():
+        shutil.copy2(geometry, geo)
+    stages: list[dict] = []
+    extra = f" {extra.strip()}" if extra.strip() else ""
+    for stage in range(1, max_stages + 1):
+        sdir = work / f"stage{stage}"
+        r = run_mopac(mopac, sdir, "opt",
+                      f'{BASE_KEYS}{solvent_keys(eps)} GEO_DAT="{geo.name}" CYCLES={cycles} PDBOUT GNORM={gnorm:g}{extra}',
+                      f"geometry optimization, stage {stage}", [geo], env_extra)
+        arc = sdir / "opt.arc"
+        if not arc.exists():
+            raise RuntimeError(f"stage {stage} left no .arc geometry; see {sdir / 'opt.out'}")
+        chk = run_mopac(mopac, sdir, "fresh",
+                        f'{BASE_KEYS}{solvent_keys(eps)} 1SCF GRADIENTS SCFCRT=0.000001 THRESH=1.D-14 GEO_DAT="opt.arc"',
+                        "fresh gradient at the optimized geometry", [], env_extra)
+        g_opt = GNORM_RE.findall(r.out_text)
+        g_fresh = GNORM_RE.findall(chk.out_text)
+        info = dict(stage=stage, cycles=len(CYCLE_RE.findall(r.out_text)), wall=r.wall + chk.wall, heat=r.heat,
+                    gnorm_opt=float(g_opt[-1]) if g_opt else None,
+                    gnorm_fresh=float(g_fresh[-1]) if g_fresh else None)
+        stages.append(info)
+        print(f"[opt stage {stage}] {info['cycles']} cycles, {info['wall']:.1f} s, heat {info['heat']}, "
+              f"GNORM {info['gnorm_opt']} (fresh SCF: {info['gnorm_fresh']})", flush=True)
+        geo = work / f"stage{stage}.arc"
+        shutil.copy2(arc, geo)
+        if info["gnorm_fresh"] is not None and info["gnorm_fresh"] < gnorm:
+            break
+    return geo, stages
+
+
 @dataclass
 class Dynamics:
     run: RunResult
