@@ -4028,6 +4028,14 @@ struct DiaggRotateArgs {
 // the total coefficient count.  Warp-collective.
 // Arrays mutated by other SMs between cooperative rounds (LMO lists,
 // coefficients, pair state) must be read through L2, never from a stale L1.
+// Back-off of the diagg2 occupied-LMO spin locks: __nanosleep exists from
+// sm_70 on; older GPUs (P100 sm_60, GTX 10xx sm_61) just spin.
+__device__ inline void lock_backoff() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+  __nanosleep(100);
+#endif
+}
+
 __device__ inline int ld_shared_int(const int *p) { return __ldcg(p); }
 __device__ inline double ld_shared_double(const double *p) { return __ldcg(p); }
 
@@ -4769,7 +4777,7 @@ mozyme_diagg2_block_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
       if (!(fabs(c / d) >= biglim)) continue;
       if (tid == 0) {
         while (atomicCAS(olock + j - 1, 0, 1) != 0) {
-          __nanosleep(100);
+          lock_backoff();
           ++spins;
         }
         __threadfence();
@@ -5139,7 +5147,7 @@ mozyme_diagg2_staged_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
       if (!(fabs(c / d) >= biglim)) continue;
       if (tid == 0) {
         while (atomicCAS(olock + j - 1, 0, 1) != 0) {
-          __nanosleep(100);
+          lock_backoff();
           ++spins;
         }
         __threadfence();
