@@ -302,7 +302,11 @@ if(GPU)
     CUDA_STANDARD_REQUIRED ON
   )
   target_link_libraries(mopac-core PUBLIC CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
-  option(ENABLE_CUSOLVER_MG "Enable cuSOLVERMg detection and stubs" ON)
+  # Off by default: the multi-GPU dense eigensolver path (HAVE_CUSOLVER_MG) is written against an API
+  # that libcusolverMg does not provide (cudaLibMgCreateGrid, cusolverMgMemcpyH2D, ...), so it does not
+  # compile; it was only ever skipped because find_library missed the library without CUDA_HOME.  MOZYME
+  # does not use the dense eigensolver.  Turning this on needs that code ported first.
+  option(ENABLE_CUSOLVER_MG "Enable cuSOLVERMg detection (multi-GPU dense eigensolver, not ported)" OFF)
   if(ENABLE_CUSOLVER_MG)
     find_library(CUSOLVERMG_LIBRARY NAMES cusolverMg PATHS $ENV{CUDA_HOME}/lib64 $ENV{CUDA_HOME}/lib $ENV{CUDAToolkit_ROOT}/lib64)
     if(CUSOLVERMG_LIBRARY)
