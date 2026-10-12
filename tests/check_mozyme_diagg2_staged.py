@@ -15,7 +15,7 @@ For every system (hydrogenated with ADD-H, no optimization needed):
 Checks (the lock sweep already varies at rounding level from run to run, so the staged kernel is compared
 with the spread of the default kernel, not bit for bit):
   - every SCF resident on the GPU and converged (no "FAILED", no fallback);
-  - SCF iterations of the staged runs within +-3 of the default runs;
+  - SCF iterations of the staged runs within the range of the default runs +-3;
   - heat of formation within 1e-4 kcal/mol of the default runs;
   - gradient |difference| within max(5 x the default run-to-run spread, 0.005) kcal/(mol A);
   - FORCETS frequencies RMS difference <= 0.5 cm-1 and ZPE within 0.01 kcal/mol.
@@ -150,8 +150,10 @@ def main() -> int:
         it_d = [r["iterations"][-1] for r in d0 if r["iterations"]]
         it_s = [r["iterations"][-1] for r in s0 if r["iterations"]]
         if it_d and it_s:
-            check(max(abs(x - y) for x in it_s for y in it_d) <= 3,
-                  f"{pdb_id}: SCF iterations staged {it_s} vs default {it_d} (within 3)")
+            # the default kernel itself varies from run to run (e.g. 45 and 57 for crambin on a T4)
+            lo, hi = min(it_d) - 3, max(it_d) + 3
+            check(all(lo <= x <= hi for x in it_s),
+                  f"{pdb_id}: SCF iterations staged {it_s} within the default range {it_d} +-3")
         h_d = [r["heat"] for r in d0 if r["heat"] is not None]
         h_s = [r["heat"] for r in s0 if r["heat"] is not None]
         if h_d and h_s:

@@ -62,10 +62,13 @@ step() {
   "$@" > "$log" 2>&1
   local rc=$?
   local dt=$((SECONDS - t0))
-  grep -E "^(PASS|FAIL) |^\[|^ {5}|all checks passed|check\(s\) failed|^work dir" "$log" >> "$REPORT"
+  # results of the test scripts (not the build output: ninja and the compiler also print '[' and indented lines)
+  if [ "$2" != build.log ]; then
+    grep -E "^(PASS|FAIL) |^\[[a-zA-Z]|^ {5}[^ ]|all checks passed|check\(s\) failed|^work dir" "$log" >> "$REPORT"
+  fi
   if [ $rc -ne 0 ]; then
     # what the PASS/FAIL lines do not show: errors, tracebacks, the last lines of a crash
-    local extra; extra=$(grep -v -E "^(PASS|FAIL) |^\[|^ {5}|all checks passed|check\(s\) failed|^work dir" "$log" | tail -25)
+    local extra; extra=$(grep -v -E "^(PASS|FAIL) |^\[[a-zA-Z]|^ {5}[^ ]|all checks passed|check\(s\) failed|^work dir" "$log" | tail -25)
     if [ -n "$extra" ]; then say "--- other output (last 25 lines) of logs/$(basename "$log"):"; echo "$extra" >> "$REPORT"; fi
   fi
   say "STEP $name: exit $rc, ${dt} s, log logs/$(basename "$log")"
