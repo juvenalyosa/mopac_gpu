@@ -25,7 +25,7 @@ subroutine iter_for_MOZYME (ee)
          norred, numred, ncf, nce, scfref, thresh, ovmax, tiny, shift, &
          energy_diff, sumt, sumb, ijc, use_three_point_extrap, &
          ws, p1, p2, p3, partf, partp, idiag, mode, &
-         gpu_occ_enabled, gpu_virt_enabled, at_res, allres
+         gpu_occ_enabled, gpu_virt_enabled, at_res, allres, selcon_cap
 !
     use funcon_C, only: fpc_9
 #ifdef GPU
@@ -318,6 +318,10 @@ subroutine iter_for_MOZYME (ee)
       idiagg = 0
       tiny = 0.d0
     end if
+    !
+    !  The MOZYME geometry optimizer tightens the criterion near convergence (SELCON_CAP)
+    !
+    if (selcon_cap > 0.d0) selcon = Min (selcon, selcon_cap)
     if (index(keywrd," tighten")  /= 0) then
       call l_control("tighten", len_trim("tighten"), -1)
       selcon = max( selcon*0.1d0, 1.d-3)

@@ -23,7 +23,8 @@
 !    Mathematical Programming B, 45, 3, pp. 503-528.
 !
       use molkst_C, only: tleft, time0, iflepo, tdump, gnorm, natoms, keywrd, stress, &
-      moperr, nvar, id, line, last, mozyme, numat, prt_gradients, keywrd_txt,  prt_coords, use_disk
+      moperr, nvar, id, line, last, mozyme, numat, prt_gradients, keywrd_txt,  prt_coords, use_disk, &
+      emin
 !
       use chanel_C, only: iw0, iw, log, ilog, input_fn
 !
@@ -31,12 +32,14 @@
 !
       use ef_C, only : nstep
 !
+      use MOZYME_C, only : selcon_cap
+!
       implicit none
       double precision, intent (inout) :: escf
       double precision, dimension (nvar), intent (inout) ::  xparam
 !
       character :: txt, csave*60, task*60, line1*30
-      logical :: resfil, times, lsave(4), geo_ref, restrt
+      logical :: resfil, times, lsave(4), geo_ref, restrt, use_tr
       integer :: i, icyc, niwa, nwa, maxcyc, alloc_stat, m, isave(44), nflush = 1, &
         n_bad = 0, max_bad
 !
@@ -153,6 +156,20 @@
       cycmx = 0.d0
       tlast = tleft
       resfil = .false.
+!
+!  MOZYME: trust-region L-BFGS (trust_region_lbfgs below) instead of L-BFGS-B, except on a
+!  restart (the restart file holds the L-BFGS-B state).  MOPAC_LBFGS_CLASSIC=1: L-BFGS-B.
+!
+      use_tr = mozyme .and. .not. restrt
+      if (use_tr) then
+        call get_environment_variable("MOPAC_LBFGS_CLASSIC", line1)
+        if (line1(1:1) == "1") use_tr = .false.
+        line1 = " "
+      end if
+      if (use_tr) then
+        call trust_region_lbfgs()
+        goto 99
+      end if
       do
        !
        !  Check: Is there enough time for another cycle?
@@ -275,65 +292,7 @@
   !
   !   Write out current status
   !
-          if (id == 3 .and. nstep > 0) then
-            nstep = nstep - 1
-            call write_cell(iw)
-            call write_cell(iw0)
-            nstep = nstep + 1
-          end if
-          if (geo_ref) then
-            call  geo_diff(sum, rms, .false.)
-            write(iw,'(/1x, a, f8.2, a, f8.4, a, f8.4, a, f11.2, a)') "Difference to Geo-Ref:", sum, &
-            " = total,", sum/numat, " = Average,", sqrt(rms/numat)," = RMS movement.    STRESS:", &
-            stress
-          end if
-          if (geo_ref) then
-            write(line1,'(a,g15.7)')"  - STRESS:", escf - stress
-          else
-            line1 = " "
-          end if
-          if (resfil) then
-            write (line, '(" RESTART FILE WRITTEN,      TIME LEFT:", f6.2, &
-             & a1, "  GRAD.:", f10.3, " HEAT:", g14.7, a)') &
-             tprt, txt, Min (gnorm, 999999.999d0), escf, trim(line1)
-            write(iw,"(a)")trim(line)
-            call to_screen(trim(line))
-            if (use_disk) then
-              endfile (iw)
-              backspace (iw)
-            end if
-            if (log) write (ilog, '(a)', err = 1000)trim(line)
-            resfil = .false.
-          else
-            write (line, '(" CYCLE:", i6, " TIME:", f8.3, " TIME LEFT:", &
-                   & f6.2, a1, "  GRAD.:", f10.3, " HEAT:", g14.7, a)') &
-                   nstep, Min (tstep, 9999.99d0), tprt, txt, &
-                   & Min (gnorm, 999999.999d0), escf, trim(line1)
-            write(iw,"(a)")trim(line)
-            if (use_disk) then
-              endfile (iw)
-              backspace (iw)
-            end if
-            if (log) write (ilog, "(a)")trim(line)
-            call to_screen(trim(line))
-          end if
-          if (mod(nstep,30) == 0) then
-            line = trim(input_fn)
-            call add_path(line)
-            i = len_trim(line) - 5
-            call to_screen(line(:i))
-          end if
-          if (nflush /= 0) then
-            if (Mod(nstep, nflush) == 0 .and. use_disk) then
-              endfile (iw)
-              backspace (iw)
-              if (log) then
-                endfile (ilog)
-                backspace (ilog)
-              end if
-            end if
-          end if
-          call to_screen("To_file: Geometry optimizing")
+          call print_cycle()
           !
           !  Write out the cosine of the angle that the new gradient makes
           !  with the old gradient.  Ideally, this should be small.
@@ -413,6 +372,249 @@
       end if
       deallocate (best_xparam, best_gradients, best_nc, stat=alloc_stat)
       return
+
+contains
+
+    subroutine print_cycle()
+!
+!  Write the status line of the current point (CYCLE / RESTART FILE WRITTEN).
+!
+      integer :: ios
+        if (id == 3 .and. nstep > 0) then
+          nstep = nstep - 1
+          call write_cell(iw)
+          call write_cell(iw0)
+          nstep = nstep + 1
+        end if
+        if (geo_ref) then
+          call  geo_diff(sum, rms, .false.)
+          write(iw,'(/1x, a, f8.2, a, f8.4, a, f8.4, a, f11.2, a)') "Difference to Geo-Ref:", sum, &
+          " = total,", sum/numat, " = Average,", sqrt(rms/numat)," = RMS movement.    STRESS:", &
+          stress
+        end if
+        if (geo_ref) then
+          write(line1,'(a,g15.7)')"  - STRESS:", escf - stress
+        else
+          line1 = " "
+        end if
+        if (resfil) then
+          write (line, '(" RESTART FILE WRITTEN,      TIME LEFT:", f6.2, &
+           & a1, "  GRAD.:", f10.3, " HEAT:", g14.7, a)') &
+           tprt, txt, Min (gnorm, 999999.999d0), escf, trim(line1)
+          write(iw,"(a)")trim(line)
+          call to_screen(trim(line))
+          if (use_disk) then
+            endfile (iw)
+            backspace (iw)
+          end if
+          if (log) write (ilog, '(a)', iostat=ios)trim(line)
+          resfil = .false.
+        else
+          write (line, '(" CYCLE:", i6, " TIME:", f8.3, " TIME LEFT:", &
+                 & f6.2, a1, "  GRAD.:", f10.3, " HEAT:", g14.7, a)') &
+                 nstep, Min (tstep, 9999.99d0), tprt, txt, &
+                 & Min (gnorm, 999999.999d0), escf, trim(line1)
+          write(iw,"(a)")trim(line)
+          if (use_disk) then
+            endfile (iw)
+            backspace (iw)
+          end if
+          if (log) write (ilog, "(a)")trim(line)
+          call to_screen(trim(line))
+        end if
+        if (mod(nstep,30) == 0) then
+          line = trim(input_fn)
+          call add_path(line)
+          i = len_trim(line) - 5
+          call to_screen(line(:i))
+        end if
+        if (nflush /= 0) then
+          if (Mod(nstep, nflush) == 0 .and. use_disk) then
+            endfile (iw)
+            backspace (iw)
+            if (log) then
+              endfile (ilog)
+              backspace (ilog)
+            end if
+          end if
+        end if
+        call to_screen("To_file: Geometry optimizing")
+    end subroutine print_cycle
+
+    subroutine trust_region_lbfgs()
+!
+!  Trust-region L-BFGS for MOZYME geometry optimizations.
+!
+!  L-BFGS-B above runs with a line-search step bound of 1.d-5 (BIG in LNSRLB) and the driver
+!  rescales or clamps the step L-BFGS-B proposed (2 x the recent step, SLOG), so the (s, y)
+!  pairs it stores need not belong to the step taken.  For MOZYME this let 1 or 2 of 8
+!  optimizations of chignolin (140 atoms, starting points 0.002 Angstrom apart) wander off:
+!  energy up by tens of kcal/mol, GNORM 15-30 at the end.  Here (same 8 starts: 8 of 8 reach
+!  GNORM=1, final heats within 4 kcal/mol instead of 13):
+!    - the direction is the L-BFGS two-loop product with the last M accepted pairs;
+!    - the step is that direction scaled so that no coordinate moves by more than the trust
+!      radius (at most SLOG, default 0.2 Angstrom); the pair stored is the step taken;
+!    - every new point is kept (no back-tracking: MOZYME starts each SCF from the LMOs of the
+!      previous one, so returning to an earlier geometry is not a clean restart); the trust
+!      radius follows the directional derivative g_new.s along the step; an energy rise of
+!      more than ERISE clears the memory;
+!    - a pair is stored only when s.y > 0 (positive curvature);
+!    - near convergence (GNORM < 10 x the criterion) the SCF is fully converged (EMIN = 0:
+!      no rapid exit in ITER); for GNORM < 0.6 the SCF criterion is also lowered below 2 x
+!      GNORM (SELCON_CAP, ~1500 x SCFCRT kcal/(mol A) of gradient error).
+!  The interaction lists only grow during an optimization (add_more_interactions), so the
+!  gradient of a fresh calculation at the final geometry can differ by ~0.3-0.4 kcal/(mol A);
+!  for a stationary point of a later FORCE, optimize again from the result.
+!
+      integer, parameter :: mmem = 12
+      double precision, parameter :: erise = 1.d0, rmin = 1.d-4
+      double precision, allocatable :: sm(:,:), ym(:,:), rho(:), alp(:), dir(:), x0(:), g0(:)
+      integer :: kmem, head, jj, k, nrej, it
+      double precision :: radius, e0, dmax, sy, yy, gam, bet, gd
+      logical :: limited
+!
+      allocate (sm(nvar, mmem), ym(nvar, mmem), rho(mmem), alp(mmem), dir(nvar), x0(nvar), g0(nvar))
+      write (iw, "(/10x,a)") "Trust-region L-BFGS (MOZYME)"
+      kmem = 0
+      head = 0
+      nrej = 0
+      radius = min(slog, 0.05d0)
+!
+!  Starting point
+!
+      call compfg (xparam, .true., escf, .true., grad, .true.)
+      if (moperr) return
+      nstep = 0
+      tx1 = seconds (2)
+      tstep = 0.d0
+      gnorm = dSqrt (ddot(nvar, grad, 1, grad, 1))
+      call prttim (tleft, tprt, txt)
+      call print_cycle()
+      if (gnorm < tolerg) then
+        iflepo = 3
+        goto 900
+      end if
+      x0 = xparam
+      g0 = grad
+      e0 = escf
+      do it = 1, maxcyc
+        if (tleft < 1.5d0*cycmx) then
+          write (iw, "(20x,a,/30x,a)") "THERE IS NOT ENOUGH TIME FOR ANOTHER CYCLE", "NOW GOING TO FINAL"
+          iflepo = -1
+          exit
+        end if
+!
+!  Direction: -H g by the two-loop recursion (H0 = gamma I, gamma = s.y / y.y of the newest pair)
+!
+        dir = -g0
+        do k = 0, kmem - 1
+          jj = mod(head - 1 - k + mmem, mmem) + 1
+          alp(jj) = rho(jj) * ddot(nvar, sm(1, jj), 1, dir, 1)
+          dir = dir - alp(jj) * ym(:, jj)
+        end do
+        if (kmem > 0) then
+          jj = mod(head - 1 + mmem, mmem) + 1
+          gam = ddot(nvar, sm(1, jj), 1, ym(1, jj), 1) / ddot(nvar, ym(1, jj), 1, ym(1, jj), 1)
+          dir = gam * dir
+        end if
+        do k = kmem - 1, 0, -1
+          jj = mod(head - 1 - k + mmem, mmem) + 1
+          bet = rho(jj) * ddot(nvar, ym(1, jj), 1, dir, 1)
+          dir = dir + (alp(jj) - bet) * sm(:, jj)
+        end do
+        gd = ddot(nvar, g0, 1, dir, 1)
+        if (gd >= 0.d0) then
+!         not a descent direction: drop the memory
+          kmem = 0
+          dir = -g0
+        end if
+!
+!  Scale to the trust radius (largest coordinate change)
+!
+        dmax = maxval(abs(dir))
+        limited = (dmax > radius)
+        if (limited) dir = dir * (radius / dmax)
+        xparam = x0 + dir
+!       converged SCF for the last steps: no rapid exit below 10 x GNORM, and below 2 x GNORM
+!       a criterion such that the gradient error (~1500 x SCFCRT kcal/(mol A) for MOZYME)
+!       stays well below GNORM
+        if (gnorm < 10.d0*tolerg) emin = 0.d0
+!       (only for a GNORM below the ~0.3 kcal/(mol A) error of the default criterion near a
+!       minimum; GNORM=1 converges without it)
+        if (gnorm < 2.d0*tolerg .and. tolerg < 0.6d0) selcon_cap = max(1.d-5, min(1.d-4, 1.d-4*tolerg))
+        call compfg (xparam, .true., escf, .true., grad, .true.)
+        if (moperr) return
+        nstep = nstep + 1
+        tx2 = seconds (2)
+        tstep = tx2 - tx1
+        cycmx = Max (tstep, cycmx)
+        tx1 = tx2
+        tleft = tleft - tstep
+!
+!  Every point is kept (MOZYME carries the LMOs of the last SCF into the next one, so going
+!  back to an earlier geometry would start from the LMOs of the rejected one).  The radius
+!  follows the directional derivative along the step: past the minimum along s
+!  (g_new.s > 0) -> halve it; a limited step that is still downhill -> double it.  A large
+!  energy rise (bad curvature information) clears the memory and halves the radius.
+!
+        sm(:, mod(head, mmem) + 1) = xparam - x0
+        ym(:, mod(head, mmem) + 1) = grad - g0
+        jj = mod(head, mmem) + 1
+        sy = ddot(nvar, sm(1, jj), 1, ym(1, jj), 1)
+        yy = ddot(nvar, ym(1, jj), 1, ym(1, jj), 1)
+        gd = ddot(nvar, grad, 1, sm(1, jj), 1)
+        if (escf > e0 + erise) then
+          kmem = 0
+          radius = max(0.5d0 * min(radius, dmax), rmin)
+          nrej = nrej + 1
+        else
+          if (sy > 1.d-10 * sqrt(yy * ddot(nvar, sm(1, jj), 1, sm(1, jj), 1))) then
+            rho(jj) = 1.d0 / sy
+            head = jj
+            kmem = min(kmem + 1, mmem)
+          end if
+          if (gd > 0.d0) then
+            radius = max(0.5d0 * min(radius, dmax), rmin)
+          else if (limited) then
+            radius = min(2.d0 * radius, slog)
+          end if
+          nrej = 0
+        end if
+        x0 = xparam
+        g0 = grad
+        e0 = escf
+        gnorm = dSqrt (ddot(nvar, grad, 1, grad, 1))
+        tleft = Max (0.d0, tleft)
+        call prttim (tleft, tprt, txt)
+        call print_cycle()
+        call dcopy (nvar, grad, 1, gold, 1)
+        if (gnorm < tolerg) then
+          iflepo = 3
+          exit
+        end if
+        if (nrej > max_bad) then
+          write (iw, "(//10x,' HEAT OF FORMATION IS ESSENTIALLY STATIONARY')")
+          iflepo = 3
+          exit
+        end if
+        if (it == maxcyc) then
+          write (iw, "(/20x,a,/)") "NUMBER OF CYCLES EXCEEDED.  NOW GOING TO FINAL"
+          iflepo = -1
+        end if
+      end do
+900   gnorm = dSqrt (ddot(nvar, grad, 1, grad, 1))
+!
+!  The result is the last point (converged, or the last one reached), not the lowest energy
+!  seen on the way: lbfgs reloads BEST_* when its energy is lower.
+!
+      best_funct = escf
+      best_gnorm = gnorm
+      best_xparam = xparam
+      best_gradients = grad
+      best_nc(:natoms) = nc(:natoms)
+      selcon_cap = 0.d0
+      deallocate (sm, ym, rho, alp, dir, x0, g0)
+    end subroutine trust_region_lbfgs
     end subroutine lbfgs
     subroutine lbfsav (tt0, mode, wa, nwa, iwa, niwa, task, csave, lsave, isave, &
    & dsave, nstep, escf)

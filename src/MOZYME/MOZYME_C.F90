@@ -96,7 +96,11 @@ module MOZYME_C
                         !
     bbone(3,-20:maxres) = 0! Atom numbers of the backbone atoms in a polypeptide
 
-   double precision :: &
+   !  Upper bound on the SCF criterion SELCON (kcal/mol) set by the MOZYME geometry
+  !  optimizer near convergence (0: none), so that the last gradients are converged well
+  !  below the GNORM criterion.  Applied in SCFCRI.
+  double precision :: selcon_cap = 0.d0
+  double precision :: &
     angles(3, -20:maxres) !  Phi, Psi, and Omega for backbone angles (Ramachandran)
 
 

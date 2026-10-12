@@ -15,6 +15,7 @@
 
 subroutine scfcri (selcon)
     use molkst_C, only: numcal, keywrd, efield
+    use MOZYME_C, only: selcon_cap
     use chanel_C, only: iw
  !   use common_convrg, only: scfref
    !
@@ -104,5 +105,6 @@ subroutine scfcri (selcon)
         selcon = scfref
       end if
     end if
+    if (selcon_cap > 0.d0) selcon = Min (selcon, selcon_cap)
     return
 end subroutine scfcri
