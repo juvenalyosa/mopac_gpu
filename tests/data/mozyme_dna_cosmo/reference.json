@@ -1,0 +1,48 @@
+{
+ "note": "CPU (Apple M-series, build-cpu-check, commit da0cf04f) 1SCF GRADIENTS references for DNA and COSMO. 1BNA_neutral: Dickerson dodecamer hydrogenated by ADD-H (phosphates protonated, the spurious N3-H on C1 removed), 780 atoms, charge 0. 1BNA_anion: phosphate H removed, 758 atoms, charge -22. 1UAO_opt: chignolin.",
+ "keywords": "PM7 MOZYME MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 GEO-OK 1SCF GRADIENTS",
+ "cases": {
+  "dna_scf": {
+   "geometry": "1BNA_neutral.pdb",
+   "extra_keywords": "",
+   "heat": -5444.21189,
+   "gnorm": 1416.22054,
+   "cpu_job_s": 8.03
+  },
+  "dna_scf_tight": {
+   "geometry": "1BNA_neutral.pdb",
+   "extra_keywords": "SCFCRT=0.000001 THRESH=1.D-15",
+   "heat": -5444.23728,
+   "gnorm": 1416.29719,
+   "cpu_job_s": 39.18
+  },
+  "dna_cosmo_scf": {
+   "geometry": "1BNA_anion.pdb",
+   "extra_keywords": "EPS=78.4",
+   "heat": -8420.52606,
+   "gnorm": 1102.5304,
+   "cpu_job_s": 14.62
+  },
+  "dna_cosmo_scf_tight": {
+   "geometry": "1BNA_anion.pdb",
+   "extra_keywords": "EPS=78.4 SCFCRT=0.000001 THRESH=1.D-15",
+   "heat": -8420.5486,
+   "gnorm": 1101.98105,
+   "cpu_job_s": 51.65
+  },
+  "chignolin_cosmo_scf": {
+   "geometry": "1UAO_opt.pdb",
+   "extra_keywords": "EPS=78.4",
+   "heat": -919.50267,
+   "gnorm": 83.10626,
+   "cpu_job_s": 0.66
+  },
+  "chignolin_cosmo_scf_tight": {
+   "geometry": "1UAO_opt.pdb",
+   "extra_keywords": "EPS=78.4 SCFCRT=0.000001 THRESH=1.D-15",
+   "heat": -919.50943,
+   "gnorm": 82.86376,
+   "cpu_job_s": 3.34
+  }
+ }
+}
