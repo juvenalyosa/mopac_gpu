@@ -19,7 +19,12 @@ import threading
 import time
 
 BRANCH = "diagg2-lpt"
-VARIANTS = {"default": {}, "lpt": {"MOPAC_MOZYME_DIAGG2_LPT": "1"}}
+# base: the sweep before the fast path and the LPT order; fast: fast path only; fast+lpt: the new default
+VARIANTS = {
+    "base": {"MOPAC_MOZYME_DIAGG2_LPT": "0", "MOPAC_MOZYME_DIAGG2_FASTPATH": "0"},
+    "fast": {"MOPAC_MOZYME_DIAGG2_LPT": "0"},
+    "fast+lpt": {},
+}
 REPEATS = 2
 BASE = "/tmp/ab"
 OUT = "/kaggle/working"
@@ -96,26 +101,25 @@ def main():
         for name, geo, keys in JOBS:
             if name.endswith("forcets") and rep > 1:
                 continue
-            # the variants side by side on different GPUs, swapped on the next repeat
-            threads = []
-            for k, variant in enumerate(names):
-                gpu = (k + rep - 1) % ngpu
-                th = threading.Thread(target=run_job, args=(variant, gpu, rep, name, geo, keys, results))
-                th.start()
-                threads.append(th)
-                if ngpu == 1:
+            # ngpu variants at a time, one per GPU, the GPUs rotated on the next repeat
+            for first in range(0, len(names), ngpu):
+                threads = []
+                for k, variant in enumerate(names[first:first + ngpu]):
+                    gpu = (k + rep - 1) % ngpu
+                    th = threading.Thread(target=run_job, args=(variant, gpu, rep, name, geo, keys, results))
+                    th.start()
+                    threads.append(th)
+                for th in threads:
                     th.join()
-            for th in threads:
-                th.join()
             say(f"done {name} repeat {rep}")
     say("")
-    say(f"{'job':14s} {'variant':8s} {'gpu':>3s} {'wall s':>8s} {'heat':>12s} {'zpe':>9s} {'iters':>12s} "
+    say(f"{'job':14s} {'variant':9s} {'gpu':>3s} {'wall s':>8s} {'heat':>12s} {'zpe':>9s} {'iters':>12s} "
         f"{'sweeps':>6s} {'span ms':>8s} {'wait ms':>8s} {'rot ms':>8s} {'chain':>6s} {'grid':>5s} {'fb':>3s}")
     for r in sorted(results, key=lambda x: (x["name"], x["rep"], x["variant"])):
         big = [s for s in r["sweeps"] if s[0] > 50000] or r["sweeps"]
         mean = lambda k: statistics.mean(s[k] for s in big) if big else float("nan")  # noqa: E731
         it = r["iterations"][-1] if len(r["iterations"]) == 1 else (len(r["iterations"]) or "-")
-        say(f"{r['name']:14s} {r['variant']:8s} {r['gpu']:3d} {r['wall']:8.1f} {str(r['heat']):>12s} "
+        say(f"{r['name']:14s} {r['variant']:9s} {r['gpu']:3d} {r['wall']:8.1f} {str(r['heat']):>12s} "
             f"{str(r['zpe']):>9s} {str(it):>12s} {len(r['sweeps']):6d} {mean(6) / 1e3:8.2f} {mean(7) / 1e3:8.2f} "
             f"{mean(8) / 1e3:8.2f} {mean(2):6.0f} {mean(5):5.0f} {r['fallback'] + r['errors']:3d}")
     say("")
@@ -123,7 +127,7 @@ def main():
     for v in names:
         rs = [r for r in results if r["variant"] == v]
         span = sum(s[6] for r in rs for s in r["sweeps"]) / 1e6
-        say(f"  {v:8s} wall {sum(r['wall'] for r in rs):8.1f} s   diagg2 spans {span:7.2f} s")
+        say(f"  {v:9s} wall {sum(r['wall'] for r in rs):8.1f} s   diagg2 spans {span:7.2f} s")
     shutil.make_archive(f"{OUT}/ab_runs", "gztar", f"{BASE}/runs")
 
 

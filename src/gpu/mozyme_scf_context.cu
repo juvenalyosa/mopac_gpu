@@ -4023,6 +4023,8 @@ struct DiaggRotateArgs {
   double *sumb_out;
   int *nrej_out;
   int *ok_slot;
+  // rotations that grow no LMO skip the slot scans (MOPAC_MOZYME_DIAGG2_FASTPATH=0: off)
+  int fast_path;
   const int *resident_control_ints;
   const double *resident_control_scalars;
 };
@@ -4447,6 +4449,25 @@ __device__ inline int block_build_offsets(const int *list, int count, const int 
 // One block scan for both quantities a growth pass needs: the rank of a
 // flagged atom (low 16 bits) and the orbital prefix of the flagged atoms
 // (high 16 bits).  Atoms <= 1024 and orbitals <= 9216 per LMO, so both fit.
+// Sum over the block (any blockDim up to 1024), result in every thread.
+__device__ inline unsigned long long block_sum_u64(unsigned long long v) {
+  __shared__ unsigned long long s_part[32];
+  for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffffu, v, off);
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  if (lane == 0) s_part[warp] = v;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    unsigned long long t = 0;
+    for (int w = 0; w < (static_cast<int>(blockDim.x) + 31) / 32; ++w) t += s_part[w];
+    s_part[0] = t;
+  }
+  __syncthreads();
+  const unsigned long long total = s_part[0];
+  __syncthreads();   // s_part is reused by the next call
+  return total;
+}
+
 __device__ inline int block_scan_flag_orbs(int flag, int norb, int *warp_sums,
                                            int *n_out, int *orb_out) {
   const int v = flag ? (1 | (norb << 16)) : 0;
@@ -4514,60 +4535,51 @@ __device__ void block_rotate_pair_indexed(const DiaggRotateArgs &a, int ij, int 
     if (tid == 0) sumb_acc += fabs(beta);
     const double beta2 = beta * beta;
 
-    // Count growth: virtual atoms missing from the occupied LMO.
-    int n_new_occ = 0;
-    int orb_new_occ = 0;
-    for (int chunk = 0; chunk < ncei0; chunk += blockDim.x) {
-      const int le = chunk + tid;
+    // Count growth: virtual atoms missing from the occupied LMO (s_fi) and
+    // occupied atoms missing from the virtual LMO (s_fj).  Only the totals
+    // are needed here (the apply passes compute the slots), so both counts
+    // go through one block reduction: n | orb << 16 for each side, the
+    // virtual side in the low and the occupied side in the high 32 bits.
+    unsigned long long packed = 0;
+    for (int le = tid; le < ncei0; le += blockDim.x) {
       int flag = 0;
-      int norb = 0;
-      if (le < ncei0) {
-        const int mie = ilist[le];
-        if (jmap[mie - 1] == 0) {
-          norb = a.iorbs[mie - 1];
-          const int cb = loopi + ioff[le];
-          double s = 0.0;
-          for (int k = 0; k < norb; ++k) {
-            const double v = ld_shared_double(a.cvir + cb + k);
-            s += v * v;
-          }
-          flag = (beta2 * s > a.thresh) ? 1 : 0;
+      const int mie = ilist[le];
+      if (jmap[mie - 1] == 0) {
+        const int norb = a.iorbs[mie - 1];
+        const int cb = loopi + ioff[le];
+        double s = 0.0;
+        for (int k = 0; k < norb; ++k) {
+          const double v = ld_shared_double(a.cvir + cb + k);
+          s += v * v;
         }
-        s_fi[le] = static_cast<unsigned char>(flag);
+        flag = (beta2 * s > a.thresh) ? 1 : 0;
+        if (flag) packed += 1ull | (static_cast<unsigned long long>(norb) << 16);
       }
-      int n = 0;
-      int orb = 0;
-      block_scan_flag_orbs(flag, norb, s_warp, &n, &orb);
-      n_new_occ += n;
-      orb_new_occ += orb;
+      s_fi[le] = static_cast<unsigned char>(flag);
     }
-    // Occupied atoms missing from the virtual LMO.
-    int n_new_vir = 0;
-    int orb_new_vir = 0;
-    for (int chunk = 0; chunk < ncfj0; chunk += blockDim.x) {
-      const int lf = chunk + tid;
+    for (int lf = tid; lf < ncfj0; lf += blockDim.x) {
       int flag = 0;
-      int norb = 0;
-      if (lf < ncfj0) {
-        const int ii = jlist[lf];
-        if (imap[ii - 1] == 0) {
-          norb = a.iorbs[ii - 1];
-          const int cb = loopj + joff[lf];
-          double s = 0.0;
-          for (int k = 0; k < norb; ++k) {
-            const double v = ld_shared_double(a.cocc + cb + k);
-            s += v * v;
-          }
-          flag = (beta2 * s > a.thresh) ? 1 : 0;
+      const int ii = jlist[lf];
+      if (imap[ii - 1] == 0) {
+        const int norb = a.iorbs[ii - 1];
+        const int cb = loopj + joff[lf];
+        double s = 0.0;
+        for (int k = 0; k < norb; ++k) {
+          const double v = ld_shared_double(a.cocc + cb + k);
+          s += v * v;
         }
-        s_fj[lf] = static_cast<unsigned char>(flag);
+        flag = (beta2 * s > a.thresh) ? 1 : 0;
+        if (flag) packed += (1ull | (static_cast<unsigned long long>(norb) << 16)) << 32;
       }
-      int n = 0;
-      int orb = 0;
-      block_scan_flag_orbs(flag, norb, s_warp, &n, &orb);
-      n_new_vir += n;
-      orb_new_vir += orb;
+      s_fj[lf] = static_cast<unsigned char>(flag);
     }
+    packed = block_sum_u64(packed);
+    const unsigned int lo = static_cast<unsigned int>(packed & 0xffffffffull);
+    const unsigned int hi = static_cast<unsigned int>(packed >> 32);
+    const int n_new_occ = static_cast<int>(lo & 0xffffu);
+    const int orb_new_occ = static_cast<int>(lo >> 16);
+    const int n_new_vir = static_cast<int>(hi & 0xffffu);
+    const int orb_new_vir = static_cast<int>(hi >> 16);
 
     const bool reject = (jbase + ncfj0 + n_new_occ > jncf) ||
                         (loopj + mlf0 + orb_new_occ > jur) ||
@@ -4586,6 +4598,30 @@ __device__ void block_rotate_pair_indexed(const DiaggRotateArgs &a, int ij, int 
     }
     if (ncei0 + n_new_vir > kDiaggMaxLmoAtoms || mle0 + orb_new_vir > kDiaggMaxLmoCoeffs) {
       error = 1;
+      __syncthreads();
+      block_map_clear(jmap, jlist, ncfj0);
+      __syncthreads();
+      return;
+    }
+
+    if (a.fast_path && n_new_occ == 0 && n_new_vir == 0) {
+      // Fast path (most rotations near self-consistency): no LMO grows, so
+      // only the atoms common to both are rotated (the same expressions as
+      // below) and none of the slot scans are needed.
+      for (int le = tid; le < ncei0; le += blockDim.x) {
+        const int mie = ilist[le];
+        const int jpos = jmap[mie - 1] - 1;
+        if (jpos < 0) continue;
+        const int norb = a.iorbs[mie - 1];
+        const int cb_i = loopi + ioff[le];
+        const int cb_j = loopj + joff[jpos];
+        for (int k = 0; k < norb; ++k) {
+          const double av = ld_shared_double(a.cocc + cb_j + k);
+          const double bv = ld_shared_double(a.cvir + cb_i + k);
+          a.cocc[cb_j + k] = alpha * av + beta * bv;
+          a.cvir[cb_i + k] = alpha * bv - beta * av;
+        }
+      }
       __syncthreads();
       block_map_clear(jmap, jlist, ncfj0);
       __syncthreads();
@@ -9173,7 +9209,11 @@ bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
       static_cast<std::size_t>(2 * grid) * static_cast<std::size_t>(ctx.config.natoms);
   if (!dev.diagg_rot_maps.resize(map_count)) return false;
   if (!dev.diagg_rot_cursor.resize(1)) return false;
-  static const bool lpt_env = env_enabled("MOPAC_MOZYME_DIAGG2_LPT");
+  // longest chains first: on by default, MOPAC_MOZYME_DIAGG2_LPT=0 for index order
+  static const bool lpt_env = [] {
+    const char *v = std::getenv("MOPAC_MOZYME_DIAGG2_LPT");
+    return !(v && (*v == '0' || *v == 'n' || *v == 'N' || *v == 'f' || *v == 'F'));
+  }();
   const bool trace = resident_scf_trace_enabled();
   const int nvir = std::max(1, ctx.config.nvirtual);
   const bool lpt = lpt_env && !staged && args.control_ints &&
@@ -9246,6 +9286,11 @@ DiaggRotateArgs make_diagg_rotate_args(MozymeScfContext &ctx,
   a.control_ints = control_ints;
   a.nij_slot = nij_slot;
   a.retry_slot = retry_slot;
+  static const int fast_path = [] {
+    const char *v = std::getenv("MOPAC_MOZYME_DIAGG2_FASTPATH");
+    return (v && (*v == '0' || *v == 'n' || *v == 'N' || *v == 'f' || *v == 'F')) ? 0 : 1;
+  }();
+  a.fast_path = fast_path;
   a.control_scalars = control_scalars;
   a.tiny_slot = tiny_slot;
   a.biglim_slot = biglim_slot;
