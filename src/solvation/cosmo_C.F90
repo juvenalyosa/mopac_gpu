@@ -16,6 +16,7 @@
 module cosmo_C
   implicit none
   logical :: iseps, noeps, useps, lpka
+  logical :: swig = .false.  ! Smooth (switching/Gaussian) COSMO surface, keyword SWIG (swig.F90)
   integer :: nspa, nps, nps2, nden, lenabc, nppa = 1082, &
   amat_dim, isude_dim, nipc, ioldcv
   integer, dimension (2) :: n0
@@ -46,6 +47,9 @@ module cosmo_C
    fnsq, rsolv
   double precision :: ffact = 0.d0
   double precision, dimension(:), allocatable :: diagsl
+  double precision, dimension(:), allocatable :: &
+  & swig_zeta, & ! SWIG: Gaussian exponent of each surface point, 1/Angstrom
+  & swig_f       ! SWIG: switching function of each surface point
   double precision, dimension(3,3,1082) :: tm
   double precision, dimension(4,1082) :: dirsm, dirvec
   double precision, dimension(:), allocatable, target :: &

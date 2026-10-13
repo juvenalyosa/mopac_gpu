@@ -197,7 +197,7 @@ subroutine coscav
     use molkst_C, only : numat
     use cosmo_C, only : lenabc, nps, area, isude, sude, &
        cosvol, rsolv, ioldcv, disex2, n0, dirvec, dirsm, srad, &
-       cosurf, amat, iatsp, nar_csm, nsetf, phinet, arat
+       cosurf, amat, iatsp, nar_csm, nsetf, phinet, arat, swig
     use common_arrays_c, only : coord, nat
     use funcon_C, only : pi
     use chanel_C, only : iw
@@ -217,6 +217,11 @@ subroutine coscav
     integer, dimension(:), allocatable :: isort, ipsrs, nipsrs, nset, nipa, &
          & lipa
     integer, dimension(:, :), allocatable :: nn
+    if (swig) then
+      call swig_surface (coord, numat)
+      call swig_amat
+      return
+    end if
     maxrs = 70 * numat
     allocate (rdat(numat), rsc(4, maxrs), tm(3, 3, numat), nn(3, numat), &
          & isort(maxrs), ipsrs(maxrs), nipsrs(lenabc), nset(1082*numat), &
@@ -664,7 +669,7 @@ end subroutine coscl2
 subroutine diegrd (dxyz)
     use molkst_C, only : numat
     use cosmo_C, only : nps, fepsi, nipc, &
-     cosurf, iatsp, isude, sude, qscnet, qdenet, qscat, arat
+     cosurf, iatsp, isude, sude, qscnet, qdenet, qscat, arat, swig
     use parameters_C, only : dd, qq
     use common_arrays_c, only : coord, nfirst, nlast, nat
     use funcon_C, only : ev, a0, fpc_9
@@ -683,6 +688,9 @@ subroutine diegrd (dxyz)
     end do
     db(0, 1) = 1.d0
     fact = -ev * a0 * fpc_9
+    if (swig) then
+      call swig_diegrd (dxyz)
+    else
     do k = 1, nps
       iak = iatsp(k)
       do ix = 1, 3
@@ -723,6 +731,7 @@ subroutine diegrd (dxyz)
         dxyz(ix, ib) = dxyz(ix, ib) + xk(ix) * deab
       end do
     end do
+    end if
     do k = 1, nps
       iak = iatsp(k)
       do ix = 1, 3
@@ -1729,7 +1738,7 @@ subroutine cosini(l_print)
     dirsm, dirvec, srad, ipiden, gden, idenat, qdenet, amat, &
     lenabc, arat, sude, isude, qden, nar_csm, nsetf, phinet, &
     qscnet, bmat, nset, iatsp, nn, qscat, cosurf, nppa, &
-    ffact, fepsi, nden
+    ffact, fepsi, nden, swig, swig_zeta, swig_f
     use common_arrays_C, only : nat, nfirst, nlast
     use molkst_C, only : numat, keywrd, moperr, lm61, mozyme, line, jobnam
     use chanel_C, only : iw
@@ -1802,6 +1811,10 @@ subroutine cosini(l_print)
           iatsp(lenabc + 1), isude(2, 30*numat), nar_csm(lenabc + 1), &
           arat(numat), sude(2, 30*numat), nsetf(lenabc + 1), cosurf(4, lenabc), stat = i)
     nsetf = 0 ! Added to fix gaps in nsetf's initialization, which might indicate a deeper flaw
+    swig = (Index (keywrd, " SWIG") /= 0)
+    if (allocated(swig_zeta)) deallocate (swig_zeta)
+    if (allocated(swig_f))    deallocate (swig_f)
+    if (swig) allocate (swig_zeta(lenabc), swig_f(lenabc))
     if (i /= 0) then
       call memory_error("COSINI (1) in Cosmo")
       return

@@ -1484,9 +1484,12 @@ subroutine wrtcon (allkey)
     i = Nint (reada (keywrd, Index (keywrd, " NSPA")))
     write (iw,'(" *  NSPA=", i5)') i
     nspa = i
+  else if (Index (keywrd, " SWIG") /= 0) then
+    nspa = 92
   else
     nspa = 42
   end if
+  if (myword(allkey, " SWIG")) write (iw,'(" *  SWIG       - SMOOTH COSMO SURFACE (SWITCHING/GAUSSIAN, LANGE AND HERBERT)")')
   if (myword(allkey, " ROTX"))  write (iw,'(" *  ROTX=", i5)') Nint (reada (keywrd, Index (keywrd, " ROTX")))
 !**********************************************************************
 !

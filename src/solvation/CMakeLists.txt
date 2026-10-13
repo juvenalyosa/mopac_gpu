@@ -16,7 +16,7 @@
 #===============================================
 # Create a list of source files (src_list) with the .F90 extension
 set(src_list 
-    afmm_C cosmo cosmo_C linear_cosmo
+    afmm_C cosmo cosmo_C linear_cosmo swig
    )
 #-----------------------------------------------
 # Add a list of source files to the target

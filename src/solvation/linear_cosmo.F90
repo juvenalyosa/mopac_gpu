@@ -43,6 +43,7 @@
   use cosmo_mini, only : new_surface, new_iteration, a_block, tm, &
   r_vec, p_vec, q_vec, z_vec, a_diag, m_vec, a_part, iblock_pos
   use iso_c_binding, only : c_int, c_ptr, c_loc, c_null_ptr
+  use cosmo_C, only : swig, swig_zeta, swig_f
   implicit none
 
   public :: ini_linear_cosmo, coscavz, addnucz, addfckz, am1dft_solve, &
@@ -489,6 +490,46 @@ contains
     end if
   end subroutine get_bvec
 
+  subroutine swig_points_z ()
+    !
+    !  For the SWIG surface (swig_surface): what coscanz does after building its surface -
+    !  first point of each atom (npoints) and the solver vectors - and the near-pair cutoff,
+    !  disex2: beyond it A(k,l) is 1/r, so erf(zeta(k,l)*r) must be 1 to machine precision.
+    !
+    use molkst_C, only : numat
+    use cosmo_C, only : nps, iatsp, disex2
+    implicit none
+    integer :: i, j, k, alloc_stat
+    npoints(1:numat + 1) = 0
+    do i = 1, nps
+      j = iatsp(i)
+      npoints(j) = npoints(j) + 1
+    end do
+    j = npoints(1)
+    npoints(1) = 1
+    do i = 2, numat
+      k = npoints(i)
+      npoints(i) = npoints(i-1) + j
+      j = k
+    end do
+    npoints(numat+1) = npoints(numat) + j
+    if (nps > 0) disex2 = (6.d0 * Sqrt (2.d0) / Minval (swig_zeta(1:nps)))**2
+    if (allocated (r_vec)) deallocate (r_vec, p_vec, q_vec, z_vec, a_diag)
+    allocate (r_vec(nps), p_vec(nps), q_vec(Max (numat, nps)), &
+         & z_vec(nps), a_diag(nps), stat=alloc_stat)
+    if (alloc_stat /= 0) call mopend ("Allocation error in swig_points_z")
+  end subroutine swig_points_z
+  double precision function swig_a (k, l, d2)
+    !
+    !  Off-diagonal element of the SWIG A matrix (swig.F90)
+    !
+    implicit none
+    integer, intent (in) :: k, l
+    double precision, intent (in) :: d2
+    double precision :: z
+    z = swig_zeta(k) * swig_zeta(l) / Sqrt (swig_zeta(k)**2 + swig_zeta(l)**2)
+    swig_a = erf (z*Sqrt (d2)) / Sqrt (d2)
+  end function swig_a
   subroutine coscavz (coord, nat)
     !
     ! Prepares molecular surface & tesselations
@@ -506,8 +547,13 @@ contains
     integer, dimension(2) :: ind
     new_surface = .true.
 
-    call coscanz (srad, coord, nat, cosurf, iatsp, nar_csm, nsetf, &
+    if (swig) then
+      call swig_surface (coord, numat)
+      call swig_points_z ()
+    else
+      call coscanz (srad, coord, nat, cosurf, iatsp, nar_csm, nsetf, &
          & phinet, arat)
+    end if
 
  !   write(26,*) ' Cosmo radii:'
  !   write(26,'(F12.5)') (srad(i), i=1, numat)
@@ -1427,28 +1473,32 @@ contains
             aa = a_part(ijpos)
           else
             xj(1:3) = coord(1:3, j)
-            rj = srad(j)
-            call mfinel (jj, 2, finel, nar_csm, nsetf, &
-               & nset, rsc, nipsrs, dirvec, &
-               & tm(1, 1, j), xj, rj, nfl2, &
-               & ioldcv, maxrs, lenabc, numat)
+            if (swig) then
+              aa = swig_a (ii, jj, d2)
+            else
+              rj = srad(j)
+              call mfinel (jj, 2, finel, nar_csm, nsetf, &
+                 & nset, rsc, nipsrs, dirvec, &
+                 & tm(1, 1, j), xj, rj, nfl2, &
+                 & ioldcv, maxrs, lenabc, numat)
 
-            aa = 0.d0
-            do k = 1, nfl1
-              x1 = finel(1, k, 1)
-              x2 = finel(2, k, 1)
-              x3 = finel(3, k, 1)
-              x4 = finel(4, k, 1)
+              aa = 0.d0
+              do k = 1, nfl1
+                x1 = finel(1, k, 1)
+                x2 = finel(2, k, 1)
+                x3 = finel(3, k, 1)
+                x4 = finel(4, k, 1)
 
-              do l = 1, nfl2
-                aa = aa + x4 * finel(4, l, 2) / &
-                   & Sqrt ((x1-finel(1, l, 2))**2 + &
-                   &       (x2-finel(2, l, 2))**2 + &
-                   &       (x3-finel(3, l, 2))**2)
+                do l = 1, nfl2
+                  aa = aa + x4 * finel(4, l, 2) / &
+                     & Sqrt ((x1-finel(1, l, 2))**2 + &
+                     &       (x2-finel(2, l, 2))**2 + &
+                     &       (x3-finel(3, l, 2))**2)
+                end do
               end do
-            end do
 
-            aa = aa / (cosurf(4, ii) * cosurf(4, jj))
+              aa = aa / (cosurf(4, ii) * cosurf(4, jj))
+            end if
           end if
         end if
         v(ii) = v(ii) + aa * q(jj)
@@ -1496,7 +1546,7 @@ contains
       xi(1:3) = coord(1:3, i)
       xa(1:3) = cosurf(1:3, ii)
 
-      if(compute) then
+      if (compute .and. .not. swig) then
         call mfinel (ii, 1, finel, nar_csm, nsetf, nset, rsc, &
            & nipsrs, dirvec, tm(1, 1, i), xi, ri, &
            & nfl1, ioldcv, maxrs, lenabc, numat)
@@ -1513,29 +1563,33 @@ contains
         if (d2 <= disex2) then
           npos = npos +1
           if(compute) then
-            j = iatsp(jj)
-            rj = srad(j)
-            call mfinel (jj, 2, finel, nar_csm, nsetf, &
-               & nset, rsc, nipsrs, dirvec, &
-               & tm(1, 1, j), xj, rj, nfl2, &
-               & ioldcv, maxrs, lenabc, numat)
+            if (swig) then
+              aa = swig_a (ii, jj, d2)
+            else
+              j = iatsp(jj)
+              rj = srad(j)
+              call mfinel (jj, 2, finel, nar_csm, nsetf, &
+                 & nset, rsc, nipsrs, dirvec, &
+                 & tm(1, 1, j), xj, rj, nfl2, &
+                 & ioldcv, maxrs, lenabc, numat)
 
-            aa = 0.d0
-            do k = 1, nfl1
-              x1 = finel(1, k, 1)
-              x2 = finel(2, k, 1)
-              x3 = finel(3, k, 1)
-              x4 = finel(4, k, 1)
+              aa = 0.d0
+              do k = 1, nfl1
+                x1 = finel(1, k, 1)
+                x2 = finel(2, k, 1)
+                x3 = finel(3, k, 1)
+                x4 = finel(4, k, 1)
 
-              do l = 1, nfl2
-                aa = aa + x4 * finel(4, l, 2) / &
-                   & Sqrt ((x1-finel(1, l, 2))**2 + &
-                   &       (x2-finel(2, l, 2))**2 + &
-                   &       (x3-finel(3, l, 2))**2)
+                do l = 1, nfl2
+                  aa = aa + x4 * finel(4, l, 2) / &
+                     & Sqrt ((x1-finel(1, l, 2))**2 + &
+                     &       (x2-finel(2, l, 2))**2 + &
+                     &       (x3-finel(3, l, 2))**2)
+                end do
               end do
-            end do
 
-            aa = aa / (cosurf(4, ii) * cosurf(4, jj))
+              aa = aa / (cosurf(4, ii) * cosurf(4, jj))
+            end if
 
             if (.not. allocated(a_part) .or. npos > size(a_part)) return
             a_part(npos) = aa
@@ -1606,28 +1660,32 @@ contains
               ijpos = ijpos +1
               aa = a_part(ijpos)
             else
-              rj = srad(j)
-              call mfinel (jj, 2, finel, nar_csm, nsetf, &
-                 & nset, rsc, nipsrs, dirvec, &
-                 & tm(1, 1, j), xj, rj, nfl2, &
-                 & ioldcv, maxrs, lenabc, numat)
+              if (swig) then
+                aa = swig_a (ii, jj, d2)
+              else
+                rj = srad(j)
+                call mfinel (jj, 2, finel, nar_csm, nsetf, &
+                   & nset, rsc, nipsrs, dirvec, &
+                   & tm(1, 1, j), xj, rj, nfl2, &
+                   & ioldcv, maxrs, lenabc, numat)
 
-              aa = 0.d0
-              do k = 1, nfl1
-                x1 = finel(1, k, 1)
-                x2 = finel(2, k, 1)
-                x3 = finel(3, k, 1)
-                x4 = finel(4, k, 1)
+                aa = 0.d0
+                do k = 1, nfl1
+                  x1 = finel(1, k, 1)
+                  x2 = finel(2, k, 1)
+                  x3 = finel(3, k, 1)
+                  x4 = finel(4, k, 1)
 
-                do l = 1, nfl2
-                  aa = aa + x4 * finel(4, l, 2) / &
-                     & Sqrt ((x1-finel(1, l, 2))**2+ &
-                     & (x2-finel(2, l, 2))**2+ &
-                     & (x3-finel(3, l, 2))**2)
+                  do l = 1, nfl2
+                    aa = aa + x4 * finel(4, l, 2) / &
+                       & Sqrt ((x1-finel(1, l, 2))**2+ &
+                       & (x2-finel(2, l, 2))**2+ &
+                       & (x3-finel(3, l, 2))**2)
+                  end do
                 end do
-              end do
 
-              aa = aa / (cosurf(4, ii) * cosurf(4, jj))
+                aa = aa / (cosurf(4, ii) * cosurf(4, jj))
+              end if
             end if
           end if
 
@@ -1664,28 +1722,32 @@ contains
               ijpos = ijpos +1
               aa = a_part(ijpos)
             else
-              rj = srad(j)
-              call mfinel (jj, 2, finel, nar_csm, nsetf, &
-                 & nset, rsc, nipsrs, dirvec, &
-                 & tm(1, 1, j), xj, rj, nfl2, &
-                 & ioldcv, maxrs, lenabc, numat)
+              if (swig) then
+                aa = swig_a (ii, jj, d2)
+              else
+                rj = srad(j)
+                call mfinel (jj, 2, finel, nar_csm, nsetf, &
+                   & nset, rsc, nipsrs, dirvec, &
+                   & tm(1, 1, j), xj, rj, nfl2, &
+                   & ioldcv, maxrs, lenabc, numat)
 
-              aa = 0.d0
-              do k = 1, nfl1
-                x1 = finel(1, k, 1)
-                x2 = finel(2, k, 1)
-                x3 = finel(3, k, 1)
-                x4 = finel(4, k, 1)
+                aa = 0.d0
+                do k = 1, nfl1
+                  x1 = finel(1, k, 1)
+                  x2 = finel(2, k, 1)
+                  x3 = finel(3, k, 1)
+                  x4 = finel(4, k, 1)
 
-                do l = 1, nfl2
-                  aa = aa + x4 * finel(4, l, 2) / &
-                     & Sqrt ((x1-finel(1, l, 2))**2+ &
-                     & (x2-finel(2, l, 2))**2+ &
-                     & (x3-finel(3, l, 2))**2)
+                  do l = 1, nfl2
+                    aa = aa + x4 * finel(4, l, 2) / &
+                       & Sqrt ((x1-finel(1, l, 2))**2+ &
+                       & (x2-finel(2, l, 2))**2+ &
+                       & (x3-finel(3, l, 2))**2)
+                  end do
                 end do
-              end do
 
-              aa = aa / (cosurf(4, ii) * cosurf(4, jj))
+                aa = aa / (cosurf(4, ii) * cosurf(4, jj))
+              end if
             end if
           end if
 
@@ -1732,7 +1794,7 @@ contains
         xi(1:3) = coord(1:3, i)
         xa(1:3) = cosurf(1:3, ii)
 
-        if (compute) then
+        if (compute .and. .not. swig) then
           call mfinel (ii, 1, finel, nar_csm, nsetf, nset, rsc, &
              & nipsrs, dirvec, tm(1, 1, i), xi, ri, &
              & nfl1, ioldcv, maxrs, lenabc, numat)
@@ -1755,28 +1817,32 @@ contains
                 a_part_i(npos) = ii
                 a_part_j(npos) = jj
               end if
-              rj = srad(j)
-              call mfinel (jj, 2, finel, nar_csm, nsetf, &
-                 & nset, rsc, nipsrs, dirvec, &
-                 & tm(1, 1, j), xj, rj, nfl2, &
-                 & ioldcv, maxrs, lenabc, numat)
+              if (swig) then
+                aa = swig_a (ii, jj, d2)
+              else
+                rj = srad(j)
+                call mfinel (jj, 2, finel, nar_csm, nsetf, &
+                   & nset, rsc, nipsrs, dirvec, &
+                   & tm(1, 1, j), xj, rj, nfl2, &
+                   & ioldcv, maxrs, lenabc, numat)
 
-              aa = 0.d0
-              do k = 1, nfl1
-                x1 = finel(1, k, 1)
-                x2 = finel(2, k, 1)
-                x3 = finel(3, k, 1)
-                x4 = finel(4, k, 1)
+                aa = 0.d0
+                do k = 1, nfl1
+                  x1 = finel(1, k, 1)
+                  x2 = finel(2, k, 1)
+                  x3 = finel(3, k, 1)
+                  x4 = finel(4, k, 1)
 
-                do l = 1, nfl2
-                  aa = aa + x4 * finel(4, l, 2) / &
-                       & Sqrt ((x1-finel(1, l, 2))**2+ &
-                       & (x2-finel(2, l, 2))**2+ &
-                       & (x3-finel(3, l, 2))**2)
+                  do l = 1, nfl2
+                    aa = aa + x4 * finel(4, l, 2) / &
+                         & Sqrt ((x1-finel(1, l, 2))**2+ &
+                         & (x2-finel(2, l, 2))**2+ &
+                         & (x3-finel(3, l, 2))**2)
+                  end do
                 end do
-              end do
 
-              aa = aa / (cosurf(4, ii) * cosurf(4, jj))
+                aa = aa / (cosurf(4, ii) * cosurf(4, jj))
+              end if
 
               a_part(npos) = aa
             end if
@@ -1790,7 +1856,7 @@ contains
         ri = srad(i)
         xi(1:3) = coord(1:3, i)
         xa(1:3) = cosurf(1:3, ii)
-        if (compute) then
+        if (compute .and. .not. swig) then
           call mfinel (ii, 1, finel, nar_csm, nsetf, nset, rsc, &
              & nipsrs, dirvec, tm(1, 1, i), xi, ri, &
              & nfl1, ioldcv, maxrs, lenabc, numat)
@@ -1813,28 +1879,32 @@ contains
                 a_part_i(npos) = ii
                 a_part_j(npos) = jj
               end if
-              rj = srad(j)
-              call mfinel (jj, 2, finel, nar_csm, nsetf, &
-                 & nset, rsc, nipsrs, dirvec, &
-                 & tm(1, 1, j), xj, rj, nfl2, &
-                 & ioldcv, maxrs, lenabc, numat)
+              if (swig) then
+                aa = swig_a (ii, jj, d2)
+              else
+                rj = srad(j)
+                call mfinel (jj, 2, finel, nar_csm, nsetf, &
+                   & nset, rsc, nipsrs, dirvec, &
+                   & tm(1, 1, j), xj, rj, nfl2, &
+                   & ioldcv, maxrs, lenabc, numat)
 
-              aa = 0.d0
-              do k = 1, nfl1
-                x1 = finel(1, k, 1)
-                x2 = finel(2, k, 1)
-                x3 = finel(3, k, 1)
-                x4 = finel(4, k, 1)
+                aa = 0.d0
+                do k = 1, nfl1
+                  x1 = finel(1, k, 1)
+                  x2 = finel(2, k, 1)
+                  x3 = finel(3, k, 1)
+                  x4 = finel(4, k, 1)
 
-                do l = 1, nfl2
-                  aa = aa + x4 * finel(4, l, 2) / &
-                     & Sqrt ((x1-finel(1, l, 2))**2+ &
-                     & (x2-finel(2, l, 2))**2+ &
-                     & (x3-finel(3, l, 2))**2)
+                  do l = 1, nfl2
+                    aa = aa + x4 * finel(4, l, 2) / &
+                       & Sqrt ((x1-finel(1, l, 2))**2+ &
+                       & (x2-finel(2, l, 2))**2+ &
+                       & (x3-finel(3, l, 2))**2)
+                  end do
                 end do
-              end do
 
-              aa = aa / (cosurf(4, ii) * cosurf(4, jj))
+                aa = aa / (cosurf(4, ii) * cosurf(4, jj))
+              end if
 
               a_part(npos) = aa
             end if
@@ -1863,7 +1933,6 @@ contains
 ! dummy statement to "use" compute and c
 !
     if (compute) aa = c(1,1)
-    m_vec = 0.d0
     if (same) then
       do i3=1, n1
         ii = ind1(i3)
@@ -2515,6 +2584,12 @@ contains
     !
 
     if (nps > na2max .or. nps > na1max) then
+      !
+      !  m_vec was set to zero in precond_aq_dir_int, i.e. once for every pair of boxes, so the
+      !  blocks kept only the last pair's elements; they could then be indefinite (NaN in the
+      !  solver with 7182 SWIG points)
+      !
+      m_vec = 0.d0
       i = count_short_ints  (cosurf, 4, precond_aq_dir_int, .false.)
       do i=1, nps
         j = iatsp(i)
@@ -2670,6 +2745,10 @@ contains
     double precision, dimension(4, 500, 2) :: finel
     double precision xi(3)
     fdiag = 2.1d0 * Sqrt (Pi)
+    if (swig) then
+      m(1:nps) = swig_zeta(1:nps) * Sqrt (2.d0/pi) / swig_f(1:nps)
+      return
+    end if
 
     do ii = 1, nps
       i = iatsp(ii)
