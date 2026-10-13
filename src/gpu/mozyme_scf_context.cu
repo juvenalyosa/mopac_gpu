@@ -1536,10 +1536,13 @@ struct MozymeScfDeviceState {
   DeviceBuffer<double> cosmo_a_part;
   DeviceBuffer<int> cosmo_a_part_i;
   DeviceBuffer<int> cosmo_a_part_j;
-  // Whole A matrix (nps x nps), built once per geometry when it fits in device memory: the
+  // The far part of A (1/r beyond disex2; zero on the diagonal and for near pairs) as an
+  // nps x nps float matrix, built once per geometry when it fits in device memory: the
   // matrix-free product recomputes 1/r for every pair in every CG iteration, which with a
-  // SWIG surface (28 000 points, DNA) was 60 s per SCF on a T4.
-  DeviceBuffer<double> cosmo_a_dense;
+  // SWIG surface (28 000 points, DNA) was 60 s per SCF on a T4.  The diagonal and the near
+  // pairs stay double; float storage of 1/r changed nothing visible (chignolin, CPU test:
+  // energy and gradient identical to 1e-5).
+  DeviceBuffer<float> cosmo_a_dense;
   DeviceBuffer<double> cosmo_m_vec;
   DeviceBuffer<int> cosmo_iblock_pos;
   DeviceBuffer<double> cosmo_scalars;
@@ -7023,15 +7026,12 @@ __global__ void mozyme_cosmo_matvec_close_kernel(
 }
 
 __global__ void mozyme_cosmo_dense_fill_kernel(
-    int nps, int cosurf_rows, double disex2, const double *cosurf,
-    const double *a_diag, double *a_dense) {
+    int nps, int cosurf_rows, double disex2, const double *cosurf, float *a_far) {
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
   const int row = blockIdx.y * blockDim.y + threadIdx.y;
   if (row >= nps || col >= nps) return;
-  double value = 0.0;
-  if (row == col) {
-    value = a_diag[row];
-  } else {
+  float value = 0.0f;
+  if (row != col) {
     const double dx = cosmo_surface_at(cosurf, cosurf_rows, row, 1) -
                       cosmo_surface_at(cosurf, cosurf_rows, col, 1);
     const double dy = cosmo_surface_at(cosurf, cosurf_rows, row, 2) -
@@ -7039,27 +7039,16 @@ __global__ void mozyme_cosmo_dense_fill_kernel(
     const double dz = cosmo_surface_at(cosurf, cosurf_rows, row, 3) -
                       cosmo_surface_at(cosurf, cosurf_rows, col, 3);
     const double d2 = dx * dx + dy * dy + dz * dz;
-    if (d2 > disex2) value = 1.0 / sqrt(d2);
+    if (d2 > disex2) value = static_cast<float>(1.0 / sqrt(d2));
   }
-  a_dense[static_cast<std::size_t>(row) * nps + col] = value;
+  a_far[static_cast<std::size_t>(row) * nps + col] = value;
 }
 
-__global__ void mozyme_cosmo_dense_close_kernel(
-    int nps, int pair_count, const int *pair_i, const int *pair_j,
-    const double *a_part, double *a_dense) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= pair_count) return;
-  const int row = pair_i[idx] - 1;
-  const int col = pair_j[idx] - 1;
-  if (row < 0 || row >= nps || col < 0 || col >= nps) return;
-  a_dense[static_cast<std::size_t>(row) * nps + col] = a_part[idx];
-  a_dense[static_cast<std::size_t>(col) * nps + row] = a_part[idx];
-}
-
-// y = A x with the stored matrix: one warp per row, coalesced reads of the row.
+// y = diag(A) x + A_far x (float matrix, double sums): one warp per row, coalesced reads.
+// The near pairs are added afterwards by mozyme_cosmo_matvec_close_kernel.
 __global__ void mozyme_cosmo_dense_matvec_kernel(
-    int nps, const double *a_dense, const double *x, double *y, int *cg_ints,
-    const int *resident_control_ints) {
+    int nps, const float *a_far, const double *a_diag, const double *x, double *y,
+    int *cg_ints, const int *resident_control_ints) {
   const int lane = threadIdx.x & 31;
   const int row = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
   if (resident_control_terminal(resident_control_ints)) return;
@@ -7068,13 +7057,15 @@ __global__ void mozyme_cosmo_dense_matvec_kernel(
   if (cg_ints && row == 0 && lane == 0) {
     atomicAdd(cg_ints + kCosmoCgMatvecCalls, 1);
   }
-  const double *a_row = a_dense + static_cast<std::size_t>(row) * nps;
+  const float *a_row = a_far + static_cast<std::size_t>(row) * nps;
   double sum = 0.0;
-  for (int col = lane; col < nps; col += 32) sum += a_row[col] * x[col];
+  for (int col = lane; col < nps; col += 32) {
+    sum += static_cast<double>(a_row[col]) * x[col];
+  }
   for (int offset = 16; offset > 0; offset >>= 1) {
     sum += __shfl_down_sync(0xffffffffu, sum, offset);
   }
-  if (lane == 0) y[row] = sum;
+  if (lane == 0) y[row] = sum + a_diag[row] * x[row];
 }
 
 __global__ void mozyme_cosmo_residual_kernel(
@@ -8397,9 +8388,9 @@ bool build_cosmo_dense_matrix(MozymeScfContext &ctx) {
       cudaGetLastError();
       return true;
     }
-    if (free_bytes < count * sizeof(double) + kCosmoDenseMarginBytes) return true;
+    if (free_bytes < count * sizeof(float) + kCosmoDenseMarginBytes) return true;
     if (cudaMalloc(reinterpret_cast<void **>(&dev.cosmo_a_dense.ptr),
-                   count * sizeof(double)) != cudaSuccess) {
+                   count * sizeof(float)) != cudaSuccess) {
       cudaGetLastError();
       dev.cosmo_a_dense.ptr = nullptr;
       return true;
@@ -8410,18 +8401,9 @@ bool build_cosmo_dense_matrix(MozymeScfContext &ctx) {
   const dim3 grid(ceil_div(nps, 32), ceil_div(nps, 8));
   mozyme_cosmo_dense_fill_kernel<<<grid, block>>>(
       nps, ctx.state.cosmo_cosurf_rows, ctx.state.cosmo_disex2,
-      dev.cosmo_cosurf.ptr, dev.cosmo_a_diag.ptr, dev.cosmo_a_dense.ptr);
+      dev.cosmo_cosurf.ptr, dev.cosmo_a_dense.ptr);
   if (!cuda_context_ok(cudaGetLastError(), "COSMO dense A fill kernel")) {
     return false;
-  }
-  if (ctx.state.cosmo_a_part_dim > 0) {
-    mozyme_cosmo_dense_close_kernel<<<ceil_div(ctx.state.cosmo_a_part_dim, 256),
-                                      256>>>(
-        nps, ctx.state.cosmo_a_part_dim, dev.cosmo_a_part_i.ptr,
-        dev.cosmo_a_part_j.ptr, dev.cosmo_a_part.ptr, dev.cosmo_a_dense.ptr);
-    if (!cuda_context_ok(cudaGetLastError(), "COSMO dense A near pairs kernel")) {
-      return false;
-    }
   }
   return true;
 }
@@ -10226,29 +10208,29 @@ bool run_cosmo_matvec(MozymeScfContext &ctx, const double *x, double *y,
     return false;
   }
   constexpr int kThreads = 128;
-  if (dev.cosmo_a_dense.ptr &&
-      dev.cosmo_a_dense.count ==
-          static_cast<std::size_t>(nps) * static_cast<std::size_t>(nps)) {
+  const bool dense = dev.cosmo_a_dense.ptr &&
+                     dev.cosmo_a_dense.count == static_cast<std::size_t>(nps) *
+                                                    static_cast<std::size_t>(nps);
+  if (dense) {
     const long long threads = static_cast<long long>(nps) * 32;
     mozyme_cosmo_dense_matvec_kernel<<<static_cast<int>((threads + 255) / 256),
                                        256>>>(
-        nps, dev.cosmo_a_dense.ptr, x, y, cg_ints,
+        nps, dev.cosmo_a_dense.ptr, dev.cosmo_a_diag.ptr, x, y, cg_ints,
         dev.resident_control_ints.ptr);
     if (!cuda_context_ok(cudaGetLastError(),
                          "resident COSMO dense matvec kernel")) {
       return false;
     }
-    if (!cg_ints) ctx.cosmo_matvec_calls += 1;
-    return true;
-  }
-  const int nps_blocks = ceil_div(nps, kThreads);
-  mozyme_cosmo_matvec_far_kernel<<<nps_blocks, kThreads>>>(
-      nps, ctx.state.cosmo_cosurf_rows, ctx.state.cosmo_disex2,
-      dev.cosmo_cosurf.ptr, dev.cosmo_a_diag.ptr, x, y, cg_ints,
-      dev.resident_control_ints.ptr);
-  if (!cuda_context_ok(cudaGetLastError(),
-                       "resident COSMO matrix-free far matvec kernel")) {
-    return false;
+  } else {
+    const int nps_blocks = ceil_div(nps, kThreads);
+    mozyme_cosmo_matvec_far_kernel<<<nps_blocks, kThreads>>>(
+        nps, ctx.state.cosmo_cosurf_rows, ctx.state.cosmo_disex2,
+        dev.cosmo_cosurf.ptr, dev.cosmo_a_diag.ptr, x, y, cg_ints,
+        dev.resident_control_ints.ptr);
+    if (!cuda_context_ok(cudaGetLastError(),
+                         "resident COSMO matrix-free far matvec kernel")) {
+      return false;
+    }
   }
   if (ctx.state.cosmo_a_part_dim > 0) {
     if (!dev.cosmo_a_part.ptr || !dev.cosmo_a_part_i.ptr ||

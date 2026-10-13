@@ -82,11 +82,13 @@ def run_mopac(mopac: Path, run_dir: Path, name: str, keywords: str, title: str, 
     return RunResult(deck, text, wall, heat, STATUS_RE.findall(text))
 
 
-def solvent_keys(eps: float | None) -> str:
+def solvent_keys(eps: float | None, swig: bool = True) -> str:
     """COSMO with the smooth SWIG surface: with the standard surface the energy jumps by up to 0.03 kcal/mol
     when an atom moves by 0.001 A and the gradient is not its derivative, so optimizations in water do not
     converge and dynamics cannot conserve energy."""
-    return f" EPS={eps:g} SWIG" if eps else ""
+    if not eps:
+        return ""
+    return f" EPS={eps:g} SWIG" if swig else f" EPS={eps:g}"
 
 
 def prepare_pdb(mopac: Path, raw_pdb: Path, work: Path, ionize: bool = False) -> Path:
@@ -172,7 +174,8 @@ def final_geometry_from_out(out_text: str) -> str | None:
 
 def optimize_stationary(mopac: Path, geometry: Path, work: Path, gnorm: float = 0.1, cycles: int = 5000,
                         max_stages: int = 6, eps: float | None = None, env_extra: dict[str, str] | None = None,
-                        extra: str = "") -> tuple[Path, list[dict]]:
+                        extra: str = "", prerelax_gnorm: float | None = 5.0,
+                        prerelax_cycles: int = 2000) -> tuple[Path, list[dict]]:
     """Optimize until the gradient of a fresh, tightly converged SCF at the result is below GNORM: the
     geometry a FORCE / THERMO calculation needs.  During one MOZYME optimization the interaction lists only
     grow (add_more_interactions), so at its end the gradient of a fresh calculation differs from the one the
@@ -180,6 +183,10 @@ def optimize_stationary(mopac: Path, geometry: Path, work: Path, gnorm: float = 
     moves less (chignolin, GNORM=0.1: ~700, ~1400, ~300, ~30 cycles; fresh gradient 1.35, 0.36, 0.13, 0.09).
     Stops at GNORM or when a stage improves the fresh gradient by less than 10 % (GPU floor ~0.13 at
     GNORM=0.1; FORCE at those chignolin minima: no imaginary mode).
+    In solvent (eps) a stage 0 first relaxes the structure with the standard COSMO surface down to
+    prerelax_gnorm (at most prerelax_cycles): a cycle costs several times less than with SWIG (DNA anion,
+    28 000 SWIG points, T4: 1.2 against 7-11 s), and its noise (gradient 0.5-6) only matters near the
+    minimum, which the SWIG stages then reach.  prerelax_gnorm=None skips it.
     Returns (final .arc geometry, one dict per stage)."""
     work.mkdir(parents=True, exist_ok=True)
     geo = work / geometry.name
@@ -187,6 +194,26 @@ def optimize_stationary(mopac: Path, geometry: Path, work: Path, gnorm: float = 
         shutil.copy2(geometry, geo)
     stages: list[dict] = []
     extra = f" {extra.strip()}" if extra.strip() else ""
+    if eps and prerelax_gnorm:
+        sdir = work / "stage0"
+        r = run_mopac(mopac, sdir, "opt",
+                      f'{BASE_KEYS}{solvent_keys(eps, swig=False)} GEO_DAT="{geo.name}" '
+                      f'CYCLES={min(cycles, prerelax_cycles)} PDBOUT GNORM={prerelax_gnorm:g}{extra}',
+                      "pre-relaxation, standard COSMO surface", [geo], env_extra)
+        arc = sdir / "opt.arc"
+        if not arc.exists():
+            geom = final_geometry_from_out(r.out_text)
+            if geom is None:
+                raise RuntimeError(f"stage 0 left no geometry; see {sdir / 'opt.out'}")
+            arc.write_text(geom)
+        g_opt = GNORM_RE.findall(r.out_text)
+        info = dict(stage=0, cycles=len(CYCLE_RE.findall(r.out_text)), wall=r.wall, heat=r.heat,
+                    gnorm_opt=float(g_opt[-1]) if g_opt else None, gnorm_fresh=None)
+        stages.append(info)
+        print(f"[opt stage 0, standard COSMO] {info['cycles']} cycles, {info['wall']:.1f} s, heat {info['heat']}, "
+              f"GNORM {info['gnorm_opt']}", flush=True)
+        geo = work / "stage0.arc"
+        shutil.copy2(arc, geo)
     for stage in range(1, max_stages + 1):
         sdir = work / f"stage{stage}"
         r = run_mopac(mopac, sdir, "opt",
