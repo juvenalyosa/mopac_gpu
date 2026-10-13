@@ -67,10 +67,40 @@ and run the cells in order (the build takes about 10 minutes):
 ### Requirements
 
 - Linux with an NVIDIA GPU of compute capability 7.0 or newer (V100, T4, A100, H100, RTX 20xx and
-  later). All GPU arithmetic is double precision, so data-centre GPUs (A100, H100, V100) are much
-  faster than gaming cards.
+  later). All GPU arithmetic is double precision, so data-centre GPUs (A100, H100, H200, V100) are much
+  faster than gaming cards: see [Which GPU?](#which-gpu).
 - CUDA toolkit 12, CMake ≥ 3.14, a Fortran compiler (gfortran), BLAS/LAPACK, Ninja (optional).
 - Device memory: about 2 GB for a 7 000-atom protein.
+
+### Which GPU?
+
+MOZYME does all its GPU arithmetic in double precision (FP64), without tensor cores, and much of the SCF
+is limited by memory bandwidth and by the latency of the serial orbital rotations. What decides the speed
+is therefore the GPU's plain FP64 rate and memory bandwidth, not the AI (FP16/FP8) figures on the box.
+Gaming and inference cards run FP64 at 1/32 or 1/64 of their FP32 rate and are slow here.
+
+| GPU | Arch. (`CUDA_ARCHS`) | FP64, TFLOPS | Memory bandwidth | Memory | Here |
+|---|---|---:|---:|---:|---|
+| **H200** | Hopper (90) | 34 | 4.8 TB/s | 141 GB | faster than A100 (expected) |
+| **GH200** | Hopper (90) | 34 | 4.0–4.9 TB/s | 96–144 GB | faster than A100 (expected) |
+| **H100 SXM** | Hopper (90) | 34 | 3.35 TB/s | 80 GB | faster than A100 (expected) |
+| **H100 NVL / PCIe** | Hopper (90) | 30 / 26 | 3.9 / 2.0 TB/s | 94 / 80 GB | faster than A100 (expected) |
+| **B200 / GB200** | Blackwell (100) | ~37–40 | 8 TB/s | 180–192 GB | faster than A100 (expected; needs CUDA ≥ 12.8, untested) |
+| **A100** | Ampere (80) | 9.7 | 1.6–2.0 TB/s | 40 / 80 GB | **reference, measured** (table above) |
+| V100 | Volta (70) | 7.8 | 0.9 TB/s | 16 / 32 GB | somewhat slower than A100 (expected) |
+| A30 | Ampere (80) | 5.2 | 0.9 TB/s | 24 GB | slower (expected) |
+| L40S, RTX 6000 Ada, RTX 4090 | Ada (89) | 1.3–1.4 | 0.9–1.0 TB/s | 24–48 GB | much slower (expected) |
+| A10, L4 | Ampere / Ada | 0.5–1.0 | 0.3–0.6 TB/s | 24 GB | much slower (expected) |
+| T4 | Turing (75) | 0.25 | 0.32 TB/s | 16 GB | **measured**: crambin FORCETS 27 min against 7.5 min on an A100 (3.7× slower); fine for testing (free on Kaggle) |
+
+FP64 and bandwidth are the vendors' data-sheet values (FP64 without tensor cores). Only the A100 and the
+T4 have been timed with this code. For Hopper and Blackwell the gain over an A100 should be real but
+smaller than the FP64 ratio, because part of each SCF waits on latency, not arithmetic. Check the data
+sheet before buying newer parts: some recent NVIDIA products (for example Blackwell Ultra, B300) cut FP64
+sharply. AMD Instinct cards (MI250X, MI300) have high FP64 but are not supported: the GPU code is CUDA.
+Frequency jobs (`FORCE`, `THERMO`) scale with the number of GPUs (`scripts/mozyme_parallel_force.py
+--gpus auto`), so two or four A100s beat one faster card there; a single SCF, optimization or dynamics
+run uses one GPU.
 
 ### Build with GPU support
 
