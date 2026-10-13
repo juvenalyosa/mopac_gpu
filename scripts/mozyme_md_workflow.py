@@ -145,6 +145,28 @@ def optimize(mopac: Path, pdb: Path, work: Path, cycles: int = 100, eps: float |
 GNORM_RE = re.compile(r"GRADIENT NORM\s*=\s*([-0-9.]+)")
 
 
+def final_geometry_from_out(out_text: str) -> str | None:
+    """The geometry MOPAC prints after "CURRENT VALUE OF HEAT OF FORMATION" when an optimization stops on
+    CYCLES or T= (it writes no .arc then): keyword, title and comment lines and the atoms, in the layout of
+    an .arc file, so GEO_DAT can read it.  None if there is no such block."""
+    i = out_text.rfind("CURRENT VALUE OF HEAT OF FORMATION")
+    if i < 0:
+        return None
+    lines = out_text[i:].splitlines()[1:]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and lines[0].startswith("*"):   # *HEADER / *REMARK lines
+        lines.pop(0)
+    if len(lines) < 4:
+        return None
+    block = lines[:3]
+    for line in lines[3:]:
+        if not line.strip():
+            break
+        block.append(line)
+    return "\n".join(block) + "\n" if len(block) > 3 else None
+
+
 def optimize_stationary(mopac: Path, geometry: Path, work: Path, gnorm: float = 0.1, cycles: int = 5000,
                         max_stages: int = 6, eps: float | None = None, env_extra: dict[str, str] | None = None,
                         extra: str = "") -> tuple[Path, list[dict]]:
@@ -169,7 +191,11 @@ def optimize_stationary(mopac: Path, geometry: Path, work: Path, gnorm: float = 
                       f"geometry optimization, stage {stage}", [geo], env_extra)
         arc = sdir / "opt.arc"
         if not arc.exists():
-            raise RuntimeError(f"stage {stage} left no .arc geometry; see {sdir / 'opt.out'}")
+            # stopped on CYCLES or T=: no .arc, but the .out ends with the last geometry
+            geom = final_geometry_from_out(r.out_text)
+            if geom is None:
+                raise RuntimeError(f"stage {stage} left no geometry; see {sdir / 'opt.out'}")
+            arc.write_text(geom)
         chk = run_mopac(mopac, sdir, "fresh",
                         f'{BASE_KEYS}{solvent_keys(eps)} 1SCF GRADIENTS SCFCRT=0.000001 THRESH=1.D-15 GEO_DAT="opt.arc"',
                         "fresh gradient at the optimized geometry", [], env_extra)
