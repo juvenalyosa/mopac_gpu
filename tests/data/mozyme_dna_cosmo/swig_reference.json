@@ -1,34 +1,34 @@
 {
- "note": "CPU (Mac, commit dedffed8) 1SCF GRADIENTS references, COSMO water with the smooth SWIG surface (NSPA 92). COSMO cases regenerated after the diegrd quadrupole fix (51cb1274).",
+ "note": "CPU (Mac) 1SCF GRADIENTS references, COSMO water with the smooth SWIG surface (NSPA 92, points with F < 1e-4 left out). The DNA cases were run without the FMM of linear_cosmo (above 6000 points the CPU uses it; it was off by 0.32 kcal/mol), i.e. with the exact product the GPU uses.",
  "keywords": "PM7 MOZYME MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 GEO-OK 1SCF GRADIENTS",
  "cases": {
   "chignolin_swig_scf": {
    "geometry": "1UAO_opt.pdb",
    "extra_keywords": "EPS=78.4 SWIG",
-   "heat": -924.55482,
-   "gnorm": 87.1634,
-   "cpu_job_s": 7.18
+   "heat": -924.55371,
+   "gnorm": 87.16268,
+   "cpu_job_s": 4.85
   },
   "chignolin_swig_scf_tight": {
    "geometry": "1UAO_opt.pdb",
    "extra_keywords": "EPS=78.4 SWIG SCFCRT=0.000001 THRESH=1.D-15",
-   "heat": -924.56228,
-   "gnorm": 86.85519,
-   "cpu_job_s": 30.9
+   "heat": -924.5613,
+   "gnorm": 86.85554,
+   "cpu_job_s": 20.61
   },
   "dna_swig_scf": {
    "geometry": "1BNA_anion.pdb",
    "extra_keywords": "EPS=78.4 SWIG",
-   "heat": -8548.81655,
-   "gnorm": 1086.77197,
-   "cpu_job_s": 65.33
+   "heat": -8549.13112,
+   "gnorm": 1086.89682,
+   "cpu_job_s": 175.12
   },
   "dna_swig_scf_tight": {
    "geometry": "1BNA_anion.pdb",
    "extra_keywords": "EPS=78.4 SWIG SCFCRT=0.000001 THRESH=1.D-15",
-   "heat": -8548.84294,
-   "gnorm": 1086.26858,
-   "cpu_job_s": 167.46
+   "heat": -8549.1574,
+   "gnorm": 1086.39476,
+   "cpu_job_s": 501.49
   }
  }
 }

@@ -8,7 +8,7 @@ Builds MOPAC (GPU=ON) from https://github.com/juvenalyosa/mopac_gpu and runs on 
   2. at the same time, GPU 0: chignolin in water, mozyme_md_workflow.optimize_stationary (GNORM=0.1) and
      FORCE THERMO(298) (imaginary modes; geometry and output kept for a CPU FORCE on the same geometry);
      GPU 1: the DNA anion in water, optimize_stationary (GNORM=0.2, at most 3 stages of T=2H);
-  3. FORCE THERMO(298) of the DNA anion in water on both GPUs, if less than 6 h have passed.
+  3. FORCE THERMO(298) of the DNA anion in water on both GPUs, if less than 4 h have passed.
 GPU memory peak per phase, GPU status lines (fallbacks) per run.  REPORT_DNA.txt (kernel output) has every number.
 
     kaggle kernels push -p scripts/kaggle/mopac_dna_cosmo
@@ -209,7 +209,7 @@ def main():
     phase[0] = "dna_force"
     if "dna" not in final:
         say("3. DNA FORCE skipped: no optimized geometry")
-    elif time.time() - T0 > 6 * 3600:
+    elif time.time() - T0 > 4 * 3600:
         say(f"3. DNA FORCE skipped: {(time.time() - T0) / 3600:.1f} h used")
     else:
         say("")

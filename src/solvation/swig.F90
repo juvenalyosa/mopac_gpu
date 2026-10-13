@@ -32,8 +32,10 @@
 !     A(k,k) = zeta(k)*sqrt(2/pi)/F(k),   A(k,l) = erf(zeta(k,l)*r(kl))/r(kl),
 !     zeta(k,l) = zeta(k)*zeta(l)/sqrt(zeta(k)**2 + zeta(l)**2)
 !
-!  so the energy and its gradient (swig_diegrd) are continuous.  Points with F < 1.d-8 are
-!  left out (their charge is at most of that order).
+!  so the energy and its gradient (swig_diegrd) are continuous.  Points with F < 1.d-4 are
+!  left out: their charge is of that order (Lange and Herbert use 1.d-8; with 1.d-4 chignolin has
+!  20 % fewer points, the energy moves by 0.001 kcal/mol, analytic - finite-difference gradient
+!  0.012-0.014 as with 1.d-8; with 1.d-3, 0.009 kcal/mol and 0.038).
 !
 subroutine swig_surface (coord, numat)
     use cosmo_C, only : nps, lenabc, cosurf, iatsp, srad, n0, dirsm, area, cosvol, arat, &
@@ -46,7 +48,7 @@ subroutine swig_surface (coord, numat)
     integer, dimension (:), allocatable :: nb
     double precision :: a, d2, f, r, ri, rcut, t, zeta, zeta_min
     double precision, dimension (3) :: u, x
-    double precision, parameter :: zeta0 = 4.9d0, fmin = 1.d-8
+    double precision, parameter :: zeta0 = 4.9d0, fmin = 1.d-4
     allocate (nb(numat))
     nps = 0
     area = 0.d0
