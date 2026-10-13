@@ -83,6 +83,32 @@ def main():
        f"-DCUDA_ARCHS={cc} > {BASE}/cmake.log 2>&1 && cmake --build {BUILD} --target mopac --parallel $(nproc) "
        f"> {BASE}/build.log 2>&1 || (grep -i error {BASE}/build.log | head -40; exit 1)")
     ngpu = int(sh("nvidia-smi -L | wc -l").strip() or 1)
+    # checks: 1SCF GRADIENTS against the CPU references (dense COSMO matrix) and the COSMO gradient
+    # on the GPU against the CPU code (MOPAC_GPU_GRAD_CHECK=1)
+    import json
+    ref = json.load(open(f"{SRC}/tests/data/mozyme_dna_cosmo/reference.json"))
+    ref["cases"].update(json.load(open(f"{SRC}/tests/data/mozyme_dna_cosmo/swig_reference.json"))["cases"])
+    say("")
+    say("checks: 1SCF GRADIENTS against CPU references; COSMO gradient GPU - CPU (MOPAC_GPU_GRAD_CHECK)")
+    for cid in ("chignolin_cosmo_scf", "chignolin_swig_scf", "chignolin_swig_scf_tight", "dna_cosmo_scf",
+                "dna_swig_scf_tight"):
+        c = ref["cases"][cid]
+        d = f"{BASE}/checks/{cid}"
+        os.makedirs(d, exist_ok=True)
+        geo = "mozyme_gpu_reference/1UAO_opt.pdb" if "1UAO" in c["geometry"] else f"mozyme_dna_cosmo/{c['geometry']}"
+        shutil.copy2(f"{SRC}/tests/data/{geo}", d)
+        open(f"{d}/j.mop", "w").write(f'{ref["keywords"]} {c["extra_keywords"]} GEO_DAT="{c["geometry"]}"\ncheck\n\n')
+        t0 = time.perf_counter()
+        subprocess.run([f"{BUILD}/mopac", "j.mop"], cwd=d, capture_output=True, text=True,
+                       env=dict(os.environ, CUDA_VISIBLE_DEVICES="0", MOPAC_GPU_GRAD_CHECK="1"))
+        wall = time.perf_counter() - t0
+        out = open(f"{d}/j.out", errors="ignore").read()
+        h = re.findall(r"FINAL HEAT OF FORMATION =\s*([-0-9.]+)", out)
+        g = re.findall(r"GRADIENT NORM\s*=\s*([-0-9.]+)", out)
+        chk = re.findall(r"COSMO gradient\] check max_abs_dgrad=\s*(\S+)", out)
+        dense = re.findall(r"cosmo_matvec_calls=\s*(\d+)", out)
+        say(f"{cid:28s} {wall:7.1f} s  d heat {float(h[-1]) - c['heat'] if h else 'none'}  "
+            f"d GNORM {float(g[-1]) - c['gnorm'] if g else 'none'}  GPU-CPU COSMO grad {chk[-1] if chk else 'none'}")
     res = {}
     for first in range(0, len(CASES), ngpu):
         th = [threading.Thread(target=run_case, args=(k, c, res)) for k, c in enumerate(CASES[first:first + ngpu])]

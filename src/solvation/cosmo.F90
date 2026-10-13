@@ -673,6 +673,10 @@ subroutine diegrd (dxyz)
     use parameters_C, only : dd, qq
     use common_arrays_c, only : coord, nfirst, nlast, nat
     use funcon_C, only : ev, a0, fpc_9
+    use chanel_C, only : iw
+#ifdef GPU
+    use mozyme_gpu_gradient, only : mozyme_gpu_gradient_enabled, mozyme_gpu_gradient_check_enabled
+#endif
     implicit none
     integer :: i, ia, iak, ial, ib, idel, iden, ix, j, k, l, nati, iii
     double precision :: bsurf, ddi, deab, dist2, dx, fact, ff, ff0, &
@@ -680,6 +684,8 @@ subroutine diegrd (dxyz)
     double precision, dimension (3) :: xk, xl, xx
     double precision, dimension (0:3, 10) :: db
     double precision, dimension (3, numat), intent (inout) :: dxyz
+    double precision, dimension (:, :), allocatable :: dsave, dgpu
+    logical :: gpu_done, check
     intrinsic Min, Sqrt
     do i = 1, 10
       do ix = 1, 3
@@ -688,6 +694,49 @@ subroutine diegrd (dxyz)
     end do
     db(0, 1) = 1.d0
     fact = -ev * a0 * fpc_9
+    if (.not. swig) then
+   ! NOW THE CONTRIBUTIONS FROM ANALYTIC SURFACE DERIVATIVES
+   ! FOR THE SURFACE CLOSURE
+    bsurf = 0.d0
+    do i = 1, nipc
+      ia = isude(1, i)
+      ib = isude(2, i)
+      deab = -0.25d0 * (qscat(ia)**2*sude(1, i)/arat(ia) + qscat(ib)**2*sude(2, &
+     & i)/arat(ib) + bsurf*(sude(1, i) + sude(2, i)))
+      xk(1) = coord(1, ib) - coord(1, ia)
+      xk(2) = coord(2, ib) - coord(2, ia)
+      xk(3) = coord(3, ib) - coord(3, ia)
+      deab = deab / Sqrt (xk(1)**2 + xk(2)**2 + xk(3)**2)
+      do ix = 1, 3
+        dxyz(ix, ia) = dxyz(ix, ia) - xk(ix) * deab
+        dxyz(ix, ib) = dxyz(ix, ib) + xk(ix) * deab
+      end do
+    end do
+    end if
+    !
+    !  Everything else is O(nps**2) (and O(nps*numat)): on the GPU when MOZYME runs there
+    !  (src/gpu/cosmo_gradient.cu); MOPAC_GPU_GRAD_CHECK=1 also runs the CPU code and prints
+    !  the largest difference (the CPU result is kept).
+    !
+    gpu_done = .false.
+    check = .false.
+#ifdef GPU
+    if (nps >= 200 .and. mozyme_gpu_gradient_enabled()) then
+      check = mozyme_gpu_gradient_check_enabled()
+      if (check) then
+        allocate (dsave(3, numat), dgpu(3, numat))
+        dsave = dxyz
+      end if
+      call diegrd_gpu (dxyz, gpu_done)
+      if (check) then
+        check = gpu_done
+        dgpu = dxyz
+        dxyz = dsave
+        gpu_done = .false.
+      end if
+    end if
+#endif
+    if (.not. gpu_done) then
     if (swig) then
       call swig_diegrd (dxyz)
     else
@@ -712,23 +761,6 @@ subroutine diegrd (dxyz)
             dxyz(ix, ial) = dxyz(ix, ial) + xl(ix) * ff
           end do
         end if
-      end do
-    end do
-   ! NOW THE CONTRIBUTIONS FROM ANALYTIC SURFACE DERIVATIVES
-   ! FOR THE SURFACE CLOSURE
-    bsurf = 0.d0
-    do i = 1, nipc
-      ia = isude(1, i)
-      ib = isude(2, i)
-      deab = -0.25d0 * (qscat(ia)**2*sude(1, i)/arat(ia) + qscat(ib)**2*sude(2, &
-     & i)/arat(ib) + bsurf*(sude(1, i) + sude(2, i)))
-      xk(1) = coord(1, ib) - coord(1, ia)
-      xk(2) = coord(2, ib) - coord(2, ia)
-      xk(3) = coord(3, ib) - coord(3, ia)
-      deab = deab / Sqrt (xk(1)**2 + xk(2)**2 + xk(3)**2)
-      do ix = 1, 3
-        dxyz(ix, ia) = dxyz(ix, ia) - xk(ix) * deab
-        dxyz(ix, ib) = dxyz(ix, ib) + xk(ix) * deab
       end do
     end do
     end if
@@ -799,6 +831,12 @@ subroutine diegrd (dxyz)
         iden = iden + (idel*(idel + 1))/2
       end do
     end do
+    end if
+    if (check) then
+      write (iw, '(1x,a,es12.4)') '[MOZYME GPU COSMO gradient] check max_abs_dgrad=', &
+        Maxval (Abs (dgpu - dxyz))
+      deallocate (dsave, dgpu)
+    end if
 end subroutine diegrd
 subroutine dmecip (coeffs, deltap, delta, eig, vectci, conf)
     use molkst_C, only : numat, norbs, lm61
