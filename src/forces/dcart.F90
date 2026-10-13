@@ -54,7 +54,7 @@
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
       implicit none
-      double precision :: dcart_timer
+      double precision :: dcart_timer, diegrd_timer
 !-----------------------------------------------
 !   G l o b a l   P a r a m e t e r s
 !-----------------------------------------------
@@ -324,7 +324,11 @@
         part_dxyz(1:3, 1:numat*l123) = -dxyz(1:3, 1:numat*l123)
       end if
       useps = refeps
-      if (useps) call diegrd (dxyz)
+      if (useps) then
+        call mozyme_section_timer_begin('dcart_diegrd', diegrd_timer)
+        call diegrd (dxyz)
+        call mozyme_section_timer_end('dcart_diegrd', diegrd_timer)
+      end if
       if (use_ref_geo) then
         do i = 1, numat
           do j = 1,3

@@ -199,7 +199,9 @@
       if (iseps) then
       ! The following routine constructs the dielectric screening surface
       if (mozyme) then
+          call mozyme_section_timer_begin('compfg_coscavz', compfg_timer)
           call coscavz(coord, nat)
+          call mozyme_section_timer_end('compfg_coscavz', compfg_timer)
         else
           call coscav
           call mkbmat

@@ -816,7 +816,7 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
    & jred, k, kj, kl, kr, l, li, lii, lij, lj, ljj, lk, m, ni, nj
     double precision :: sum, sumdia, sumoff, ade, aee, da, dx, dy, dz, r, r2, &
    & ri2, ri5, rm, rp, w1, w2, w3, w4, w5, w6, w7, enuc, rij, point, const
-    double precision :: profile_token
+    double precision :: profile_token, cosmo_token
     integer, dimension (256), save :: jindex
     double precision, dimension (16) :: pja, pjb, wk4x1
     double precision, dimension (10) :: wj4x1
@@ -1476,7 +1476,11 @@ subroutine fz2n (f, ptot, iorbs, nat, ifact, q, qe, wj, wk, ptot2, mode, &
    !
     if (mode == -1) f = -f
    ! The following routine adds the dielectric correction to F.
-    if (useps .and. mode == 0) call addfckz()
+    if (useps .and. mode == 0) then
+      call mozyme_section_timer_begin('fz2n_cosmo', cosmo_token)
+      call addfckz()
+      call mozyme_section_timer_end('fz2n_cosmo', cosmo_token)
+    end if
     call mozyme_section_timer_end('fz2n', profile_token)
     call mozyme_section_timer_report('fz2n')
 end subroutine fz2n
