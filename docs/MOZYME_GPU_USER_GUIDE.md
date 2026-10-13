@@ -69,8 +69,29 @@ row every 0.5 fs and the trajectory is written to `<name>.xyz`). Two ensembles:
   error.
 
 `SEED=n` sets the random seed. There is no barostat (NPT): MOZYME treats a finite molecule, and with implicit
-solvent there is no box. Implicit water is COSMO (`EPS=78.4`). `scripts/mozyme_md_workflow.py` and
+solvent there is no box. Implicit water is COSMO (`EPS=78.4`, with `SWIG`: see below). `scripts/mozyme_md_workflow.py` and
 `colab/mozyme_md_colab.ipynb` chain PDB preparation, optimization, NVT equilibration and NVE production.
+
+## Implicit solvent: the smooth COSMO surface (SWIG)
+
+The standard COSMO surface is built from grid points that are either on or off the surface, segments that
+collect them, a local frame from the nearest neighbours and closure segments, and all of these change in
+steps as the atoms move. Moving one atom of chignolin by 0.001 Å changes the energy by up to 0.03 kcal/mol,
+and the analytic gradient differs from the slope of the energy by 1-2 kcal/(mol Å) (with and without MOZYME,
+CPU and GPU). Optimizations in water then do not converge (chignolin: 5000 cycles, gradient 0.5-6), and the
+energy of dynamics cannot be conserved.
+
+`SWIG` (with `EPS=`) replaces the surface by the switching/Gaussian discretization of Lange and Herbert
+(J. Chem. Phys. 133, 244111 (2010)): fixed points on every atomic sphere (`NSPA=`, default 92 with `SWIG`, a
+third of that for hydrogen), each a Gaussian charge switched off smoothly as it enters another sphere. Energy
+and gradient are continuous and consistent: the analytic gradient agrees with finite differences of the
+energy to 0.01-0.04 kcal/(mol Å) (MOZYME adds its own ~0.09, also in the gas phase). The surface is the union
+of the atomic spheres, without the solvent-probe exclusion of crevices, so solvation is somewhat stronger
+than with the standard surface (chignolin -66.3 against -61.3 kcal/mol). The grid converges slowly
+(chignolin, `NSPA` 42/92/162/252: -920.54/-924.56/-925.39/-925.70 kcal/mol), so compare energies only at
+the same `NSPA`. A SWIG surface has 3-5 times more points; the GPU solver handles them directly, the CPU
+solver is a few times slower than with the standard surface. `scripts/mozyme_md_workflow.py` adds `SWIG`
+whenever a dielectric is given.
 
 ## Vibrational frequencies and thermochemistry (FORCE, FORCETS, THERMO)
 

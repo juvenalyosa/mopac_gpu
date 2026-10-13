@@ -770,12 +770,17 @@ subroutine diegrd (dxyz)
             db(1, 3) = 6 * qqi2 * xx(1) * rm2
             db(2, 6) = 6 * qqi2 * xx(2) * rm2
             db(3, 10) = 6 * qqi2 * xx(3) * rm2
-            db(1, 5) = db(2, 6)
-            db(2, 5) = db(1, 3)
-            db(1, 8) = db(3, 10)
-            db(3, 8) = db(1, 3)
-            db(2, 9) = db(3, 10)
-            db(3, 9) = db(2, 6)
+            !
+            !  B(5) = 3*x*y*qq**2/r**5 (mkbmat, get_bvec), so dB(5)/dx needs 3*qq**2*y/r**2, half of
+            !  db(2, 6); with the full value the COSMO gradient of heavy atoms was wrong by up to
+            !  0.25 kcal/(mol A) (finite differences: acetate, methylamine, methyl phosphate)
+            !
+            db(1, 5) = 0.5d0 * db(2, 6)
+            db(2, 5) = 0.5d0 * db(1, 3)
+            db(1, 8) = 0.5d0 * db(3, 10)
+            db(3, 8) = 0.5d0 * db(1, 3)
+            db(2, 9) = 0.5d0 * db(3, 10)
+            db(3, 9) = 0.5d0 * db(2, 6)
           end if
           do j = 1, min(10, (idel*(idel + 1))/2)
             ff = -ff0 * qdenet(iden + j, 3)
