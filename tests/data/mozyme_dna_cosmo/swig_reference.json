@@ -1,0 +1,34 @@
+{
+ "note": "CPU (Mac, commit dedffed8) 1SCF GRADIENTS references, COSMO water with the smooth SWIG surface (NSPA 92).",
+ "keywords": "PM7 MOZYME MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 GEO-OK 1SCF GRADIENTS",
+ "cases": {
+  "chignolin_swig_scf": {
+   "geometry": "1UAO_opt.pdb",
+   "extra_keywords": "EPS=78.4 SWIG",
+   "heat": -924.55482,
+   "gnorm": 87.29931,
+   "cpu_job_s": 7.13
+  },
+  "chignolin_swig_scf_tight": {
+   "geometry": "1UAO_opt.pdb",
+   "extra_keywords": "EPS=78.4 SWIG SCFCRT=0.000001 THRESH=1.D-15",
+   "heat": -924.56228,
+   "gnorm": 86.99252,
+   "cpu_job_s": 32.43
+  },
+  "dna_swig_scf": {
+   "geometry": "1BNA_anion.pdb",
+   "extra_keywords": "EPS=78.4 SWIG",
+   "heat": -8548.81655,
+   "gnorm": 1086.60973,
+   "cpu_job_s": 68.66
+  },
+  "dna_swig_scf_tight": {
+   "geometry": "1BNA_anion.pdb",
+   "extra_keywords": "EPS=78.4 SWIG SCFCRT=0.000001 THRESH=1.D-15",
+   "heat": -8548.84294,
+   "gnorm": 1086.10687,
+   "cpu_job_s": 175.81
+  }
+ }
+}

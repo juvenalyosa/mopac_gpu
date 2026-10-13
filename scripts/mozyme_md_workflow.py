@@ -14,7 +14,7 @@ Steps (each one is a function, the Colab notebook colab/mozyme_md_colab.ipynb ca
                   returns the DRC table, the temperature log and the trajectory (.xyz);
                   last_frame_pdb writes the final frame as a PDB
 
-Implicit solvent: pass eps=78.4 (COSMO, water).  No barostat exists (NPT): MOZYME runs a
+Implicit solvent: pass eps=78.4 (COSMO, water, smooth SWIG surface).  No barostat exists (NPT): MOZYME runs a
 finite molecule, with implicit solvent there is no box and no pressure.
 
 Command line (runs the whole chain):
@@ -83,7 +83,10 @@ def run_mopac(mopac: Path, run_dir: Path, name: str, keywords: str, title: str, 
 
 
 def solvent_keys(eps: float | None) -> str:
-    return f" EPS={eps:g}" if eps else ""
+    """COSMO with the smooth SWIG surface: with the standard surface the energy jumps by up to 0.03 kcal/mol
+    when an atom moves by 0.001 A and the gradient is not its derivative, so optimizations in water do not
+    converge and dynamics cannot conserve energy."""
+    return f" EPS={eps:g} SWIG" if eps else ""
 
 
 def prepare_pdb(mopac: Path, raw_pdb: Path, work: Path, ionize: bool = False) -> Path:

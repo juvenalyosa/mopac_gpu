@@ -1,8 +1,9 @@
 """Kaggle GPU test of MOZYME on DNA and with COSMO (EPS=78.4) against CPU references.
+Water is COSMO with the smooth SWIG surface (keyword SWIG) in the optimizations and FORCE.
 
 Builds MOPAC (GPU=ON) from https://github.com/juvenalyosa/mopac_gpu and runs on the GPUs (two T4):
   1. 1SCF GRADIENTS, default and FORCE criterion (SCFCRT=1e-6 THRESH=1e-15), against
-     tests/data/mozyme_dna_cosmo/reference.json (CPU): DNA dodecamer 1BNA neutral (780 atoms, 22 P: d orbitals),
+     tests/data/mozyme_dna_cosmo/reference.json and swig_reference.json (CPU): DNA dodecamer 1BNA neutral (780 atoms, 22 P: d orbitals),
      1BNA anion (758 atoms, charge -22) in COSMO water, chignolin in COSMO water;
   2. at the same time, GPU 0: chignolin in water, mozyme_md_workflow.optimize_stationary (GNORM=0.1) and
      FORCE THERMO(298) (imaginary modes; geometry and output kept for a CPU FORCE on the same geometry);
@@ -129,6 +130,7 @@ def main():
     threading.Thread(target=sample_memory, daemon=True).start()
     data = Path(SRC) / "tests/data/mozyme_dna_cosmo"
     ref = json.load(open(data / "reference.json"))
+    ref["cases"].update(json.load(open(data / "swig_reference.json"))["cases"])
     geos = [data / "1BNA_neutral.pdb", data / "1BNA_anion.pdb",
             Path(SRC) / "tests/data/mozyme_gpu_reference/1UAO_opt.pdb"]
 
@@ -170,7 +172,7 @@ def main():
     import mozyme_parallel_force as pf  # noqa: E402
     import check_mozyme_gpu_thermo as th  # noqa: E402
     phase[0] = "opt"
-    keys_w = f"{md.BASE_KEYS} EPS=78.4 THERMO(298)"
+    keys_w = f"{md.BASE_KEYS} EPS=78.4 SWIG THERMO(298)"
     final = {}
     say("")
     say("2. stationary points in COSMO water (optimize_stationary), then FORCE THERMO(298)")
