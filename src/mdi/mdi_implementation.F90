@@ -34,6 +34,7 @@ MODULE MDI_IMPLEMENTATION
     escf, & ! heat of formation
     nelecs, & ! number of electrons
     voigt, & ! Voigt stress tensor (xx, yy, zz, yz, xz, xy)
+    emin, & ! lowest heat so far (rapid exit of the MOZYME SCF)
     jobnam, & ! path to input file
     run ! run mode
 
@@ -455,6 +456,7 @@ CONTAINS
 
   SUBROUTINE recompute_as_needed()
   if ( recompute_flag ) then
+    emin = 0.d0 ! converged SCF for every request (no rapid exit; MD drivers need consistent forces)
     call compfg (xparam, .true., escf, .true., grad, .true.)
     recompute_flag = .false.
   end if

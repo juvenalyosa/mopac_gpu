@@ -15,7 +15,7 @@
 
      subroutine drc(startv, startk)
       USE molkst_C, only : nvar, tleft, escf, gnorm, ndep, numat, keywrd, &
-      line, nopen, nclose, moperr, jloop => itemp_1, prt_velocity
+      line, nopen, nclose, moperr, jloop => itemp_1, prt_velocity, emin
       USE chanel_C, only : iw0, iw, ires, iscr, restart_fn
       use common_arrays_C, only : geo, loc, grad, xparam, atmass, nat, &
       & errfn, coord, na, p, q, labels, geoa, txtatm
@@ -713,6 +713,9 @@
 !   CALCULATE ENERGY AND GRADIENTS
 !
         if (Abs(new_hof) > 1.d-20) old_hof = escf
+!  No rapid exit of the MOZYME SCF (meant for geometry optimization): the gradient must be that of a
+!  converged SCF, or the total energy is not conserved
+        emin = 0.d0
         call compfg (xparam, .TRUE., escf, .TRUE., grad, .TRUE.)
         if (Abs(new_hof) < 1.d-20) then
         old_hof = escf + 5.d0

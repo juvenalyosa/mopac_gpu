@@ -55,15 +55,17 @@ python scripts/qmmm/run_qmmm_md.py protein.pdb --libmopac build/libmopac.so --qm
 - Units: OpenMM nm and kJ/mol, MOPAC Angstroms and kcal/mol. The QM energy is the PM7 heat of formation
   of the QM region in the field of the MM charges, so the potential energy is offset by a constant.
 - The periodic box must hold the QM region plus `roff` on every side (checked; an error says so).
-- `tolerance` is MOPAC's relative SCF criterion; below 0.1 MOPAC also uses `THRESH=1.D-15`. An SCF that
-  does not converge stops the run with an error.
+- `tolerance` is MOPAC's relative SCF criterion (default 0.01); below 0.1 MOPAC also uses `THRESH=1.D-15`.
+  An SCF that does not converge stops the run with an error. 0.001 costs ~1.8 x the SCF time of 0.01.
 - The H-bond correction of PM7 is used with `HB-SMOOTH` (its original form has kinks that MD and FORCE
   cannot cross).
 - Long-range QM-MM electrostatics: cut-off with switching (no QM-PME yet).
 - One QM region per process; do not run two MOPAC sessions in the same directory.
-- Energy conservation (NVE, chignolin in water): no jumps; a slow drift (~ -10 kJ/mol per 100 fs for a
-  138-atom QM region) comes from MOZYME's own gradient, which is not exactly the derivative of its energy
-  (also without MM charges). Use a thermostat (Langevin NVT) for production.
+- Energy conservation (NVE, chignolin in water, 0.5 fs, 100 fs): the total energy fluctuates by a few kJ/mol
+  as with pure MM and does not drift (-0.5 kJ/mol per 100 fs at `tolerance=0.01`, 0.0 at 0.001). Every
+  step converges the SCF to `tolerance`; before 2026-10-14 the SCF of a step could stop early (a rapid exit
+  meant for geometry optimization, when the heat is far from the lowest heat so far), the forces were not
+  the derivatives of the energy and the total energy fell by ~30 kJ/mol per 100 fs.
 
 ## Speed
 
@@ -84,4 +86,6 @@ the GPU. A T4 is weak in double precision; an A100 should be several times faste
   with finite differences to 0.01 kcal/(mol Angstrom).
 - Chignolin in TIP3P (QM = whole peptide, 138 atoms; QM = Tyr side chain with a link atom): OpenMM forces
   agree with finite differences of the total energy, including atoms in the switching shell and the
-  boundary atoms CA/CB; NVE at 0.25 fs: drift and per-step noise as for pure MM over 10-50 fs.
+  boundary atoms CA/CB.
+- Along an MD trajectory the gradient of each step agrees with that of a fresh calculation at the same
+  geometry (largest difference 0.035 kcal/(mol Angstrom)) and with finite differences of the energy.

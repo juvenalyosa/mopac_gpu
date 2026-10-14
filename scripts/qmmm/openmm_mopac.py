@@ -132,7 +132,7 @@ class MopacQMMMForce:
     """Builds the PythonForce; keep a reference to this object while the simulation runs."""
 
     def __init__(self, region: QMMMRegion, libmopac: str, qm_charge: int, positions_nm: np.ndarray,
-                 model: int = 0, tolerance: float = 1e-3):
+                 model: int = 0, tolerance: float = 1e-2):
         self.region = region
         self.qm_idx = np.array(region.qm_atoms, dtype=int)
         self.link_q = np.array([q for q, m, g in region.links], dtype=int)
@@ -258,7 +258,7 @@ class MopacQMMMForce:
 
 
 def add_qmmm(system: mm.System, topology, positions, qm_atoms, qm_charge: int, libmopac: str,
-             ron: float = 10.0, roff: float = 12.0, model: int = 0, tolerance: float = 1e-3):
+             ron: float = 10.0, roff: float = 12.0, model: int = 0, tolerance: float = 1e-2):
     """Turn an OpenMM system into a QM/MM system; returns the MopacQMMMForce (keep it alive)."""
     qm_atoms = sorted(int(i) for i in qm_atoms)
     qm_set = set(qm_atoms)

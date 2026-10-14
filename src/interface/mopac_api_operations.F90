@@ -274,7 +274,7 @@ contains
 !dec$ attributes dllexport :: mozyme_qmmm_step
 #endif
     use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_pot, ron => mm_ron, roff => mm_roff
-    use molkst_C, only : iscf
+    use molkst_C, only : iscf, emin
     integer(c_int), value, intent(in) :: natom, nmm
     real(c_double), intent(in) :: coord(*), mm_coord(*), mm_charge(*)
     real(c_double), value, intent(in) :: mm_ron, mm_roff
@@ -296,6 +296,10 @@ contains
     end if
     ron = mm_ron
     roff = mm_roff
+!   Every step needs the SCF converged to SELCON: the rapid exit of the SCF when the heat is far from
+!   the lowest heat so far (EMIN, meant for geometry optimization) gave gradients that were not the
+!   derivatives of the energy, and the total energy of NVE dynamics drifted.
+    emin = 0.d0
     call compfg (xparam, .true., escf, .true., grad, .true.)
     if (moperr) return
     heat = escf
