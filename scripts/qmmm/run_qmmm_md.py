@@ -15,7 +15,8 @@ Residues: "57" (any chain) or "E:57" (chain E); a suffix ":sc" takes only the si
 with --qm-sidechain).  Waters, ions and other non-protein residues of the PDB file are removed.
 --variants E:57=HID sets the protonation state of a residue.  --distances E:195:OG-I:15:C,... prints
 the mean, smallest and largest distance during the QM/MM run.  --cutoff-test 8,12,16 recomputes the QM/MM
-forces on snapshots with these roff (ron = roff - 2) and compares them with the largest one.
+forces on snapshots with these roff (ron = roff - 2), with and without the long-range part (PME), and
+compares them with PME at the largest roff.  --no-pme: cut-off QM-MM electrostatics only.
 """
 
 import argparse
@@ -87,6 +88,7 @@ def main():
     ap.add_argument("--distances", default="", help="atom pairs to follow, e.g. E:195:OG-I:15:C")
     ap.add_argument("--cutoff-test", default="", help="roff values (A) for a force comparison on snapshots")
     ap.add_argument("--snapshots", type=int, default=5, help="snapshots of the cut-off test")
+    ap.add_argument("--no-pme", action="store_true", help="no long-range QM-MM electrostatics (cut-off only)")
     a = ap.parse_args()
 
     plat = mm.Platform.getPlatformByName(a.platform)
@@ -139,8 +141,9 @@ def main():
     if qcharge is None:
         qcharge = int(round(sum(nb.getParticleParameters(i)[0].value_in_unit(u.elementary_charge) for i in qm)))
     qmmm = add_qmmm(system, top, st.getPositions(), qm, qcharge, a.libmopac, ron=a.ron, roff=a.roff,
-                    tolerance=a.tolerance)
-    print(f"QM region: {len(qm)} atoms + {len(qmmm.region.links)} link atoms, charge {qcharge}", flush=True)
+                    tolerance=a.tolerance, pme=False if a.no_pme else None)
+    print(f"QM region: {len(qm)} atoms + {len(qmmm.region.links)} link atoms, charge {qcharge}; long-range "
+          f"QM-MM electrostatics: {'PME' if qmmm.region.pme else 'none (cut-off)'}", flush=True)
 
     integ = mm.LangevinMiddleIntegrator(a.temperature * u.kelvin, 1 / u.picosecond, a.dt * u.femtoseconds)
     sim = app.Simulation(top, system, integ, plat)
@@ -178,26 +181,31 @@ def main():
 
     if snaps:
         cuts = sorted(float(c) for c in a.cutoff_test.split(","))
-        ron0, roff0 = qmmm.region.ron, qmmm.region.roff
+        ron0, roff0, pme0 = qmmm.region.ron, qmmm.region.roff, qmmm.region.pme
         idx = np.array(qmmm.region.qm_atoms)
-        res = {c: [] for c in cuts}
+        modes = (False, True) if pme0 else (False,)
+        res = {(m, c): [] for m in modes for c in cuts}
         for st2 in snaps:
+            for m in modes:
+                for c in cuts:
+                    qmmm.region.ron, qmmm.region.roff, qmmm.region.pme = c - 2.0, c, m
+                    e, f = qmmm.compute(st2)
+                    res[(m, c)].append((e, f[idx], qmmm.last["n_mm"]))
+        qmmm.region.ron, qmmm.region.roff, qmmm.region.pme = ron0, roff0, pme0
+        ref = (modes[-1], cuts[-1])
+        print(f"cut-off test on {len(snaps)} snapshots, reference: {'PME, ' if pme0 else ''}roff = {cuts[-1]:.0f} A "
+              f"(forces on the QM atoms, kJ/(mol nm)):", flush=True)
+        fr = np.array([q[1] for q in res[ref]])
+        for m in modes:
             for c in cuts:
-                qmmm.region.ron, qmmm.region.roff = c - 2.0, c
-                e, f = qmmm.compute(st2)
-                res[c].append((e, f[idx], qmmm.last["n_mm"]))
-        qmmm.region.ron, qmmm.region.roff = ron0, roff0
-        ref = cuts[-1]
-        print(f"cut-off test on {len(snaps)} snapshots, reference roff = {ref:.0f} A (QM atoms, kJ/(mol nm)):",
-              flush=True)
-        for c in cuts[:-1]:
-            de = [r[0] - q[0] for r, q in zip(res[c], res[ref])]
-            df = np.array([r[1] - q[1] for r, q in zip(res[c], res[ref])])
-            fr = np.array([q[1] for q in res[ref]])
-            print(f"   roff {c:4.0f} A ({np.mean([r[2] for r in res[c]]):.0f} MM charges): rms force error "
-                  f"{np.sqrt(np.mean(df ** 2)):.1f} (rms force {np.sqrt(np.mean(fr ** 2)):.0f}), largest "
-                  f"{np.max(np.abs(df)):.1f}; energy change between snapshots: spread "
-                  f"{np.ptp(de):.1f} kJ/mol", flush=True)
+                if (m, c) == ref:
+                    continue
+                de = [r[0] - q[0] for r, q in zip(res[(m, c)], res[ref])]
+                df = np.array([r[1] - q[1] for r, q in zip(res[(m, c)], res[ref])])
+                print(f"   {'PME' if m else 'cut-off'} roff {c:4.0f} A ({np.mean([r[2] for r in res[(m, c)]]):.0f} MM "
+                      f"charges): rms force error {np.sqrt(np.mean(df ** 2)):.1f} (rms force "
+                      f"{np.sqrt(np.mean(fr ** 2)):.0f}), largest {np.max(np.abs(df)):.1f}; energy change between "
+                      f"snapshots: spread {np.ptp(de):.1f} kJ/mol", flush=True)
 
     if a.nve > 0:
         st = sim.context.getState(getPositions=True, getVelocities=True)

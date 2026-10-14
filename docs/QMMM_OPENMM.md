@@ -7,10 +7,11 @@ coupling is an OpenMM `PythonForce`.
 
 ## Requirements
 
-- OpenMM ≥ 8.4 (tested with 8.6.1; `conda install -c conda-forge openmm` or `pip install 'openmm[cuda12]'`)
+- OpenMM ≥ 8.4 (tested with 8.6.1; `conda install -c conda-forge openmm` or `pip install 'openmm[cuda12]'`),
+  NumPy and SciPy
 - this MOPAC built as a shared library (`libmopac.so` / `libmopac.dylib`, built with the `mopac` target;
   `-DGPU=ON` for the GPU)
-- `scripts/qmmm/openmm_mopac.py` and `scripts/qmmm/mopac_qmmm_api.py` on the Python path
+- `scripts/qmmm/openmm_mopac.py`, `mopac_qmmm_api.py` and `qmmm_pme.py` on the Python path
 
 ## Use
 
@@ -49,6 +50,15 @@ python scripts/qmmm/run_qmmm_md.py protein.pdb --libmopac build/libmopac.so --qm
 - The MM charges are switched on and off by groups (residues: a water, an ion, an MM residue): all charges
   of a group are multiplied by the same S(d), d = smooth minimum of the distances from the group centre to
   the QM atoms, S = 1 below `ron` and 0 beyond `roff` (quintic). Each group is imaged as a whole.
+- Long-range electrostatics (QM-PME, on by default when the `NonbondedForce` uses PME or Ewald; `pme=False`
+  turns it off): the Mulliken charges Q_A of the QM atoms interact with all MM charges and their periodic
+  images by Ewald summation (smooth PME in `qmmm_pme.py`), minus the bare Coulomb interaction with the
+  switched charges that MOPAC already sees:
+  E_far = Σ_A Q_A φ_far(A), φ_far(A) = φ_Ewald(A) − Σ_j S_j q_j / r_Aj.
+  φ_far enters MOPAC's Fock matrix (diagonal of atom A, as MOL_QMMM does), so the energy stays variational
+  and the forces are its exact derivatives. A charge near the QM region acts through the QM integrals with
+  weight S and through the Mulliken charges with weight 1 − S, so the result hardly depends on `ron` and
+  `roff`. The QM region does not interact with its own periodic images.
 
 ## Details and limits
 
@@ -59,7 +69,12 @@ python scripts/qmmm/run_qmmm_md.py protein.pdb --libmopac build/libmopac.so --qm
   An SCF that does not converge stops the run with an error. 0.001 costs ~1.8 x the SCF time of 0.01.
 - The H-bond correction of PM7 is used with `HB-SMOOTH` (its original form has kinks that MD and FORCE
   cannot cross).
-- Long-range QM-MM electrostatics: cut-off with switching (no QM-PME yet).
+- QM-PME needs an orthorhombic box. Its parameters are fields of `qmmm.region` (`pme_alpha` = 0.25 1/A,
+  `pme_cutoff` = 13 A real space, `pme_spacing` = 1.2 A, `pme_order` = 4): potential errors ~1e-4 of the
+  potential, and the forces are exact derivatives of the energy as computed. It runs in NumPy on the CPU:
+  ~45 ms per step for 46 000 MM atoms (Apple M-series). With PME the QM energy includes the far field and a
+  constant (net-charge background), so absolute energies of runs with and without PME differ; only
+  differences and forces compare.
 - One QM region per process; do not run two MOPAC sessions in the same directory.
 - Energy conservation (NVE, chignolin in water, 0.5 fs, 100 fs): the total energy fluctuates by a few kJ/mol
   as with pure MM and does not drift (-0.5 kJ/mol per 100 fs at `tolerance=0.01`, 0.0 at 0.001). Every

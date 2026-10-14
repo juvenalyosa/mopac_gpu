@@ -3,7 +3,8 @@ TIP3P water, OpenMM (CUDA) + MOPAC/MOZYME, through scripts/qmmm/run_qmmm_md.py.
 
 QM region (PM7, 54 atoms + 5 H link atoms, charge 0): the catalytic triad side chains His57 (HID), Asp102,
 Ser195 of trypsin and Lys15-Ala16 of BPTI (the scissile peptide bond, attacked by Ser195 OG).  Langevin NVT,
-an NVE check, the distances of the active site, and a cut-off test of the QM/MM electrostatics.
+an NVE check, the distances of the active site, and a cut-off test of the QM/MM electrostatics (with and
+without the long-range part, QM-PME).
 
 Builds MOPAC (GPU=ON, libmopac) from https://github.com/juvenalyosa/mopac_gpu and installs OpenMM 8.6.1 with
 CUDA.  MM equilibration 100 ps, then 5 ps of QM/MM NVT (0.5 fs) and 0.5 ps NVE.  REPORT_QMMM_ENZYME.txt has
@@ -80,7 +81,7 @@ def main():
     say(f"== trypsin-BPTI ({time.perf_counter() - t0:.0f} s in all)")
     for line in out.splitlines():
         if line.startswith(("system:", "QM region", "QM/MM NVT", "NVE check", "MM equilibration", "distance",
-                            "cut-off", "   roff")) or "Error" in line or "error" in line:
+                            "cut-off", "   cut-off", "   PME")) or "Error" in line or "error" in line:
             say("   " + line.rstrip()[:300])
     say(f"total {(time.time() - t_start) / 60:.0f} min")
 

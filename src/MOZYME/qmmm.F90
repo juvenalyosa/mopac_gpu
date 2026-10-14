@@ -29,6 +29,8 @@
 !  additive term po(9) differs from that of the electrons, a water O collapsed onto a QM H in MD:
 !  thousands of kcal/mol released).  With mm_roff > 0 every pair is switched off between mm_ron and
 !  mm_roff by S(x) = 1 - 10x**3 + 15x**4 - 6x**5.
+!  The API can also set qm_pot, a potential at each QM atom that acts on its Mulliken charge (the MM driver
+!  uses it for the long-range part of the QM-MM electrostatics, PME).
 !
 subroutine qmmm_read
 !
@@ -190,16 +192,32 @@ subroutine qmmm_hcore (h, enuclr)
 !
 !  MOZYME: add the MM charges to the one-electron matrix (packed with ijbo) and to the core energy (eV)
 !
-    use qmmm_C, only : n_mm, mm_xyz, mm_q
+    use qmmm_C, only : n_mm, mm_xyz, mm_q, qm_pot
     use molkst_C, only : numat
     use common_arrays_C, only : coord, nat
-    use parameters_C, only : tore
+    use parameters_C, only : tore, natorb
+    use funcon_C, only : fpc_9
     implicit none
     double precision, intent (inout) :: h(*), enuclr
     integer :: i, j, k, ii, nv
     double precision :: v(45), dv(3, 45), gam, dgam(3), sw, dsw(3), d(3)
     integer, external :: ijbo
     call qmmm_read
+    !
+    !  External potential at the QM atoms (kcal/(mol e)): -qm_pot on every diagonal element of the atom, its
+    !  core charge in enuclr; the energy is Sum_A (Mulliken charge of A) qm_pot(A)
+    !
+    if (allocated(qm_pot)) then
+      if (size(qm_pot) >= numat) then
+        do i = 1, numat
+          ii = ijbo (i, i)
+          do k = 1, natorb(nat(i))
+            h(ii + (k*(k + 1))/2) = h(ii + (k*(k + 1))/2) - qm_pot(i) / fpc_9
+          end do
+          enuclr = enuclr + tore(nat(i)) * qm_pot(i) / fpc_9
+        end do
+      end if
+    end if
     if (n_mm == 0) return
     do i = 1, numat
       ii = ijbo (i, i)

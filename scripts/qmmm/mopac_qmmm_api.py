@@ -2,11 +2,13 @@
 
     from mopac_qmmm_api import QMSession
     qm = QMSession(libpath, atomic_numbers, coords, charge=0, model=0)
-    heat, grad_qm, grad_mm = qm.step(coords, mm_coords, mm_charges, ron=0.0, roff=0.0)
+    heat, grad_qm, grad_mm = qm.step(coords, mm_coords, mm_charges, ron=0.0, roff=0.0, qm_pot=None)
     qm.close()
 
 Units: Angstroms, electrons, kcal/mol, kcal/(mol Angstrom).  heat is the PM7 heat of formation of the QM
-system in the field of the MM charges (it includes the QM-MM electrostatics).
+system in the field of the MM charges (it includes the QM-MM electrostatics).  qm_pot (kcal/(mol e), one per
+QM atom) is an external potential acting on the Mulliken charges; after a step, qm.mm_pot holds dheat/dq of
+each MM charge and qm.qm_charges the Mulliken charges.
 """
 
 import ctypes as C
@@ -53,11 +55,14 @@ class QMSession:
         f = self.lib.mozyme_qmmm_step
         f.argtypes = [C.c_int, C.POINTER(C.c_double), C.c_int, C.POINTER(C.c_double), C.POINTER(C.c_double),
                       C.c_double, C.c_double, C.POINTER(C.c_double), C.POINTER(C.c_double),
-                      C.POINTER(C.c_double), C.POINTER(C.c_double), C.POINTER(C.c_int)]
+                      C.POINTER(C.c_double), C.POINTER(C.c_double), C.POINTER(C.c_double),
+                      C.POINTER(C.c_double), C.POINTER(C.c_int)]
         f.restype = None
 
-    def step(self, coords, mm_coords, mm_charges, ron=0.0, roff=0.0):
+    def step(self, coords, mm_coords, mm_charges, ron=0.0, roff=0.0, qm_pot=None):
         x = np.ascontiguousarray(coords, float).ravel()
+        vq = np.zeros(self.n) if qm_pot is None else np.ascontiguousarray(qm_pot, float).ravel()
+        cq = np.zeros(self.n)
         mx = np.ascontiguousarray(mm_coords, float).ravel()
         mq = np.ascontiguousarray(mm_charges, float).ravel()
         nmm = len(mq)
@@ -68,14 +73,15 @@ class QMSession:
         status = C.c_int(1)
         dp = C.POINTER(C.c_double)
         self.lib.mozyme_qmmm_step(self.n, x.ctypes.data_as(dp), nmm, mx.ctypes.data_as(dp) if nmm else None,
-                                  mq.ctypes.data_as(dp) if nmm else None, ron, roff, C.byref(heat),
-                                  g.ctypes.data_as(dp), gm.ctypes.data_as(dp), pot.ctypes.data_as(dp),
-                                  C.byref(status))
+                                  mq.ctypes.data_as(dp) if nmm else None, ron, roff, vq.ctypes.data_as(dp),
+                                  C.byref(heat), g.ctypes.data_as(dp), gm.ctypes.data_as(dp),
+                                  pot.ctypes.data_as(dp), cq.ctypes.data_as(dp), C.byref(status))
         if status.value == 2:
             raise RuntimeError("mozyme_qmmm_step: the SCF did not converge (tolerance too tight?)")
         if status.value != 0:
             raise RuntimeError("mozyme_qmmm_step failed: " + "; ".join(self.errors()))
         self.mm_pot = pot[:nmm]
+        self.qm_charges = cq
         return heat.value, g.reshape(self.n, 3), gm[:3 * nmm].reshape(nmm, 3)
 
     def errors(self):

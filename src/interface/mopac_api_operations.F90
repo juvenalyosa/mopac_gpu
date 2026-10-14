@@ -266,23 +266,33 @@ contains
   end subroutine mozyme_qmmm_init
 
   ! One QM/MM evaluation: QM coordinates (Angstroms), MM point charges (Angstroms, electrons), switching
-  ! radii (mm_roff <= 0: none); returns the heat of formation (kcal/mol, including the QM-MM
-  ! electrostatics) and its gradient on the QM atoms and on the MM charges (kcal/(mol Angstrom))
-  module subroutine mozyme_qmmm_step(natom, coord, nmm, mm_coord, mm_charge, mm_ron, mm_roff, &
-      heat, grad_out, mm_grad_out, mm_pot_out, status) bind(c)
+  ! radii (mm_roff <= 0: none), an external potential at each QM atom (kcal/(mol e), acting on its
+  ! Mulliken charge); returns the heat of formation (kcal/mol, including the QM-MM electrostatics), its
+  ! gradient on the QM atoms and on the MM charges (kcal/(mol Angstrom)) and the Mulliken charges
+  module subroutine mozyme_qmmm_step(natom, coord, nmm, mm_coord, mm_charge, mm_ron, mm_roff, qm_pot_in, &
+      heat, grad_out, mm_grad_out, mm_pot_out, qm_charge_out, status) bind(c)
 #ifdef WIN32
 !dec$ attributes dllexport :: mozyme_qmmm_step
 #endif
-    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_pot, ron => mm_ron, roff => mm_roff
-    use molkst_C, only : iscf, emin
+    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_pot, qm_pot, ron => mm_ron, roff => mm_roff
+    use molkst_C, only : iscf, emin, numat
+    use common_arrays_C, only : nat, p
+    use parameters_C, only : tore, natorb
     integer(c_int), value, intent(in) :: natom, nmm
-    real(c_double), intent(in) :: coord(*), mm_coord(*), mm_charge(*)
+    real(c_double), intent(in) :: coord(*), mm_coord(*), mm_charge(*), qm_pot_in(*)
     real(c_double), value, intent(in) :: mm_ron, mm_roff
-    real(c_double), intent(out) :: heat, grad_out(*), mm_grad_out(*), mm_pot_out(*)
+    real(c_double), intent(out) :: heat, grad_out(*), mm_grad_out(*), mm_pot_out(*), qm_charge_out(*)
     integer(c_int), intent(out) :: status
-    integer :: n
+    integer :: n, i, k, ii
+    integer, external :: ijbo
     status = 1
     if (moperr .or. natom*3 /= nvar) return
+    if (any(qm_pot_in(:natom) /= 0.d0)) then
+      if (.not. allocated(qm_pot)) allocate (qm_pot(natom))
+      qm_pot(:natom) = qm_pot_in(:natom)
+    else if (allocated(qm_pot)) then
+      deallocate (qm_pot)
+    end if
     xparam(:nvar) = coord(:nvar)
     if (allocated(mm_xyz)) then
       if (size(mm_q) /= nmm) deallocate (mm_xyz, mm_q, mm_grad)
@@ -310,6 +320,13 @@ contains
       mm_grad_out(:3*n) = reshape(mm_grad(:, :n), [3*n])
       mm_pot_out(:n) = mm_pot(:n)
     end if
+    do i = 1, numat
+      ii = ijbo (i, i)
+      qm_charge_out(i) = tore(nat(i))
+      do k = 1, natorb(nat(i))
+        qm_charge_out(i) = qm_charge_out(i) - p(ii + (k*(k + 1))/2)
+      end do
+    end do
   end subroutine mozyme_qmmm_step
 
   ! End of a QM/MM session: the electronic state and the properties of the last step

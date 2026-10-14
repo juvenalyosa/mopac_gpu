@@ -27,6 +27,14 @@ What add_qmmm does to the MM system:
     each QM atom - MM charge pair instead let waters in the switching shell turn their H inside and their
     O outside and feel a net charge: the energy of a charged QM peptide fell by 1750 kcal/mol in 10 fs.
     The force from dS/dx uses dE/dq of each charge (the QM potential there), returned by MOPAC.
+  * long-range QM-MM electrostatics (pme=True, the default with PME in OpenMM): the Mulliken charges Q_A of
+    the QM atoms interact with all MM charges and their periodic images, by Ewald summation (smooth PME,
+    qmmm_pme.py), minus the bare Coulomb interaction with the switched charges that MOPAC already sees:
+        E_far = Sum_A Q_A phi_far(A),  phi_far(A) = phi_Ewald(A) - Sum_(j near) S_j q_j / r_Aj
+    phi_far goes into the Fock matrix of MOPAC (on the diagonal of atom A), so that the energy stays
+    variational and the forces are exact; near charges act through the QM integrals with weight S and
+    through Q_A with weight 1 - S, and the result hardly depends on ron and roff.  The interactions of the
+    QM region with its own periodic images are left out.
 
 Units at the interface: OpenMM nm, kJ/mol; MOPAC Angstrom, kcal/mol.  The QM energy is the PM7 heat of
 formation of the QM region (+ link atoms) in the field of the MM charges, so the total potential energy is
@@ -47,8 +55,12 @@ import openmm.unit as unit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mopac_qmmm_api import QMSession  # noqa: E402
+from qmmm_pme import PMEGrid, Stencil  # noqa: E402
+from scipy.special import erfc  # noqa: E402
 
 KCAL_TO_KJ = 4.184
+# Coulomb constant, kcal A/(mol e^2) (OpenMM's ONE_4PI_EPS0)
+COULOMB = 138.935456 * 10.0 / KCAL_TO_KJ
 # force: kcal/(mol A) -> kJ/(mol nm)
 GRAD_KCAL_A_TO_KJ_NM = KCAL_TO_KJ * 10.0
 # Q-H bond lengths (A) for link atoms
@@ -65,6 +77,11 @@ class QMMMRegion:
     ron: float = 10.0                          # A
     roff: float = 12.0                         # A
     periodic: bool = False
+    pme: bool = False                          # long-range QM-MM electrostatics by PME (periodic only)
+    pme_alpha: float = 0.25                    # Ewald splitting, 1/A
+    pme_cutoff: float = 13.0                   # real-space cut-off, A (erfc(alpha rc) ~ 4e-6)
+    pme_spacing: float = 1.2                   # grid spacing, A (potential error ~1e-4 relative)
+    pme_order: int = 4                         # B-spline order (even)
 
 
 def _element_number(atom) -> int:
@@ -154,6 +171,7 @@ class MopacQMMMForce:
         self.session = QMSession(libmopac, nums, x0, charge=qm_charge, model=model, tolerance=tolerance)
         self.calls = 0
         self.last = {}
+        self.grid = None
 
     def _qm_coords(self, pos_a):
         xq = pos_a[self.qm_idx]
@@ -227,10 +245,18 @@ class MopacQMMMForce:
         sel = np.nonzero(wg[self.group_of] > 0)[0]
         xs = xm[sel]
         qs = self.region.mm_charges[mm_idx[sel]] * wg[self.group_of[sel]]
-        heat, gq, gm = self.session.step(xq, xs, qs, 0.0, 0.0)
-        pot = self.session.mm_pot                                 # dE/dq_eff, kcal/(mol e)
+        if self.region.pme:
+            far = self._pme_far_potential(xq, xm, xs, qs, box, c)
+            heat, gq, gm = self.session.step(xq, xs, qs, 0.0, 0.0, qm_pot=far["phi"])
+            pot = self.session.mm_pot.copy()                      # dE/dq_eff, kcal/(mol e)
+            g_all = self._pme_far_gradient(far, xq, xs, qs, gq, gm, pot)
+        else:
+            heat, gq, gm = self.session.step(xq, xs, qs, 0.0, 0.0)
+            pot = self.session.mm_pot                             # dE/dq_eff, kcal/(mol e)
         forces = np.zeros((n, 3))
         nq = len(self.qm_idx)
+        if self.region.pme:
+            forces[mm_idx] -= g_all * GRAD_KCAL_A_TO_KJ_NM
         forces[self.qm_idx] -= gq[:nq] * GRAD_KCAL_A_TO_KJ_NM
         if len(self.link_q):
             fl = -gq[nq:] * GRAD_KCAL_A_TO_KJ_NM
@@ -253,13 +279,79 @@ class MopacQMMMForce:
         self.last = dict(heat=heat, n_mm=len(sel))
         return heat * KCAL_TO_KJ, forces
 
+    def _pme_far_potential(self, xq, xm, xs, qs, box, c):
+        """phi_far at the QM atoms (kcal/(mol e)) and what its gradient needs"""
+        reg = self.region
+        if box is None or np.any(np.abs(box - np.diag(np.diag(box))) > 1e-9):
+            raise ValueError("QM/MM PME: needs an orthorhombic periodic box")
+        L = np.diag(box).copy()
+        if self.grid is None or not self.grid.matches(L, reg.pme_alpha, reg.pme_spacing, reg.pme_order):
+            self.grid = PMEGrid(L, reg.pme_alpha, reg.pme_spacing, reg.pme_order)
+        g, a = self.grid, reg.pme_alpha
+        qm_all = reg.mm_charges[self.mm_idx_all]
+        st_mm = Stencil(g, xm)
+        phi_mm = g.potential(st_mm, qm_all)
+        st_q = Stencil(g, xq)
+        # real space: every MM charge within pme_cutoff of a QM atom (minimum image of each atom)
+        d = xm - c
+        d -= L * np.round(d / L)
+        span = np.max(np.linalg.norm(xq - c, axis=1))
+        near = np.nonzero(np.linalg.norm(d, axis=1) < span + reg.pme_cutoff)[0]
+        rv = (c + d[near])[None, :, :] - xq[:, None, :]            # QM atom -> MM charge
+        r = np.sqrt(np.einsum('ijk,ijk->ij', rv, rv))
+        pa, pj = np.nonzero(r < reg.pme_cutoff)                     # pairs inside the cut-off
+        rv, r = rv[pa, pj], r[pa, pj]
+        ec = erfc(a * r)
+        qn = qm_all[near[pj]]
+        phi_real = np.bincount(pa, qn * ec / r, minlength=len(xq))
+        # bare Coulomb potential of the charges MOPAC sees (switched)
+        rb = xs[None, :, :] - xq[:, None, :]
+        rbn = np.linalg.norm(rb, axis=2)
+        phi_bare = (qs[None, :] / rbn).sum(axis=1)
+        background = -np.pi * qm_all.sum() / (g.V * a * a)
+        phi = COULOMB * (phi_real + g.value(st_q, phi_mm) + background - phi_bare)
+        return dict(phi=phi, st_mm=st_mm, st_q=st_q, phi_mm=phi_mm, pa=pa, pj=near[pj], rv=rv, r=r, ec=ec, qn=qn,
+                    rb=rb, rbn=rbn, qm_all=qm_all)
+
+    def _pme_far_gradient(self, far, xq, xs, qs, gq, gm, pot):
+        """Add the gradient of E_far (kcal/(mol A)) to gq (QM atoms) and gm (switched charges, at fixed
+        weights), dE_far/dq_eff to pot; returns the gradient on all MM charges from the Ewald part"""
+        g, a = self.grid, self.region.pme_alpha
+        Q = self.session.qm_charges
+        qm_all = far["qm_all"]
+        # reciprocal space
+        gq += COULOMB * Q[:, None] * g.gradient(far["st_q"], far["phi_mm"])
+        psi = g.potential(far["st_q"], Q)
+        g_all = COULOMB * qm_all[:, None] * g.gradient(far["st_mm"], psi)
+        # real space: E = C Q_A q_j erfc(a r)/r
+        r, rv, pa = far["r"], far["rv"], far["pa"]
+        dfdr = -2.0 * a / np.sqrt(np.pi) * np.exp(-(a * r) ** 2) / r - far["ec"] / r ** 2
+        gr = (COULOMB * Q[pa] * far["qn"] * dfdr / r)[:, None] * rv      # d E / d x(MM charge), per pair
+        for k in range(3):
+            g_all[:, k] += np.bincount(far["pj"], gr[:, k], minlength=len(g_all))
+            gq[:, k] -= np.bincount(pa, gr[:, k], minlength=len(gq))
+        # bare Coulomb with the switched charges: E = -C Q_A q_eff_j / r
+        rbn, rb = far["rbn"], far["rb"]
+        cb = COULOMB * Q[:, None] * qs[None, :] / rbn ** 3
+        gb = cb[:, :, None] * rb
+        gm += gb.sum(axis=0)
+        gq -= gb.sum(axis=1)
+        pot -= COULOMB * (Q[:, None] / rbn).sum(axis=0)
+        return g_all
+
     def close(self):
         self.session.close()
 
 
 def add_qmmm(system: mm.System, topology, positions, qm_atoms, qm_charge: int, libmopac: str,
-             ron: float = 10.0, roff: float = 12.0, model: int = 0, tolerance: float = 1e-2):
-    """Turn an OpenMM system into a QM/MM system; returns the MopacQMMMForce (keep it alive)."""
+             ron: float = 10.0, roff: float = 12.0, model: int = 0, tolerance: float = 1e-2, pme=None):
+    """Turn an OpenMM system into a QM/MM system; returns the MopacQMMMForce (keep it alive).
+    pme: long-range QM-MM electrostatics by PME (default: when the NonbondedForce uses PME or Ewald)."""
+    if pme is None:
+        pme = any(isinstance(f, mm.NonbondedForce) and f.getNonbondedMethod() in (mm.NonbondedForce.PME,
+                  mm.NonbondedForce.Ewald) for f in system.getForces())
+    if pme and not system.usesPeriodicBoundaryConditions():
+        raise ValueError("QM/MM PME needs a periodic system")
     qm_atoms = sorted(int(i) for i in qm_atoms)
     qm_set = set(qm_atoms)
     atoms = list(topology.atoms())
@@ -274,7 +366,7 @@ def add_qmmm(system: mm.System, topology, positions, qm_atoms, qm_charge: int, l
     region = QMMMRegion(qm_atoms=qm_atoms, atomic_numbers=[_element_number(atoms[i]) for i in qm_atoms],
                         links=links, mm_charges=charges, ron=ron, roff=roff,
                         groups=np.array([a.residue.index for a in atoms]),
-                        periodic=system.usesPeriodicBoundaryConditions())
+                        periodic=system.usesPeriodicBoundaryConditions(), pme=bool(pme))
     qmmm = MopacQMMMForce(region, libmopac, qm_charge, pos_nm, model=model, tolerance=tolerance)
     force = mm.PythonForce(qmmm.compute)
     force.setUsesPeriodicBoundaryConditions(region.periodic)
