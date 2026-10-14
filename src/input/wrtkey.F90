@@ -1007,6 +1007,11 @@ subroutine wrtcon (allkey)
     write (iw, '(" *  GEO_DAT    - DATA SET GEOMETRY IS IN FILE """,a,"""")') &
       keywrd_quoted(i + 10:j - 1)
   end if
+  if (quoted('MM_CHARGES=') > 0) then
+    i = index(keywrd_quoted," MM_CHARGES=")
+    j = index(keywrd_quoted(i + 13:),'"') + i + 12
+    write (iw, '(" *  MM_CHARGES - QM/MM: MM POINT CHARGES IN FILE """,a,"""")') keywrd_quoted(i + 13:j - 1)
+  end if
   if (quoted('GEO_REF=')  > 0) then
     i = index(keywrd_quoted," GEO_REF")
     j = index(keywrd_quoted(i + 10:),'"') + i + 9 

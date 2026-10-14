@@ -324,6 +324,7 @@
         part_dxyz(1:3, 1:numat*l123) = -dxyz(1:3, 1:numat*l123)
       end if
       useps = refeps
+      if (mozyme) call qmmm_grad (dxyz)
       if (useps) then
         call mozyme_section_timer_begin('dcart_diegrd', diegrd_timer)
         call diegrd (dxyz)

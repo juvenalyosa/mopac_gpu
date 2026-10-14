@@ -526,7 +526,7 @@
   implicit none
   character, intent (in) :: oldkey*3000
   integer :: i, j, k, loop
-  integer, parameter :: n_quoted = 4
+  integer, parameter :: n_quoted = 5
   character :: quoted_keywords(n_quoted)*20, old*3000, quotation*1
   logical :: first
 !
@@ -545,6 +545,7 @@
   quoted_keywords(2) = ' GEO_REF='
   quoted_keywords(3) = ' EXTERNAL='
   quoted_keywords(4) = ' SETUP='
+  quoted_keywords(5) = ' MM_CHARGES='
   old = trim(oldkey)
   keywrd_quoted = " "
   do

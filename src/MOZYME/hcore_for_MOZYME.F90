@@ -499,6 +499,10 @@ subroutine hcore_for_MOZYME ()
     call addnucz (phinet, qscnet, qdenet)
 
   end if
+  !
+  !  QM/MM: MM point charges (MM_CHARGES or the API)
+  !
+  if (mode /= -1) call qmmm_hcore (h, enuclr)
   kr = kr - 1
  !
  !
