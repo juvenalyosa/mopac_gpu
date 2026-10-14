@@ -274,7 +274,14 @@ __device__ bool side_terms(const PairGeom &g, int s0, int nb, int natx, bool sec
       torsion_cos = sqrt(c * c + w * w);
     }
   }
-  if (distance_s(g, H, s0) > distance_s(g, H, s0 + 1) && torsion_check_set2) torsion_cos = 0.0;
+  if (torsion_check_set2) {
+    // carbonyl: no H-bond when the H is nearer the C than the O (HB-SMOOTH: switched over 0.01 A)
+    if (smooth) {
+      torsion_cos *= 0.5 * (1.0 - tanh((distance_s(g, H, s0) - distance_s(g, H, s0 + 1)) / 0.01));
+    } else if (distance_s(g, H, s0) > distance_s(g, H, s0 + 1)) {
+      torsion_cos = 0.0;
+    }
+  }
   if (g.atom[s0 + 2] == g.atom[s0 + 3] || g.atom[H] == g.atom[s0 + 3]) torsion_cos = 1.0;
   if (smooth) {
     // the torsion is undefined as the angle X1-X-H approaches 180 degrees

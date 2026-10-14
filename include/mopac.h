@@ -204,14 +204,16 @@ void mozyme_vibe(struct mopac_system *system,
    step: coord = QM coordinates [3*natom] (Angstroms); mm_coord [3*nmm] (Angstroms), mm_charge [nmm]
    (electrons); each QM atom - MM charge pair is switched off between mm_ron and mm_roff (Angstroms,
    mm_roff <= 0: no cut-off); returns heat (kcal/mol, with the QM-MM electrostatics), grad [3*natom] and
-   mm_grad [3*nmm] (kcal/mol/Angstrom). */
+   mm_grad [3*nmm] (kcal/mol/Angstrom) and mm_pot [nmm] = dheat/dq of each charge (kcal/mol/e, the
+   potential of the QM system there, used by group-based switching in the MM driver).  status: 0 = success, 1 = error, 2 = SCF not converged
+   (results returned).  system->tolerance < 0.1 (tight SCF for MD) also sets THRESH=1.D-15. */
 void mozyme_qmmm_init(struct mopac_system *system,
                       struct mozyme_state *state,
                       int *status);
 
 void mozyme_qmmm_step(int natom, const double *coord, int nmm, const double *mm_coord,
                       const double *mm_charge, double mm_ron, double mm_roff,
-                      double *heat, double *grad, double *mm_grad, int *status);
+                      double *heat, double *grad, double *mm_grad, double *mm_pot, int *status);
 
 void mozyme_qmmm_finalize(struct mozyme_state *state,
                           struct mopac_properties *properties);

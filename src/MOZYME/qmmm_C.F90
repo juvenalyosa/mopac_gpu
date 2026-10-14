@@ -25,6 +25,8 @@ module qmmm_C
   double precision, dimension(:,:), allocatable :: mm_xyz  ! (3, n_mm), Angstroms
   double precision, dimension(:),   allocatable :: mm_q    ! (n_mm), electrons
   double precision, dimension(:,:), allocatable :: mm_grad ! (3, n_mm), kcal/(mol Angstrom), from qmmm_grad
+  double precision, dimension(:),   allocatable :: mm_pot  ! (n_mm), dE/dq of each charge, kcal/(mol e):
+                                                           ! the potential of the QM system there (qmmm_grad)
   double precision :: mm_ron = 0.d0    ! switching of each QM atom - MM charge pair from mm_ron to mm_roff
   double precision :: mm_roff = 0.d0   ! (Angstroms); mm_roff <= 0: no cut-off
   double precision :: e_qmmm = 0.d0    ! QM - MM electrostatic energy at the last SCF, kcal/mol (information)

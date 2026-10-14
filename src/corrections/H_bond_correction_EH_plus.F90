@@ -182,8 +182,15 @@
         end if
         if (hb_smooth .and. torsion_check_set2) torsion_cos = sqrt(cos(torsion_raw)**2 + w_hb**2)
       end if
-      if (distance(hblist(i, 9), hblist(i, 1)) > distance(hblist(i, 9), hblist(i, 2)) .and. torsion_check_set2) &
-        torsion_cos = 0.d0
+      if (torsion_check_set2) then
+        !  carbonyl: no H-bond when the H is nearer the C than the O (HB-SMOOTH: switched over 0.01 A)
+        if (hb_smooth) then
+          torsion_cos = torsion_cos * 0.5d0 * (1.d0 - tanh((distance(hblist(i, 9), hblist(i, 1)) - &
+            distance(hblist(i, 9), hblist(i, 2))) / 0.01d0))
+        else if (distance(hblist(i, 9), hblist(i, 1)) > distance(hblist(i, 9), hblist(i, 2))) then
+          torsion_cos = 0.d0
+        end if
+      end if
       if (hblist(i, 3) == hblist(i, 4) .or. hblist(i, 9) == hblist(i, 4)) torsion_cos = 1.d0
       if (hb_smooth) then
         torsion_cos = (1.d0 - exp(-((pi - angle2)/(pi/36.d0))**2))*(torsion_cos - 0.5d0) + 0.5d0
@@ -294,8 +301,14 @@
         end if
         if (hb_smooth .and. torsion_check_set2) torsion_cos_new = sqrt(cos(torsion_raw)**2 + w_hb**2)
       end if
-      if (distance(hblist(i, 9), hblist(i, 5)) > distance(hblist(i, 9), hblist(i, 6)) .and. torsion_check_set2) &
-        torsion_cos_new = 0.d0
+      if (torsion_check_set2) then
+        if (hb_smooth) then
+          torsion_cos_new = torsion_cos_new * 0.5d0 * (1.d0 - tanh((distance(hblist(i, 9), hblist(i, 5)) - &
+            distance(hblist(i, 9), hblist(i, 6))) / 0.01d0))
+        else if (distance(hblist(i, 9), hblist(i, 5)) > distance(hblist(i, 9), hblist(i, 6))) then
+          torsion_cos_new = 0.d0
+        end if
+      end if
       if (hblist(i, 7) == hblist(i, 8) .or. hblist(i, 9) == hblist(i, 8)) torsion_cos_new = 1.d0
    !   if (torsion_cos_new < 0.d0) return
       if (hb_smooth) then

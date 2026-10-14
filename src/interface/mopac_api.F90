@@ -225,14 +225,14 @@ module mopac_api
     end subroutine mozyme_qmmm_init
 
     module subroutine mozyme_qmmm_step(natom, coord, nmm, mm_coord, mm_charge, mm_ron, mm_roff, &
-        heat, grad_out, mm_grad_out, status) bind(c)
+        heat, grad_out, mm_grad_out, mm_pot_out, status) bind(c)
 #ifdef WIN32
 !dec$ attributes dllexport :: mozyme_qmmm_step
 #endif
       integer(c_int), value, intent(in) :: natom, nmm
       real(c_double), intent(in) :: coord(*), mm_coord(*), mm_charge(*)
       real(c_double), value, intent(in) :: mm_ron, mm_roff
-      real(c_double), intent(out) :: heat, grad_out(*), mm_grad_out(*)
+      real(c_double), intent(out) :: heat, grad_out(*), mm_grad_out(*), mm_pot_out(*)
       integer(c_int), intent(out) :: status
     end subroutine mozyme_qmmm_step
 

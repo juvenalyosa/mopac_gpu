@@ -53,7 +53,7 @@ class QMSession:
         f = self.lib.mozyme_qmmm_step
         f.argtypes = [C.c_int, C.POINTER(C.c_double), C.c_int, C.POINTER(C.c_double), C.POINTER(C.c_double),
                       C.c_double, C.c_double, C.POINTER(C.c_double), C.POINTER(C.c_double),
-                      C.POINTER(C.c_double), C.POINTER(C.c_int)]
+                      C.POINTER(C.c_double), C.POINTER(C.c_double), C.POINTER(C.c_int)]
         f.restype = None
 
     def step(self, coords, mm_coords, mm_charges, ron=0.0, roff=0.0):
@@ -64,16 +64,35 @@ class QMSession:
         heat = C.c_double(0.0)
         g = np.zeros(3 * self.n)
         gm = np.zeros(max(3 * nmm, 1))
+        pot = np.zeros(max(nmm, 1))
         status = C.c_int(1)
         dp = C.POINTER(C.c_double)
         self.lib.mozyme_qmmm_step(self.n, x.ctypes.data_as(dp), nmm, mx.ctypes.data_as(dp) if nmm else None,
                                   mq.ctypes.data_as(dp) if nmm else None, ron, roff, C.byref(heat),
-                                  g.ctypes.data_as(dp), gm.ctypes.data_as(dp), C.byref(status))
+                                  g.ctypes.data_as(dp), gm.ctypes.data_as(dp), pot.ctypes.data_as(dp),
+                                  C.byref(status))
+        if status.value == 2:
+            raise RuntimeError("mozyme_qmmm_step: the SCF did not converge (tolerance too tight?)")
         if status.value != 0:
-            raise RuntimeError("mozyme_qmmm_step failed")
+            raise RuntimeError("mozyme_qmmm_step failed: " + "; ".join(self.errors()))
+        self.mm_pot = pot[:nmm]
         return heat.value, g.reshape(self.n, 3), gm[:3 * nmm].reshape(nmm, 3)
 
+    def errors(self):
+        """Finish the session and return MOPAC's error messages (after a failed step)."""
+        props = MopacProperties()
+        self.lib.mozyme_qmmm_finalize(C.byref(self.state), C.byref(props))
+        msgs = []
+        if props.nerror > 0 and props.error_msg:
+            arr = C.cast(props.error_msg, C.POINTER(C.c_char_p))
+            msgs = [arr[i].decode(errors="replace").strip() for i in range(props.nerror)]
+        self.lib.destroy_mopac_properties(C.byref(props))
+        self.closed = True
+        return msgs
+
     def close(self):
+        if getattr(self, "closed", False):
+            return
         props = MopacProperties()
         self.lib.mozyme_qmmm_finalize(C.byref(self.state), C.byref(props))
         self.lib.destroy_mopac_properties(C.byref(props))

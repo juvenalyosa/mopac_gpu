@@ -24,8 +24,10 @@
 !  at long range.  In the molecular frame, u = (x(J) - x(A))/R:
 !     v(ss) = ri1,  v(s p_k) = -ri2 u_k,  v(p_k p_l) = ri4 delta_kl + (ri3 - ri4) u_k u_l,
 !     v(d d) = ri1 on the diagonal (as COSMO does for d orbitals),
-!  and H(mu nu) on A gets -q v(mu nu).  The core of A sees q through eV/sqrt(r**2 + po(9,A)**2), the
-!  gamma of the MOPAC core-core term.  With mm_roff > 0 every pair is switched off between mm_ron and
+!  and H(mu nu) on A gets -q v(mu nu).  The core of A sees q through the same (ss|J) as its s electrons,
+!  so that a neutral atom has no field at short range (with the gamma of the core-core term, whose
+!  additive term po(9) differs from that of the electrons, a water O collapsed onto a QM H in MD:
+!  thousands of kcal/mol released).  With mm_roff > 0 every pair is switched off between mm_ron and
 !  mm_roff by S(x) = 1 - 10x**3 + 15x**4 - 6x**5.
 !
 subroutine qmmm_read
@@ -77,7 +79,7 @@ subroutine qmmm_pair (ni, d, nv, v, dv, gam, dgam, sw, dsw)
 !  v(k), k = 1..nv (packed lower triangle of the atom's orbitals, eV), dv(:, k) = dv(k)/dd (eV/A),
 !  gam (eV) and dgam = dgam/dd for the core, sw / dsw = switching function and its gradient.
 !
-    use parameters_C, only : natorb, dd, qq, am, ad, aq, po
+    use parameters_C, only : natorb, dd, qq, am, ad, aq
     use funcon_C, only : ev, a0
     use qmmm_C, only : mm_ron, mm_roff
     implicit none
@@ -95,15 +97,15 @@ subroutine qmmm_pair (ni, d, nv, v, dv, gam, dgam, sw, dsw)
     nao = natorb(ni)
     v = 0.d0
     dv = 0.d0
-    !
-    !  core: gamma with the additive term of the core-core interaction
-    !
-    gam = ev / Sqrt (r*r + po(9, ni)**2)
-    dgam = -ev * r / (r*r + po(9, ni)**2)**1.5d0 / a0 * u
     aee = (0.5d0/am(ni))**2
     s1 = Sqrt (r*r + aee)
     ri1 = ev / s1
     d1 = -ev * r / s1**3 / a0
+    !
+    !  core: the same (ss|J) as the s electrons
+    !
+    gam = ri1
+    dgam = d1 * u
     if (nao < 4) then
       nv = 1
       v(1) = ri1
@@ -206,7 +208,7 @@ subroutine qmmm_grad (dxyz)
 !  MOZYME: gradient of the QM-MM energy (kcal/(mol A)) on the QM atoms (added to dxyz) and on the
 !  MM charges (mm_grad).  E(A,J) = q S (Z_A gam - Sum_k g_k P_k v_k), g = 1 on the diagonal, 2 off it.
 !
-    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, e_qmmm
+    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_pot, e_qmmm
     use molkst_C, only : numat
     use common_arrays_C, only : coord, nat, p
     use parameters_C, only : tore
@@ -219,7 +221,12 @@ subroutine qmmm_grad (dxyz)
     double precision :: v(45), dv(3, 45), gam, dgam(3), sw, dsw(3), d(3), pv, dpv(3), g(3), wk(45), e, pk
     integer, external :: ijbo
     if (n_mm == 0) return
+    if (allocated(mm_pot)) then
+      if (size(mm_pot) < n_mm) deallocate (mm_pot)
+    end if
+    if (.not. allocated(mm_pot)) allocate (mm_pot(n_mm))
     mm_grad = 0.d0
+    mm_pot(:n_mm) = 0.d0
     e = 0.d0
     do i = 1, numat
       ii = ijbo (i, i)
@@ -248,6 +255,7 @@ subroutine qmmm_grad (dxyz)
           dpv = dpv + pk * dv(:, k)
         end do
         e = e + mm_q(j) * sw * (tore(nat(i))*gam - pv)
+        mm_pot(j) = mm_pot(j) + sw * (tore(nat(i))*gam - pv) * fpc_9
         !  dE/dd, d = x(J) - x(A)
         g = mm_q(j) * (dsw * (tore(nat(i))*gam - pv) + sw * (tore(nat(i))*dgam - dpv)) * fpc_9
         mm_grad(:, j) = mm_grad(:, j) + g

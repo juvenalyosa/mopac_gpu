@@ -235,6 +235,8 @@ contains
     logical :: applied
 #endif
     keywrd = " MOZYME 1SCF ALLBONDS GRADIENTS HB-SMOOTH"
+    ! a tight SCF (MD forces) needs smaller LMO cut-offs: without them the SCF stops at its noise floor
+    if (system%tolerance < 0.1d0) keywrd = trim(keywrd) // " THRESH=1.D-15"
     n_mm = 0
     call mopac_initialize(system)
 #ifdef GPU
@@ -255,15 +257,16 @@ contains
   ! radii (mm_roff <= 0: none); returns the heat of formation (kcal/mol, including the QM-MM
   ! electrostatics) and its gradient on the QM atoms and on the MM charges (kcal/(mol Angstrom))
   module subroutine mozyme_qmmm_step(natom, coord, nmm, mm_coord, mm_charge, mm_ron, mm_roff, &
-      heat, grad_out, mm_grad_out, status) bind(c)
+      heat, grad_out, mm_grad_out, mm_pot_out, status) bind(c)
 #ifdef WIN32
 !dec$ attributes dllexport :: mozyme_qmmm_step
 #endif
-    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, ron => mm_ron, roff => mm_roff
+    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_pot, ron => mm_ron, roff => mm_roff
+    use molkst_C, only : iscf
     integer(c_int), value, intent(in) :: natom, nmm
     real(c_double), intent(in) :: coord(*), mm_coord(*), mm_charge(*)
     real(c_double), value, intent(in) :: mm_ron, mm_roff
-    real(c_double), intent(out) :: heat, grad_out(*), mm_grad_out(*)
+    real(c_double), intent(out) :: heat, grad_out(*), mm_grad_out(*), mm_pot_out(*)
     integer(c_int), intent(out) :: status
     integer :: n
     status = 1
@@ -284,9 +287,13 @@ contains
     call compfg (xparam, .true., escf, .true., grad, .true.)
     if (moperr) return
     heat = escf
-    grad_out(:nvar) = grad(:nvar)
-    if (n > 0) mm_grad_out(:3*n) = reshape(mm_grad(:, :n), [3*n])
     status = 0
+    if (iscf == 2) status = 2          ! SCF not converged (results returned all the same)
+    grad_out(:nvar) = grad(:nvar)
+    if (n > 0) then
+      mm_grad_out(:3*n) = reshape(mm_grad(:, :n), [3*n])
+      mm_pot_out(:n) = mm_pot(:n)
+    end if
   end subroutine mozyme_qmmm_step
 
   ! End of a QM/MM session: the electronic state and the properties of the last step
