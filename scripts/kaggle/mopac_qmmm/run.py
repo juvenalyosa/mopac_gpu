@@ -64,7 +64,7 @@ def main():
     script = f"{SRC}/scripts/qmmm/run_qmmm_md.py"
     cases = [
         ("Tyr2 side chain (chignolin)", f"{data}/1UAO_opt.pdb", "--qm-residues 2 --qm-sidechain --padding 1.4", 1000, 200),
-        ("whole chignolin", f"{data}/1UAO_opt.pdb", "--qm-residues 1,2,3,4,5,6,7,8,9,10 --padding 1.8 --ron 6 --roff 8",
+        ("whole chignolin", f"{data}/1UAO_opt.pdb", "--qm-residues 1,2,3,4,5,6,7,8,9,10 --padding 2.2 --ron 6 --roff 8",
          400, 100),
         ("whole crambin", f"{data}/1CRN_opt.pdb",
          "--qm-residues " + ",".join(str(i) for i in range(1, 47)) + " --padding 1.8 --ron 6 --roff 8", 100, 50),
