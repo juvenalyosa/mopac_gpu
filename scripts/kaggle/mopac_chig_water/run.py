@@ -1,16 +1,18 @@
 """Kaggle GPU test: thermochemistry of chignolin in COSMO water with the smooth SWIG surface.
 
-Builds MOPAC (GPU=ON) from https://github.com/juvenalyosa/mopac_gpu; two starts (1UAO_opt.pdb and a copy
-moved by up to 0.002 A, random.seed 1) are optimized at the same time, one per GPU, with
-mozyme_md_workflow.optimize_stationary (GNORM=0.1, EPS=78.4 SWIG), then FORCE THERMO(298) EPS=78.4 SWIG of
-each minimum on both GPUs (mozyme_parallel_force, 4 workers).  REPORT_CHIG_WATER.txt has every number.
+Builds MOPAC (GPU=ON) from https://github.com/juvenalyosa/mopac_gpu and, at the same time:
+  GPU 0: chignolin (1UAO_opt.pdb) optimized with mozyme_md_workflow.optimize_stationary (GNORM=0.1, EPS=78.4
+         SWIG HB-SMOOTH, stage 0 with the standard COSMO surface), then FORCE THERMO(298) of the minimum on
+         both GPUs (mozyme_parallel_force, 4 workers);
+  GPU 1: the DNA anion in water from the geometry where the run without HB-SMOOTH stuck on an H-bond kink
+         (tests/data/mozyme_dna_cosmo/1BNA_anion_water_kink.arc), SWIG stages only, at most 2 x 45 min.
+REPORT_CHIG_WATER.txt has every number.
 
     kaggle kernels push -p scripts/kaggle/mopac_chig_water
     kaggle kernels output juvenalyosa/mopac-chig-water -p ./chig_water_results
 """
 
 import os
-import random
 import shutil
 import subprocess
 import sys
@@ -42,20 +44,6 @@ def sh(cmd, check=True):
     return r.stdout
 
 
-def perturbed(seed, src, dst):
-    random.seed(seed)
-    out = []
-    for line in open(src).read().splitlines():
-        if line.startswith(("ATOM", "HETATM")):
-            x, y, z = float(line[30:38]), float(line[38:46]), float(line[46:54])
-            x += random.uniform(-.002, .002)
-            y += random.uniform(-.002, .002)
-            z += random.uniform(-.002, .002)
-            line = line[:30] + "%8.3f%8.3f%8.3f" % (x, y, z) + line[54:]
-        out.append(line)
-    open(dst, "w").write("\n".join(out) + "\n")
-
-
 def main():
     t_start = time.time()
     os.makedirs(BASE, exist_ok=True)
@@ -76,19 +64,18 @@ def main():
     import mozyme_md_workflow as md  # noqa: E402
     import mozyme_parallel_force as pf  # noqa: E402
     import check_mozyme_gpu_thermo as th  # noqa: E402
-    start = Path(f"{SRC}/tests/data/mozyme_gpu_reference/1UAO_opt.pdb")
-    starts = {"base": start}
+    starts = {"base": Path(f"{SRC}/tests/data/mozyme_gpu_reference/1UAO_opt.pdb"),
+              "dna": Path(f"{SRC}/tests/data/mozyme_dna_cosmo/1BNA_anion_water_kink.arc")}
     os.makedirs(f"{BASE}/runs", exist_ok=True)
-    perturbed(1, start, f"{BASE}/runs/1UAO_s1.pdb")
-    starts["seed1"] = Path(f"{BASE}/runs/1UAO_s1.pdb")
     final = {}
 
     def opt(gpu, key):
         try:
             t0 = time.perf_counter()
+            kw = dict(gnorm=0.1, eps=78.4) if key == "base" else \
+                dict(gnorm=0.2, eps=78.4, max_stages=2, extra="T=45M", prerelax_gnorm=None)
             geo, stages = md.optimize_stationary(Path(f"{BUILD}/mopac"), starts[key], Path(f"{BASE}/runs/{key}"),
-                                                 gnorm=0.1, eps=78.4,
-                                                 env_extra={"CUDA_VISIBLE_DEVICES": str(gpu)})
+                                                 env_extra={"CUDA_VISIBLE_DEVICES": str(gpu)}, **kw)
             final[key] = (geo, stages, time.perf_counter() - t0)
         except Exception as exc:
             say(f"{key}: optimization failed: {exc!r}")
@@ -99,7 +86,7 @@ def main():
     for t in threads:
         t.join()
     say("")
-    say("1. chignolin in COSMO water (EPS=78.4 SWIG), optimize_stationary GNORM=0.1 (fresh tight SCF checks)")
+    say(f"1. optimize_stationary in COSMO water ({md.BASE_KEYS} EPS=78.4 SWIG); stage 0 = standard COSMO")
     for key in starts:
         if key not in final:
             continue
@@ -109,8 +96,8 @@ def main():
                 f"GNORM {st['gnorm_opt']}, fresh tight SCF {st['gnorm_fresh']}")
         say(f"{key}: {wall / 60:.1f} min in all")
     say("")
-    say("2. FORCE THERMO(298) EPS=78.4 SWIG at each minimum (4 workers, both GPUs)")
-    for key in starts:
+    say("2. FORCE THERMO(298) EPS=78.4 SWIG at the chignolin minimum (4 workers, both GPUs)")
+    for key in ("base",):
         if key not in final:
             continue
         geo = final[key][0]
