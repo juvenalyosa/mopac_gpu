@@ -220,6 +220,11 @@ its cube. One SCF iteration is a sequence of steps over those orbitals:
 These keywords are **new in this fork**. They follow MOPAC's usual form (`WORD=value`) and are
 listed in the output header like every other keyword.
 
+- `SWIG` (with `EPS=`): smooth COSMO surface with a consistent gradient (Lange and Herbert).
+- `HB-SMOOTH`: the PM6-DH+ / PM7 hydrogen-bond correction without kinks (for optimization, FORCE, MD).
+- `MM_CHARGES="file"`: QM/MM electrostatic embedding in MM point charges (x y z q per line); the OpenMM
+  driver passes them through the API instead (`mozyme_qmmm_init/step/finalize` in `include/mopac.h`).
+
 ### Molecular dynamics at a temperature (used with `DRC`)
 
 | Keyword | Meaning | Default |
@@ -334,13 +339,18 @@ MNDO MOZYME 1SCF GEO_DAT="1crn_hydrogenated.pdb"
 
 ### 6.4 Implicit water (COSMO)
 
-`EPS=78.4` is the dielectric constant of water.
+`EPS=78.4` is the dielectric constant of water. Add `SWIG` for optimizations, frequencies and dynamics in
+water: the standard COSMO surface changes in steps as atoms move, the smooth SWIG surface does not (see
+`docs/MOZYME_GPU_USER_GUIDE.md`).
 
 ```
-PM7 MOZYME 1SCF EPS=78.4 GEO_DAT="1crn_hydrogenated.pdb"
+PM7 MOZYME 1SCF EPS=78.4 SWIG GEO_DAT="1crn_hydrogenated.pdb"
 Crambin in implicit water
 
 ```
+
+Explicit water and the rest of the protein can be molecular mechanics instead: QM/MM molecular dynamics
+with OpenMM, the QM region on MOPAC/MOZYME (`docs/QMMM_OPENMM.md`, `scripts/qmmm/run_qmmm_md.py`).
 
 ### 6.5 Geometry optimization
 

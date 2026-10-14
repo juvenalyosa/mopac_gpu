@@ -45,18 +45,21 @@ def main():
     say(sh("nvidia-smi --query-gpu=index,name,memory.total,compute_cap --format=csv,noheader"))
     os.environ["PATH"] = "/usr/local/cuda/bin:" + os.environ["PATH"]
     sh("apt-get update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
-       "--no-install-recommends gfortran libblas-dev liblapack-dev ninja-build >/dev/null 2>&1", check=False)
+       "--no-install-recommends gfortran libopenblas-dev liblapack-dev ninja-build >/dev/null 2>&1", check=False)
     sh("pip install -q 'openmm[cuda12]==8.6.1' 2>&1 | tail -2", check=False)
     say(sh("python -c \"import openmm as m; print('OpenMM', m.__version__, [m.Platform.getPlatform(i).getName() "
            "for i in range(m.Platform.getNumPlatforms())])\""))
     sh(f"rm -rf {SRC} && git clone -q --depth 1 --branch {BRANCH} https://github.com/juvenalyosa/mopac_gpu.git {SRC}")
     say("commit: " + sh(f"git -C {SRC} log -1 --format='%h %s'").strip())
     cc = sh("nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1").strip().replace(".", "")
+    # OpenBLAS, not the image's MKL: libmopac is loaded into Python (with numpy), where MKL failed to
+    # load its own kernels ("Cannot load libmkl_avx512.so")
     sh(f"cmake -S {SRC} -B {BUILD} -G Ninja -DGPU=ON -DTESTS=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo "
-       f"-DCUDA_ARCHS={cc} > {BASE}/cmake.log 2>&1 && cmake --build {BUILD} --target mopac --parallel $(nproc) "
+       f"-DENABLE_MKL=OFF -DBLA_VENDOR=OpenBLAS -DCUDA_ARCHS={cc} > {BASE}/cmake.log 2>&1 && cmake --build {BUILD} --target mopac --parallel $(nproc) "
        f"> {BASE}/build.log 2>&1 || (grep -i error {BASE}/build.log | head -40; exit 1)")
     lib = sh(f"ls {BUILD}/libmopac.so* | head -1").strip()
     say(f"libmopac: {lib}")
+    say(sh(f"ldd {lib} | grep -i -E 'blas|lapack|mkl'", check=False).strip())
     data = f"{SRC}/tests/data/mozyme_gpu_reference"
     script = f"{SRC}/scripts/qmmm/run_qmmm_md.py"
     cases = [
