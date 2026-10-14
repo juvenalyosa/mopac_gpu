@@ -10,6 +10,12 @@ and equilibrates it with MM only (minimization + 20 ps NVT, 2 fs), then turns th
 or only their side chains with an H link atom on CA-CB) into the QM region (PM7, MOZYME, electrostatic
 embedding) and runs Langevin NVT (LangevinMiddleIntegrator, 1/ps) with `dt` fs; optionally a short NVE
 check of the energy conservation.  Prints the time per step and writes qmmm_traj.pdb.
+
+Residues: "57" (any chain) or "E:57" (chain E); a suffix ":sc" takes only the side chain (all side chains
+with --qm-sidechain).  Waters, ions and other non-protein residues of the PDB file are removed.
+--variants E:57=HID sets the protonation state of a residue.  --distances E:195:OG-I:15:C,... prints
+the mean, smallest and largest distance during the QM/MM run.  --cutoff-test 8,12,16 recomputes the QM/MM
+forces on snapshots with these roff (ron = roff - 2) and compares them with the largest one.
 """
 
 import argparse
@@ -26,6 +32,38 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from openmm_mopac import add_qmmm  # noqa: E402
 
 BACKBONE = ("N", "H", "CA", "HA", "C", "O", "OXT", "H1", "H2", "H3", "HA2", "HA3")
+PROTEIN = {"ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE", "LEU", "LYS", "MET", "PHE",
+           "PRO", "SER", "THR", "TRP", "TYR", "VAL", "HID", "HIE", "HIP", "CYX", "ASH", "GLH", "LYN", "ACE",
+           "NME"}
+
+
+def residue_matches(res, spec):
+    """spec = (chain or None, residue number)"""
+    chain, rid = spec
+    return res.id == rid and (chain is None or res.chain.id == chain)
+
+
+def parse_residues(text):
+    """"57,E:102,E:195:sc" -> [((chain, id), side_chain_only)]"""
+    out = []
+    for item in (x.strip() for x in text.split(",")):
+        if not item:
+            continue
+        f = item.split(":")
+        sc = f[-1].lower() == "sc"
+        if sc:
+            f = f[:-1]
+        out.append(((f[0], f[1]) if len(f) == 2 else (None, f[0]), sc))
+    return out
+
+
+def find_atom(top, text):
+    """"E:195:OG" -> atom index"""
+    chain, rid, name = text.split(":")
+    for a in top.atoms():
+        if a.name == name and residue_matches(a.residue, (chain, rid)):
+            return a.index
+    raise ValueError("atom not found: " + text)
 
 
 def main():
@@ -45,15 +83,28 @@ def main():
     ap.add_argument("--tolerance", type=float, default=0.01)
     ap.add_argument("--nve", type=int, default=0, help="steps of an NVE check at the end")
     ap.add_argument("--mm-equil-ps", type=float, default=20.0)
+    ap.add_argument("--variants", default="", help="protonation states, e.g. E:57=HID,E:102=ASP")
+    ap.add_argument("--distances", default="", help="atom pairs to follow, e.g. E:195:OG-I:15:C")
+    ap.add_argument("--cutoff-test", default="", help="roff values (A) for a force comparison on snapshots")
+    ap.add_argument("--snapshots", type=int, default=5, help="snapshots of the cut-off test")
     a = ap.parse_args()
 
     plat = mm.Platform.getPlatformByName(a.platform)
     pdb = app.PDBFile(a.pdb)
     ff = app.ForceField("amber14-all.xml", "amber14/tip3p.xml")
     mod = app.Modeller(pdb.topology, pdb.positions)
-    mod.delete([x for x in mod.topology.atoms() if x.residue.name == "HOH"])
+    mod.delete([r for r in mod.topology.residues() if r.name not in PROTEIN])
     mod.delete([x for x in mod.topology.atoms() if x.element is not None and x.element.symbol == "H"])
-    mod.addHydrogens(ff, pH=7.0)
+    variants = None
+    if a.variants:
+        want = {}
+        for item in a.variants.split(","):
+            spec, name = item.split("=")
+            f = spec.split(":")
+            want[(f[0], f[1]) if len(f) == 2 else (None, f[0])] = name.strip()
+        variants = [next((v for k, v in want.items() if residue_matches(r, k)), None)
+                    for r in mod.topology.residues()]
+    mod.addHydrogens(ff, pH=7.0, variants=variants)
     mod.addSolvent(ff, padding=a.padding * u.nanometer, neutralize=True)
     top, pos = mod.topology, mod.positions
     print(f"system: {top.getNumAtoms()} atoms, {top.getNumResidues()} residues, box "
@@ -75,9 +126,13 @@ def main():
     print(f"MM equilibration {a.mm_equil_ps} ps: {time.perf_counter() - t0:.1f} s", flush=True)
 
     # QM region
-    wanted = {r.strip() for r in a.qm_residues.split(",") if r.strip()}
-    qm = [x.index for x in top.atoms() if x.residue.id in wanted and
-          (not a.qm_sidechain or x.name not in BACKBONE)]
+    wanted = parse_residues(a.qm_residues)
+    qm = []
+    for x in top.atoms():
+        for spec, sc in wanted:
+            if residue_matches(x.residue, spec) and not ((sc or a.qm_sidechain) and x.name in BACKBONE):
+                qm.append(x.index)
+                break
     system = make_system()
     nb = [f for f in system.getForces() if isinstance(f, mm.NonbondedForce)][0]
     qcharge = a.qm_charge
@@ -93,11 +148,56 @@ def main():
     sim.context.setVelocities(st.getVelocities())
     sim.reporters.append(app.PDBReporter("qmmm_traj.pdb", max(1, a.steps // 10)))
     sim.step(2)   # first SCF from the Lewis structure
+    pairs = [(find_atom(top, p.split("-")[0]), find_atom(top, p.split("-")[1]), p)
+             for p in a.distances.split(",") if p.strip()]
+    nsnap = max(1, a.snapshots) if a.cutoff_test else 0
+    chunk = max(1, a.steps // max(20, nsnap))
+    dist = [[] for _ in pairs]
+    snaps = []
     t0 = time.perf_counter()
-    sim.step(a.steps)
+    done = 0
+    while done < a.steps:
+        n = min(chunk, a.steps - done)
+        sim.step(n)
+        done += n
+        if pairs or nsnap:
+            st2 = sim.context.getState(getPositions=True, enforcePeriodicBox=False)
+            x = st2.getPositions(asNumpy=True).value_in_unit(u.angstrom)
+            for k, (i, j, _) in enumerate(pairs):
+                dist[k].append(np.linalg.norm(x[i] - x[j]))
+            if nsnap and done * nsnap >= (len(snaps) + 1) * a.steps:
+                snaps.append(st2)
     t = time.perf_counter() - t0
     print(f"QM/MM NVT: {a.steps} steps x {a.dt} fs in {t:.1f} s = {t / a.steps:.3f} s/step, "
           f"{a.steps * a.dt / 1000 / (t / 86400):.2f} ps/day; MM charges seen {qmmm.last['n_mm']}", flush=True)
+
+    for (i, j, name), d in zip(pairs, dist):
+        d = np.array(d)
+        print(f"distance {name}: mean {d.mean():.2f} A, min {d.min():.2f}, max {d.max():.2f}, last {d[-1]:.2f}",
+              flush=True)
+
+    if snaps:
+        cuts = sorted(float(c) for c in a.cutoff_test.split(","))
+        ron0, roff0 = qmmm.region.ron, qmmm.region.roff
+        idx = np.array(qmmm.region.qm_atoms)
+        res = {c: [] for c in cuts}
+        for st2 in snaps:
+            for c in cuts:
+                qmmm.region.ron, qmmm.region.roff = c - 2.0, c
+                e, f = qmmm.compute(st2)
+                res[c].append((e, f[idx], qmmm.last["n_mm"]))
+        qmmm.region.ron, qmmm.region.roff = ron0, roff0
+        ref = cuts[-1]
+        print(f"cut-off test on {len(snaps)} snapshots, reference roff = {ref:.0f} A (QM atoms, kJ/(mol nm)):",
+              flush=True)
+        for c in cuts[:-1]:
+            de = [r[0] - q[0] for r, q in zip(res[c], res[ref])]
+            df = np.array([r[1] - q[1] for r, q in zip(res[c], res[ref])])
+            fr = np.array([q[1] for q in res[ref]])
+            print(f"   roff {c:4.0f} A ({np.mean([r[2] for r in res[c]]):.0f} MM charges): rms force error "
+                  f"{np.sqrt(np.mean(df ** 2)):.1f} (rms force {np.sqrt(np.mean(fr ** 2)):.0f}), largest "
+                  f"{np.max(np.abs(df)):.1f}; energy change between snapshots: spread "
+                  f"{np.ptp(de):.1f} kJ/mol", flush=True)
 
     if a.nve > 0:
         st = sim.context.getState(getPositions=True, getVelocities=True)
