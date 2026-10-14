@@ -145,6 +145,13 @@ contains
 #else
   output_fn = '/dev/null'
 #endif
+    ! diagnostics: MOPAC_API_OUTPUT=file keeps the output of API calls (e.g. GPU status, section timers)
+    block
+      character(len=400) :: env_out
+      integer :: env_len, env_stat
+      call get_environment_variable('MOPAC_API_OUTPUT', env_out, length=env_len, status=env_stat)
+      if (env_stat == 0 .and. env_len > 0) output_fn = trim(env_out)
+    end block
     close(iw)
     open(unit=iw, file=output_fn, iostat=status)
     if (status /= 0) then
