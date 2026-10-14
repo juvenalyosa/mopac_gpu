@@ -65,6 +65,19 @@ python scripts/qmmm/run_qmmm_md.py protein.pdb --libmopac build/libmopac.so --qm
   138-atom QM region) comes from MOZYME's own gradient, which is not exactly the derivative of its energy
   (also without MM charges). Use a thermostat (Langevin NVT) for production.
 
+## Speed
+
+OpenMM CUDA + MOPAC, Kaggle T4, 0.5 fs steps, TIP3P water box (`scripts/kaggle/mopac_qmmm`):
+
+| QM region | atoms (QM / all) | MOPAC on the GPU | MOPAC on the CPU (1 core) |
+|---|---:|---:|---:|
+| Tyr side chain of chignolin (link atom) | 16 / 3 300 | 0.026 s/step | **0.014 s/step** (3.1 ns/day) |
+| whole chignolin | 138 / 8 100 | **0.110 s/step** (390 ps/day) | 0.61 s/step |
+| whole crambin | 642 / 13 100 | **1.14 s/step** (38 ps/day) | 13.1 s/step |
+
+QM regions of up to 100 atoms run on the CPU by default (as MOPAC does for small systems); larger ones on
+the GPU. A T4 is weak in double precision; an A100 should be several times faster (README, "Which GPU?").
+
 ## Validation
 
 - QM water + TIP3P water (point charges): all gradient components on the QM atoms and the MM charges agree

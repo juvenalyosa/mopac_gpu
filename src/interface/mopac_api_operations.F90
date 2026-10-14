@@ -246,6 +246,9 @@ contains
     env = ' '
     call get_environment_variable('MOPAC_NOGPU', env, length=env_len, status=env_stat)
     lgpu = .not. (env_stat == 0 .and. env_len > 0 .and. index('0 F FALSE N NO OFF', trim(adjustl(env))) == 0)
+    ! as run_mopac: small QM regions are faster on the CPU (Tyr side chain, 16 atoms: 0.014 s per step on
+    ! the CPU, 0.026 s on a T4); MOPAC_FORCEGPU still forces the GPU
+    if (system%natom <= 100) lgpu = .false.
 #endif
     call mopac_initialize(system)
 #ifdef GPU
