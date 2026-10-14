@@ -34,7 +34,7 @@ double precision function PM6_DH_H_bond_corrections(l_grad, prt)
   integer, allocatable :: nrbondsa(:), nrbondsb(:)
   double precision, allocatable :: vector(:)
   double precision :: EC, ER, sum, sum1, delta = 1.d-5, covrad(94)
-  double precision, external :: EC_plus_ER, EH_plus
+  double precision, external :: EC_plus_ER, EH_plus_blend
   logical, external :: connected
 
   save
@@ -118,7 +118,7 @@ double precision function PM6_DH_H_bond_corrections(l_grad, prt)
       H = hblist(ii,9)
       A = hblist(ii,1)
       D = hblist(ii,5)
-      sum = EH_plus(ii, hblist, max_h_bonds, nrbondsa, nrbondsb)
+      sum = EH_plus_blend(ii, hblist, max_h_bonds, nrbondsa, nrbondsb)
       E_hb = E_hb + sum
       nd_list=0
       do i = 1, 9
@@ -164,7 +164,7 @@ double precision function PM6_DH_H_bond_corrections(l_grad, prt)
           do i = 1, 3
             coord(i,k) = coord(i,k) + delta
             if (method_pm6_dh_plus .or. method_pm7) then
-              sum1 = EH_plus(ii, hblist, max_h_bonds, nrbondsa, nrbondsb)
+              sum1 = EH_plus_blend(ii, hblist, max_h_bonds, nrbondsa, nrbondsb)
             else
               sum1 = EC_plus_ER(D, H, A, q(H), q(A), EC, ER, d_l, l)
             end if

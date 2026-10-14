@@ -19,7 +19,7 @@
 !  Martin Korth, J. Chem. Theory Comput., 2010, 6 (12), pp 3808-3816
 !
     use common_arrays_C, only : nat
-    use molkst_C, only : method_PM7
+    use molkst_C, only : method_PM7, hb_smooth
     use funcon_C, only : eV, fpc_9, a0, pi
   !  use parameters_C, only : par8, par9
     implicit none
@@ -29,7 +29,20 @@
       angle2_cos, angle2_cos_2, torsion_correct, torsion_value, torsion_cos, torsion_value_2, &
       torsion_cos_2, angle2_cos_new, angle2_cos_2_new, torsion_cos_new, torsion_cos_2_new, &
       scale_a, scale_nsp3, scale_nsp2, scale_osp3, scale_osp2, scale_b, scale_c, &
-      hb_dist, xc_dist, ha_dist, damping, hartree2kcal, XY_dist, short
+      hb_dist, xc_dist, ha_dist, damping, hartree2kcal, XY_dist, short, torsion_raw
+!
+!  HB-SMOOTH: the angular factors use max(), abs() and "no H-bond if cos <= 0", so the energy has kinks
+!  where two branches meet (an H in the plane between the two lone pairs of an ether or hydroxyl O,
+!  a carbonyl torsion through 90 degrees, ...).  A geometry optimization can stop on such a kink (DNA in
+!  COSMO water: the gradient on the O4' of a sugar was +-18 kcal/(mol A) on its two sides) and FORCE
+!  differentiates across it.  With HB-SMOOTH these become max(a,b) -> (a+b+sqrt((a-b)**2+w**2))/2,
+!  |x| -> sqrt(x**2+w**2), cut at 0 -> (x+sqrt(x**2+w**2))/2, w = 0.02, which differ from the original
+!  only near the kinks (by at most w/2 in a cosine).  Also, when the angle X1-X-H approaches 180 degrees
+!  the torsion X2-X1-X-H is undefined (it turned by 14 degrees when the O4' moved by 0.001 A in the DNA
+!  case), so its cosine is weighted by s = 1 - exp(-((pi - angle)/5 degrees)**2) and goes smoothly to 0.5
+!  at 180 degrees (s = 1 to 1e-4 below 165 degrees, so ordinary H-bonds are not changed).
+!
+    double precision, parameter :: w_hb = 0.02d0
     double precision :: shortcut = 2.4d0    !  2.4 Angstrom
     double precision :: longcut  = 7.0d0    !  7.0 Angstrom
     double precision :: covcut   = 1.2d0    !  1.2 Angstrom (hb mid point)
@@ -120,12 +133,19 @@
       angle2 = angle(hblist(i, 2), hblist(i, 1), hblist(i, 9))  !angle2
       angle2_cos = cos(angle2_shift - angle2)
       angle2_cos_2 = cos(angle2_shift_2 - angle2)
-      if (angle2_cos_2 > angle2_cos) angle2_cos = angle2_cos_2
-      if (angle2_cos <= 0.d0) return
+      if (hb_smooth) then
+        if (angle2_shift_2 /= angle2_shift) &
+          angle2_cos = 0.5d0*(angle2_cos + angle2_cos_2 + sqrt((angle2_cos - angle2_cos_2)**2 + w_hb**2))
+        angle2_cos = 0.5d0*(angle2_cos + sqrt(angle2_cos**2 + w_hb**2))
+      else
+        if (angle2_cos_2 > angle2_cos) angle2_cos = angle2_cos_2
+        if (angle2_cos <= 0.d0) return
+      end if
 ! torsion angle
       torsion_correct = torsion(hblist(i, 3), hblist(i, 2), hblist(i, 1), hblist(i, 9))   !  torsion1
       if (torsion_correct <= -pi) torsion_correct = torsion_correct + 2.d0 * pi
       if (torsion_correct  >  pi) torsion_correct = torsion_correct - 2.d0 * pi
+      torsion_raw = torsion_correct
       if ((.not.torsion_check_set2) .or. (abs(torsion_correct*180.d0/pi) > 90.d0)) then
         if (torsion_correct < 0.d0) then
           torsion_correct = -pi - torsion_correct
@@ -155,12 +175,22 @@
         if (torsion_value_2 >   pi) torsion_value_2 = torsion_value_2 - 2.d0 * pi
         torsion_cos = cos(torsion_value)
         torsion_cos_2 = cos(torsion_value_2)
-        if (torsion_cos_2 > torsion_cos) torsion_cos = torsion_cos_2
+        if (hb_smooth .and. torsion_shift /= 0.d0) then
+          torsion_cos = 0.5d0*(torsion_cos + torsion_cos_2 + sqrt((torsion_cos - torsion_cos_2)**2 + w_hb**2))
+        else if (torsion_cos_2 > torsion_cos) then
+          torsion_cos = torsion_cos_2
+        end if
+        if (hb_smooth .and. torsion_check_set2) torsion_cos = sqrt(cos(torsion_raw)**2 + w_hb**2)
       end if
       if (distance(hblist(i, 9), hblist(i, 1)) > distance(hblist(i, 9), hblist(i, 2)) .and. torsion_check_set2) &
         torsion_cos = 0.d0
       if (hblist(i, 3) == hblist(i, 4) .or. hblist(i, 9) == hblist(i, 4)) torsion_cos = 1.d0
-      if (torsion_cos < 0) return
+      if (hb_smooth) then
+        torsion_cos = (1.d0 - exp(-((pi - angle2)/(pi/36.d0))**2))*(torsion_cos - 0.5d0) + 0.5d0
+        torsion_cos = 0.5d0*(torsion_cos + sqrt(torsion_cos**2 + w_hb**2))
+      else if (torsion_cos < 0) then
+        return
+      end if
 !
 ! get target angles for hblist(i, 5) - see comment above
 !
@@ -216,12 +246,19 @@
 !     weight_956 = 1.d0 - exp(-10.d0*(angle2 - pi)**2)
       angle2_cos_new = cos(angle2_shift -angle2)
       angle2_cos_2_new = cos(angle2_shift_2 -angle2)
-      if (angle2_cos_2_new > angle2_cos_new) angle2_cos_new = angle2_cos_2_new
-      if (angle2_cos_new <= 0.d0) return
+      if (hb_smooth) then
+        if (angle2_shift_2 /= angle2_shift) angle2_cos_new = 0.5d0*(angle2_cos_new + angle2_cos_2_new + &
+          sqrt((angle2_cos_new - angle2_cos_2_new)**2 + w_hb**2))
+        angle2_cos_new = 0.5d0*(angle2_cos_new + sqrt(angle2_cos_new**2 + w_hb**2))
+      else
+        if (angle2_cos_2_new > angle2_cos_new) angle2_cos_new = angle2_cos_2_new
+        if (angle2_cos_new <= 0.d0) return
+      end if
 ! torsion angle
       torsion_correct = torsion(hblist(i, 7), hblist(i, 6), hblist(i, 5), hblist(i, 9))   ! torsion1_new
       if (torsion_correct <= -pi) torsion_correct = torsion_correct  +  2.d0 * pi
       if (torsion_correct > pi) torsion_correct = torsion_correct - 2.d0 * pi
+      torsion_raw = torsion_correct
       if ((.not.torsion_check_set2) .or. (abs(torsion_correct*180.d0/pi) > 90.d0)) then
         if (torsion_correct < 0.d0) then
           torsion_correct = -pi -torsion_correct
@@ -249,13 +286,24 @@
         if (torsion_value_2  >  pi) torsion_value_2 = torsion_value_2 - 2.d0 * pi
         torsion_cos_new   = cos(torsion_value)
         torsion_cos_2_new = cos(torsion_value_2)
-        if (torsion_cos_2_new > torsion_cos_new)torsion_cos_new = torsion_cos_2_new
+        if (hb_smooth .and. torsion_shift /= 0.d0) then
+          torsion_cos_new = 0.5d0*(torsion_cos_new + torsion_cos_2_new + &
+            sqrt((torsion_cos_new - torsion_cos_2_new)**2 + w_hb**2))
+        else if (torsion_cos_2_new > torsion_cos_new) then
+          torsion_cos_new = torsion_cos_2_new
+        end if
+        if (hb_smooth .and. torsion_check_set2) torsion_cos_new = sqrt(cos(torsion_raw)**2 + w_hb**2)
       end if
       if (distance(hblist(i, 9), hblist(i, 5)) > distance(hblist(i, 9), hblist(i, 6)) .and. torsion_check_set2) &
         torsion_cos_new = 0.d0
       if (hblist(i, 7) == hblist(i, 8) .or. hblist(i, 9) == hblist(i, 8)) torsion_cos_new = 1.d0
    !   if (torsion_cos_new < 0.d0) return
-      torsion_cos_new=abs(torsion_cos_new)
+      if (hb_smooth) then
+        torsion_cos_new = (1.d0 - exp(-((pi - angle2)/(pi/36.d0))**2))*(torsion_cos_new - 0.5d0) + 0.5d0
+        torsion_cos_new = sqrt(torsion_cos_new**2 + w_hb**2)
+      else
+        torsion_cos_new=abs(torsion_cos_new)
+      end if
 ! parameters
       if (nat(hblist(i, 1)) == 7) then ! nitrogen
         if (nrbondsa(i) >= 3) then
@@ -356,3 +404,53 @@
     end if
     return
   end function EH_plus
+  double precision function EH_plus_blend(i, hblist, max_h_bonds, nrbondsa, nrbondsb)
+!
+!  HB-SMOOTH: hblist(i, 2) is the neighbour of the acceptor farthest from the H, hblist(i, 3) the next
+!  one (setup_DH_Plus), and the angle and torsion of EH_plus are measured from them, so when the two
+!  are equally far from the H (an ether O such as the O4' of a sugar, an sp3 N) they swap and the energy
+!  has a kink.  Here the energies of both orders are mixed with s = (1 + tanh((d2 - d3)/0.01))/2,
+!  d = distance to the H (s = 1 beyond about 0.1 A, s = 1/2 at the swap), on the acceptor (slots 2, 3)
+!  and on the donor side (slots 6, 7).  Without HB-SMOOTH this is EH_plus.
+!
+    use molkst_C, only : hb_smooth
+    implicit none
+    integer, intent (in) :: max_h_bonds, i, nrbondsa(max_h_bonds), nrbondsb(max_h_bonds)
+    integer, intent (inout) :: hblist(max_h_bonds,10)
+    integer :: ia, id, k
+    double precision :: sa(2), sd(2), s
+    double precision, external :: EH_plus, distance
+    double precision, parameter :: width = 0.01d0
+    EH_plus_blend = 0.d0
+    sa = (/1.d0, 0.d0/)
+    sd = (/1.d0, 0.d0/)
+    if (hb_smooth) then
+      if (nrbondsa(i) >= 2 .and. hblist(i, 2) > 0 .and. hblist(i, 3) > 0 .and. hblist(i, 2) /= hblist(i, 3)) then
+        s = 0.5d0*(1.d0 + tanh((distance(hblist(i, 2), hblist(i, 9)) - distance(hblist(i, 3), hblist(i, 9)))/width))
+        sa = (/s, 1.d0 - s/)
+      end if
+      if (nrbondsb(i) >= 2 .and. hblist(i, 6) > 0 .and. hblist(i, 7) > 0 .and. hblist(i, 6) /= hblist(i, 7)) then
+        s = 0.5d0*(1.d0 + tanh((distance(hblist(i, 6), hblist(i, 9)) - distance(hblist(i, 7), hblist(i, 9)))/width))
+        sd = (/s, 1.d0 - s/)
+      end if
+    end if
+    do ia = 1, 2
+      if (sa(ia) < 1.d-12) cycle
+      if (ia == 2) then
+        k = hblist(i, 2); hblist(i, 2) = hblist(i, 3); hblist(i, 3) = k
+      end if
+      do id = 1, 2
+        if (sd(id) < 1.d-12) cycle
+        if (id == 2) then
+          k = hblist(i, 6); hblist(i, 6) = hblist(i, 7); hblist(i, 7) = k
+        end if
+        EH_plus_blend = EH_plus_blend + sa(ia)*sd(id)*EH_plus(i, hblist, max_h_bonds, nrbondsa, nrbondsb)
+        if (id == 2) then
+          k = hblist(i, 6); hblist(i, 6) = hblist(i, 7); hblist(i, 7) = k
+        end if
+      end do
+      if (ia == 2) then
+        k = hblist(i, 2); hblist(i, 2) = hblist(i, 3); hblist(i, 3) = k
+      end if
+    end do
+  end function EH_plus_blend

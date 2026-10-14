@@ -1759,6 +1759,7 @@ subroutine wrtout (allkey)
   if (myword(allkey, " SPIN"))    write (iw,'(" *  SPIN       - FINAL UHF SPIN MATRIX TO BE PRINTED")')
   if (myword(allkey, " PRNT"))    write (iw,'(" *  PRNT       - EXTRA PRINTING IN EF ROUTINE")')
   if (myword(allkey, " DISP"))    write (iw,'(" *  DISP       - PRINT DISPERSION AND HYDROGEN BOND ENERGIES")')
+  if (myword(allkey, " HB-SMOOTH")) write (iw,'(" *  HB-SMOOTH  - SMOOTH ANGULAR TERMS IN THE PM6-DH+ / PM7 H-BOND CORRECTION")')
   if (myword(allkey, " DEP ")) then
 10410 format (" *  DEP        - OUTPUT FORTRAN CODE FOR BLOCK-DATA")
 10411 format (" *             THIS KEYWORD CANNOT BE USED IN THIS VERSION OF MOPAC.")

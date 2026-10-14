@@ -19,7 +19,7 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
 !
   use molkst_C, only : numat, E_hb, N_Hbonds, method_pm7, l123, l1u, l2u, l3u, &
     method_pm6_dh_plus, method_pm6_dh2, method_pm6_d3h4, method_pm6_d3h4x, method_pm6_dh2x, &
-    line, id, numcal, method_pm6_org
+    line, id, numcal, method_pm6_org, hb_smooth, keywrd
   use parameters_C, only : tore
   use common_arrays_C, only: coord, nat, q, p, hblist, dxyz, cell_ijk
   use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
@@ -39,7 +39,7 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
   logical :: n_h_bonds, first = .true.
   integer, allocatable :: nrbondsa(:), nrbondsb(:)
   double precision :: EC, ER, vector(numat), sum, sum1, delta = 1.d-5, covrad(94), hb_timer
-  double precision, external :: EC_plus_ER, EH_plus, h_bonds4
+  double precision, external :: EC_plus_ER, EH_plus_blend, h_bonds4
   logical, external :: connected
 #ifdef GPU
   interface
@@ -107,6 +107,7 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
   end if
   hblist(:,:) = 0
   nrpairs = 0
+  hb_smooth = (Index (keywrd, " HB-SMOOTH") /= 0)
   if (method_pm6_dh_plus .or. method_PM7) then
     call mozyme_section_timer_begin('hbonds_find_pairs', hb_timer)
     call all_h_bonds(hblist(1,1), hblist(1,9), hblist(1,5), max_h_bonds, nrpairs, covrad)
@@ -142,7 +143,8 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
     call mozyme_section_timer_begin('hbonds_gpu', gpu_timer)
     rc = mopac_cuda_dh_plus_hbonds(int(numat, kind=c_int), int(nrpairs, kind=c_int), &
       int(max_h_bonds, kind=c_int), nat_c, coord, hblist, nrbondsa, nrbondsb, &
-      merge(1_c_int, 0_c_int, method_PM7), merge(1_c_int, 0_c_int, l_grad), delta, &
+      merge(1_c_int, 0_c_int, method_PM7) + merge(2_c_int, 0_c_int, hb_smooth), &
+      merge(1_c_int, 0_c_int, l_grad), delta, &
       a0, eV, fpc_9, e_c, nhb_c, dxyz, ms_c)
     call mozyme_section_timer_end('hbonds_gpu', gpu_timer)
     deallocate(nat_c)
@@ -196,7 +198,7 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
       H = hblist(ii,9)
       A = hblist(ii,1)
       D = hblist(ii,5)
-      sum = EH_plus(ii, hblist, max_h_bonds, nrbondsa, nrbondsb)
+      sum = EH_plus_blend(ii, hblist, max_h_bonds, nrbondsa, nrbondsb)
       E_hb = E_hb + sum
       nd_list=0
       do i = 1, 9
@@ -248,7 +250,7 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
           do i = 1, 3
             coord(i,k) = coord(i,k) + delta
             if (method_pm6_dh_plus .or. method_pm7) then
-              sum1 = EH_plus(ii, hblist, max_h_bonds, nrbondsa, nrbondsb)
+              sum1 = EH_plus_blend(ii, hblist, max_h_bonds, nrbondsa, nrbondsb)
             else if (method_pm6_d3h4 .or. method_pm6_d3h4x .or. method_pm6_org) then
               sum1 = H_bonds4(H, A, D, d_l, l)
             else

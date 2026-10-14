@@ -43,6 +43,7 @@ struct HbArgs {
   const int *nrbondsa;  // nrpairs
   const int *nrbondsb;  // nrpairs
   int pm7;
+  int smooth;  // HB-SMOOTH (H_bond_correction_EH_plus.F90): smooth max / abs / cut-offs
   double delta;
   double a0, ev, fpc9;  // funcon_C constants (runtime CODATA set)
   double *e_pair;       // nrpairs (energy of each pair)
@@ -166,7 +167,8 @@ struct SideResult {
 };
 
 __device__ bool side_terms(const PairGeom &g, int s0, int nb, int natx, bool second,
-                           SideResult *out) {
+                           bool smooth, SideResult *out) {
+  const double w = 0.02;  // as w_hb in H_bond_correction_EH_plus.F90
   const double pi = 3.14159265358979323846;
   const int H = 8;
   // The Fortran writes the acceptor-side shifts as pi/(180.d0/109.48) and
@@ -220,11 +222,20 @@ __device__ bool side_terms(const PairGeom &g, int s0, int nb, int natx, bool sec
   const double angle2 = angle_s(g, s0 + 1, s0, H);
   double angle2_cos = cos(angle2_shift - angle2);
   const double angle2_cos_2 = cos(angle2_shift_2 - angle2);
-  if (angle2_cos_2 > angle2_cos) angle2_cos = angle2_cos_2;
-  if (angle2_cos <= 0.0) return false;
+  if (smooth) {
+    if (angle2_shift_2 != angle2_shift) {
+      const double d = angle2_cos - angle2_cos_2;
+      angle2_cos = 0.5 * (angle2_cos + angle2_cos_2 + sqrt(d * d + w * w));
+    }
+    angle2_cos = 0.5 * (angle2_cos + sqrt(angle2_cos * angle2_cos + w * w));
+  } else {
+    if (angle2_cos_2 > angle2_cos) angle2_cos = angle2_cos_2;
+    if (angle2_cos <= 0.0) return false;
+  }
   double torsion_correct = torsion_s(g, s0 + 2, s0 + 1, s0, H);
   if (torsion_correct <= -pi) torsion_correct = torsion_correct + 2.0 * pi;
   if (torsion_correct > pi) torsion_correct = torsion_correct - 2.0 * pi;
+  const double torsion_raw = torsion_correct;
   if ((!torsion_check_set2) || (fabs(torsion_correct * 180.0 / pi) > 90.0)) {
     if (torsion_correct < 0.0) {
       torsion_correct = -pi - torsion_correct;
@@ -252,12 +263,28 @@ __device__ bool side_terms(const PairGeom &g, int s0, int nb, int natx, bool sec
     if (tv2 > pi) tv2 = tv2 - 2.0 * pi;
     torsion_cos = cos(tv);
     const double torsion_cos_2 = cos(tv2);
-    if (torsion_cos_2 > torsion_cos) torsion_cos = torsion_cos_2;
+    if (smooth && torsion_shift != 0.0) {
+      const double d = torsion_cos - torsion_cos_2;
+      torsion_cos = 0.5 * (torsion_cos + torsion_cos_2 + sqrt(d * d + w * w));
+    } else if (torsion_cos_2 > torsion_cos) {
+      torsion_cos = torsion_cos_2;
+    }
+    if (smooth && torsion_check_set2) {
+      const double c = cos(torsion_raw);
+      torsion_cos = sqrt(c * c + w * w);
+    }
   }
   if (distance_s(g, H, s0) > distance_s(g, H, s0 + 1) && torsion_check_set2) torsion_cos = 0.0;
   if (g.atom[s0 + 2] == g.atom[s0 + 3] || g.atom[H] == g.atom[s0 + 3]) torsion_cos = 1.0;
+  if (smooth) {
+    // the torsion is undefined as the angle X1-X-H approaches 180 degrees
+    const double t = (pi - angle2) / (pi / 36.0);
+    torsion_cos = (1.0 - exp(-t * t)) * (torsion_cos - 0.5) + 0.5;
+  }
   if (second) {
-    torsion_cos = fabs(torsion_cos);
+    torsion_cos = smooth ? sqrt(torsion_cos * torsion_cos + w * w) : fabs(torsion_cos);
+  } else if (smooth) {
+    torsion_cos = 0.5 * (torsion_cos + sqrt(torsion_cos * torsion_cos + w * w));
   } else if (torsion_cos < 0.0) {
     return false;
   }
@@ -289,8 +316,8 @@ __device__ double eh_plus_d(const PairGeom &g, const HbArgs &a) {
   const double angle_cos = -cos(angle_s(g, A, H, D));
   if (angle_cos <= 0.0) return 0.0;
   SideResult sa, sd;
-  if (!side_terms(g, A, g.nbondsa, g.natA, false, &sa)) return 0.0;
-  if (!side_terms(g, D, g.nbondsb, g.natD, true, &sd)) return 0.0;
+  if (!side_terms(g, A, g.nbondsa, g.natA, false, a.smooth != 0, &sa)) return 0.0;
+  if (!side_terms(g, D, g.nbondsb, g.natD, true, a.smooth != 0, &sd)) return 0.0;
   double scale_a, scale_b;
   if (g.natA == 7) {
     scale_a = (g.nbondsa >= 3) ? scale_nsp3 : scale_nsp2;
@@ -340,6 +367,45 @@ __device__ double eh_plus_d(const PairGeom &g, const HbArgs &a) {
   return e;
 }
 
+// HB-SMOOTH (EH_plus_blend in H_bond_correction_EH_plus.F90): mix the energies of both orders of
+// the two neighbours of the acceptor (slots 1, 2) and of the donor (slots 5, 6) with
+// s = (1 + tanh((d1 - d2)/0.01))/2, d = distance to the H; s = 1 beyond about 0.1 A.
+__device__ void swap_slots(PairGeom *g, int s1, int s2) {
+  for (int c = 0; c < 3; ++c) {
+    const double t = g->x[s1][c];
+    g->x[s1][c] = g->x[s2][c];
+    g->x[s2][c] = t;
+  }
+  const int t = g->atom[s1];
+  g->atom[s1] = g->atom[s2];
+  g->atom[s2] = t;
+}
+
+__device__ double blend_weight(const PairGeom &g, int nb, int s1, int s2, int numat) {
+  const int a1 = g.atom[s1], a2 = g.atom[s2];
+  if (nb < 2 || a1 < 1 || a1 > numat || a2 < 1 || a2 > numat || a1 == a2) return 1.0;
+  return 0.5 * (1.0 + tanh((distance_s(g, s1, 8) - distance_s(g, s2, 8)) / 0.01));
+}
+
+__device__ double eh_plus_blend_d(const PairGeom &g, const HbArgs &a) {
+  if (!a.smooth) return eh_plus_d(g, a);
+  const double sa = blend_weight(g, g.nbondsa, 1, 2, a.numat);
+  const double sd = blend_weight(g, g.nbondsb, 5, 6, a.numat);
+  const double wa[2] = {sa, 1.0 - sa}, wd[2] = {sd, 1.0 - sd};
+  double e = 0.0;
+  for (int ia = 0; ia < 2; ++ia) {
+    if (wa[ia] < 1.0e-12) continue;
+    for (int id = 0; id < 2; ++id) {
+      if (wd[id] < 1.0e-12) continue;
+      PairGeom h = g;
+      if (ia == 1) swap_slots(&h, 1, 2);
+      if (id == 1) swap_slots(&h, 5, 6);
+      e += wa[ia] * wd[id] * eh_plus_d(h, a);
+    }
+  }
+  return e;
+}
+
 __device__ void load_pair(const HbArgs &a, int ii, PairGeom *g) {
   for (int s = 0; s < kSlots; ++s) {
     const int atom = a.hblist[s * a.max_h_bonds + ii];
@@ -367,7 +433,7 @@ __global__ void hbond_energy_kernel(HbArgs a) {
   if (ii >= a.nrpairs) return;
   PairGeom g;
   load_pair(a, ii, &g);
-  a.e_pair[ii] = eh_plus_d(g, a);
+  a.e_pair[ii] = eh_plus_blend_d(g, a);
 }
 
 // Thread per (pair, slot, coordinate): forward difference of the pair energy
@@ -402,7 +468,7 @@ __global__ void hbond_gradient_kernel(HbArgs a) {
   for (int s = 0; s < kSlots; ++s) {
     if (g.atom[s] == k) g.x[s][comp] += a.delta;
   }
-  double e1 = eh_plus_d(g, a);
+  double e1 = eh_plus_blend_d(g, a);
   if (fabs(e1) > 1.0e-5) {
     e1 = (e1 - e0) / a.delta;
     atomicAdd(&a.dxyz[3 * (k - 1) + comp], e1);
@@ -466,7 +532,9 @@ extern "C" int mopac_cuda_dh_plus_hbonds(int numat, int nrpairs, int max_h_bonds
       a.hblist = d_hblist.ptr;
       a.nrbondsa = d_nra.ptr;
       a.nrbondsb = d_nrb.ptr;
-      a.pm7 = method_pm7;
+      // method_pm7: bit 0 = PM7, bit 1 = HB-SMOOTH
+      a.pm7 = method_pm7 & 1;
+      a.smooth = (method_pm7 >> 1) & 1;
       a.delta = delta;
       a.a0 = a0;
       a.ev = ev;

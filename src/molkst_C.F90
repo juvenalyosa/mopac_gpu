@@ -282,6 +282,7 @@ module molkst_C
     allkey*3000, keywrd_txt*3000, refkey_ref(6)*3000, keywrd_quoted*3000
   character :: errtxt*200, dh*20
 !
+  logical :: hb_smooth = .false. ! HB-SMOOTH: smooth max/abs/cut-offs in the PM6-DH+ / PM7 H-bond correction
   logical ::            &
      moperr,            & !
      uhf,               & !  Term        Should the Unrestricted Hartree Fock method be used?

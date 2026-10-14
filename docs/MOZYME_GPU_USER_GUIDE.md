@@ -93,6 +93,22 @@ the same `NSPA`. A SWIG surface has 3-5 times more points; the GPU solver handle
 solver is a few times slower than with the standard surface. `scripts/mozyme_md_workflow.py` adds `SWIG`
 whenever a dielectric is given.
 
+## Smooth H-bond correction (HB-SMOOTH)
+
+The PM6-DH+ / PM7 hydrogen-bond correction (Korth, `EH_plus`) is built from pieces that meet in kinks:
+the larger of two lone-pair cosines, `abs()`, "no H-bond if a cosine is negative", the choice of the
+reference neighbours of the acceptor and donor by distance, and a torsion X2-X1-X-H that is undefined when
+the angle X1-X-H is 180 degrees. An optimization can stop on such a kink with a large gradient that the
+energy does not follow (DNA anion in water: 2000 cycles at -9726.67 kcal/mol with a gradient of 30 on one
+sugar O4', from an N-H...O4' pair with C4'-O4'...H at 179.86 degrees), and FORCE differentiates across it.
+
+`HB-SMOOTH` replaces them by smooth versions (max(a,b) -> (a+b+sqrt((a-b)**2+w**2))/2, |x| ->
+sqrt(x**2+w**2), the cut at 0 by a smooth ramp, w = 0.02; both orders of two equidistant reference
+neighbours mixed with a tanh of their distance difference, width 0.01 A; the torsion weighted by
+1 - exp(-((180 - angle)/5 degrees)**2)), on the CPU and the GPU. It changes the H-bond energy little
+(chignolin -42.99 -> -42.90 kcal/mol, DNA dodecamer -172.21 -> -171.63) and only near the kinks; without
+the keyword PM7 is unchanged. `scripts/mozyme_md_workflow.py` uses it in every run.
+
 ## Vibrational frequencies and thermochemistry (FORCE, FORCETS, THERMO)
 
 MOPAC builds the Hessian by finite differences of the gradient (two gradients per Cartesian coordinate),
