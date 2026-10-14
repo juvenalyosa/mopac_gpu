@@ -216,6 +216,92 @@ contains
     jobnam = ' '
   end function run_mopac_from_input
 
+  ! MOZYME QM/MM session: set up the QM system once (keywords as mozyme_scf, plus HB-SMOOTH, and the MOZYME
+  ! GPU defaults that run_mopac applies), keep the electronic state between steps
+  module subroutine mozyme_qmmm_init(system, state, status) bind(c)
+#ifdef WIN32
+!dec$ attributes dllexport :: mozyme_qmmm_init
+#endif
+#ifdef GPU
+    use mod_vars_cuda, only : lgpu, mozyme_gpu, mozyme_gpu_requested, mozyme_resident_fock_gpu, &
+      mozyme_gpu_disable_reason, MOZYME_GPU_REASON_NONE
+    use mozyme_gpu_scf_driver, only : mozyme_gpu_apply_default_environment
+#endif
+    use qmmm_C, only : n_mm
+    type(mopac_system), intent(in) :: system
+    type(mozyme_state), intent(in) :: state
+    integer(c_int), intent(out) :: status
+#ifdef GPU
+    logical :: applied
+#endif
+    keywrd = " MOZYME 1SCF ALLBONDS GRADIENTS HB-SMOOTH"
+    n_mm = 0
+    call mopac_initialize(system)
+#ifdef GPU
+    if (.not. moperr .and. lgpu) then
+      call mozyme_gpu_apply_default_environment(7, applied)
+      mozyme_gpu_requested = .true.
+      mozyme_gpu = .true.
+      mozyme_resident_fock_gpu = .true.
+      mozyme_gpu_disable_reason = MOZYME_GPU_REASON_NONE
+    end if
+#endif
+    if (.not. moperr) call mozyme_load(state)
+    status = 0
+    if (moperr) status = 1
+  end subroutine mozyme_qmmm_init
+
+  ! One QM/MM evaluation: QM coordinates (Angstroms), MM point charges (Angstroms, electrons), switching
+  ! radii (mm_roff <= 0: none); returns the heat of formation (kcal/mol, including the QM-MM
+  ! electrostatics) and its gradient on the QM atoms and on the MM charges (kcal/(mol Angstrom))
+  module subroutine mozyme_qmmm_step(natom, coord, nmm, mm_coord, mm_charge, mm_ron, mm_roff, &
+      heat, grad_out, mm_grad_out, status) bind(c)
+#ifdef WIN32
+!dec$ attributes dllexport :: mozyme_qmmm_step
+#endif
+    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, ron => mm_ron, roff => mm_roff
+    integer(c_int), value, intent(in) :: natom, nmm
+    real(c_double), intent(in) :: coord(*), mm_coord(*), mm_charge(*)
+    real(c_double), value, intent(in) :: mm_ron, mm_roff
+    real(c_double), intent(out) :: heat, grad_out(*), mm_grad_out(*)
+    integer(c_int), intent(out) :: status
+    integer :: n
+    status = 1
+    if (moperr .or. natom*3 /= nvar) return
+    xparam(:nvar) = coord(:nvar)
+    if (allocated(mm_xyz)) then
+      if (size(mm_q) /= nmm) deallocate (mm_xyz, mm_q, mm_grad)
+    end if
+    if (.not. allocated(mm_xyz)) allocate (mm_xyz(3, max(nmm, 1)), mm_q(max(nmm, 1)), mm_grad(3, max(nmm, 1)))
+    n = max(nmm, 0)
+    n_mm = n
+    if (n > 0) then
+      mm_xyz(:, :n) = reshape(mm_coord(:3*n), [3, n])
+      mm_q(:n) = mm_charge(:n)
+    end if
+    ron = mm_ron
+    roff = mm_roff
+    call compfg (xparam, .true., escf, .true., grad, .true.)
+    if (moperr) return
+    heat = escf
+    grad_out(:nvar) = grad(:nvar)
+    if (n > 0) mm_grad_out(:3*n) = reshape(mm_grad(:, :n), [3*n])
+    status = 0
+  end subroutine mozyme_qmmm_step
+
+  ! End of a QM/MM session: the electronic state and the properties of the last step
+  module subroutine mozyme_qmmm_finalize(state, properties) bind(c)
+#ifdef WIN32
+!dec$ attributes dllexport :: mozyme_qmmm_finalize
+#endif
+    use qmmm_C, only : n_mm
+    type(mozyme_state), intent(inout) :: state
+    type(mopac_properties), intent(out) :: properties
+    if (.not. moperr) call mozyme_save(state)
+    call mopac_finalize(properties)
+    n_mm = 0
+  end subroutine mozyme_qmmm_finalize
+
   ! Get MOPAC version string
   module subroutine get_mopac_version(version) bind(c)
 #ifdef WIN32

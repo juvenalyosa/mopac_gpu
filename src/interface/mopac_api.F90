@@ -23,6 +23,7 @@ module mopac_api
   public :: mopac_system, mopac_properties, mopac_state, mozyme_state
   ! public subroutines of the MOPAC API
   public :: mopac_scf, mopac_relax, mopac_vibe, mozyme_scf, mozyme_relax, mozyme_vibe
+  public :: mozyme_qmmm_init, mozyme_qmmm_step, mozyme_qmmm_finalize
   ! public subroutines to create derived types of the API that it can destroy
   public :: create_mopac_state, create_mozyme_state
   ! public subroutines to destroy derived types created by the API
@@ -212,6 +213,37 @@ module mopac_api
     end subroutine mozyme_vibe
 
     ! allocate memory for mopac_state
+    ! MOZYME QM/MM session (OpenMM and other MM drivers): set up once, then one call per MD step with
+    ! the QM coordinates and the MM point charges; the electronic state stays in memory (and on the GPU)
+    module subroutine mozyme_qmmm_init(system, state, status) bind(c)
+#ifdef WIN32
+!dec$ attributes dllexport :: mozyme_qmmm_init
+#endif
+      type(mopac_system), intent(in) :: system
+      type(mozyme_state), intent(in) :: state
+      integer(c_int), intent(out) :: status
+    end subroutine mozyme_qmmm_init
+
+    module subroutine mozyme_qmmm_step(natom, coord, nmm, mm_coord, mm_charge, mm_ron, mm_roff, &
+        heat, grad_out, mm_grad_out, status) bind(c)
+#ifdef WIN32
+!dec$ attributes dllexport :: mozyme_qmmm_step
+#endif
+      integer(c_int), value, intent(in) :: natom, nmm
+      real(c_double), intent(in) :: coord(*), mm_coord(*), mm_charge(*)
+      real(c_double), value, intent(in) :: mm_ron, mm_roff
+      real(c_double), intent(out) :: heat, grad_out(*), mm_grad_out(*)
+      integer(c_int), intent(out) :: status
+    end subroutine mozyme_qmmm_step
+
+    module subroutine mozyme_qmmm_finalize(state, properties) bind(c)
+#ifdef WIN32
+!dec$ attributes dllexport :: mozyme_qmmm_finalize
+#endif
+      type(mozyme_state), intent(inout) :: state
+      type(mopac_properties), intent(out) :: properties
+    end subroutine mozyme_qmmm_finalize
+
     module subroutine create_mopac_state(state) bind(c)
 #ifdef WIN32
 !dec$ attributes dllexport :: create_mopac_state

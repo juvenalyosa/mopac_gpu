@@ -199,6 +199,23 @@ void mozyme_vibe(struct mopac_system *system,
                  struct mozyme_state *state,
                  struct mopac_properties *properties);
 
+/* MOZYME QM/MM session (electrostatic embedding in MM point charges, e.g. from OpenMM):
+   init once (status = 0 on success), step for every MD step, finalize at the end.
+   step: coord = QM coordinates [3*natom] (Angstroms); mm_coord [3*nmm] (Angstroms), mm_charge [nmm]
+   (electrons); each QM atom - MM charge pair is switched off between mm_ron and mm_roff (Angstroms,
+   mm_roff <= 0: no cut-off); returns heat (kcal/mol, with the QM-MM electrostatics), grad [3*natom] and
+   mm_grad [3*nmm] (kcal/mol/Angstrom). */
+void mozyme_qmmm_init(struct mopac_system *system,
+                      struct mozyme_state *state,
+                      int *status);
+
+void mozyme_qmmm_step(int natom, const double *coord, int nmm, const double *mm_coord,
+                      const double *mm_charge, double mm_ron, double mm_roff,
+                      double *heat, double *grad, double *mm_grad, int *status);
+
+void mozyme_qmmm_finalize(struct mozyme_state *state,
+                          struct mopac_properties *properties);
+
 /* allocate memory for mopac_state */
 void create_mopac_state(struct mopac_state *state);
 
