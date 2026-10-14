@@ -233,11 +233,20 @@ contains
     integer(c_int), intent(out) :: status
 #ifdef GPU
     logical :: applied
+    character(len=16) :: env
+    integer :: env_len, env_stat
 #endif
     keywrd = " MOZYME 1SCF ALLBONDS GRADIENTS HB-SMOOTH"
     ! a tight SCF (MD forces) needs smaller LMO cut-offs: without them the SCF stops at its noise floor
     if (system%tolerance < 0.1d0) keywrd = trim(keywrd) // " THRESH=1.D-15"
     n_mm = 0
+#ifdef GPU
+    ! api_setup_gpu (mopac_initialize) uses a GPU only when lgpu is set beforehand (or MOPAC_FORCEGPU):
+    ! the QM/MM session wants it unless MOPAC_NOGPU is set (without this the whole SCF ran on the CPU)
+    env = ' '
+    call get_environment_variable('MOPAC_NOGPU', env, length=env_len, status=env_stat)
+    lgpu = .not. (env_stat == 0 .and. env_len > 0 .and. index('0 F FALSE N NO OFF', trim(adjustl(env))) == 0)
+#endif
     call mopac_initialize(system)
 #ifdef GPU
     if (.not. moperr .and. lgpu) then
