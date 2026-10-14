@@ -63,14 +63,17 @@ def main():
     data = f"{SRC}/tests/data/mozyme_gpu_reference"
     script = f"{SRC}/scripts/qmmm/run_qmmm_md.py"
     cases = [
-        ("Tyr2 side chain (chignolin)", f"{data}/1UAO_opt.pdb", "--qm-residues 2 --qm-sidechain --padding 1.4", 1000, 200),
+        ("Tyr2 side chain (chignolin)", f"{data}/1UAO_opt.pdb", "--qm-residues 2 --qm-sidechain --padding 1.4", 1000, 400,
+         ("GPU",)),
         ("whole chignolin", f"{data}/1UAO_opt.pdb", "--qm-residues 1,2,3,4,5,6,7,8,9,10 --padding 2.2 --ron 6 --roff 8",
-         400, 100),
+         400, 400, ("GPU", "CPU")),
         ("whole crambin", f"{data}/1CRN_opt.pdb",
-         "--qm-residues " + ",".join(str(i) for i in range(1, 47)) + " --padding 1.8 --ron 6 --roff 8", 100, 50),
+         "--qm-residues " + ",".join(str(i) for i in range(1, 47)) + " --padding 1.8 --ron 6 --roff 8", 100, 200,
+         ("GPU",)),
     ]
-    for name, pdb, opts, steps, nve in cases:
-        for dev in ("GPU", "CPU"):
+    # (QM regions of <= 100 atoms run MOPAC on the CPU even in the "GPU" run)
+    for name, pdb, opts, steps, nve, devices in cases:
+        for dev in devices:
             env = dict(os.environ, CUDA_VISIBLE_DEVICES="0")
             if dev == "CPU":
                 env["MOPAC_NOGPU"] = "1"
