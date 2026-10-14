@@ -241,7 +241,7 @@ contains
               bond_order(kk) = sum
               kk = kk + 1
             end if
-          else if (valenc > 0.01d0) then
+          else if (i == j .and. valenc > 0.01d0) then
             bond_atom(kk) = j - 1
             bond_order(kk) = valenc
             kk = kk + 1
