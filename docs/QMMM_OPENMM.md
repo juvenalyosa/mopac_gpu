@@ -83,6 +83,27 @@ water.)
 QM regions of up to 100 atoms run on the CPU by default (as MOPAC does for small systems); larger ones on
 the GPU. A T4 is weak in double precision; an A100 should be several times faster (README, "Which GPU?").
 
+## Example: trypsin with BPTI
+
+`scripts/kaggle/mopac_qmmm_enzyme` (PDB 2PTC, 46 637 atoms with TIP3P water):
+
+```
+python scripts/qmmm/run_qmmm_md.py 2PTC.pdb --libmopac build/libmopac.so \
+    --qm-residues E:57:sc,E:102:sc,E:195:sc,I:15,I:16 --variants E:57=HID --padding 1.0 --ron 10 --roff 12 \
+    --distances E:195:OG-I:15:C,E:57:NE2-E:195:OG,E:57:HD1-E:102:OD2 --cutoff-test 8,12,16,20,24 \
+    --steps 10000 --nve 1000 --mm-equil-ps 100 --platform CUDA
+```
+
+QM region: side chains of the catalytic triad (His57 as HID, Asp102, Ser195) and Lys15-Ala16 of BPTI
+(54 atoms + 5 H link atoms, charge 0). Kaggle T4: 0.21 s per step (MOPAC on the CPU, 206 ps/day); 5 ps
+NVT: His57 HD1-Asp102 OD2 1.95 A, His57 NE2-Ser195 OG 2.85 A, Ser195 OG-Lys15 C 4.0 A (mean); NVE
+-6.7 kJ/mol in 0.5 ps.
+
+Cut-off test (8 snapshots, QM forces against roff = 24 A, rms force 770 kJ/(mol nm)): rms error 50 (roff 8),
+44 (12), 50 (16), 18 kJ/(mol nm) (20); the QM/MM energy differences between snapshots change by up to 28
+kJ/mol. With the many charged residues of a protein the cut-off electrostatics converge slowly: for
+energies of reactions in proteins use a large roff (20 A), until QM-PME is available.
+
 ## Validation
 
 - QM water + TIP3P water (point charges): all gradient components on the QM atoms and the MM charges agree
