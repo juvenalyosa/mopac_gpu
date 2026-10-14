@@ -220,8 +220,12 @@ def main():
             integ2.step(1)
         e = np.array(e)
         de = np.diff(e)
-        print(f"NVE check {a.nve} steps: drift {e[-1] - e[0]:.2f} kJ/mol, largest step {np.max(np.abs(de)):.2f}, "
-              f"rms step {np.sqrt(np.mean(de ** 2)):.3f}", flush=True)
+        slope = np.polyfit(np.arange(a.nve) * a.dt / 1000.0, e, 1)[0]
+        print(f"NVE check {a.nve} steps: drift {e[-1] - e[0]:.2f} kJ/mol, slope of a linear fit {slope:.1f} "
+              f"kJ/mol/ps, largest step {np.max(np.abs(de)):.2f}, rms step {np.sqrt(np.mean(de ** 2)):.3f}, "
+              f"rms deviation from the fit {np.std(e - np.polyval(np.polyfit(np.arange(a.nve), e, 1), np.arange(a.nve))):.2f}",
+              flush=True)
+        np.savetxt("nve_energy.txt", e, fmt="%.4f")
     qmmm.close()
 
 
