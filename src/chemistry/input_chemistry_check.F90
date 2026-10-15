@@ -156,6 +156,8 @@ contains
     integer :: tsize, h, expected
     character(len=3) :: rname
     logical :: special, standard_aa, have_labels, do_structural, do_electronic
+    integer :: ich
+    character(len=200) :: report_line
 
     ! Each part runs once per job: the structural part at the first call
     ! (also in ADD-H and non-MOZYME runs), the electronic part at the first
@@ -213,7 +215,12 @@ contains
 
     nerr = 0
     nwarn = 0
-    write (iw, '(/10x,a)') "INPUT CHEMISTRY CHECK"
+    !
+    !  The report goes to a scratch file and into the output only when there are errors (the job
+    !  stops then, unless LET), so that the outputs of good inputs are unchanged.
+    !
+    open (newunit=ich, status="SCRATCH", form="FORMATTED", action="READWRITE")
+    write (ich, '(/10x,a)') "INPUT CHEMISTRY CHECK"
     !
     !  Structural checks: fragments and special positions.
     !
@@ -236,21 +243,21 @@ contains
       end do
       if (special .and. heavy > 1) then
         nerr = nerr + 1
-        write (iw, '(10x,a,i0,a)') "ERROR   "//res_key(k)//": lies on a crystallographic special position (REMARK 375); ", &
+        write (ich, '(10x,a,i0,a)') "ERROR   "//res_key(k)//": lies on a crystallographic special position (REMARK 375); ", &
           heavy, " heavy atoms are in the file,"
-        write (iw, '(10x,a)') "        the rest of the group is a symmetry mate that is not.  Remove the group or complete it."
+        write (ich, '(10x,a)') "        the rest of the group is a symmetry mate that is not.  Remove the group or complete it."
       else if (special) then
         nwarn = nwarn + 1
-        write (iw, '(10x,a)') "WARNING "//res_key(k)//": single atom on a crystallographic special position (REMARK 375)."
+        write (ich, '(10x,a)') "WARNING "//res_key(k)//": single atom on a crystallographic special position (REMARK 375)."
       end if
       if (expected > 0 .and. heavy < expected .and. .not. special) then
         if (standard_aa) then
           nwarn = nwarn + 1
-          write (iw, '(10x,a,i0,a,i0,a)') "WARNING "//res_key(k)//": ", heavy, " heavy atoms, a complete residue has ", &
+          write (ich, '(10x,a,i0,a,i0,a)') "WARNING "//res_key(k)//": ", heavy, " heavy atoms, a complete residue has ", &
             expected, " (missing side-chain atoms were capped with hydrogen)."
         else
           nerr = nerr + 1
-          write (iw, '(10x,a,i0,a,i0,a)') "ERROR   "//res_key(k)//": incomplete group, ", heavy, &
+          write (ich, '(10x,a,i0,a,i0,a)') "ERROR   "//res_key(k)//": incomplete group, ", heavy, &
             " heavy atoms instead of ", expected, ".  Remove the fragment or complete it."
         end if
       end if
@@ -258,7 +265,7 @@ contains
     do k = 1, n_partial
       if (on_special_position(partial_keys(k))) cycle
       nwarn = nwarn + 1
-      if (nwarn <= 50) write (iw, '(10x,a,f5.2,a)') "WARNING "//partial_keys(k)//": partial occupancy (", &
+      if (nwarn <= 50) write (ich, '(10x,a,f5.2,a)') "WARNING "//partial_keys(k)//": partial occupancy (", &
         partial_occ(k), ") in the PDB file; the model may hold only part of a disordered group."
     end do
     end if
@@ -272,7 +279,7 @@ contains
         if (nat(i) /= 1 .and. (nat(i) < 5 .or. nat(i) > 9)) cycle
         if (abs(ions(i)) < 2) cycle
         nerr = nerr + 1
-        write (iw, '(10x,a,i0,a,sp,i0,a)') "ERROR   atom ", i, " ("//trim(txtatm(i))//") has a formal charge of ", &
+        write (ich, '(10x,a,i0,a,sp,i0,a)') "ERROR   atom ", i, " ("//trim(txtatm(i))//") has a formal charge of ", &
           ions(i), " in the Lewis structure: impossible for this element."
       end do
       n_ionizable = 0
@@ -290,28 +297,33 @@ contains
         end select
         if (abs(q) > 2) then
           nwarn = nwarn + 1
-          write (iw, '(10x,a,sp,i0,a)') "WARNING "//res_key(k)//": net formal charge ", q, &
+          write (ich, '(10x,a,sp,i0,a)') "WARNING "//res_key(k)//": net formal charge ", q, &
             " in the Lewis structure."
         end if
       end do
       if (n_ionizable >= 3 .and. n_charged == 0) then
         nwarn = nwarn + 1
-        write (iw, '(10x,a,i0,a)') "WARNING all ", n_ionizable, &
+        write (ich, '(10x,a,i0,a)') "WARNING all ", n_ionizable, &
           " ARG/LYS/ASP/GLU/HIS residues are neutral (gas-phase protonation);"
-        write (iw, '(10x,a)') "        for a system at pH ~7 hydrogenate with ADD-H SITE=(IONIZE)."
+        write (ich, '(10x,a)') "        for a system at pH ~7 hydrogenate with ADD-H SITE=(IONIZE)."
       end if
       if (n_acid_so4 > 0) then
         nwarn = nwarn + 1
-        write (iw, '(10x,a,i0,a)') "WARNING ", n_acid_so4, &
+        write (ich, '(10x,a,i0,a)') "WARNING ", n_acid_so4, &
           " sulfate/phosphate groups carry O-H hydrogens (acid form); SITE=(SO4,PO4) ionizes them."
       end if
     end if
-    if (nerr == 0 .and. nwarn == 0) then
-      write (iw, '(10x,a)') "No problems found."
-    else
-      write (iw, '(10x,a,i0,a,i0,a)') "Errors: ", nerr, "   Warnings: ", nwarn, &
-        "   (see HTTP://OpenMOPAC.net/Manual/setpi.html for Lewis structures)"
+    write (ich, '(10x,a,i0,a,i0,a)') "Errors: ", nerr, "   Warnings: ", nwarn, &
+      "   (see HTTP://OpenMOPAC.net/Manual/setpi.html for Lewis structures)"
+    if (nerr > 0) then
+      rewind (ich)
+      do
+        read (ich, '(a)', iostat=i) report_line
+        if (i /= 0) exit
+        write (iw, '(a)') trim(report_line)
+      end do
     end if
+    close (ich)
     deallocate (res_of, res_heavy, res_q, res_h_on_o, res_key, table)
     if (nerr > 0) then
       if (index(keywrd, " LET") /= 0) then

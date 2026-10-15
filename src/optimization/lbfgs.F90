@@ -157,15 +157,11 @@
       tlast = tleft
       resfil = .false.
 !
-!  MOZYME: trust-region L-BFGS (trust_region_lbfgs below) instead of L-BFGS-B, except on a
-!  restart (the restart file holds the L-BFGS-B state).  MOPAC_LBFGS_CLASSIC=1: L-BFGS-B.
+!  TRUST: trust-region L-BFGS (trust_region_lbfgs below) instead of L-BFGS-B, except on a
+!  restart (the restart file holds the L-BFGS-B state).  Meant for MOZYME, whose SCF noise made
+!  the line searches of L-BFGS-B fail.
 !
-      use_tr = mozyme .and. .not. restrt
-      if (use_tr) then
-        call get_environment_variable("MOPAC_LBFGS_CLASSIC", line1)
-        if (line1(1:1) == "1") use_tr = .false.
-        line1 = " "
-      end if
+      use_tr = index(keywrd, " TRUST") /= 0 .and. .not. restrt
       if (use_tr) then
         call trust_region_lbfgs()
         goto 99
@@ -474,7 +470,7 @@ contains
       logical :: limited
 !
       allocate (sm(nvar, mmem), ym(nvar, mmem), rho(mmem), alp(mmem), dir(nvar), x0(nvar), g0(nvar))
-      write (iw, "(/10x,a)") "Trust-region L-BFGS (MOZYME)"
+      write (iw, "(/10x,a)") "Trust-region L-BFGS (TRUST)"
       kmem = 0
       head = 0
       nrej = 0
@@ -572,6 +568,8 @@ contains
             rho(jj) = 1.d0 / sy
             head = jj
             kmem = min(kmem + 1, mmem)
+          else if (kmem == mmem) then
+            kmem = mmem - 1          ! slot jj held the oldest pair, now overwritten by the rejected one
           end if
           if (gd > 0.d0) then
             radius = max(0.5d0 * min(radius, dmax), rmin)
