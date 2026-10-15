@@ -121,8 +121,11 @@ QM region: side chains of the catalytic triad (His57 as HID, Asp102, Ser195) and
 | His57 NE2 - Ser195 OG | 2.85 A | 3.09 A | 3.21 A |
 | Ser195 OG - Lys15 C (attacked carbonyl) | 4.0 A | 2.5 A | 2.56 A |
 
-(one 5 ps trajectory each, from different MM equilibrations: the distances are indications, not converged
-averages.) The NumPy PME costs ~0.1 s per step on the Kaggle CPU for 46 000 atoms, the CuPy one ~0.03 s. NVE (Mac, 3000 steps =
+(one 5 ps trajectory each, from different MM equilibrations.) Three independent replicas of each (Mac CPU,
+20 ps MM equilibration, 5 ps NVT) give similar geometries with and without QM-PME, mean ± standard deviation
+of the replica averages: Ser195 OG - Lys15 C 2.42 ± 0.05 / 2.55 ± 0.08 A, His57 NE2 - Ser195 OG 3.03 ± 0.06 /
+3.15 ± 0.06 A, His57 HD1 - Asp102 OD2 1.76 ± 0.06 / 1.83 ± 0.03 A (cut-off only / QM-PME); the 4.0 A of the
+single cut-off run above was not reproduced. The NumPy PME costs ~0.1 s per step on the Kaggle CPU for 46 000 atoms, the CuPy one ~0.03 s. NVE (Mac, 3000 steps =
 1.5 ps): linear-fit slope -1.6 kJ/mol/ps with QM-PME, -7.2 without, fluctuations ~5 kJ/mol rms (the Kaggle
 check, +20 kJ/mol over 0.5 ps with PME, is within them).
 
