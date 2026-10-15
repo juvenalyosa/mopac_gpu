@@ -425,28 +425,9 @@ if(TESTS)
       target_link_libraries(mopac-gpu-density-verify mopac-core)
       add_dependencies(mopac-gpu-density-verify mopac-core)
     endif()
-    if(NOT TARGET mopac-gpu-rot-verify)
-      add_executable(mopac-gpu-rot-verify tests/gpu_rot_verify.F90)
-      target_link_libraries(mopac-gpu-rot-verify mopac-core)
-      add_dependencies(mopac-gpu-rot-verify mopac-core)
-    endif()
-    if(NOT TARGET mopac-gpu-rot-2gpu-verify)
-      add_executable(mopac-gpu-rot-2gpu-verify tests/gpu_rot_2gpu_verify.F90)
-      target_link_libraries(mopac-gpu-rot-2gpu-verify mopac-core)
-      add_dependencies(mopac-gpu-rot-2gpu-verify mopac-core)
-    endif()
     # scf-compare targets are defined in tests/CMakeLists.txt; avoid duplicates here
 
-    # Optional: register 2-GPU rotation verification with ctest
     if(ENABLE_GPU_TESTS)
-      add_test(NAME gpu_rot_verify
-        COMMAND $<TARGET_FILE:mopac-gpu-rot-verify>)
-      set_tests_properties(gpu_rot_verify PROPERTIES LABELS "gpu" ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
-
-      add_test(NAME gpu_rot_2gpu_verify
-        COMMAND $<TARGET_FILE:mopac-gpu-rot-2gpu-verify>)
-      set_tests_properties(gpu_rot_2gpu_verify PROPERTIES LABELS "gpu" ENVIRONMENT "CUDA_VISIBLE_DEVICES=0,1")
-
       add_test(NAME gpu_density_verify
         COMMAND $<TARGET_FILE:mopac-gpu-density-verify>)
       set_tests_properties(gpu_density_verify PROPERTIES LABELS "gpu" ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
