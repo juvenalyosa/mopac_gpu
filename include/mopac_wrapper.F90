@@ -22,6 +22,8 @@ module mopac_api_f
   public :: mopac_system_f, mopac_properties_f, mopac_state_f, mozyme_state_f
   ! public subroutines of the MOPAC API
   public :: mopac_scf_f, mopac_relax_f, mopac_vibe_f, mozyme_scf_f, mozyme_relax_f, mozyme_vibe_f
+  ! public subroutines of the MOZYME QM/MM session (see mopac.h)
+  public :: mozyme_qmmm_init_f, mozyme_qmmm_step_f, mozyme_qmmm_finalize_f
   ! public subroutine of the simple, disk-based MOPAC API
   public :: run_mopac_from_input_f, get_mopac_version_f
 
@@ -188,6 +190,29 @@ module mopac_api_f
       type(mozyme_state_f), intent(inout) :: state
       type(mopac_properties_f), intent(out) :: properties
     end subroutine mozyme_vibe_f
+
+    ! MOZYME QM/MM session: start (status = 0 on success)
+    module subroutine mozyme_qmmm_init_f(system, state, status)
+      type(mopac_system_f), intent(in) :: system
+      type(mozyme_state_f), intent(in) :: state
+      integer, intent(out) :: status
+    end subroutine mozyme_qmmm_init_f
+
+    ! MOZYME QM/MM session: one step (Angstroms, electrons, kcal/mol; see mopac.h)
+    module subroutine mozyme_qmmm_step_f(coord, mm_coord, mm_charge, mm_ron, mm_roff, qm_pot, &
+        heat, grad, mm_grad, mm_pot, qm_charge, status)
+      double precision, intent(in) :: coord(:), mm_coord(:), mm_charge(:), qm_pot(:)
+      double precision, intent(in) :: mm_ron, mm_roff
+      double precision, intent(out) :: heat, grad(:), mm_grad(:), mm_pot(:), qm_charge(:)
+      integer, intent(out) :: status
+    end subroutine mozyme_qmmm_step_f
+
+    ! MOZYME QM/MM session: end (electronic state and properties of the last step)
+    module subroutine mozyme_qmmm_finalize_f(system, state, properties)
+      type(mopac_system_f), intent(in) :: system
+      type(mozyme_state_f), intent(inout) :: state
+      type(mopac_properties_f), intent(out) :: properties
+    end subroutine mozyme_qmmm_finalize_f
 
     ! run MOPAC conventionally from an input file
     module function run_mopac_from_input_f(path_to_file)

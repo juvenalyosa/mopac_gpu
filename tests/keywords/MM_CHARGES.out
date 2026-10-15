@@ -1,0 +1,173 @@
+ *******************************************************************************
+ **                                                                           **
+ **                              MOPAC v23.1.2                                **
+ **                                                                           **
+ *******************************************************************************
+ **          Digital Object Identifier (DOI): 10.5281/zenodo.6511958          **
+ **    Visit the DOI location for information on how to cite this program.    **
+ *******************************************************************************
+
+                              PM7 CALCULATION RESULTS
+
+ *******************************************************************************
+ *  CALCULATION DONE: (MAX THREADS = 10)             Thu Oct 15 12:44:55 2026  *
+ *  PM7        - The PM7 Hamiltonian to be used
+ *  MM_CHARGES - QM/MM: MM POINT CHARGES IN FILE "MM_CHARGES.txt"
+ *  MOZYME     - USE LOCALIZED M.O.s IN SOLVING THE SCF EQUATIONS
+ *  1SCF       - DO 1 SCF AND THEN STOP 
+ *  T=         - A TIME OF 172800.0 SECONDS REQUESTED
+ *  DUMP=N     - RESTART FILE WRITTEN EVERY 7200.0 SECONDS REQUESTED
+ *  GRADIENTS  - ALL GRADIENTS TO BE PRINTED
+ *******************************************************************************
+PM7 MOZYME 1SCF GRADIENTS MM_CHARGES="MM_CHARGES.txt"
+ Water in the field of a TIP3P water (point charges): QM/MM electrostatic embedding
+
+   ATOM   CHEMICAL          X               Y               Z
+  NUMBER   SYMBOL      (ANGSTROMS)     (ANGSTROMS)     (ANGSTROMS)
+
+     1       O          0.00000000  *   0.00000000  *   0.00000000  *
+     2       H          0.95720000  *   0.00000000  *   0.00000000  *
+     3       H         -0.24000000  *   0.92660000  *   0.00000000  *
+
+
+
+          CARTESIAN COORDINATES 
+
+    NO.       ATOM           X           Y           Z
+
+     1         O          0.0000      0.0000      0.0000
+     2         H          0.9572      0.0000      0.0000
+     3         H         -0.2400      0.9266      0.0000
+
+ General Reference for PM7:
+ "Optimization of Parameters for Semiempirical Methods VI: More Modifications to the 
+ NDDO Approximations and Re-optimization of Parameters", J. J. P. Stewart, J. Mol. Mod., 1:32, 19 (2013)
+ https://link.springer.com/article/10.1007/s00894-012-1667-x
+
+           Empirical Formula: H2 O  =     3 atoms
+
+
+
+      MOLECULAR POINT GROUP   :   C2v 
+
+          NO CHARGES FOUND.
+
+          COMPUTED CHARGE ON SYSTEM: +0
+ QM/MM:        3 MM point charges, total charge      0.0000 from 'MM_CHARGES.txt'
+
+          QM/MM ELECTROSTATIC ENERGY =     -5.768970 KCAL/MOL
+          GRADIENT ON THE MM CHARGES (KCAL/MOL/ANGSTROM)
+ MM_GRAD       1     11.345153     -2.736934     -0.000158
+ MM_GRAD       2     -2.441566      0.807762     -1.126654
+ MM_GRAD       3     -2.441511      0.807753      1.126719
+
+ -------------------------------------------------------------------------------
+ PM7 MOZYME 1SCF GRADIENTS MM_CHARGES="MM_CHARGES.txt"
+ Water in the field of a TIP3P water (point charges): QM/MM electrostatic embedding
+
+
+
+     1SCF WAS SPECIFIED, SO BFGS WAS NOT USED                 
+     SCF FIELD WAS ACHIEVED                                   
+
+
+                              PM7 CALCULATION
+                                                       MOPAC v23.1.2 MacOS
+                                                       Thu Oct 15 12:44:55 2026
+
+
+
+
+          FINAL HEAT OF FORMATION =        -63.22836 KCAL/MOL =    -264.54746 KJ/MOL
+
+
+
+          GRADIENT NORM           =         15.04180          =       8.68439 PER ATOM
+          NO. OF FILLED LEVELS    =          4
+          MOLECULAR WEIGHT        =         18.0152         POINT GROUP:  C2v 
+
+          MOLECULAR DIMENSIONS (Angstroms)
+
+            Atom       Atom       Distance
+            H     3    H     2     1.51389
+            H     2    O     1     0.58587
+            O     1    H     2     0.00000
+
+
+          SCF CALCULATIONS        =          1
+
+          WALL-CLOCK TIME         =      0.004 SECONDS
+          COMPUTATION TIME        =      0.005 SECONDS
+
+          LARGEST ATOMIC GRADIENTS
+
+          Atom     Label                     Cartesian Gradients           Cartesian Coordinates       |Gradient|
+                                           X          Y          Z        X          Y          Z
+
+             2       H                 -11.874      2.862     -0.019    0.95720    0.00000    0.00000     12.215
+             1       O                   5.893     -5.375      0.040    0.00000    0.00000    0.00000      7.976
+             3       H                  -0.480      3.635     -0.021   -0.24000    0.92660    0.00000      3.666
+
+
+
+       FINAL  POINT  AND  DERIVATIVES
+
+             Cartesian Gradients         Cartesian Coordinates          |Gradient|
+  Atom       X        Y        Z        X          Y          Z
+
+    1  O    5.893   -5.375    0.040    0.00000    0.00000    0.00000       7.976
+    2  H  -11.874    2.862   -0.019    0.95720    0.00000    0.00000      12.215
+    3  H   -0.480    3.635   -0.021   -0.24000    0.92660    0.00000       3.666
+
+
+
+
+
+   ATOM   CHEMICAL          X               Y               Z
+  NUMBER   SYMBOL      (ANGSTROMS)     (ANGSTROMS)     (ANGSTROMS)
+
+     1       O          0.00000000  *   0.00000000  *   0.00000000  *
+     2       H          0.95720000  *   0.00000000  *   0.00000000  *
+     3       H         -0.24000000  *   0.92660000  *   0.00000000  *
+
+                             CARTESIAN COORDINATES
+
+   1    O        0.000000000     0.000000000     0.000000000
+   2    H        0.957200000     0.000000000     0.000000000
+   3    H       -0.240000000     0.926600000     0.000000000
+
+
+           Empirical Formula: H2 O  =     3 atoms
+
+
+
+              NET ATOMIC CHARGES AND DIPOLE CONTRIBUTIONS
+
+  ATOM NO.   TYPE          CHARGE      No. of ELECS.   s-Pop       p-Pop       
+    1          O          -0.682472        6.6825     1.81386     4.86862
+    2          H           0.363345        0.6367     0.63665
+    3          H           0.319127        0.6809     0.68087
+ DIPOLE           X         Y         Z       TOTAL
+ POINT-CHG.     1.303     1.420     0.000     1.927
+ HYBRID         0.189     0.256     0.000     0.319
+ SUM            1.492     1.677     0.000     2.244
+
+
+          ATOMIC ORBITAL ELECTRON POPULATIONS
+
+     Atom    s        px        py        pz   
+    1  O   1.81386   1.43958   1.42904   2.00000
+    2  H   0.63665
+    3  H   0.68087
+
+ **********************
+ *                    *
+ * JOB ENDED NORMALLY *
+ *                    *
+ **********************
+
+
+
+ TOTAL JOB TIME:             0.01 SECONDS
+
+ == MOPAC DONE ==

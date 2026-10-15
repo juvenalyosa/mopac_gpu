@@ -1,0 +1,6 @@
+PM7 DRC TEMPERATURE=300 SEED=1 CYCLES=40 T-PRIORITY=0.5
+Water: dynamics from Maxwell-Boltzmann velocities at 300 K (NVE), fixed seed
+
+O     0.000000 1   0.000000 1   0.000000 1
+H     0.958000 1   0.000000 1   0.000000 1
+H    -0.239000 1   0.928000 1   0.000000 1

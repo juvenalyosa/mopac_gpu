@@ -227,6 +227,30 @@ submodule (mopac_api_f) mopac_api_f_internal
     end subroutine destroy_mozyme_state
 
     ! run MOPAC conventionally from an input file
+    subroutine mozyme_qmmm_init(system, state, status) bind(c)
+      use iso_c_binding
+      import :: mopac_system, mozyme_state
+      type(mopac_system), intent(in) :: system
+      type(mozyme_state), intent(in) :: state
+      integer(c_int), intent(out) :: status
+    end subroutine mozyme_qmmm_init
+
+    subroutine mozyme_qmmm_step(natom, coord, nmm, mm_coord, mm_charge, mm_ron, mm_roff, qm_pot, &
+        heat, grad, mm_grad, mm_pot, qm_charge, status) bind(c)
+      use iso_c_binding
+      integer(c_int), value, intent(in) :: natom, nmm
+      real(c_double), intent(in) :: coord(*), mm_coord(*), mm_charge(*), qm_pot(*)
+      real(c_double), value, intent(in) :: mm_ron, mm_roff
+      real(c_double), intent(out) :: heat, grad(*), mm_grad(*), mm_pot(*), qm_charge(*)
+      integer(c_int), intent(out) :: status
+    end subroutine mozyme_qmmm_step
+
+    subroutine mozyme_qmmm_finalize(state, properties) bind(c)
+      import :: mozyme_state, mopac_properties
+      type(mozyme_state), intent(inout) :: state
+      type(mopac_properties), intent(out) :: properties
+    end subroutine mozyme_qmmm_finalize
+
     function run_mopac_from_input(path_to_file) bind(c)
       use iso_c_binding
       integer(c_int) :: run_mopac_from_input
@@ -314,6 +338,63 @@ contains
     deallocate(iwork)
     deallocate(rwork)
   end subroutine mozyme_scf_f
+
+  module subroutine mozyme_qmmm_init_f(system, state, status)
+    type(mopac_system_f), intent(in) :: system
+    type(mozyme_state_f), intent(in) :: state
+    integer, intent(out) :: status
+    type(mopac_system) :: system_c
+    type(mozyme_state) :: state_c
+    integer(c_int) :: status_c
+    integer(c_int), pointer :: iwork(:)
+    real(c_double), pointer :: rwork(:)
+    call mopac_system_f2c(system, system_c, iwork, rwork)
+    call mozyme_state_f2c(state, state_c)
+    call mozyme_qmmm_init(system_c, state_c, status_c)
+    call destroy_mozyme_state(state_c)
+    deallocate(iwork)
+    deallocate(rwork)
+    status = status_c
+  end subroutine mozyme_qmmm_init_f
+
+  module subroutine mozyme_qmmm_step_f(coord, mm_coord, mm_charge, mm_ron, mm_roff, qm_pot, &
+      heat, grad, mm_grad, mm_pot, qm_charge, status)
+    double precision, intent(in) :: coord(:), mm_coord(:), mm_charge(:), qm_pot(:)
+    double precision, intent(in) :: mm_ron, mm_roff
+    double precision, intent(out) :: heat, grad(:), mm_grad(:), mm_pot(:), qm_charge(:)
+    integer, intent(out) :: status
+    real(c_double) :: heat_c, dummy(3)
+    integer(c_int) :: status_c
+    integer :: nmm
+    nmm = size(mm_charge)
+    if (nmm > 0) then
+      call mozyme_qmmm_step(int(size(coord)/3, c_int), coord, int(nmm, c_int), mm_coord, mm_charge, mm_ron, &
+        mm_roff, qm_pot, heat_c, grad, mm_grad, mm_pot, qm_charge, status_c)
+    else
+      call mozyme_qmmm_step(int(size(coord)/3, c_int), coord, 0_c_int, dummy, dummy, mm_ron, mm_roff, qm_pot, &
+        heat_c, grad, dummy, dummy, qm_charge, status_c)
+    end if
+    heat = heat_c
+    status = status_c
+  end subroutine mozyme_qmmm_step_f
+
+  module subroutine mozyme_qmmm_finalize_f(system, state, properties)
+    type(mopac_system_f), intent(in) :: system
+    type(mozyme_state_f), intent(inout) :: state
+    type(mopac_properties_f), intent(out) :: properties
+    type(mopac_system) :: system_c
+    type(mozyme_state) :: state_c
+    type(mopac_properties) :: properties_c
+    integer(c_int), pointer :: iwork(:)
+    real(c_double), pointer :: rwork(:)
+    call mopac_system_f2c(system, system_c, iwork, rwork)
+    state_c%numat = 0          ! empty: mozyme_qmmm_finalize writes the state of the last step
+    call mozyme_qmmm_finalize(state_c, properties_c)
+    call mozyme_state_c2f(state_c, state)
+    call mopac_properties_c2f(system_c, properties_c, properties)
+    deallocate(iwork)
+    deallocate(rwork)
+  end subroutine mozyme_qmmm_finalize_f
 
   module subroutine mozyme_relax_f(system, state, properties)
     type(mopac_system_f), intent(in) :: system

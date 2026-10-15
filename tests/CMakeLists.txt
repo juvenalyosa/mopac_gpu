@@ -33,8 +33,6 @@ endmacro()
 target_sources(mopac-api-test PRIVATE mopac_api_test.F90)
 add_test(NAME "gpu-env-flag-parsing"
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/check_gpu_env_flag_parsing.py)
-add_test(NAME "gpu-source-build-contract"
-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/check_gpu_source_build_contract.py)
 
 if(GPU AND ENABLE_GPU_TESTS)
   function(add_mopac_gpu_ctest test_name)

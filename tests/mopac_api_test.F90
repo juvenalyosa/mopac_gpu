@@ -43,6 +43,8 @@ program mopac_api_test
     write(*,*) "Passed API test 9"
     call test_crystal1(nfail)
     write(*,*) "Passed API test 10"
+    call test_qmmm1(nfail)
+    write(*,*) "Passed API test 11"
     call exit(nfail)
 end program mopac_api_test
 
@@ -2197,6 +2199,85 @@ subroutine test_crystal1(nfail)
     call mopac_scf_f(test_in, test_restore, test_out)
     call test_output(test_name, test_in, test_target, test_out, nfail)
 end subroutine test_crystal1
+
+subroutine test_qmmm1(nfail)
+    use mopac_api_f
+    implicit none
+    integer, intent(inout) :: nfail
+    type(mopac_system_f) :: sys
+    type(mozyme_state_f) :: state, state2
+    type(mopac_properties_f) :: props
+    double precision :: coord(9), mm_coord(9), mm_charge(3), qm_pot(3), grad(9), mm_grad(9), mm_pot(3), &
+      qm_charge(3), heat, heat_p, heat_m, fd
+    double precision, parameter :: h = 1.d-3
+    integer :: status
+    character(50) :: test_name
+    test_name = 'H2O QM/MM MOZYME session'
+
+    ! QM water in the field of a TIP3P water (point charges), as tests/keywords/MM_CHARGES.mop
+    coord = [0.d0, 0.d0, 0.d0, 0.9572d0, 0.d0, 0.d0, -0.24d0, 0.9266d0, 0.d0]
+    mm_coord = [2.9d0, 0.d0, 0.d0, 3.476d0, 0.d0, 0.768d0, 3.476d0, 0.d0, -0.768d0]
+    mm_charge = [-0.834d0, 0.417d0, 0.417d0]
+    qm_pot = 0.d0
+    sys%natom = 3
+    sys%natom_move = 3
+    allocate(sys%atom(3))
+    sys%atom = [8, 1, 1]
+    allocate(sys%coord(9))
+    sys%coord = coord
+    call mozyme_qmmm_init_f(sys, state, status)
+    if (status /= 0) then
+      write(*,*) "mozyme_qmmm_init failed in test '", trim(test_name), "'"
+      nfail = nfail + 1
+      return
+    end if
+    call mozyme_qmmm_step_f(coord, mm_coord, mm_charge, 0.d0, 0.d0, qm_pot, heat, grad, mm_grad, mm_pot, &
+      qm_charge, status)
+    if (status /= 0 .or. abs(heat - (-63.22836d0)) > 1.d-3) then
+      write(*,*) "heat mismatch in test '", trim(test_name), "':", heat, "vs", -63.22836d0, " status", status
+      nfail = nfail + 1
+    end if
+    if (abs(sum(qm_charge)) > 1.d-6) then
+      write(*,*) "Mulliken charges do not add up to 0 in test '", trim(test_name), "':", sum(qm_charge)
+      nfail = nfail + 1
+    end if
+    ! gradient on an MM charge (x of the MM oxygen) against finite differences of the heat
+    mm_coord(1) = 2.9d0 + h
+    call mozyme_qmmm_step_f(coord, mm_coord, mm_charge, 0.d0, 0.d0, qm_pot, heat_p, grad, mm_grad, mm_pot, &
+      qm_charge, status)
+    mm_coord(1) = 2.9d0 - h
+    call mozyme_qmmm_step_f(coord, mm_coord, mm_charge, 0.d0, 0.d0, qm_pot, heat_m, grad, mm_grad, mm_pot, &
+      qm_charge, status)
+    mm_coord(1) = 2.9d0
+    call mozyme_qmmm_step_f(coord, mm_coord, mm_charge, 0.d0, 0.d0, qm_pot, heat, grad, mm_grad, mm_pot, &
+      qm_charge, status)
+    fd = (heat_p - heat_m)/(2.d0*h)
+    if (abs(fd - mm_grad(1)) > 0.02d0) then
+      write(*,*) "MM gradient mismatch in test '", trim(test_name), "':", mm_grad(1), "vs FD", fd
+      nfail = nfail + 1
+    end if
+    call mozyme_qmmm_finalize_f(sys, state, props)
+    if (props%nerror /= 0) then
+      write(*,*) "errors at mozyme_qmmm_finalize in test '", trim(test_name), "'"
+      nfail = nfail + 1
+    end if
+    ! a step after the end of the session must fail, not run on freed arrays
+    call mozyme_qmmm_step_f(coord, mm_coord, mm_charge, 0.d0, 0.d0, qm_pot, heat, grad, mm_grad, mm_pot, &
+      qm_charge, status)
+    if (status == 0) then
+      write(*,*) "step after finalize did not fail in test '", trim(test_name), "'"
+      nfail = nfail + 1
+    end if
+    ! the MM charges must not act on a later calculation: plain MOZYME water as in test 4
+    sys%atom = [1, 1, 8]
+    sys%coord = [0.76d0, 0.59d0, 0.d0, -0.76d0, 0.59d0, 0.d0, 0.d0, 0.d0, 0.d0]
+    call mozyme_scf_f(sys, state2, props)
+    if (abs(props%heat - (-57.76837d0)) > 1.d-3) then
+      write(*,*) "state of the QM/MM session leaked into a later calculation in test '", trim(test_name), &
+        "':", props%heat, "vs", -57.76837d0
+      nfail = nfail + 1
+    end if
+end subroutine test_qmmm1
 
 subroutine test_output(name, input, target, output, nfail)
     use mopac_api_f

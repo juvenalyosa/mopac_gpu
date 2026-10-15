@@ -1674,7 +1674,7 @@
         write(iw,'(/10x,a)')"Transition state refinement using EF"
         call to_screen(" Transition state refinement using EF")
         call ef (xparam, escf)
-      else if (index(keywrd,' LBFGS') /= 0 .or. &
+      else if (index(keywrd,' LBFGS') /= 0 .or. index(keywrd,' TRUST') /= 0 .or. &
         id == 0 .and. index(keywrd_txt, " GEO_REF") /= 0 .or. &
         nvar > 100 .and. index(keywrd,' EF') == 0) then
         write(iw,'(/10x,a)')"Geometry optimization using L-BFGS"

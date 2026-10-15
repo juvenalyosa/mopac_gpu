@@ -1,0 +1,210 @@
+ *******************************************************************************
+ **                                                                           **
+ **                              MOPAC v23.1.2                                **
+ **                                                                           **
+ *******************************************************************************
+ **          Digital Object Identifier (DOI): 10.5281/zenodo.6511958          **
+ **    Visit the DOI location for information on how to cite this program.    **
+ *******************************************************************************
+
+                              PM7 CALCULATION RESULTS
+
+ *******************************************************************************
+ *  CALCULATION DONE: (MAX THREADS = 10)             Thu Oct 15 12:44:55 2026  *
+ *  PM7        - The PM7 Hamiltonian to be used
+ *  1SCF       - DO 1 SCF AND THEN STOP 
+ *  T=         - A TIME OF 172800.0 SECONDS REQUESTED
+ *  DUMP=N     - RESTART FILE WRITTEN EVERY 7200.0 SECONDS REQUESTED
+ *  GRADIENTS  - ALL GRADIENTS TO BE PRINTED
+ *  HB-SMOOTH  - SMOOTH ANGULAR TERMS IN THE PM6-DH+ / PM7 H-BOND CORRECTION
+ *******************************************************************************
+PM7 1SCF HB-SMOOTH GRADIENTS
+ Water dimer: smooth PM7 hydrogen-bond correction (HB-SMOOTH)
+
+   ATOM   CHEMICAL          X               Y               Z
+  NUMBER   SYMBOL      (ANGSTROMS)     (ANGSTROMS)     (ANGSTROMS)
+
+     1       O          0.00000000  *   0.00000000  *   0.00000000  *
+     2       H          0.96000000  *   0.00000000  *   0.00000000  *
+     3       H         -0.31680000  *   0.90620000  *   0.00000000  *
+     4       O          2.90000000  *   0.00000000  *   0.00000000  *
+     5       H          3.47600000  *   0.00000000  *   0.76800000  *
+     6       H          3.47600000  *   0.00000000  *  -0.76800000  *
+
+
+
+          CARTESIAN COORDINATES 
+
+    NO.       ATOM           X           Y           Z
+
+     1         O          0.0000      0.0000      0.0000
+     2         H          0.9600      0.0000      0.0000
+     3         H         -0.3168      0.9062      0.0000
+     4         O          2.9000      0.0000      0.0000
+     5         H          3.4760      0.0000      0.7680
+     6         H          3.4760      0.0000     -0.7680
+
+ General Reference for PM7:
+ "Optimization of Parameters for Semiempirical Methods VI: More Modifications to the 
+ NDDO Approximations and Re-optimization of Parameters", J. J. P. Stewart, J. Mol. Mod., 1:32, 19 (2013)
+ https://link.springer.com/article/10.1007/s00894-012-1667-x
+
+           Empirical Formula: H4 O2  =     6 atoms
+
+
+
+      MOLECULAR POINT GROUP   :   Cs  
+
+
+      RHF CALCULATION, NO. OF DOUBLY OCCUPIED LEVELS = 8
+
+
+ -------------------------------------------------------------------------------
+ PM7 1SCF HB-SMOOTH GRADIENTS
+ Water dimer: smooth PM7 hydrogen-bond correction (HB-SMOOTH)
+
+
+
+     1SCF WAS SPECIFIED, SO BFGS WAS NOT USED                 
+     SCF FIELD WAS ACHIEVED                                   
+
+
+                              PM7 CALCULATION
+                                                       MOPAC v23.1.2 MacOS
+                                                       Thu Oct 15 12:44:55 2026
+
+
+
+
+          FINAL HEAT OF FORMATION =       -119.20575 KCAL/MOL =    -498.75686 KJ/MOL
+
+
+          COSMO AREA              =         74.19 SQUARE ANGSTROMS
+          COSMO VOLUME            =         49.75 CUBIC ANGSTROMS
+
+          GRADIENT NORM           =         16.17540          =       6.60358 PER ATOM
+          IONIZATION POTENTIAL    =         11.476782 EV
+          HOMO LUMO ENERGIES (EV) =        -11.477  3.379
+          NO. OF FILLED LEVELS    =          8
+          MOLECULAR WEIGHT        =         36.0304         POINT GROUP:  Cs  
+
+          MOLECULAR DIMENSIONS (Angstroms)
+
+            Atom       Atom       Distance
+            H     5    H     3     3.97446
+            H     6    O     1     1.62223
+            O     1    H     3     0.75042
+
+
+          SCF CALCULATIONS        =          1
+
+          WALL-CLOCK TIME         =      0.004 SECONDS
+          COMPUTATION TIME        =      0.006 SECONDS
+
+          LARGEST ATOMIC GRADIENTS
+
+          Atom     Label                     Cartesian Gradients           Cartesian Coordinates       |Gradient|
+                                           X          Y          Z        X          Y          Z
+
+             3       H                  -9.164      6.701      0.000   -0.31680    0.90620    0.00000     11.353
+             1       O                   6.656     -1.260      0.000    0.00000    0.00000    0.00000      6.775
+             2       H                   3.711     -4.587      0.000    0.96000    0.00000    0.00000      5.900
+             4       O                  -4.986     -2.047      0.000    2.90000    0.00000    0.00000      5.390
+             6       H                   1.906      0.594     -2.751    3.47600    0.00000   -0.76800      3.399
+             5       H                   1.876      0.594      2.751    3.47600    0.00000    0.76800      3.382
+
+
+
+       FINAL  POINT  AND  DERIVATIVES
+
+   PARAMETER     ATOM    TYPE            VALUE        GRADIENT
+      1          1  O    CARTESIAN X     0.000000      6.656452  KCAL/ANGSTROM
+      2          1  O    CARTESIAN Y     0.000000     -1.260046  KCAL/ANGSTROM
+      3          1  O    CARTESIAN Z     0.000000      0.000023  KCAL/ANGSTROM
+      4          2  H    CARTESIAN X     0.960000      3.711357  KCAL/ANGSTROM
+      5          2  H    CARTESIAN Y     0.000000     -4.586981  KCAL/ANGSTROM
+      6          2  H    CARTESIAN Z     0.000000      0.000139  KCAL/ANGSTROM
+      7          3  H    CARTESIAN X    -0.316800     -9.164205  KCAL/ANGSTROM
+      8          3  H    CARTESIAN Y     0.906200      6.701337  KCAL/ANGSTROM
+      9          3  H    CARTESIAN Z     0.000000      0.000000  KCAL/ANGSTROM
+     10          4  O    CARTESIAN X     2.900000     -4.985771  KCAL/ANGSTROM
+     11          4  O    CARTESIAN Y     0.000000     -2.047414  KCAL/ANGSTROM
+     12          4  O    CARTESIAN Z     0.000000      0.000018  KCAL/ANGSTROM
+     13          5  H    CARTESIAN X     3.476000      1.875835  KCAL/ANGSTROM
+     14          5  H    CARTESIAN Y     0.000000      0.593552  KCAL/ANGSTROM
+     15          5  H    CARTESIAN Z     0.768000      2.750961  KCAL/ANGSTROM
+     16          6  H    CARTESIAN X     3.476000      1.906156  KCAL/ANGSTROM
+     17          6  H    CARTESIAN Y     0.000000      0.593541  KCAL/ANGSTROM
+     18          6  H    CARTESIAN Z    -0.768000     -2.751015  KCAL/ANGSTROM
+
+
+
+
+   ATOM   CHEMICAL          X               Y               Z
+  NUMBER   SYMBOL      (ANGSTROMS)     (ANGSTROMS)     (ANGSTROMS)
+
+     1       O          0.00000000  *   0.00000000  *   0.00000000  *
+     2       H          0.96000000  *   0.00000000  *   0.00000000  *
+     3       H         -0.31680000  *   0.90620000  *   0.00000000  *
+     4       O          2.90000000  *   0.00000000  *   0.00000000  *
+     5       H          3.47600000  *   0.00000000  *   0.76800000  *
+     6       H          3.47600000  *   0.00000000  *  -0.76800000  *
+
+                             CARTESIAN COORDINATES
+
+   1    O        0.000000000     0.000000000     0.000000000
+   2    H        0.960000000     0.000000000     0.000000000
+   3    H       -0.316800000     0.906200000     0.000000000
+   4    O        2.900000000     0.000000000     0.000000000
+   5    H        3.476000000     0.000000000     0.768000000
+   6    H        3.476000000     0.000000000    -0.768000000
+
+
+           Empirical Formula: H4 O2  =     6 atoms
+
+
+
+      MOLECULAR POINT GROUP   :   Cs  
+
+
+                  EIGENVALUES  
+ -29.96716 -28.59329 -18.35945 -17.36365 -14.81196 -13.28429 -12.69813 -11.47678
+   3.37947   4.90241   5.90104   7.32004
+
+
+              NET ATOMIC CHARGES AND DIPOLE CONTRIBUTIONS
+
+  ATOM NO.   TYPE          CHARGE      No. of ELECS.   s-Pop       p-Pop       
+    1          O          -0.691855        6.6919     1.80654     4.88532
+    2          H           0.358296        0.6417     0.64170
+    3          H           0.328655        0.6713     0.67134
+    4          O          -0.679391        6.6794     1.80775     4.87164
+    5          H           0.342148        0.6579     0.65785
+    6          H           0.342148        0.6579     0.65785
+ DIPOLE           X         Y         Z       TOTAL
+ POINT-CHG.     3.114     1.431    -0.000     3.426
+ HYBRID         0.491     0.260     0.000     0.556
+ SUM            3.605     1.691    -0.000     3.981
+
+
+          ATOMIC ORBITAL ELECTRON POPULATIONS
+
+     Atom    s        px        py        pz   
+    1  O   1.80654   1.43005   1.45527   2.00000
+    2  H   0.64170
+    3  H   0.67134
+    4  O   1.80775   1.50837   2.00000   1.36327
+    5  H   0.65785
+    6  H   0.65785
+
+ **********************
+ *                    *
+ * JOB ENDED NORMALLY *
+ *                    *
+ **********************
+
+
+
+ TOTAL JOB TIME:             0.01 SECONDS
+
+ == MOPAC DONE ==
