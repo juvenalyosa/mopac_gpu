@@ -550,10 +550,7 @@ Best practices
 ## Development & Collaboration
 
 - Developed by: Juvenal Yosa, PhD (juvenal.yosa@gmail.com)
-- In collaboration with: Universidad Simón Bolívar — Barranquilla, Colombia
-  - Address: Carrera 54 # 64 - 222, Barranquilla, Atlántico, Colombia
-- And: Protyon — Groningen, Netherlands
-  - Address: Winschoterdiep 50, 9723 AB Groningen, The Netherlands
+- In collaboration with: Josef Melcr, Anthonie van der Wekken and M. R. Groves
 
 ---
 
@@ -570,9 +567,8 @@ BibTeX (repository)
 @misc{barranquilla_mopac_repo,
   author       = {Yosa, Juvenal and Melcr, Josef and van der Wekken, Anthonie and Groves, M. R.},
   title        = {Barranquilla MOPAC — A GPU-Accelerated Semiempirical Flavor of MOPAC},
-  year         = {2025},
+  year         = {2026},
   howpublished = {GitHub repository},
-  note         = {UMCG Groningen; Universidad Simón Bolívar; Protyon},
   url          = {https://github.com/juvenalyosa/mopac_gpu}
 }
 ```
