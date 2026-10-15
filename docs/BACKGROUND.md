@@ -516,8 +516,6 @@ GPU/SCF policy
 
 SCF hybrid mixer
 - `EDIIS` keyword: enable hybrid mode.
-- `MOPAC_SCF_DAMP=on`, `MOPAC_SCF_ALPHA_MIN/MAX/K`  Damping parameters.
-- `MOPAC_SCF_ADAPTIVE_SHIFT=on`  Adaptive level shift schedule.
 
 MOZYME
 - `MOZYME`, `MOZYME_GPU`, `MOZYME_MINBLK=INT`  Enable and tune MOZYME GPU.
