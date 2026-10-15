@@ -36,7 +36,6 @@ REQUIRED_FRAGMENTS = {
     ),
     "src/SCF/iter.F90": (
         "call get_environment_variable('MOPAC_GPU_SCF_EXPERIMENTAL'",
-        "call get_environment_variable('MOPAC_SCF_HYBRID'",
         "call get_environment_variable('MOPAC_GPU_RESIDENT_DEBUG'",
         FALSE_TOKENS_FORTRAN_ALT_COMPACT,
     ),

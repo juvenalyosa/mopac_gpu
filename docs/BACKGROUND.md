@@ -516,8 +516,6 @@ GPU/SCF policy
 
 SCF hybrid mixer
 - `EDIIS` keyword: enable hybrid mode.
-- `MOPAC_SCF_HYBRID=on`  Hybrid without keyword.
-- `MOPAC_SCF_SWITCH_PL`, `MOPAC_SCF_EDIIS_ITERS`  Control EDIIS→CDIIS switch.
 - `MOPAC_SCF_DAMP=on`, `MOPAC_SCF_ALPHA_MIN/MAX/K`  Damping parameters.
 - `MOPAC_SCF_ADAPTIVE_SHIFT=on`  Adaptive level shift schedule.
 

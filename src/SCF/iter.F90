@@ -13,12 +13,6 @@
 ! See the License for the specific language governing permissions and
 ! limitations under the License.
 
-! NOTE (modification): 2025-10-11 — Applied by Codex CLI assistant
-! - Fixed duplicate local declarations of alpha_loc/t_res and alpha_loc_b/t_resb
-!   inside hybrid SCF damped-mixing blocks to satisfy Fortran type rules and
-!   resolve compiler error "already has basic type of REAL".
-!   Numerical behavior is unchanged (variables are already declared at scope).
-
       subroutine iter(ee, fulscf, rand)
       use common_arrays_C, only : eigs, p, pa, pb, cb, h, &
        &  c, nat, nfirst, nlast, eigb, pdiag, f, w, wk, fb
@@ -36,7 +30,6 @@
          nbeta_open, npulay, method_indo, use_disk, n2elec
       USE reimers_C, only: dd, ff, tot, cc0, aa, dtmp, nb2
       use cosmo_C, only : useps
-      use ga_harness
 #ifdef GPU
       use eig_call_context, only: current_spin
 #endif
@@ -213,77 +206,12 @@
         prtfok = index(keywrd,' FOCK') /=0 .and. debug
         prtvec = index(keywrd,' VEC') + index(keywrd,' ALLVEC') /=0 .and. debug
         debug = index(keywrd,' ITER') /= 0
-        ! Enable hybrid mode from keyword or environment
+        ! EDIIS: hybrid EDIIS -> CDIIS SCF with damping and an adaptive level shift (docs/BACKGROUND.md)
         if (index(keywrd,' EDIIS') /= 0) then
           hybrid_enable = .true.
           adaptive_shift_on = .true.
           damp_enable = .true.
         end if
-        i = 1 ; line = ''
-        call get_environment_variable('MOPAC_SCF_HYBRID', line, status=i)
-        if (i == 0) then
-          line = adjustl(line)
-          call upcase(line, len_trim(line))
-          if (len_trim(line) > 0) then
-            select case (trim(line))
-            case('0','N','NO','F','FALSE','OFF')
-              hybrid_enable = .false.
-            case default
-              hybrid_enable = .true.
-            end select
-          end if
-        end if
-        i = 1 ; line = ''
-        call get_environment_variable('MOPAC_SCF_ADAPTIVE_SHIFT', line, status=i)
-        if (i == 0 .and. len_trim(adjustl(line)) > 0) adaptive_shift_on = .true.
-        i = 1 ; line = ''
-        call get_environment_variable('MOPAC_SCF_DAMP', line, status=i)
-        if (i == 0 .and. len_trim(adjustl(line)) > 0) damp_enable = .true.
-        i = 1 ; line = ''
-        call get_environment_variable('MOPAC_SCF_SWITCH_PL', line, status=i)
-        if (i == 0) then
-          line = adjustl(line)
-          if (len_trim(line) > 0) then
-            read(line,*,err=10) hybrid_switch_pl
-          end if
-        end if
-10      continue
-        i = 1 ; line = ''
-        call get_environment_variable('MOPAC_SCF_EDIIS_ITERS', line, status=i)
-        if (i == 0) then
-          line = adjustl(line)
-          if (len_trim(line) > 0) then
-            read(line,*,err=11) ediis_max_iter
-          end if
-        end if
-11      continue
-        i = 1 ; line = ''
-        call get_environment_variable('MOPAC_SCF_ALPHA_MIN', line, status=i)
-        if (i == 0) then
-          line = adjustl(line)
-          if (len_trim(line) > 0) then
-            read(line,*,err=12) alpha_min_h
-          end if
-        end if
-12      continue
-        i = 1 ; line = ''
-        call get_environment_variable('MOPAC_SCF_ALPHA_MAX', line, status=i)
-        if (i == 0) then
-          line = adjustl(line)
-          if (len_trim(line) > 0) then
-            read(line,*,err=13) alpha_max_h
-          end if
-        end if
-13      continue
-        i = 1 ; line = ''
-        call get_environment_variable('MOPAC_SCF_ALPHA_K', line, status=i)
-        if (i == 0) then
-          line = adjustl(line)
-          if (len_trim(line) > 0) then
-            read(line,*,err=14) alpha_k_h
-          end if
-        end if
-14      continue
 !
 ! INITIALIZE SOME LOGICALS AND CONSTANTS
 !
@@ -365,14 +293,6 @@
                 pb((i*(i+1))/2) = p((i*(i+1))/2)*w2*random
               end do
             end if
-          end if
-          ! Optionally refine initial guess via a small GA harness
-          if (uhf) then
-            call maybe_ga_refine_initial_guess(pa, pb, p, w, h, f, norbs, mpack, numat, nfirst, nlast, &
-                                               uhf, na1el, nb1el, nclose, fract, id, fb)
-          else
-            call maybe_ga_refine_initial_guess(pa, pb, p, w, h, f, norbs, mpack, numat, nfirst, nlast, &
-                                               uhf, na1el, nb1el, nclose, fract, id)
           end if
           pold(1:mpack) = pa(1:mpack)
           if (uhf) then
