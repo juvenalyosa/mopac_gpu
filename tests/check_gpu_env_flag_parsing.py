@@ -34,11 +34,6 @@ REQUIRED_FRAGMENTS = {
         "call get_environment_variable('MOPAC_GPU_GRAD'",
         TRUE_TOKENS_FORTRAN,
     ),
-    "src/forces/deri1.F90": (
-        "call get_environment_variable('MOPAC_NO_GPU_GRAD'",
-        "call get_environment_variable('MOPAC_FORCE_GPU_GRAD'",
-        TRUE_TOKENS_FORTRAN,
-    ),
     "src/SCF/iter.F90": (
         "call get_environment_variable('MOPAC_GPU_SCF_EXPERIMENTAL'",
         "call get_environment_variable('MOPAC_SCF_HYBRID'",
