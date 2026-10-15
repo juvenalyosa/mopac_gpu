@@ -17,13 +17,14 @@
 ! Cache of the last post-SCF correction evaluation.  compfg evaluates the
 ! corrections for the energy and deriv evaluates them again, with gradients,
 ! at the same geometry: the second evaluation (dispersion + H-bond pair search,
-! ~40 ms per geometry step at 7000 atoms) only repeats the first.  When compfg
-! announces that a gradient will follow (post_scf_gradient_expected) the energy
-! call also accumulates the gradient contribution, and the gradient call at the
-! same geometry (exact coordinate match) adds the stored contribution instead.
+! ~40 ms per geometry step at 7000 atoms) only repeats the first.  A gradient
+! call stores its contribution, and a repeated gradient call at the same
+! geometry (exact coordinate match) adds the stored contribution instead.  (The
+! energy call no longer evaluates the gradient in advance: adding it back as a
+! stored difference changed the summation order and, through the optimizer,
+! upstream results by up to 0.02 kcal/mol.)
 module post_scf_cache_C
   implicit none
-  logical :: post_scf_gradient_expected = .false.
   logical, private :: cache_valid = .false.
   logical, private :: cache_has_grad = .false.
   integer, private :: cache_numat = -1, cache_numcal = -1, cache_id = -1
@@ -124,7 +125,7 @@ subroutine post_scf_corrections(correction, l_grad)
   use common_arrays_C, only: dxyz
   use molkst_C, only : numat, moperr, id
   use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
-  use post_scf_cache_C, only : post_scf_gradient_expected, post_scf_cache_hit, &
+  use post_scf_cache_C, only : post_scf_cache_hit, &
     post_scf_cache_restore, post_scf_cache_begin_grad, post_scf_cache_store
   implicit none
   double precision, intent(out) ::  correction
@@ -181,13 +182,7 @@ subroutine post_scf_corrections(correction, l_grad)
       return
     end if
   end if
-  ! Evaluate the gradient now when compfg says deriv will ask for it at this
-  ! geometry (dxyz must already have its full size).
-  capture_grad = use_cache .and. (l_grad .or. post_scf_gradient_expected)
-  if (capture_grad .and. .not. l_grad) then
-    capture_grad = allocated(dxyz)
-    if (capture_grad) capture_grad = size(dxyz) >= 3*numat
-  end if
+  capture_grad = use_cache .and. l_grad
   lg = l_grad .or. capture_grad
   if (capture_grad) call post_scf_cache_begin_grad()
   correction = 0.d0

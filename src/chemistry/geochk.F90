@@ -1251,9 +1251,11 @@ subroutine geochk ()
 !  Chemical/electronic sanity of the input (fragments, special positions,
 !  impossible formal charges); errors stop the job unless LET.
 !
-    call input_chemistry_check(ions, noccupied /= 0 .and. &
-      index(keywrd, " ADD-H") + index(keywrd, " SITE=") == 0)
-    if (moperr) return
+    if (index(keywrd, " LEWIS") == 0) then       ! LEWIS only reports the Lewis structure
+      call input_chemistry_check(ions, noccupied /= 0 .and. &
+        index(keywrd, " ADD-H") + index(keywrd, " SITE=") == 0)
+      if (moperr) return
+    end if
 !
 ! Check for sulfate and phosphate
 !
