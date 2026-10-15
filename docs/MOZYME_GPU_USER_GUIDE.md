@@ -108,7 +108,11 @@ sugar O4', from an N-H...O4' pair with C4'-O4'...H at 179.86 degrees), and FORCE
 `HB-SMOOTH` replaces them by smooth versions (max(a,b) -> (a+b+sqrt((a-b)**2+w**2))/2, |x| ->
 sqrt(x**2+w**2), the cut at 0 by a smooth ramp, w = 0.02; both orders of two equidistant reference
 neighbours mixed with a tanh of their distance difference, width 0.01 A; the torsion weighted by
-1 - exp(-((180 - angle)/5 degrees)**2)), on the CPU and the GPU. It changes the H-bond energy little
+1 - exp(-((180 - angle)/5 degrees)**2)); with three neighbours (an sp3 N, NH3+) all six orders are mixed;
+the PM7 choice "damp by the shorter X-H distance only if the X-H distances differ by more than 0.5 A" is mixed
+with a tanh of width 0.02 A (it jumped by 0.57 kcal/mol in a proton-transfer scan); and the energy is switched
+off over the last Angstrom before the pair-list cut-off (7 A for PM7, 10 A for PM6-DH+), where it dropped by
+0.15 kcal/mol in a water dimer. On the CPU and the GPU. It changes the H-bond energy little
 (chignolin -42.99 -> -42.90 kcal/mol, DNA dodecamer -172.21 -> -171.63) and only near the kinks; without
 the keyword PM7 is unchanged. `scripts/mozyme_md_workflow.py` uses it in every run.
 

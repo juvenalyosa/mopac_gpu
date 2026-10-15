@@ -344,7 +344,10 @@ __device__ double eh_plus_d(const PairGeom &g, const HbArgs &a) {
   if (pm7) {
     double XY_dist = fmax(ha_dist, hb_dist) - xc_dist;
     double damping;
-    if (XY_dist > 0.5) {
+    if (a.smooth) {
+      const double t = 0.5 * (1.0 + tanh((XY_dist - 0.5) / 0.02));
+      damping = t * (1.0 - 1.0 / (1.0 + exp(-60.0 * (xc_dist / covcut - 1.0)))) + (1.0 - t);
+    } else if (XY_dist > 0.5) {
       damping = 1.0 - 1.0 / (1.0 + exp(-60.0 * (xc_dist / covcut - 1.0)));
     } else {
       damping = 1.0;
@@ -371,42 +374,69 @@ __device__ double eh_plus_d(const PairGeom &g, const HbArgs &a) {
         sa.torsion_cos * sa.torsion_cos * sd.angle2_cos * sd.angle2_cos * sd.torsion_cos *
         sd.torsion_cos * hartree2kcal * damping;
   }
+  if (a.smooth) {  // switched off over the last Angstrom before the pair-list cut-off
+    const double cut = pm7 ? 7.0 : 10.0;
+    const double t = fmin(1.0, fmax(0.0, distance_s(g, A, D) - (cut - 1.0)));
+    e *= 1.0 - 10.0 * t * t * t + 15.0 * t * t * t * t - 6.0 * t * t * t * t * t;
+  }
   return e;
 }
 
-// HB-SMOOTH (EH_plus_blend in H_bond_correction_EH_plus.F90): mix the energies of both orders of
-// the two neighbours of the acceptor (slots 1, 2) and of the donor (slots 5, 6) with
-// s = (1 + tanh((d1 - d2)/0.01))/2, d = distance to the H; s = 1 beyond about 0.1 A.
-__device__ void swap_slots(PairGeom *g, int s1, int s2) {
-  for (int c = 0; c < 3; ++c) {
-    const double t = g->x[s1][c];
-    g->x[s1][c] = g->x[s2][c];
-    g->x[s2][c] = t;
+// HB-SMOOTH (EH_plus_blend and hb_slot_orders in src/corrections): mix the energies of all orders
+// of the neighbours of the acceptor (slots 1-3) and of the donor (slots 5-7); an order (a, b, c) has
+// the weight s(a,b) s(b,c) s(a,c) / (sum over the orders), s(x,y) = (1 + tanh((d(x) - d(y))/0.01))/2,
+// d = distance to the H (two neighbours: s and 1 - s).
+__device__ int slot_orders(const PairGeom &g, int base, int nb, int numat, int perm[6][3], double w[6]) {
+  const int a1 = g.atom[base], a2 = g.atom[base + 1], a3 = g.atom[base + 2], h = g.atom[8];
+  for (int k = 0; k < 6; ++k) w[k] = 0.0;
+  perm[0][0] = 0; perm[0][1] = 1; perm[0][2] = 2;
+  w[0] = 1.0;
+  if (nb < 2 || a1 < 1 || a1 > numat || a2 < 1 || a2 > numat || a1 == a2) return 1;
+  double d[3];
+  d[0] = distance_s(g, base, 8);
+  d[1] = distance_s(g, base + 1, 8);
+  if (nb >= 3 && a3 >= 1 && a3 <= numat && a3 != a1 && a3 != a2 && a3 != h) {
+    d[2] = distance_s(g, base + 2, 8);
+    double sf[3][3];
+    for (int l = 0; l < 3; ++l)
+      for (int m = 0; m < 3; ++m) sf[l][m] = 0.5 * (1.0 + tanh((d[l] - d[m]) / 0.01));
+    const int p[6][3] = {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+    double total = 0.0;
+    for (int k = 0; k < 6; ++k) {
+      for (int c = 0; c < 3; ++c) perm[k][c] = p[k][c];
+      w[k] = sf[p[k][0]][p[k][1]] * sf[p[k][1]][p[k][2]] * sf[p[k][0]][p[k][2]];
+      total += w[k];
+    }
+    for (int k = 0; k < 6; ++k) w[k] /= total;
+    return 6;
   }
-  const int t = g->atom[s1];
-  g->atom[s1] = g->atom[s2];
-  g->atom[s2] = t;
+  perm[1][0] = 1; perm[1][1] = 0; perm[1][2] = 2;
+  w[0] = 0.5 * (1.0 + tanh((d[0] - d[1]) / 0.01));
+  w[1] = 1.0 - w[0];
+  return 2;
 }
 
-__device__ double blend_weight(const PairGeom &g, int nb, int s1, int s2, int numat) {
-  const int a1 = g.atom[s1], a2 = g.atom[s2];
-  if (nb < 2 || a1 < 1 || a1 > numat || a2 < 1 || a2 > numat || a1 == a2) return 1.0;
-  return 0.5 * (1.0 + tanh((distance_s(g, s1, 8) - distance_s(g, s2, 8)) / 0.01));
+__device__ void apply_order(const PairGeom &g, PairGeom *h, int base, const int perm[3]) {
+  for (int k = 0; k < 3; ++k) {
+    h->atom[base + k] = g.atom[base + perm[k]];
+    for (int c = 0; c < 3; ++c) h->x[base + k][c] = g.x[base + perm[k]][c];
+  }
 }
 
 __device__ double eh_plus_blend_d(const PairGeom &g, const HbArgs &a) {
   if (!a.smooth) return eh_plus_d(g, a);
-  const double sa = blend_weight(g, g.nbondsa, 1, 2, a.numat);
-  const double sd = blend_weight(g, g.nbondsb, 5, 6, a.numat);
-  const double wa[2] = {sa, 1.0 - sa}, wd[2] = {sd, 1.0 - sd};
+  int pa[6][3], pd[6][3];
+  double wa[6], wd[6];
+  const int na = slot_orders(g, 1, g.nbondsa, a.numat, pa, wa);
+  const int nd = slot_orders(g, 5, g.nbondsb, a.numat, pd, wd);
   double e = 0.0;
-  for (int ia = 0; ia < 2; ++ia) {
+  for (int ia = 0; ia < na; ++ia) {
     if (wa[ia] < 1.0e-12) continue;
-    for (int id = 0; id < 2; ++id) {
+    for (int id = 0; id < nd; ++id) {
       if (wd[id] < 1.0e-12) continue;
       PairGeom h = g;
-      if (ia == 1) swap_slots(&h, 1, 2);
-      if (id == 1) swap_slots(&h, 5, 6);
+      apply_order(g, &h, 1, pa[ia]);
+      apply_order(g, &h, 5, pd[id]);
       e += wa[ia] * wd[id] * eh_plus_d(h, a);
     }
   }

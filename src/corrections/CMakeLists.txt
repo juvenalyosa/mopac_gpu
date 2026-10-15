@@ -16,7 +16,7 @@
 #===============================================
 # Create a list of source files (src_list) with the .F90 extension
 set(src_list 
-    dftd3_bits dftd3 H_bond_correction_EH_plus
+    dftd3_bits dftd3 H_bond_correction_EH_plus hb_slot_orders
     H_bond_correction_bits H_bond_correction_EC_plus_ER
     set_up_dentate gdisp disp_DnX
     post_scf_corrections H_bonds4 copyc6

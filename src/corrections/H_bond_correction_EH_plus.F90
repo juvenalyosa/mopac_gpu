@@ -29,7 +29,7 @@
       angle2_cos, angle2_cos_2, torsion_correct, torsion_value, torsion_cos, torsion_value_2, &
       torsion_cos_2, angle2_cos_new, angle2_cos_2_new, torsion_cos_new, torsion_cos_2_new, &
       scale_a, scale_nsp3, scale_nsp2, scale_osp3, scale_osp2, scale_b, scale_c, &
-      hb_dist, xc_dist, ha_dist, damping, hartree2kcal, XY_dist, short, torsion_raw
+      hb_dist, xc_dist, ha_dist, damping, hartree2kcal, XY_dist, short, torsion_raw, t_sw, cut_hb
 !
 !  HB-SMOOTH: the angular factors use max(), abs() and "no H-bond if cos <= 0", so the energy has kinks
 !  where two branches meet (an H in the plane between the two lone pairs of an ether or hydroxyl O,
@@ -41,6 +41,11 @@
 !  the torsion X2-X1-X-H is undefined (it turned by 14 degrees when the O4' moved by 0.001 A in the DNA
 !  case), so its cosine is weighted by s = 1 - exp(-((pi - angle)/5 degrees)**2) and goes smoothly to 0.5
 !  at 180 degrees (s = 1 to 1e-4 below 165 degrees, so ordinary H-bonds are not changed).
+!  Two more steps are smoothed: the PM7 choice "damping by the shorter X-H distance only if the two X-H
+!  distances differ by more than 0.5 A" (a jump of up to half of E near proton transfer) is mixed with
+!  t = (1 + tanh((dXH - 0.5)/0.02))/2, and the pair list drops a pair when X-Y reaches its cut-off (7 A
+!  for PM7, 10 A for PM6-DH+), where E is not yet 0 (up to 0.3 kcal/mol): E is switched off over the
+!  last Angstrom, S(x) = 1 - 10x**3 + 15x**4 - 6x**5.
 !
     double precision, parameter :: w_hb = 0.02d0
     double precision :: shortcut = 2.4d0    !  2.4 Angstrom
@@ -355,7 +360,10 @@
 ! energies
       if (method_PM7) then
         XY_dist = max(ha_dist, hb_dist) - xc_dist
-        if (XY_dist > 0.5d0) then
+        if (hb_smooth) then
+          t_sw = 0.5d0*(1.d0 + tanh((XY_dist - 0.5d0)/0.02d0))
+          damping = t_sw*(1.d0 - 1.d0/(1.d0 + exp( -60.d0*(xc_dist/covcut - 1.0d0)))) + (1.d0 - t_sw)
+        else if (XY_dist > 0.5d0) then
 !
 ! Make damping a function of the shorter X - H distance.
 ! Distances greater than covcut = 1.2 Angstroms reduce damping
@@ -414,56 +422,56 @@
         EH_plus = scale_c/distance(hblist(i, 1), hblist(i, 5))**2.d0* &
         angle_cos**2*angle2_cos**2*torsion_cos**2*angle2_cos_new**2*torsion_cos_new**2*hartree2kcal*damping
       end if
+      if (hb_smooth) then
+        if (method_PM7) then
+          cut_hb = 7.d0
+        else
+          cut_hb = 10.d0
+        end if
+        t_sw = min(1.d0, max(0.d0, distance(hblist(i, 1), hblist(i, 5)) - (cut_hb - 1.d0)))
+        EH_plus = EH_plus*(1.d0 - 10.d0*t_sw**3 + 15.d0*t_sw**4 - 6.d0*t_sw**5)
+      end if
     end if
     return
   end function EH_plus
   double precision function EH_plus_blend(i, hblist, max_h_bonds, nrbondsa, nrbondsb)
 !
 !  HB-SMOOTH: hblist(i, 2) is the neighbour of the acceptor farthest from the H, hblist(i, 3) the next
-!  one (setup_DH_Plus), and the angle and torsion of EH_plus are measured from them, so when the two
-!  are equally far from the H (an ether O such as the O4' of a sugar, an sp3 N) they swap and the energy
-!  has a kink.  Here the energies of both orders are mixed with s = (1 + tanh((d2 - d3)/0.01))/2,
-!  d = distance to the H (s = 1 beyond about 0.1 A, s = 1/2 at the swap), on the acceptor (slots 2, 3)
-!  and on the donor side (slots 6, 7).  Without HB-SMOOTH this is EH_plus.
+!  one and, with three or more neighbours, hblist(i, 4) the third (setup_DH_Plus); the angle and the
+!  torsions of EH_plus are measured from them, so when two are equally far from the H (an ether O such
+!  as the O4' of a sugar, an sp3 N) they swap and the energy has a kink or a step.  Here the energies of
+!  all orders are mixed: an order (a, b, c) of the neighbours gets the weight
+!  s(a,b) s(b,c) s(a,c) / (sum over the orders), s(x,y) = (1 + tanh((d(x) - d(y))/0.01))/2, d = distance
+!  to the H (for two neighbours s(a,b) and 1 - s(a,b)), so that the order by distance has weight 1 beyond
+!  about 0.05 A, on the acceptor (slots 2-4) and on the donor side (slots 6-8).  Without HB-SMOOTH this
+!  is EH_plus.
 !
     use molkst_C, only : hb_smooth
     implicit none
     integer, intent (in) :: max_h_bonds, i, nrbondsa(max_h_bonds), nrbondsb(max_h_bonds)
     integer, intent (inout) :: hblist(max_h_bonds,10)
-    integer :: ia, id, k
-    double precision :: sa(2), sd(2), s
-    double precision, external :: EH_plus, distance
-    double precision, parameter :: width = 0.01d0
+    integer :: ia, id, na, nd, perm_a(3,6), perm_d(3,6), save_a(3), save_d(3)
+    double precision :: wa(6), wd(6)
+    double precision, external :: EH_plus
     EH_plus_blend = 0.d0
-    sa = (/1.d0, 0.d0/)
-    sd = (/1.d0, 0.d0/)
-    if (hb_smooth) then
-      if (nrbondsa(i) >= 2 .and. hblist(i, 2) > 0 .and. hblist(i, 3) > 0 .and. hblist(i, 2) /= hblist(i, 3)) then
-        s = 0.5d0*(1.d0 + tanh((distance(hblist(i, 2), hblist(i, 9)) - distance(hblist(i, 3), hblist(i, 9)))/width))
-        sa = (/s, 1.d0 - s/)
-      end if
-      if (nrbondsb(i) >= 2 .and. hblist(i, 6) > 0 .and. hblist(i, 7) > 0 .and. hblist(i, 6) /= hblist(i, 7)) then
-        s = 0.5d0*(1.d0 + tanh((distance(hblist(i, 6), hblist(i, 9)) - distance(hblist(i, 7), hblist(i, 9)))/width))
-        sd = (/s, 1.d0 - s/)
-      end if
+    if (.not. hb_smooth) then
+      EH_plus_blend = EH_plus(i, hblist, max_h_bonds, nrbondsa, nrbondsb)
+      return
     end if
-    do ia = 1, 2
-      if (sa(ia) < 1.d-12) cycle
-      if (ia == 2) then
-        k = hblist(i, 2); hblist(i, 2) = hblist(i, 3); hblist(i, 3) = k
-      end if
-      do id = 1, 2
-        if (sd(id) < 1.d-12) cycle
-        if (id == 2) then
-          k = hblist(i, 6); hblist(i, 6) = hblist(i, 7); hblist(i, 7) = k
-        end if
-        EH_plus_blend = EH_plus_blend + sa(ia)*sd(id)*EH_plus(i, hblist, max_h_bonds, nrbondsa, nrbondsb)
-        if (id == 2) then
-          k = hblist(i, 6); hblist(i, 6) = hblist(i, 7); hblist(i, 7) = k
-        end if
+    call hb_slot_orders(hblist(i, 2:4), hblist(i, 9), nrbondsa(i), na, perm_a, wa)
+    call hb_slot_orders(hblist(i, 6:8), hblist(i, 9), nrbondsb(i), nd, perm_d, wd)
+    save_a = hblist(i, 2:4)
+    save_d = hblist(i, 6:8)
+    do ia = 1, na
+      if (wa(ia) < 1.d-12) cycle
+      hblist(i, 2:4) = perm_a(:, ia)
+      do id = 1, nd
+        if (wd(id) < 1.d-12) cycle
+        hblist(i, 6:8) = perm_d(:, id)
+        EH_plus_blend = EH_plus_blend + wa(ia)*wd(id)*EH_plus(i, hblist, max_h_bonds, nrbondsa, nrbondsb)
       end do
-      if (ia == 2) then
-        k = hblist(i, 2); hblist(i, 2) = hblist(i, 3); hblist(i, 3) = k
-      end if
     end do
+    hblist(i, 2:4) = save_a
+    hblist(i, 6:8) = save_d
   end function EH_plus_blend
+
