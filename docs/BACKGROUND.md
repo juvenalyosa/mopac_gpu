@@ -549,8 +549,7 @@ Best practices
 
 ## Development & Collaboration
 
-- Developed by: Dr. Juvenal Yosa (UMCG — Groningen, Netherlands)
-  - Address: Hanzeplein 1, 9713 GZ Groningen, The Netherlands
+- Developed by: Juvenal Yosa, PhD (juvenal.yosa@gmail.com)
 - In collaboration with: Universidad Simón Bolívar — Barranquilla, Colombia
   - Address: Carrera 54 # 64 - 222, Barranquilla, Atlántico, Colombia
 - And: Protyon — Groningen, Netherlands

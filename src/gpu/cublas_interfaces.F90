@@ -1,5 +1,19 @@
+! Molecular Orbital PACkage (MOPAC)
+! Copyright 2025-2026 Juvenal Yosa, PhD (juvenal.yosa@gmail.com)
+!
+! Licensed under the Apache License, Version 2.0 (the "License");
+! you may not use this file except in compliance with the License.
+! You may obtain a copy of the License at
+!
+!    http://www.apache.org/licenses/LICENSE-2.0
+!
+! Unless required by applicable law or agreed to in writing, software
+! distributed under the License is distributed on an "AS IS" BASIS,
+! WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+! See the License for the specific language governing permissions and
+! limitations under the License.
+
 ! Minimal production cuBLAS interfaces used by MOPAC GPU paths.
-! Developed by Dr. Juvenal Yosa Reyes, UMCG Groningen, Universidad Simon Bolivar - Barranquilla - Colombia
 ! These bindings keep the chemistry-facing BLAS calls in FP64 and delegate
 ! dense kernels to NVIDIA libraries instead of project-local CUDA math kernels.
 module mopac_cublas_interfaces

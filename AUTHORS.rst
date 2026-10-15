@@ -203,3 +203,8 @@ Open-Source MOPAC Contributors
 One of the major benefits of modern open-source software development is that contributions are passively recorded by
 git version control. As such, refer to the commit records for a complete list of contributions. Major new feature
 contributions will continue to be added to this list over time.
+
+Juvenal Yosa
+   MOZYME on NVIDIA GPUs (resident localized-orbital SCF, gradients, dispersion and hydrogen-bond corrections),
+   smooth COSMO surface (SWIG) and hydrogen-bond correction (HB-SMOOTH), DRC thermostat (TEMPERATURE=, BUSSI=),
+   QM/MM coupling to OpenMM with particle-mesh Ewald embedding

@@ -8,8 +8,7 @@ documentation updates, including but not limited to:
   - SCF iteration type declaration fix in iter.F90.
   - Developer attribution headers for GPU source files.
 
-Developed by: Dr. Juvenal Yosa Reyes, UMCG Groningen,
-Universidad Simon Bolivar — Barranquilla — Colombia.
+Developed by: Juvenal Yosa, PhD (juvenal.yosa@gmail.com).
 
 Unless otherwise noted, this software is provided on an “AS IS” basis,
 without warranties or conditions of any kind, either express or implied.
