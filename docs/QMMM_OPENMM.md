@@ -8,7 +8,7 @@ coupling is an OpenMM `PythonForce`.
 ## Requirements
 
 - OpenMM ≥ 8.4 (tested with 8.6.1; `conda install -c conda-forge openmm` or `pip install 'openmm[cuda12]'`),
-  NumPy and SciPy
+  NumPy and SciPy; CuPy (`pip install cupy-cuda12x`) puts the QM-PME grid on the GPU
 - this MOPAC built as a shared library (`libmopac.so` / `libmopac.dylib`, built with the `mopac` target;
   `-DGPU=ON` for the GPU)
 - `scripts/qmmm/openmm_mopac.py`, `mopac_qmmm_api.py` and `qmmm_pme.py` on the Python path
@@ -71,8 +71,10 @@ python scripts/qmmm/run_qmmm_md.py protein.pdb --libmopac build/libmopac.so --qm
   cannot cross).
 - QM-PME needs an orthorhombic box. Its parameters are fields of `qmmm.region` (`pme_alpha` = 0.25 1/A,
   `pme_cutoff` = 13 A real space, `pme_spacing` = 1.2 A, `pme_order` = 4): potential errors ~1e-4 of the
-  potential, and the forces are exact derivatives of the energy as computed. It runs in NumPy on the CPU:
-  ~45 ms per step for 46 000 MM atoms (Apple M-series). With PME the QM energy includes the far field and a
+  potential, and the forces are exact derivatives of the energy as computed. It runs on the GPU with CuPy
+  when CuPy sees one (`add_qmmm(..., pme_gpu=False)` or `run_qmmm_md.py --pme-cpu` keep it on the CPU),
+  else in NumPy: grid work for 46 000 MM atoms 13 ms on a T4 against 100 ms in NumPy on the Kaggle CPU
+  (~45 ms on an Apple M-series CPU); CuPy and NumPy agree to 1e-15. With PME the QM energy includes the far field and a
   constant (net-charge background), so absolute energies of runs with and without PME differ; only
   differences and forces compare.
 - One QM region per process; do not run two MOPAC sessions in the same directory.

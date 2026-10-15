@@ -7,7 +7,7 @@ an NVE check, the distances of the active site, and a cut-off test of the QM/MM 
 without the long-range part, QM-PME).
 
 Builds MOPAC (GPU=ON, libmopac) from https://github.com/juvenalyosa/mopac_gpu and installs OpenMM 8.6.1 with
-CUDA.  MM equilibration 100 ps, then 5 ps of QM/MM NVT (0.5 fs) and 0.5 ps NVE.  REPORT_QMMM_ENZYME.txt has
+CUDA and CuPy (the QM-PME grid on the GPU).  MM equilibration 100 ps, then 5 ps of QM/MM NVT (0.5 fs) and 0.5 ps NVE.  REPORT_QMMM_ENZYME.txt has
 every number, log_trypsin.txt the whole output, qmmm_traj.pdb the trajectory.
 
     kaggle kernels push -p scripts/kaggle/mopac_qmmm_enzyme
@@ -51,6 +51,7 @@ def main():
     sh("apt-get update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
        "--no-install-recommends gfortran libopenblas-dev liblapack-dev ninja-build >/dev/null 2>&1", check=False)
     sh("pip install -q 'openmm[cuda12]==8.6.1' 2>&1 | tail -2", check=False)
+    sh("python -c 'import cupy' 2>/dev/null || pip install -q cupy-cuda12x 2>&1 | tail -2", check=False)
     say(sh("python -c \"import openmm as m; print('OpenMM', m.__version__, [m.Platform.getPlatform(i).getName() "
            "for i in range(m.Platform.getNumPlatforms())])\""))
     sh(f"rm -rf {SRC} && git clone -q --depth 1 --branch {BRANCH} https://github.com/juvenalyosa/mopac_gpu.git {SRC}")

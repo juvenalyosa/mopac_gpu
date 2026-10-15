@@ -34,7 +34,8 @@ What add_qmmm does to the MM system:
     phi_far goes into the Fock matrix of MOPAC (on the diagonal of atom A), so that the energy stays
     variational and the forces are exact; near charges act through the QM integrals with weight S and
     through Q_A with weight 1 - S, and the result hardly depends on ron and roff.  The interactions of the
-    QM region with its own periodic images are left out.
+    QM region with its own periodic images are left out.  The PME grid runs on the GPU when CuPy is
+    installed (pme_gpu).
 
 Units at the interface: OpenMM nm, kJ/mol; MOPAC Angstrom, kcal/mol.  The QM energy is the PM7 heat of
 formation of the QM region (+ link atoms) in the field of the MM charges, so the total potential energy is
@@ -55,7 +56,7 @@ import openmm.unit as unit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mopac_qmmm_api import QMSession  # noqa: E402
-from qmmm_pme import PMEGrid, Stencil  # noqa: E402
+from qmmm_pme import PMEGrid, Stencil, gpu_available  # noqa: E402
 from scipy.special import erfc  # noqa: E402
 
 KCAL_TO_KJ = 4.184
@@ -82,6 +83,7 @@ class QMMMRegion:
     pme_cutoff: float = 13.0                   # real-space cut-off, A (erfc(alpha rc) ~ 4e-6)
     pme_spacing: float = 1.2                   # grid spacing, A (potential error ~1e-4 relative)
     pme_order: int = 4                         # B-spline order (even)
+    pme_gpu: bool = False                      # PME grid on the GPU (CuPy)
 
 
 def _element_number(atom) -> int:
@@ -285,8 +287,8 @@ class MopacQMMMForce:
         if box is None or np.any(np.abs(box - np.diag(np.diag(box))) > 1e-9):
             raise ValueError("QM/MM PME: needs an orthorhombic periodic box")
         L = np.diag(box).copy()
-        if self.grid is None or not self.grid.matches(L, reg.pme_alpha, reg.pme_spacing, reg.pme_order):
-            self.grid = PMEGrid(L, reg.pme_alpha, reg.pme_spacing, reg.pme_order)
+        if self.grid is None or not self.grid.matches(L, reg.pme_alpha, reg.pme_spacing, reg.pme_order, reg.pme_gpu):
+            self.grid = PMEGrid(L, reg.pme_alpha, reg.pme_spacing, reg.pme_order, reg.pme_gpu)
         g, a = self.grid, reg.pme_alpha
         qm_all = reg.mm_charges[self.mm_idx_all]
         st_mm = Stencil(g, xm)
@@ -344,9 +346,11 @@ class MopacQMMMForce:
 
 
 def add_qmmm(system: mm.System, topology, positions, qm_atoms, qm_charge: int, libmopac: str,
-             ron: float = 10.0, roff: float = 12.0, model: int = 0, tolerance: float = 1e-2, pme=None):
+             ron: float = 10.0, roff: float = 12.0, model: int = 0, tolerance: float = 1e-2, pme=None,
+             pme_gpu=None):
     """Turn an OpenMM system into a QM/MM system; returns the MopacQMMMForce (keep it alive).
-    pme: long-range QM-MM electrostatics by PME (default: when the NonbondedForce uses PME or Ewald)."""
+    pme: long-range QM-MM electrostatics by PME (default: when the NonbondedForce uses PME or Ewald).
+    pme_gpu: its grid on the GPU with CuPy (default: when CuPy sees a GPU)."""
     if pme is None:
         pme = any(isinstance(f, mm.NonbondedForce) and f.getNonbondedMethod() in (mm.NonbondedForce.PME,
                   mm.NonbondedForce.Ewald) for f in system.getForces())
@@ -366,7 +370,8 @@ def add_qmmm(system: mm.System, topology, positions, qm_atoms, qm_charge: int, l
     region = QMMMRegion(qm_atoms=qm_atoms, atomic_numbers=[_element_number(atoms[i]) for i in qm_atoms],
                         links=links, mm_charges=charges, ron=ron, roff=roff,
                         groups=np.array([a.residue.index for a in atoms]),
-                        periodic=system.usesPeriodicBoundaryConditions(), pme=bool(pme))
+                        periodic=system.usesPeriodicBoundaryConditions(), pme=bool(pme),
+                        pme_gpu=bool(pme and (gpu_available() if pme_gpu is None else pme_gpu)))
     qmmm = MopacQMMMForce(region, libmopac, qm_charge, pos_nm, model=model, tolerance=tolerance)
     force = mm.PythonForce(qmmm.compute)
     force.setUsesPeriodicBoundaryConditions(region.periodic)

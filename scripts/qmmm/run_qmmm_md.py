@@ -16,7 +16,8 @@ with --qm-sidechain).  Waters, ions and other non-protein residues of the PDB fi
 --variants E:57=HID sets the protonation state of a residue.  --distances E:195:OG-I:15:C,... prints
 the mean, smallest and largest distance during the QM/MM run.  --cutoff-test 8,12,16 recomputes the QM/MM
 forces on snapshots with these roff (ron = roff - 2), with and without the long-range part (PME), and
-compares them with PME at the largest roff.  --no-pme: cut-off QM-MM electrostatics only.
+compares them with PME at the largest roff.  --no-pme: cut-off QM-MM electrostatics only; --pme-cpu: the
+PME grid on the CPU (NumPy) even when CuPy sees a GPU.
 """
 
 import argparse
@@ -89,6 +90,7 @@ def main():
     ap.add_argument("--cutoff-test", default="", help="roff values (A) for a force comparison on snapshots")
     ap.add_argument("--snapshots", type=int, default=5, help="snapshots of the cut-off test")
     ap.add_argument("--no-pme", action="store_true", help="no long-range QM-MM electrostatics (cut-off only)")
+    ap.add_argument("--pme-cpu", action="store_true", help="PME grid on the CPU even when CuPy sees a GPU")
     a = ap.parse_args()
 
     plat = mm.Platform.getPlatformByName(a.platform)
@@ -141,9 +143,11 @@ def main():
     if qcharge is None:
         qcharge = int(round(sum(nb.getParticleParameters(i)[0].value_in_unit(u.elementary_charge) for i in qm)))
     qmmm = add_qmmm(system, top, st.getPositions(), qm, qcharge, a.libmopac, ron=a.ron, roff=a.roff,
-                    tolerance=a.tolerance, pme=False if a.no_pme else None)
+                    tolerance=a.tolerance, pme=False if a.no_pme else None,
+                    pme_gpu=False if a.pme_cpu else None)
+    lr = "none (cut-off)" if not qmmm.region.pme else "PME on the GPU" if qmmm.region.pme_gpu else "PME"
     print(f"QM region: {len(qm)} atoms + {len(qmmm.region.links)} link atoms, charge {qcharge}; long-range "
-          f"QM-MM electrostatics: {'PME' if qmmm.region.pme else 'none (cut-off)'}", flush=True)
+          f"QM-MM electrostatics: {lr}", flush=True)
 
     integ = mm.LangevinMiddleIntegrator(a.temperature * u.kelvin, 1 / u.picosecond, a.dt * u.femtoseconds)
     sim = app.Simulation(top, system, integ, plat)
