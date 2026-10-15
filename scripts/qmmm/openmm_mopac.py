@@ -205,10 +205,12 @@ class MopacQMMMForce:
         if self.region.periodic:
             # one image of each MM charge: the box must hold the QM region plus roff on every side
             span = np.max(np.linalg.norm(xq - c, axis=1))
-            if 2.0 * (span + self.region.roff) > min(box[0, 0], box[1, 1], box[2, 2]):
+            # (the real-space PME pairs use the same single image: pme_cutoff must fit too)
+            reach = max(self.region.roff, self.region.pme_cutoff if self.region.pme else 0.0)
+            if 2.0 * (span + reach) > min(box[0, 0], box[1, 1], box[2, 2]):
                 raise ValueError("QM/MM: periodic box %.1f A too small for the QM region (radius %.1f A) plus "
-                                 "roff = %.1f A on each side; use a larger box or a smaller roff"
-                                 % (min(box[0, 0], box[1, 1], box[2, 2]), span, self.region.roff))
+                                 "%.1f A (roff or the PME real-space cut-off) on each side; use a larger box"
+                                 % (min(box[0, 0], box[1, 1], box[2, 2]), span, reach))
             # whole groups: the first charge of each group nearest to the QM centroid, the other charges of
             # the group nearest to it (imaging every atom separately split waters at half a box, and the
             # switching factor of the split group jumped)

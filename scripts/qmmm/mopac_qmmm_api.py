@@ -48,10 +48,12 @@ class QMSession:
         self.system = MopacSystem(self.n, self.n, charge, spin, model, 1.0, self._atom, self._coord, 0, 0, 0.0,
                                   None, tolerance, max_time)
         self.state = MozymeState()
+        self.closed = True
         status = C.c_int(1)
         self.lib.mozyme_qmmm_init(C.byref(self.system), C.byref(self.state), C.byref(status))
+        self.closed = False
         if status.value != 0:
-            raise RuntimeError("mozyme_qmmm_init failed")
+            raise RuntimeError("mozyme_qmmm_init failed: " + "; ".join(self.errors()))
         f = self.lib.mozyme_qmmm_step
         f.argtypes = [C.c_int, C.POINTER(C.c_double), C.c_int, C.POINTER(C.c_double), C.POINTER(C.c_double),
                       C.c_double, C.c_double, C.POINTER(C.c_double), C.POINTER(C.c_double),
@@ -60,12 +62,18 @@ class QMSession:
         f.restype = None
 
     def step(self, coords, mm_coords, mm_charges, ron=0.0, roff=0.0, qm_pot=None):
+        if self.closed:
+            raise RuntimeError("mozyme_qmmm_step: the session is closed")
         x = np.ascontiguousarray(coords, float).ravel()
         vq = np.zeros(self.n) if qm_pot is None else np.ascontiguousarray(qm_pot, float).ravel()
+        if x.size != 3 * self.n or vq.size != self.n:
+            raise ValueError("mozyme_qmmm_step: %d QM atoms expected" % self.n)
         cq = np.zeros(self.n)
         mx = np.ascontiguousarray(mm_coords, float).ravel()
         mq = np.ascontiguousarray(mm_charges, float).ravel()
         nmm = len(mq)
+        if mx.size != 3 * nmm:
+            raise ValueError("mozyme_qmmm_step: %d MM charges but %d coordinates" % (nmm, mx.size // 3))
         heat = C.c_double(0.0)
         g = np.zeros(3 * self.n)
         gm = np.zeros(max(3 * nmm, 1))
@@ -85,7 +93,9 @@ class QMSession:
         return heat.value, g.reshape(self.n, 3), gm[:3 * nmm].reshape(nmm, 3)
 
     def errors(self):
-        """Finish the session and return MOPAC's error messages (after a failed step)."""
+        """Finish the session and return MOPAC's error messages (after a failed init or step)."""
+        if self.closed:
+            return []
         props = MopacProperties()
         self.lib.mozyme_qmmm_finalize(C.byref(self.state), C.byref(props))
         msgs = []
@@ -93,13 +103,17 @@ class QMSession:
             arr = C.cast(props.error_msg, C.POINTER(C.c_char_p))
             msgs = [arr[i].decode(errors="replace").strip() for i in range(props.nerror)]
         self.lib.destroy_mopac_properties(C.byref(props))
+        self.lib.destroy_mozyme_state(C.byref(self.state))
+        self.state = MozymeState()
         self.closed = True
         return msgs
 
     def close(self):
-        if getattr(self, "closed", False):
+        if self.closed:
             return
         props = MopacProperties()
         self.lib.mozyme_qmmm_finalize(C.byref(self.state), C.byref(props))
         self.lib.destroy_mopac_properties(C.byref(props))
         self.lib.destroy_mozyme_state(C.byref(self.state))
+        self.state = MozymeState()
+        self.closed = True

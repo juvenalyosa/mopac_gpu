@@ -23,7 +23,7 @@ set(src_list
     helecz scfcri MOZYME_C epseta iter_for_MOZYME pinout
     denrot_for_MOZYME fock1_for_MOZYME jab_for_MOZYME hybrid
     hcore_for_MOZYME tidy makvec selmos diagg2 mlmo
-    convert_storage outer1 diagg1 adjvec MOZYME_eigs qmmm_C qmmm
+    convert_storage outer1 diagg1 adjvec MOZYME_eigs qmmm_C qmmm qmmm_free
    )
 #-----------------------------------------------
 # Add a list of source files to the target

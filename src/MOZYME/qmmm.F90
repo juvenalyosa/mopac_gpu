@@ -36,7 +36,7 @@ subroutine qmmm_read
 !
 !  Keyword MM_CHARGES="file": one charge per line, x y z q (Angstroms, electrons).
 !
-    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_numcal
+    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_numcal, qmmm_session
     use molkst_C, only : keywrd_quoted, numcal, line
     use chanel_C, only : iw
     implicit none
@@ -44,7 +44,11 @@ subroutine qmmm_read
     double precision :: x(4)
     character(len=400) :: fname
     i = Index (keywrd_quoted, " MM_CHARGES=")
-    if (i == 0 .or. mm_numcal == numcal) return
+    if (i == 0) then
+      if (.not. qmmm_session) n_mm = 0     ! charges of an earlier job must not leak into this one
+      return
+    end if
+    if (mm_numcal == numcal) return
     mm_numcal = numcal
     j = i + 13                                      ! after MM_CHARGES="
     k = Index (keywrd_quoted(j:), '"') + j - 1
@@ -237,7 +241,7 @@ subroutine qmmm_grad (dxyz)
 !  MOZYME: gradient of the QM-MM energy (kcal/(mol A)) on the QM atoms (added to dxyz) and on the
 !  MM charges (mm_grad).  E(A,J) = q S (Z_A gam - Sum_k g_k P_k v_k), g = 1 on the diagonal, 2 off it.
 !
-    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_pot, e_qmmm
+    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_pot, e_qmmm, qmmm_session
     use molkst_C, only : numat
     use common_arrays_C, only : coord, nat, p
     use parameters_C, only : tore
@@ -292,7 +296,7 @@ subroutine qmmm_grad (dxyz)
       end do
     end do
     e_qmmm = e * fpc_9
-    if (Index (keywrd, " GRADIENTS") /= 0 .and. n_mm <= 2000) then
+    if (Index (keywrd, " GRADIENTS") /= 0 .and. n_mm <= 2000 .and. .not. qmmm_session) then
       write (iw, '(/10x,a,f14.6,a)') "QM/MM ELECTROSTATIC ENERGY =", e_qmmm, " KCAL/MOL"
       write (iw, '(10x,a)') "GRADIENT ON THE MM CHARGES (KCAL/MOL/ANGSTROM)"
       do j = 1, n_mm

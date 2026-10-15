@@ -227,7 +227,7 @@ contains
       mozyme_gpu_disable_reason, MOZYME_GPU_REASON_NONE
     use mozyme_gpu_scf_driver, only : mozyme_gpu_apply_default_environment
 #endif
-    use qmmm_C, only : n_mm
+    use qmmm_C, only : n_mm, qmmm_session
     type(mopac_system), intent(in) :: system
     type(mozyme_state), intent(in) :: state
     integer(c_int), intent(out) :: status
@@ -239,7 +239,7 @@ contains
     keywrd = " MOZYME 1SCF ALLBONDS GRADIENTS HB-SMOOTH"
     ! a tight SCF (MD forces) needs smaller LMO cut-offs: without them the SCF stops at its noise floor
     if (system%tolerance < 0.1d0) keywrd = trim(keywrd) // " THRESH=1.D-15"
-    n_mm = 0
+    call qmmm_free()
 #ifdef GPU
     ! api_setup_gpu (mopac_initialize) uses a GPU only when lgpu is set beforehand (or MOPAC_FORCEGPU):
     ! the QM/MM session wants it unless MOPAC_NOGPU is set (without this the whole SCF ran on the CPU)
@@ -263,6 +263,7 @@ contains
     if (.not. moperr) call mozyme_load(state)
     status = 0
     if (moperr) status = 1
+    qmmm_session = (status == 0)
   end subroutine mozyme_qmmm_init
 
   ! One QM/MM evaluation: QM coordinates (Angstroms), MM point charges (Angstroms, electrons), switching
@@ -274,7 +275,7 @@ contains
 #ifdef WIN32
 !dec$ attributes dllexport :: mozyme_qmmm_step
 #endif
-    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_pot, qm_pot, ron => mm_ron, roff => mm_roff
+    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_pot, qm_pot, ron => mm_ron, roff => mm_roff, qmmm_session
     use molkst_C, only : iscf, emin, numat
     use common_arrays_C, only : nat, p
     use parameters_C, only : tore, natorb
@@ -286,8 +287,16 @@ contains
     integer :: n, i, k, ii
     integer, external :: ijbo
     status = 1
-    if (moperr .or. natom*3 /= nvar) return
+    if (.not. qmmm_session) return               ! no open session (never opened, failed, or closed)
+    if (moperr) return
+    if (natom*3 /= nvar) then
+      call mopend("mozyme_qmmm_step: the number of QM atoms differs from that of mozyme_qmmm_init")
+      return
+    end if
     if (any(qm_pot_in(:natom) /= 0.d0)) then
+      if (allocated(qm_pot)) then
+        if (size(qm_pot) /= natom) deallocate (qm_pot)
+      end if
       if (.not. allocated(qm_pot)) allocate (qm_pot(natom))
       qm_pot(:natom) = qm_pot_in(:natom)
     else if (allocated(qm_pot)) then
@@ -334,12 +343,17 @@ contains
 #ifdef WIN32
 !dec$ attributes dllexport :: mozyme_qmmm_finalize
 #endif
-    use qmmm_C, only : n_mm
+    use qmmm_C, only : qmmm_session
     type(mozyme_state), intent(inout) :: state
     type(mopac_properties), intent(out) :: properties
+    if (.not. qmmm_session) then
+      call mopend("mozyme_qmmm_finalize: no QM/MM session is open")
+      call mopac_finalize(properties)
+      return
+    end if
     if (.not. moperr) call mozyme_save(state)
     call mopac_finalize(properties)
-    n_mm = 0
+    call qmmm_free()
   end subroutine mozyme_qmmm_finalize
 
   ! Get MOPAC version string

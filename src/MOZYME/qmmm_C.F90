@@ -22,6 +22,7 @@ module qmmm_C
   implicit none
   integer :: n_mm = 0                  ! number of MM point charges
   integer :: mm_numcal = -1            ! calculation for which MM_CHARGES was last read
+  logical :: qmmm_session = .false.    ! a QM/MM session of the API is open: the MM charges come from it
   double precision, dimension(:,:), allocatable :: mm_xyz  ! (3, n_mm), Angstroms
   double precision, dimension(:),   allocatable :: mm_q    ! (n_mm), electrons
   double precision, dimension(:,:), allocatable :: mm_grad ! (3, n_mm), kcal/(mol Angstrom), from qmmm_grad
