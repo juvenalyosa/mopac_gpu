@@ -114,15 +114,15 @@ python scripts/qmmm/run_qmmm_md.py 2PTC.pdb --libmopac build/libmopac.so \
 QM region: side chains of the catalytic triad (His57 as HID, Asp102, Ser195) and Lys15-Ala16 of BPTI
 (54 atoms + 5 H link atoms, charge 0). Kaggle T4, MOPAC on the CPU, 5 ps of NVT:
 
-| | cut-off only (roff 12 A) | with QM-PME |
-|---|---:|---:|
-| time per step | 0.21 s (206 ps/day) | 0.31 s (140 ps/day) |
-| His57 HD1 - Asp102 OD2 (mean) | 1.95 A | 1.76 A |
-| His57 NE2 - Ser195 OG | 2.85 A | 3.09 A |
-| Ser195 OG - Lys15 C (attacked carbonyl) | 4.0 A | 2.5 A |
+| | cut-off only (roff 12 A) | QM-PME, grid in NumPy | QM-PME, grid on the GPU |
+|---|---:|---:|---:|
+| time per step | 0.21 s (206 ps/day) | 0.31 s (140 ps/day) | 0.24 s (181 ps/day) |
+| His57 HD1 - Asp102 OD2 (mean) | 1.95 A | 1.76 A | 1.80 A |
+| His57 NE2 - Ser195 OG | 2.85 A | 3.09 A | 3.21 A |
+| Ser195 OG - Lys15 C (attacked carbonyl) | 4.0 A | 2.5 A | 2.56 A |
 
 (one 5 ps trajectory each, from different MM equilibrations: the distances are indications, not converged
-averages.) The NumPy PME costs ~0.1 s per step on the Kaggle CPU for 46 000 atoms. NVE (Mac, 3000 steps =
+averages.) The NumPy PME costs ~0.1 s per step on the Kaggle CPU for 46 000 atoms, the CuPy one ~0.03 s. NVE (Mac, 3000 steps =
 1.5 ps): linear-fit slope -1.6 kJ/mol/ps with QM-PME, -7.2 without, fluctuations ~5 kJ/mol rms (the Kaggle
 check, +20 kJ/mol over 0.5 ps with PME, is within them).
 
@@ -136,6 +136,9 @@ Cut-off test (8 snapshots of the PME run; forces on the QM atoms against PME wit
 | 16 A | 24.6 | 23.9 kJ/mol | 5.8 | 1.9 kJ/mol |
 | 20 A | 19.9 | 23.9 kJ/mol | 4.0 | 1.9 kJ/mol |
 | 24 A | 19.2 | 26.0 kJ/mol | (reference) | |
+
+A second run (GPU grid, other MM equilibration) gave the same picture: cut-off only 45/27/30/22/20, QM-PME
+10.0/7.0/6.7/3.4 kJ/(mol nm) at 8/12/16/20 A, spreads 14-43 against 1.1-2.6 kJ/mol.
 
 Without the long-range part, the energy differences depend on the cut-off by 20-45 kJ/mol even at 24 A
 (the charged residues of a protein converge slowly); with QM-PME the result is nearly independent of roff,
