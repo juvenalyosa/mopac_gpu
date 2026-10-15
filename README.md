@@ -222,6 +222,9 @@ listed in the output header like every other keyword.
 
 - `SWIG` (with `EPS=`): smooth COSMO surface with a consistent gradient (Lange and Herbert).
 - `HB-SMOOTH`: the PM6-DH+ / PM7 hydrogen-bond correction without kinks (for optimization, FORCE, MD).
+- `TRUST`: trust-region L-BFGS geometry optimizer, recommended for MOZYME (the line searches of the default
+  L-BFGS-B fail on the noise of the MOZYME SCF; with `TRUST` the radius follows the directional derivative
+  and no step is ever undone, so the LMOs of the last SCF stay valid).
 - `MM_CHARGES="file"`: QM/MM electrostatic embedding in MM point charges (x y z q per line); the OpenMM
   driver passes them through the API instead (`mozyme_qmmm_init/step/finalize` in `include/mopac.h`).
 
@@ -258,7 +261,8 @@ separately, so a small `ERROR` means the dynamics is accurate in NVT as well as 
 
 ### Input chemistry check (automatic, no keyword needed)
 
-Every PDB-derived input is checked before the calculation. The result appears as a block:
+Every PDB-derived input is checked before the calculation. When the check finds errors, the job stops
+and the output shows the report (warnings included); inputs without errors run with no report:
 
 ```
           INPUT CHEMISTRY CHECK
@@ -277,7 +281,7 @@ Every PDB-derived input is checked before the calculation. The result appears as
 | Atoms with partial occupancy | warning |
 | All Arg/Lys/Asp/Glu/His neutral; sulfate/phosphate in acid form | warning |
 
-**Errors stop the job.** Add the existing MOPAC keyword `LET` to run anyway. Why this matters: in
+**Errors stop the job.** Add the existing MOPAC keyword `LET` to run anyway (the report stays in the output). Why this matters: in
 the PDB entry 1G6X two half sulfates on a symmetry axis made the SCF take 112 iterations and give a
 different energy on every GPU run; after removing them it converges in 29.
 
@@ -355,7 +359,7 @@ with OpenMM, the QM region on MOPAC/MOZYME (`docs/QMMM_OPENMM.md`, `scripts/qmmm
 ### 6.5 Geometry optimization
 
 ```
-PM7 MOZYME CYCLES=200 GEO_DAT="1crn_hydrogenated.pdb" PDBOUT
+PM7 MOZYME TRUST CYCLES=200 GEO_DAT="1crn_hydrogenated.pdb" PDBOUT
 Crambin, optimization
 
 ```
@@ -380,7 +384,7 @@ Final geometry of the optimization
 ### 6.6 Optimization in implicit water with PM6-D3H4
 
 ```
-PM6-D3H4 MOZYME EPS=78.4 CYCLES=300 GEO_DAT="protein_hydrogenated.pdb" PDBOUT
+PM6-D3H4 MOZYME EPS=78.4 TRUST CYCLES=300 GEO_DAT="protein_hydrogenated.pdb" PDBOUT
 Protein optimized in water
 
 ```

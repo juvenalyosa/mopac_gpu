@@ -24,8 +24,11 @@ PM7 GEO_DAT="protein.pdb" MOZYME 1SCF
 or a geometry optimization:
 
 ```
-PM7 GEO_DAT="protein.pdb" MOZYME CYCLES=200
+PM7 GEO_DAT="protein.pdb" MOZYME TRUST CYCLES=200
 ```
+
+(`TRUST` selects the trust-region L-BFGS optimizer; the default L-BFGS-B often stalls on the noise of the
+MOZYME SCF.)
 
 The output reports `[MOZYME GPU] resident SCF enabled by default (disable with NOGPU or
 MOPAC_NOGPU=1)` and one `[MOZYME GPU SCF] status=success ...` line per SCF.
@@ -43,15 +46,15 @@ Inputs from the PDB must be complete: heavy-atom-only structures do not converge
 the CPU either. Run `ADD-H` first (`scripts/hydrogenate_publication_benchmark_inputs.py` does it
 for the benchmark decks).
 
-MOPAC checks PDB-derived inputs before the calculation (`INPUT CHEMISTRY CHECK` in the output).
-Errors stop the job unless `LET` is present:
+MOPAC checks PDB-derived inputs before the calculation; when it finds errors it writes an
+`INPUT CHEMISTRY CHECK` report (with the warnings) and stops the job unless `LET` is present:
 
 - a group of several atoms on a crystallographic special position (`REMARK 375`): the file holds
   only part of it, the rest is a symmetry mate;
 - an incomplete small group (SO4, PO4, NO3, EDO, GOL, ACT, ...);
 - a formal charge of ±2 or more on H, B, C, N, O or F in the Lewis structure.
 
-Warnings only: amino acids with missing side-chain atoms, partial occupancy, all ARG/LYS/ASP/GLU/HIS
+Warnings (reported only together with an error): amino acids with missing side-chain atoms, partial occupancy, all ARG/LYS/ASP/GLU/HIS
 neutral (use `ADD-H SITE=(IONIZE)` for pH ~7) and sulfate/phosphate in acid form. The check exists
 because of 1G6X: two half sulfates on special positions became "SO2(2-)" fragments, and the SCF
 took 112 iterations (CPU) and gave run-dependent energies (GPU). Without them it converges in 29.

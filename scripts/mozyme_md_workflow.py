@@ -122,7 +122,7 @@ def optimize(mopac: Path, pdb: Path, work: Path, cycles: int = 100, eps: float |
     name = "opt"
     extra = f" {extra.strip()}" if extra.strip() else ""
     r = run_mopac(mopac, work, name,
-                  f'{BASE_KEYS}{solvent_keys(eps)} GEO_DAT="{pdb.name}" CYCLES={cycles} PDBOUT{extra}',
+                  f'{BASE_KEYS}{solvent_keys(eps)} GEO_DAT="{pdb.name}" CYCLES={cycles} TRUST PDBOUT{extra}',
                   "geometry optimization", [pdb], env_extra)
     cycles_seen = CYCLE_RE.findall(r.out_text)
     if cycles_seen:
@@ -198,7 +198,7 @@ def optimize_stationary(mopac: Path, geometry: Path, work: Path, gnorm: float = 
         sdir = work / "stage0"
         r = run_mopac(mopac, sdir, "opt",
                       f'{BASE_KEYS}{solvent_keys(eps, swig=False)} GEO_DAT="{geo.name}" '
-                      f'CYCLES={min(cycles, prerelax_cycles)} PDBOUT GNORM={prerelax_gnorm:g}{extra}',
+                      f'CYCLES={min(cycles, prerelax_cycles)} TRUST PDBOUT GNORM={prerelax_gnorm:g}{extra}',
                       "pre-relaxation, standard COSMO surface", [geo], env_extra)
         arc = sdir / "opt.arc"
         if not arc.exists():
@@ -217,7 +217,7 @@ def optimize_stationary(mopac: Path, geometry: Path, work: Path, gnorm: float = 
     for stage in range(1, max_stages + 1):
         sdir = work / f"stage{stage}"
         r = run_mopac(mopac, sdir, "opt",
-                      f'{BASE_KEYS}{solvent_keys(eps)} GEO_DAT="{geo.name}" CYCLES={cycles} PDBOUT GNORM={gnorm:g}{extra}',
+                      f'{BASE_KEYS}{solvent_keys(eps)} GEO_DAT="{geo.name}" CYCLES={cycles} TRUST PDBOUT GNORM={gnorm:g}{extra}',
                       f"geometry optimization, stage {stage}", [geo], env_extra)
         arc = sdir / "opt.arc"
         if not arc.exists():
