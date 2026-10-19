@@ -1,7 +1,7 @@
 """Conventional (non-MOZYME) SCF with the GPU on a Kaggle GPU: which device path stalls the urea crystal.
 
-tests/data/materials/small/urea.mop (192 atoms, 480 orbitals) ran past 600 s with the GPU and in 20 s with
-MOPAC_NOGPU=1 (mopac-ctest v3).  Runs it with PL and MOPAC_GPU_DEBUG=1, each at most 150 s, switching off one
+tests/data/materials/small/urea.mop (192 atoms, 480 orbitals, 288 occupied) ran past 600 s with the GPU and in
+20 s with MOPAC_NOGPU=1 (mopac-ctest v3); v1 of this kernel: only MOPAC_CPU_DENSITY=1 converged.  Runs it with PL and MOPAC_GPU_DEBUG=1, each at most 120 s, switching off one
 device path at a time; REPORT_CONV.txt gets the time, the heat, the last SCF iteration lines and stderr.
 
     kaggle kernels push -p scripts/kaggle/mopac_conv_gpu
@@ -50,15 +50,14 @@ say(f"build: {time.time() - T0:.0f} s")
 deck = open(f"{SRC}/tests/data/materials/small/urea.mop").read().splitlines()
 deck[0] = deck[0] + " PL"
 variants = [("NOGPU", "MOPAC_NOGPU=1"), ("default", ""), ("RESIDENT_SCF=0", "MOPAC_RESIDENT_SCF=0"),
-            ("FASTGPU=0", "MOPAC_FASTGPU=0"), ("EIGEN_MIN=1e6", "MOPAC_GPU_EIGEN_MIN=1000000"),
-            ("ORTHO_GPU=0", "MOPAC_ORTHO_GPU=0"), ("CPU_DENSITY=1", "MOPAC_CPU_DENSITY=1"),
-            ("DIIS_GPU=0", "MOPAC_DIIS_GPU=0"), ("SCFTASK=cpu", "MOPAC_GPU_SCFTASK=cpu")]
+            ("EIGEN_MIN=1e6", "MOPAC_GPU_EIGEN_MIN=1000000"),
+            ("DENSITY_DEBUG", "MOPAC_GPU_DENSITY_DEBUG=1")]
 for label, env in variants:
     d = f"{BASE}/{label.replace('=', '_')}"
     os.makedirs(d, exist_ok=True)
     open(f"{d}/urea.mop", "w").write("\n".join(deck) + "\n")
     t = time.time()
-    sh(f"cd {d} && MOPAC_GPU_DEBUG=1 {env} timeout 150 {BUILD}/mopac urea.mop > stdout.txt 2>&1")
+    sh(f"cd {d} && MOPAC_GPU_DEBUG=1 {env} timeout 120 {BUILD}/mopac urea.mop > stdout.txt 2>&1")
     out = open(f"{d}/urea.out", errors="ignore").read().splitlines() if os.path.exists(f"{d}/urea.out") else []
     heat = [l.strip() for l in out if "FINAL HEAT OF FORMATION" in l]
     iters = [l.strip() for l in out if "ITERATION" in l or "PLS" in l or l.strip().startswith("ITER")]

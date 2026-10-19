@@ -392,16 +392,9 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
               allocate(xmat_ref(norbs,norbs), stat=istat_loc)
               xmat_ref = 0.d0
               if (ndubl > 0) then
-                call dgemm('N','T', norbs, norbs, ndubl, 2.0d0*sign, &
+                call dgemm('N','T', norbs, norbs, ndubl, occ, &
                      c(1:norbs,1:ndubl), norbs, c(1:norbs,1:ndubl), norbs, 0.0d0, xmat_ref, norbs)
               end if
-              if (nsingl > ndubl) then
-                call dgemm('N','T', norbs, norbs, nsingl-ndubl, frac*sign, &
-                     c(1:norbs,ndubl+1:nsingl), norbs, c(1:norbs,ndubl+1:nsingl), norbs, 1.0d0, xmat_ref, norbs)
-              end if
-              do idx = 1, norbs
-                xmat_ref(idx,idx) = xmat_ref(idx,idx) + cst
-              end do
               allocate(pp_ref(mpack), stat=istat_loc)
               call dtrttp('u', norbs, xmat_ref, norbs, pp_ref, info_ref)
               max_diff = 0.d0
@@ -464,31 +457,21 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             allocate(xmat(norbs,norbs),stat = i)
             forall (j = 1:norbs, i=1:norbs) xmat(i, j) = 0.d0
             gpu_density_used = .false.
-            call dgemm('N','T', norbs, norbs, ndubl, 2.0d0*sign, &
-                 c(1:norbs,1:ndubl), norbs, c(1:norbs,1:ndubl), norbs, 0.0d0, xmat, norbs)
-            if (nsingl > ndubl) then
-              call dgemm('N','T', norbs, norbs, nsingl-ndubl, frac*sign, &
-                   c(1:norbs,ndubl+1:nsingl), norbs, c(1:norbs,ndubl+1:nsingl), norbs, 1.0d0, xmat, norbs)
-            end if
+!
+!  Same as case 5 and the original case 4: occ*C(:,1:ndubl)*C(:,1:ndubl)', no positron equivalent
+!  (sign, cst and frac belong to cases 2 and 3; with them a system with more than norbs/2 occupied
+!  orbitals got a wrong density)
+!
+            call dsyrk ('u', 'n', norbs, ndubl, occ, c(1:norbs,1:ndubl), norbs, 0.d0, xmat, norbs)
             if (need_host_density) then
-              forall (i=1:norbs)
-                 xmat(i,i) = xmat(i,i) + cst
-              endforall
               call dtrttp('u', norbs, xmat, norbs, pp, i )
               if (debug_density) then
                 allocate(xmat_ref(norbs,norbs), stat=istat_loc)
                 xmat_ref = 0.d0
                 if (ndubl > 0) then
-                  call dgemm('N','T', norbs, norbs, ndubl, 2.0d0*sign, &
+                  call dgemm('N','T', norbs, norbs, ndubl, occ, &
                        c(1:norbs,1:ndubl), norbs, c(1:norbs,1:ndubl), norbs, 0.0d0, xmat_ref, norbs)
                 end if
-                if (nsingl > ndubl) then
-                  call dgemm('N','T', norbs, norbs, nsingl-ndubl, frac*sign, &
-                       c(1:norbs,ndubl+1:nsingl), norbs, c(1:norbs,ndubl+1:nsingl), norbs, 1.0d0, xmat_ref, norbs)
-                end if
-                do idx = 1, norbs
-                  xmat_ref(idx,idx) = xmat_ref(idx,idx) + cst
-                end do
                 allocate(pp_ref(mpack), stat=istat_loc)
                 call dtrttp('u', norbs, xmat_ref, norbs, pp_ref, info_ref)
                 max_diff = 0.d0
