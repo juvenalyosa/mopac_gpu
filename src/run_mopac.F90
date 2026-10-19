@@ -826,6 +826,7 @@
         end if
         if (gpu_scf_task_mode == GPU_SCF_TASK_CPU) gpu_scf_stream_available = .false.
 
+        if (index(keywrd, " DEBUG") /= 0) then
         select case (gpu_scf_task_mode)
         case (GPU_SCF_TASK_CPU)
           write(iw,'(1x,a)') '[GPU SCF] mode request: cpu'
@@ -837,7 +838,7 @@
           write(iw,'(1x,a)') '[GPU SCF] mode request: auto'
         end select
 
-        ! Always print a concise auto‑profile summary so users see the selected policies
+        ! With DEBUG, a concise summary of the selected GPU policies
         block
           use molkst_C, only : norbs
           character(len=16) :: size_cls
@@ -863,6 +864,7 @@
             write(iw,'(1x,a,1x,l1)') '[PROFILE] MOZYME_CHECK_GPU=', mozyme_check_gpu
           end if
         end block
+        end if
         ! Auto policy: adjust resident_scf and streaming based on problem size and device
         block
           use molkst_C, only: norbs

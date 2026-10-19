@@ -98,12 +98,12 @@
       lid = (id == 0)
 ! Optional experimental GPU Fock build (scaffold)
 #ifdef GPU
-      ! Default to the GPU Fock build when GPU support is available and this is not a derivative build.
-      ! Users can opt out by setting MOPAC_GPU_EXACT_SC to 0/off/false, and the legacy
-      ! MOPAC_FOCK_GPU flag is still accepted for backward compatibility.
-      if (.not. deriv) then
+      ! The device Fock builds (dense and disk streaming) give wrong Fock matrices (ctest on a T4,
+      ! 2026-10-19: PM3, port and the API test), so they only run on request: MOPAC_GPU_EXACT_SC=1
+      ! (or the legacy MOPAC_FOCK_GPU) with the GPU in use.  Otherwise the CPU build below is used.
+      if (.not. deriv .and. lgpu) then
         want_gpu = .false.
-        allow_gpu = .true.
+        allow_gpu = .false.
         legacy_env = .false.
         stream_mode = .false.
 
@@ -127,16 +127,11 @@
         if (envs == 0) then
           if (trim(adjustl(line8)) /= '') legacy_env = .true.
         end if
-
-        if (.not. allow_gpu .and. .not. legacy_env) then
-          write(iw,'(1x,a)') '[GPU FOCK] GPU path disabled by MOPAC_GPU_EXACT_SC value'
-        else if (legacy_env .and. .not. allow_gpu) then
-          write(iw,'(1x,a)') '[GPU FOCK] legacy MOPAC_FOCK_GPU request ignored – unset it or enable the GPU path explicitly'
-        end if
+        if (legacy_env) allow_gpu = .true.
 
         want_gpu = allow_gpu
 
-        if (use_disk) then
+        if (use_disk .and. allow_gpu) then
           if (gpu_scf_stream_available) then
             stream_mode = .true.
           else

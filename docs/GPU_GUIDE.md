@@ -47,8 +47,10 @@ Eigensolver (cuSOLVER) and Density
 - Optional GPU orthogonalization (Cholesky + transforms): `MOPAC_ORTHO_GPU=1`.
 
 Fock Build and Gradients
-- Default: the two-center Fock build runs on GPU when `lgpu` is true.
-- Opt-out: `MOPAC_NOFOCKGPU=1` forces CPU Fock build; legacy opt-in `MOPAC_FOCK_GPU=1` is still honored.
+- Default: the two-center Fock build of the conventional (non-MOZYME) SCF runs on the CPU. The device builds
+  (dense and disk streaming, `src/SCF/fock2.F90`) gave wrong Fock matrices in the test suite on a T4
+  (2026-10-19) and only run on request: `MOPAC_GPU_EXACT_SC=1` (or the legacy `MOPAC_FOCK_GPU=1`) with the
+  GPU in use. The MOZYME device Fock builds are separate and unaffected.
 - Gradient reuse: device-resident Fock can be multiplied with C on device (`fmulC_from_dev`).
 - Experimental gradients: set `MOPAC_GPU_GRAD=1` to request the CUDA gradient path. If no GPU implementation is available the code automatically falls back to the existing CPU routine and continues normally.
 
