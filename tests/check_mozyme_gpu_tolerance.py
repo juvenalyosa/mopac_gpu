@@ -55,6 +55,7 @@ def clean_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ.copy()
     for key in GPU_OFF_KEYS:
         env.pop(key, None)
+    env["MOPAC_GPU_DEBUG"] = "1"  # the [MOZYME GPU ...] trace lines parsed below
     if extra:
         env.update(extra)
     return env

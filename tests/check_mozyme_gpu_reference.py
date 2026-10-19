@@ -87,6 +87,7 @@ def mopac_run(mopac: Path, run_dir: Path, keywords: str, geometry: Path, name: s
     (run_dir / f"{name}.mop").write_text(f'{keywords} GEO_DAT="{geometry.name}"\nreference check\n\n')
     env = os.environ.copy()
     env.pop("MOPAC_NOGPU", None)
+    env["MOPAC_GPU_DEBUG"] = "1"  # the [MOZYME GPU SCF] status lines parsed below
     t0 = time.perf_counter()
     proc = subprocess.run([str(mopac), f"{name}.mop"], cwd=run_dir, env=env, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True)

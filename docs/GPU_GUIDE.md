@@ -38,6 +38,7 @@ Device Selection and Enablement
   - `MOPAC_NOGPU=1`: disable GPU (overrides auto‑enable).
   - `MOPAC_MIN_CC=7.0`: require minimum compute capability (e.g., 7.0 for Volta+).
   - `MOPAC_GPU_DEBUG=1`: print a summary of detected GPUs, chosen devices, and MOZYME GPU settings in the output.
+    It (or the keyword `DEBUG`) also prints the GPU trace lines (`[MOZYME GPU ...]`, `[STREAM]`, `[GPU SCF] GPU path completed`) in the output file; without it a GPU run writes only the fallback and abort messages, and the scripts that parse the trace lines set it.
   - `MOPAC_RESIDENT_SCF=1`: keep density/Fock/DIIS work buffers on the GPU across SCF iterations (default on; set to 0 to force host copies).
 
 Eigensolver (cuSOLVER) and Density

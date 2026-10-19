@@ -63,7 +63,8 @@ def main():
        f"--parallel $(nproc) > {BASE}/build.log 2>&1 || (grep -i error {BASE}/build.log | head -40; exit 1)")
     lib = sh(f"ls {BUILD}/libmopac.so* | head -1").strip()
     data = f"{SRC}/tests/data/mozyme_gpu_reference"
-    env0 = dict(os.environ, CUDA_VISIBLE_DEVICES="0", MOPAC_MOZYME_SECTION_PROFILE="1", MOPAC_GPU_VERBOSE="1")
+    env0 = dict(os.environ, CUDA_VISIBLE_DEVICES="0", MOPAC_MOZYME_SECTION_PROFILE="1", MOPAC_GPU_VERBOSE="1",
+                MOPAC_GPU_DEBUG="1")
     # 1. standalone
     d = f"{BASE}/sa"
     os.makedirs(d, exist_ok=True)

@@ -32,7 +32,7 @@ contains
     use mozyme_gpu_int_utils, only: mozyme_c_int_nonnegative_or_zero, &
       mozyme_c_int_positive_or_zero
     use mod_vars_cuda, only: lgpu, mozyme_gpu_requested, &
-      mozyme_resident_fock_gpu
+      mozyme_resident_fock_gpu, gpu_trace
 #endif
     implicit none
     character(len=*), intent(in) :: lmo_type
@@ -125,7 +125,7 @@ contains
 
     done = code == 0_c_int
     if (done) then
-      write(iw,'(1x,a," status=success kind=",a," iterations=",i0,'// &
+      if (gpu_trace) write(iw,'(1x,a," status=success kind=",a," iterations=",i0,'// &
         '" total=",es13.5," wall_ms=",f10.3)') &
         '[MOZYME GPU relocal]', trim(lmo_type), int(iterations), total, &
         max(wall_ms, 0.001_c_double)

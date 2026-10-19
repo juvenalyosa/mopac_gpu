@@ -63,6 +63,8 @@ def run(mopac: Path, deck: Path, gpu: bool, timeout: float, extra_env: dict | No
         env.pop(key, None)
     if not gpu:
         env["MOPAC_NOGPU"] = "1"
+    else:
+        env["MOPAC_GPU_DEBUG"] = "1"  # the [MOZYME GPU SCF] status lines
     if extra_env:
         env.update(extra_env)
     t0 = time.perf_counter()

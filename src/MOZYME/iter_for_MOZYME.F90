@@ -29,7 +29,7 @@ subroutine iter_for_MOZYME (ee)
 !
     use funcon_C, only: fpc_9
 #ifdef GPU
-    use mod_vars_cuda, only: lgpu, mozyme_gpu, mozyme_check_gpu
+    use mod_vars_cuda, only: lgpu, mozyme_gpu, mozyme_check_gpu, gpu_trace
 #endif
     use common_arrays_C, only : f, p
     use iter_C, only : pold
@@ -1317,8 +1317,12 @@ subroutine iter_for_MOZYME (ee)
     call mozyme_section_timer_begin('iter_post_2_final', iter_sub_timer)
     if (resident_density_current) then
       call mozyme_section_timer_begin('iter_density_final_resident', mozyme_timer)
-      write(iw,'(1x,a)') '[MOZYME GPU SCF] final_density=current_resident'
-      call flush(iw)
+#ifdef GPU
+      if (gpu_trace) then
+        write(iw,'(1x,a)') '[MOZYME GPU SCF] final_density=current_resident'
+        call flush(iw)
+      end if
+#endif
       call mozyme_section_timer_end('iter_density_final_resident', mozyme_timer)
     else if (resident_strict_required) then
       call mozyme_gpu_strict_abort('strict_missing_final_density', &

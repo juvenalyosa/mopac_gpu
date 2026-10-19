@@ -1083,6 +1083,7 @@ def build_mopac_env(
         env["MOPAC_GPU_PROFILE"] = "2"
         env["MOPAC_GPU_DEBUG"] = "1"
     if mode.name == "GPU":
+        env["MOPAC_GPU_DEBUG"] = "1"  # the [MOZYME GPU ...] trace lines parsed from the output
         env["MOPAC_MOZYME_CNVGZ_GPU"] = "1"
         env["MOPAC_MOZYME_HELECZ_GPU"] = "1"
         env["MOPAC_MOZYME_EIMP_GPU"] = "1"

@@ -73,7 +73,8 @@
      &                         mozyme_gpu_requested, mozyme_gpu_plan_ready, mozyme_gpu_enabled, &
      &                         mozyme_gpu_disable_reason, mozyme_fock1_batch_gpu, mozyme_fock2_4x1_batch_gpu, &
      &                         mozyme_resident_fock_gpu, &
-     &                         mozyme_fock_gpu, mozyme_f2_gpu, mozyme_check_gpu, resident_scf, gpu_scf_stream_available
+     &                         mozyme_fock_gpu, mozyme_f2_gpu, mozyme_check_gpu, resident_scf, gpu_scf_stream_available, &
+     &                         gpu_trace
       use mod_vars_cuda, only: gpu_scf_task_mode, GPU_SCF_TASK_AUTO, GPU_SCF_TASK_CPU, GPU_SCF_TASK_GPU
       use mod_vars_cuda, only: MOZYME_GPU_REASON_NONE, MOZYME_GPU_REASON_NOT_REQUESTED, &
      &                         MOZYME_GPU_REASON_NO_DEVICE, MOZYME_GPU_REASON_DEVICE_POLICY
@@ -356,6 +357,23 @@
         call gpuInfo(hasGpu, hasDouble, nDevices, gpuName,name_size, totalMem, &
                   & clockRate, major, minor)
         lgpu = .false.
+!
+!  GPU trace lines in the output file only with DEBUG or MOPAC_GPU_DEBUG
+!
+        gpu_trace = (index(keywrd, " DEBUG") /= 0)
+        line = ' '
+        call get_environment_variable('MOPAC_GPU_DEBUG', line, status=i)
+        if (i == 0) then
+          line = adjustl(line)
+          if (len_trim(line) /= 0) then
+            call upcase(line, len_trim(line))
+            select case (trim(line))
+            case ('0','F','FALSE','N','NO','OFF')
+            case default
+              gpu_trace = .true.
+            end select
+          end if
+        end if
         mozyme_gpu = .false.
         mozyme_gpu_requested = .false.
         mozyme_gpu_plan_ready = .false.
@@ -610,7 +628,7 @@
               if (j >= 1 .and. j <= nDevices) cc_major = major(j)
             end if
             call mozyme_gpu_apply_default_environment(cc_major, defaults_applied)
-            if (defaults_applied) then
+            if (defaults_applied .and. gpu_trace) then
               write(iw,'(1x,a)') '[MOZYME GPU] resident SCF enabled by default (disable with NOGPU or MOPAC_NOGPU=1)'
               call flush(iw)
             end if
@@ -896,11 +914,14 @@
               cc_major = major(jdev)
               cc_minor = minor(jdev)
             end if
-            if (norbs < small_thr) then
-              ! Very small dense-SCF jobs should stay on CPU.  MOZYME inputs can
-              ! still have norbs unset at this early policy point, so keep lgpu
-              ! available for the MOZYME-specific kernels and only disable the
-              ! dense resident/streaming SCF path here.
+            if (norbs == 0) then
+              ! The system size is not known yet (moldat has not run): the dense SCF
+              ! policy is applied after moldat.
+              continue
+            else if (norbs < small_thr) then
+              ! Very small dense-SCF jobs should stay on CPU.  Keep lgpu available
+              ! for the MOZYME-specific kernels and only disable the dense
+              ! resident/streaming SCF path here.
               resident_scf = .false.
               gpu_scf_stream_available = .false.
               if (.not. mozyme) lgpu = .false.
@@ -1085,6 +1106,34 @@
 ! Set up all the data for the molecule
 !
       call moldat (0)  ! data dependent on the system
+#ifdef GPU
+!
+!  Dense-SCF GPU policy by system size, now that norbs is known (MOZYME has its own policy)
+!
+      if (lgpu .and. .not. mozyme) then
+        line = ' '
+        call get_environment_variable('MOPAC_GPU_AUTOPOLICY_OFF', line, status=i)
+        line = adjustl(line)
+        call upcase(line, len_trim(line))
+        select case (trim(line))
+        case ('1','T','TRUE','Y','YES','ON')
+          continue
+        case default
+          if (norbs < 30) then
+            lgpu = .false.
+            resident_scf = .false.
+            gpu_scf_stream_available = .false.
+          else if (norbs < 800) then
+            resident_scf = .true.
+          else
+            resident_scf = .true.
+            gpu_scf_stream_available = (mopac_cuda_scf_stream_supported() .eqv. .true._c_bool)
+          end if
+        end select
+        if (gpu_trace) write(iw,'(1x,a,i0,a,l1,a,l1)') '[GPU SCF] norbs=', norbs, &
+          ' lgpu=', lgpu, ' resident_scf=', resident_scf
+      end if
+#endif
       if (index(keywrd, " 0SCF") /= 0) moperr = .FALSE.
       call calpar      ! Calculate derived parameters
       if (moperr) goto 100

@@ -38,7 +38,7 @@
 #endif
 #ifdef GPU
       use iso_c_binding, only: c_ptr, c_null_ptr, c_associated, c_loc, c_bool, c_size_t
-      Use mod_vars_cuda, only: lgpu, real_cuda, prec, resident_scf, gpu_scf_stream_available
+      Use mod_vars_cuda, only: lgpu, real_cuda, prec, resident_scf, gpu_scf_stream_available, gpu_trace
       Use mod_vars_cuda, only: gpu_scf_task_mode, GPU_SCF_TASK_AUTO, GPU_SCF_TASK_CPU, GPU_SCF_TASK_GPU
       use density_cuda_i
       use gpu_density_interfaces, only: mopac_cuda_update_density_from_host
@@ -484,7 +484,7 @@
                  max(1, gpu_scf_ctx%iterations), ' dE=', gpu_scf_ctx%energy_delta, &
                  ' rmsP=', gpu_scf_ctx%density_rms
           end if
-          write (iw,'(1x,a)') '[GPU SCF] GPU path completed: ' // trim(gpu_scf_message)
+          if (gpu_trace) write (iw,'(1x,a)') '[GPU SCF] GPU path completed: ' // trim(gpu_scf_message)
           niter = max(1, gpu_scf_ctx%iterations)
           pl = gpu_scf_ctx%density_rms
           diff = gpu_scf_ctx%energy_delta

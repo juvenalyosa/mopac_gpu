@@ -30,8 +30,9 @@ PM7 GEO_DAT="protein.pdb" MOZYME TRUST CYCLES=200
 (`TRUST` selects the trust-region L-BFGS optimizer; the default L-BFGS-B often stalls on the noise of the
 MOZYME SCF.)
 
-The output reports `[MOZYME GPU] resident SCF enabled by default (disable with NOGPU or
-MOPAC_NOGPU=1)` and one `[MOZYME GPU SCF] status=success ...` line per SCF.
+The output file has the same lines as a CPU run. With the keyword `DEBUG` or `MOPAC_GPU_DEBUG=1` it also
+reports `[MOZYME GPU] resident SCF enabled by default (disable with NOGPU or MOPAC_NOGPU=1)` and the
+`[MOZYME GPU SCF] status=success ...` trace lines of every SCF (a fallback to the CPU is always reported).
 
 Switching the GPU off, for a job or for a whole environment:
 

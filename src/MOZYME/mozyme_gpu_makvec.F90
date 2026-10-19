@@ -34,7 +34,7 @@ contains
       lijbo, nijbo, kopt
     use mozyme_gpu_int_utils, only: mozyme_c_int_nonnegative_or_zero, &
       mozyme_c_int_positive_or_zero
-    use mod_vars_cuda, only: lgpu, mozyme_gpu_requested, mozyme_resident_fock_gpu
+    use mod_vars_cuda, only: lgpu, mozyme_gpu_requested, mozyme_resident_fock_gpu, gpu_trace
     use mozyme_resident_fock, only: mozyme_resident_fock_prepare_plan, &
       resident_fock_plan_full, mozyme_resident_fock_plan_full_coverage
 #endif
@@ -157,7 +157,7 @@ contains
     call mozyme_section_timer_end('makvec_gpu_kernel', makvec_timer)
     done = (code == 0_c_int)
     if (done) then
-      write(iw,'(1x,a,1x,f0.3)') '[MOZYME GPU makvec] status=success wall_ms=', wall_ms
+      if (gpu_trace) write(iw,'(1x,a,1x,f0.3)') '[MOZYME GPU makvec] status=success wall_ms=', wall_ms
     else
       write(iw,'(1x,a,1x,i0)') '[MOZYME GPU makvec] status=fallback_cpu code=', int(code)
     end if

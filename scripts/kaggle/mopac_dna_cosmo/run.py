@@ -75,7 +75,7 @@ def mopac(run_dir, keywords, geo, gpu, name="j"):
     os.makedirs(run_dir, exist_ok=True)
     with open(f"{run_dir}/{name}.mop", "w") as fh:
         fh.write(f'{keywords} GEO_DAT="{geo}"\ndna/cosmo test\n\n')
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu))
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu), MOPAC_GPU_DEBUG="1")
     t0 = time.perf_counter()
     subprocess.run([f"{BUILD}/mopac", f"{name}.mop"], cwd=run_dir, env=env, capture_output=True, text=True)
     wall = time.perf_counter() - t0

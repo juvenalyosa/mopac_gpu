@@ -191,7 +191,7 @@ smoke() {
     cp "$DATA/1UAO_opt.pdb" "$d/$m/"
     printf 'PM7 MOZYME MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 GEO-OK 1SCF GEO_DAT="1UAO_opt.pdb"\nsmoke\n\n' > "$d/$m/s.mop"
   done
-  ( cd "$d/gpu" && "$MOPAC" s.mop > s.stdout 2>&1 )
+  ( cd "$d/gpu" && MOPAC_GPU_DEBUG=1 "$MOPAC" s.mop > s.stdout 2>&1 )
   ( cd "$d/cpu" && MOPAC_NOGPU=1 "$MOPAC" s.mop > s.stdout 2>&1 )
   local hg hc st
   hg=$(grep "FINAL HEAT" "$d/gpu/s.out" | awk '{print $6}')

@@ -88,6 +88,8 @@ def run(mopac: Path, deck: Path, run_dir: Path, gpu: bool, timeout: float) -> di
         env.pop(key, None)
     if not gpu:
         env["MOPAC_NOGPU"] = "1"
+    else:
+        env["MOPAC_GPU_DEBUG"] = "1"  # the [MOZYME GPU SCF] status lines
     t0 = time.perf_counter()
     try:
         proc = subprocess.run([str(mopac), staged.name], cwd=run_dir, capture_output=True, text=True,

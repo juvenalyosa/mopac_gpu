@@ -69,6 +69,7 @@ def run_mopac(mopac: Path, run_dir: Path, name: str, keywords: str, title: str, 
     deck = run_dir / f"{name}.mop"
     deck.write_text(f"{keywords}\n{title}\n\n", encoding="utf-8")
     env = os.environ.copy()
+    env.setdefault("MOPAC_GPU_DEBUG", "1")  # the [MOZYME GPU SCF] status lines
     if env_extra:
         env.update(env_extra)
     t0 = time.perf_counter()

@@ -63,7 +63,8 @@ def run_job(variant, gpu, rep, name, geo, keys, results):
     shutil.copy2(f"{SRC}/tests/data/mozyme_gpu_reference/{geo}", d)
     with open(f"{d}/j.mop", "w") as fh:
         fh.write(f'{keys} GEO_DAT="{geo}"\nab\n\n')
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu), MOPAC_MOZYME_SCF_TRACE="1", **VARIANTS[variant])
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu), MOPAC_MOZYME_SCF_TRACE="1", MOPAC_GPU_DEBUG="1",
+               **VARIANTS[variant])
     t0 = time.perf_counter()
     p = subprocess.run([f"{BUILD}/mopac", "j.mop"], cwd=d, env=env, capture_output=True, text=True)
     wall = time.perf_counter() - t0

@@ -31,7 +31,7 @@ contains
       noccupied, nvirtual, nnce, nncf, thresh, jopt, numred, nelred, &
       norred
     use mod_vars_cuda, only: lgpu, mozyme_gpu_requested, &
-      mozyme_resident_fock_gpu
+      mozyme_resident_fock_gpu, gpu_trace
     use mozyme_gpu_int_utils, only: mozyme_c_int_nonnegative_or_zero, &
       mozyme_c_int_positive_or_zero
 #endif
@@ -155,7 +155,7 @@ contains
       end if
     end if
     if (done) then
-      write(iw,'(1x,a," status=success mode=",a," selmos=",i0,' // &
+      if (gpu_trace) write(iw,'(1x,a," status=success mode=",a," selmos=",i0,' // &
         '" selected=",i0," ln=",i0," mn=",i0," wall_ms=",f10.3)') &
         '[MOZYME GPU tidy]', trim(mode_name), int(use_selmos_c), &
         int(selected_c), ln, mn, &

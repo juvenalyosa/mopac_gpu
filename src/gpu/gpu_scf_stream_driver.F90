@@ -42,6 +42,7 @@ contains
   logical function gpu_scf_stream_fock(norbs, mpack, numat, nfirst, nlast, ptot, p, w, wj, wk, periodic_flag, f)
     use iso_c_binding, only: c_int, c_double, c_ptr, c_loc
     use chanel_C,      only: iw
+    use mod_vars_cuda, only: gpu_trace
     implicit none
     integer, intent(in) :: norbs, mpack, numat
     integer, intent(in), target :: nfirst(*), nlast(*)
@@ -224,10 +225,10 @@ contains
     if (status /= 0_c_int .and. final_status == 0_c_int) final_status = status
     if (final_status == 0_c_int) then
       gpu_scf_stream_fock = .true.
-      write(iw,'(1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0)') &
+      if (gpu_trace) write(iw,'(1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0)') &
         '[STREAM] engaged: blocks=', nblocks, 'W-blocks=', nblocks_w, 'WJ/WK-blocks=', nblocks_wjwk, &
         'periodic=', periodic_flag
-      write(iw,'(1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0)') &
+      if (gpu_trace) write(iw,'(1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0)') &
         '[STREAM] lengths:', total_len, 'W-len=', total_w_len, 'WJ/WK-len=', total_wjwk_len
     end if
   end function gpu_scf_stream_fock

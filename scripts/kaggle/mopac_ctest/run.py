@@ -1,9 +1,8 @@
 """MOPAC test suite (ctest) with a GPU build on a Kaggle GPU, keeping every output file.
 
-Builds https://github.com/juvenalyosa/mopac_gpu with GPU=ON TESTS=ON, runs ctest without the periodic test
-`port` with the GPU in use and with MOPAC_NOGPU=1, then `port` alone (GPU, MOPAC_NOGPU=1, the opt-in device Fock
-build MOPAC_GPU_EXACT_SC=1; each at most 15 min), keywords/PM3 with MOPAC_GPU_EXACT_SC=1, and the API test under
-gdb.  The kernel output gets ctest_outputs_gpu.tar.gz / ctest_outputs_nogpu.tar.gz (every .out of each ctest
+Builds https://github.com/juvenalyosa/mopac_gpu with GPU=ON TESTS=ON, runs ctest with the GPU in use and
+with MOPAC_NOGPU=1, then the periodic cells of tests/data/materials (small: GPU and MOPAC_NOGPU=1; medium: GPU,
+and quartz also MOPAC_NOGPU=1) and the API test under gdb.  The kernel output gets ctest_outputs_gpu.tar.gz / ctest_outputs_nogpu.tar.gz (every .out of each ctest
 run), ctest_references.tar.gz, the ctest logs and REPORT_CTEST.txt.
 
     kaggle kernels push -p scripts/kaggle/mopac_ctest
@@ -51,34 +50,39 @@ sh(f"cmake -S {SRC} -B {BUILD} -G Ninja -DGPU=ON -DTESTS=ON -DCMAKE_BUILD_TYPE=R
 say(f"build: {time.time() - T0:.0f} s")
 
 t = time.time()
-sh(f"cd {BUILD} && ctest -j $(nproc) -E '^port$' --timeout 900 --output-on-failure > {OUT}/ctest_gpu.log 2>&1")
-say(f"ctest without port: {time.time() - t:.0f} s, " + sh(f"grep 'tests passed' {OUT}/ctest_gpu.log").strip())
+sh(f"cd {BUILD} && ctest -j $(nproc) --timeout 900 --output-on-failure > {OUT}/ctest_gpu.log 2>&1")
+say(f"ctest: {time.time() - t:.0f} s, " + sh(f"grep 'tests passed' {OUT}/ctest_gpu.log").strip())
 sh(f"cd {BUILD}/tests && find . -name '*.out' | tar -czf {OUT}/ctest_outputs_gpu.tar.gz -T -")
 t = time.time()
-sh(f"cd {BUILD} && MOPAC_NOGPU=1 ctest -j $(nproc) -E '^port$' --timeout 900 > {OUT}/ctest_nogpu.log 2>&1")
-say(f"ctest without port, MOPAC_NOGPU=1: {time.time() - t:.0f} s, " + sh(f"grep 'tests passed' {OUT}/ctest_nogpu.log").strip())
+sh(f"cd {BUILD} && MOPAC_NOGPU=1 ctest -j $(nproc) --timeout 900 > {OUT}/ctest_nogpu.log 2>&1")
+say(f"ctest, MOPAC_NOGPU=1: {time.time() - t:.0f} s, " + sh(f"grep 'tests passed' {OUT}/ctest_nogpu.log").strip())
 
-# the periodic test with the GPU in use and off, then the opt-in device Fock build (MOPAC_GPU_EXACT_SC=1)
-for label, env in (("GPU", ""), ("MOPAC_NOGPU=1", "MOPAC_NOGPU=1"), ("MOPAC_GPU_EXACT_SC=1", "MOPAC_GPU_EXACT_SC=1")):
-    tag = label.replace("=", "_")
-    d = f"{BASE}/port_{tag}"
-    sh(f"mkdir -p {d} && cp {SRC}/tests/port.mop {d}/")
-    t = time.time()
-    sh(f"cd {d} && {env} timeout {300 if 'EXACT' in env else 900} {BUILD}/mopac port.mop > stdout.txt 2>&1")
-    heats = sh(f"grep 'FINAL HEAT OF FORMATION' {d}/port.out | awk '{{print $6}}'").split()
-    say(f"port, {label}: {time.time() - t:.0f} s, {len(heats)} heats {heats[:8]}")
-    sh(f"cp {d}/port.out {OUT}/port_{tag}.out")
-# a molecule (keywords/PM3) with the opt-in device Fock build, against the reference
-d = f"{BASE}/pm3_exact_sc"
-sh(f"mkdir -p {d} && cp {SRC}/tests/keywords/PM3.mop {d}/")
-sh(f"cd {d} && MOPAC_GPU_EXACT_SC=1 timeout 300 {BUILD}/mopac PM3.mop > stdout.txt 2>&1; cp PM3.out {OUT}/PM3_exact_sc.out")
-say("PM3, MOPAC_GPU_EXACT_SC=1: " + sh(f"grep 'FINAL HEAT OF FORMATION' {d}/PM3.out").strip() + " | reference: "
-    + sh(f"grep 'FINAL HEAT OF FORMATION' {SRC}/tests/keywords/PM3.out").strip())
-say("port reference heats: " + str(sh(f"grep 'FINAL HEAT OF FORMATION' {SRC}/tests/port.out | awk '{{print $6}}'").split()[:8]))
+# periodic cells (tests/data/materials): GPU against MOPAC_NOGPU=1; MOPAC_GPU_DEBUG=1 shows whether lgpu stays on
+def heat_grad(path):
+    txt = open(path, errors="ignore").read() if os.path.exists(path) else ""
+    h = [l.split()[5] for l in txt.splitlines() if "FINAL HEAT OF FORMATION" in l]
+    g = [l.split()[-1] for l in txt.splitlines() if "GRADIENT NORM" in l]
+    gpu = [l.strip() for l in txt.splitlines() if l.strip().startswith(("lgpu", "hasGPU", "[GPU SCF] norbs"))]
+    return (h[-1] if h else None), (g[-1] if g else None), gpu[:2]
+
+
+for size, decks, modes, limit in (("small", sorted(os.listdir(f"{SRC}/tests/data/materials/small")), ("GPU", "NOGPU"), 600),
+                                  ("medium", ["quartz.mop", "silicon.mop", "rutile.mop"], ("GPU",), 1500),
+                                  ("medium", ["quartz.mop"], ("NOGPU",), 1500)):
+    for deck in decks:
+        for mode in modes:
+            d = f"{BASE}/mat_{size}_{mode}"
+            sh(f"mkdir -p {d} && cp {SRC}/tests/data/materials/{size}/{deck} {d}/")
+            env = "MOPAC_GPU_DEBUG=1 " + ("MOPAC_NOGPU=1" if mode == "NOGPU" else "")
+            t = time.time()
+            sh(f"cd {d} && {env} timeout {limit} {BUILD}/mopac {deck} > /dev/null 2>&1")
+            h, g, gpu = heat_grad(f"{d}/{deck[:-4]}.out")
+            say(f"{size} {deck[:-4]:10s} {mode:5s} {time.time() - t:7.1f} s  heat {h}  gnorm {g}  {gpu}")
+            sh(f"cp {d}/{deck[:-4]}.out {OUT}/mat_{size}_{mode}_{deck[:-4]}.out")
 
 # backtrace of the API test
 say("mopac-api-test under gdb:")
-say(sh(f"cd {BUILD}/tests && gdb -batch -ex run -ex bt {BUILD}/mopac-api-test 2>&1 | tail -25"))
+say(sh(f"cd {BUILD}/tests && gdb -batch -ex run -ex bt {BUILD}/mopac-api-test 2>&1 | grep -v Thread | tail -8"))
 
 sh(f"cd {BUILD}/tests && find . -name '*.out' | tar -czf {OUT}/ctest_outputs_nogpu.tar.gz -T - ; "
    f"cd {SRC}/tests && find . -name '*.out' | tar -czf {OUT}/ctest_references.tar.gz -T -")

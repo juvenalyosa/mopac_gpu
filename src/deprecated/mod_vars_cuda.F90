@@ -18,12 +18,15 @@ module mod_vars_cuda
   public :: mozyme_gpu_requested, mozyme_gpu_plan_ready, mozyme_gpu_enabled
   public :: mozyme_gpu_disable_reason, mozyme_fock1_batch_gpu, mozyme_fock2_4x1_batch_gpu
   public :: mozyme_resident_fock_gpu, mozyme_fock_gpu, mozyme_f2_gpu, mozyme_check_gpu
-  public :: resident_scf, gpu_scf_stream_available
+  public :: resident_scf, gpu_scf_stream_available, gpu_trace
   public :: MOZYME_GPU_REASON_NONE, MOZYME_GPU_REASON_NOT_REQUESTED, MOZYME_GPU_REASON_NO_DEVICE
   public :: MOZYME_GPU_REASON_NO_PRODUCTION_WORK, MOZYME_GPU_REASON_DEVICE_POLICY
 
   integer, parameter :: nthreads_gpu = 256, nblocks_gpu = 256
   logical :: lgpu = .false.
+  ! GPU trace lines ('[MOZYME GPU ...]', '[STREAM] ...') in the output file:
+  ! only with the keyword DEBUG or MOPAC_GPU_DEBUG set (set in run_mopac).
+  logical :: gpu_trace = .false.
   ! MOZYME GPU state is split deliberately:
   ! requested: user/default policy asked for MOZYME GPU work.
   ! mozyme_gpu: production-safe MOZYME GPU work is currently enabled.

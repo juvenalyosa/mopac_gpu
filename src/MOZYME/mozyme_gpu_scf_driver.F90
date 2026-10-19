@@ -192,7 +192,7 @@ contains
     use mozyme_section_timers, only: mozyme_section_timer_begin, mozyme_section_timer_end
 #ifdef GPU
     use mod_vars_cuda, only: lgpu, mozyme_gpu_requested, &
-      mozyme_resident_fock_gpu
+      mozyme_resident_fock_gpu, gpu_trace
     use mozyme_gpu_int_utils, only: mozyme_c_int_checked
     use mozyme_resident_fock, only: mozyme_resident_fock_prepare_plan, &
       mozyme_resident_fock_plan_full_coverage, resident_fock_plan_full, &
@@ -443,7 +443,7 @@ contains
       merge(1_c_int, 0_c_int, resident_fock_partial_covered)
     config%resident_fock_plan_required_mask = resident_fock_required_mask
     config%resident_fock_plan_covered_mask = resident_fock_covered_mask
-    write(iw,'(1x,a,1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0)') &
+    if (gpu_trace) write(iw,'(1x,a,1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0,1x,a,1x,i0)') &
       '[MOZYME GPU SCF]', 'resident_fock_plan_id=', resident_fock_plan_id, &
       'resident_fock_plan_full_coverage=', int(config%resident_fock_plan_full_coverage), &
       'resident_fock_plan_partial_coverage=', int(config%resident_fock_plan_partial_coverage), &
@@ -537,9 +537,11 @@ contains
         grow_status = 0
         call mozyme_gpu_grow_lmo_storage(grow_status)
         if (grow_status == 0) then
-          write(iw,'(1x,a,i0,a,i0,a,i0)') '[MOZYME GPU SCF] lmo_storage_grown attempt=', &
-            storage_attempt, ' icocc_dim=', icocc_dim, ' icvir_dim=', icvir_dim
-          call flush(iw)
+          if (gpu_trace) then
+            write(iw,'(1x,a,i0,a,i0,a,i0)') '[MOZYME GPU SCF] lmo_storage_grown attempt=', &
+              storage_attempt, ' icocc_dim=', icocc_dim, ' icvir_dim=', icvir_dim
+            call flush(iw)
+          end if
           cycle storage_loop
         end if
       end if
@@ -704,6 +706,7 @@ contains
     use molkst_C, only: numat
     use MOZYME_C, only: icocc, icocc_dim, kopt, ncf, nncf
     use mozyme_gpu_int_utils, only: mozyme_c_int_positive_or_zero
+    use mod_vars_cuda, only: gpu_trace
     implicit none
     integer, intent(in) :: nocc
     integer, intent(in) :: fock_mode
@@ -740,7 +743,7 @@ contains
     ok = code == 0_c_int
     if (ok) then
       printed_ms = max(wall_ms, 0.001_c_double)
-      write(iw,'(1x,a," success code=",i0," ms=",f10.3,'// &
+      if (gpu_trace) write(iw,'(1x,a," success code=",i0," ms=",f10.3,'// &
         '" initial_setup=1 fock_mode=",i0," all_initial_setup_paths=1")') &
         '[MOZYME GPU setupk]', int(code), printed_ms, fock_mode
     else
@@ -1868,6 +1871,7 @@ contains
   end subroutine append_stage_name
 
   subroutine trace_status(iw, trace, status, prefix)
+    use mod_vars_cuda, only: gpu_trace
     implicit none
     integer, intent(in) :: iw
     logical, intent(in) :: trace
@@ -1878,6 +1882,7 @@ contains
     integer :: full_stage_value
     integer :: resident_decision_complete_value
 
+    if (.not. (trace .or. gpu_trace)) return
     write(iw,'(1x,a,1x,a,1x,a,1x,i0,1x,a,1x,a,1x,a,1x,i0,1x,a,1x,i0)') &
       '[MOZYME GPU SCF]', trim(prefix), 'code=', int(status%code), &
       'code_name=', trim(status_code_name(status%code)), &
@@ -2082,6 +2087,9 @@ contains
   end subroutine trace_begin
 
   subroutine trace_end(iw, trace, success, start_time, message, force_message)
+#ifdef GPU
+    use mod_vars_cuda, only: gpu_trace
+#endif
     implicit none
     integer, intent(in) :: iw
     logical, intent(in) :: trace, success
@@ -2093,7 +2101,14 @@ contains
     logical :: emit_message
 
     emit_message = trace
-    if (present(force_message)) emit_message = emit_message .or. force_message
+#ifdef GPU
+    emit_message = emit_message .or. gpu_trace
+#endif
+!
+!  A fallback or an abort is always reported, a completed resident SCF only with DEBUG
+!
+    if (present(force_message)) emit_message = emit_message .or. (force_message .and. &
+      index(message, 'status=success') /= 1 .and. index(message, 'status=resident_step') /= 1)
     if (emit_message) then
       write(iw,'(1x,a,1x,a)') '[MOZYME GPU SCF]', trim(message)
     end if

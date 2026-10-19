@@ -13,6 +13,7 @@ from pathlib import Path
 
 
 STRICT_GPU_ENV = {
+    "MOPAC_GPU_DEBUG": "1",  # the [MOZYME GPU ...] trace lines parsed below
     "MOPAC_FORCEGPU": "1",
     "MOZYME_GPU_FORCE": "1",
     "MOPAC_GPU_PROFILE": "1",

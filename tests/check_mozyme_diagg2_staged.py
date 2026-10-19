@@ -54,6 +54,7 @@ def run(mopac: Path, run_dir: Path, keywords: str, pdb: Path, staged: bool) -> d
     env = os.environ.copy()
     env.pop("MOPAC_NOGPU", None)
     env["MOPAC_MOZYME_SCF_TRACE"] = "1"
+    env["MOPAC_GPU_DEBUG"] = "1"  # the [MOZYME GPU SCF] status line with the iteration count
     if staged:
         env["MOPAC_MOZYME_DIAGG2_STAGED"] = "1"
     else:
