@@ -37,6 +37,10 @@
 #   6 trace         chignolin and crambin SCF per iteration and per diagg2 sweep (MOPAC_MOZYME_SCF_TRACE=1)
 #   7 (RUN_NSYS=1)  nsys kernel summary of a crambin SCF, both kernels
 #   8 (RUN_LARGE=1) full crambin FORCE THERMO with 6 processes, both kernels
+#   9 hbond         tests/check_mozyme_gpu_hbond.py: PM7 H-bond (with and without HB-SMOOTH) and dispersion kernels
+#                   against the CPU loops of the same run (MOPAC_GPU_DISP_CHECK=1); chignolin, crambin, DNA
+#  10 ctest         (CTEST=0 skips) the MOPAC test suite with this GPU build (TESTS=ON, needs NumPy); failed tests
+#                   run again with MOPAC_NOGPU=1 (GPU results vs a broken CPU path in the GPU build)
 
 set -u
 STAMP=$(date +%Y%m%d_%H%M%S)
@@ -299,4 +303,37 @@ if [ "${RUN_LARGE:-0}" = 1 ]; then
   step "8b crambin FORCE (staged diagg2)" crambin_force_staged.log \
     env MOPAC_MOZYME_DIAGG2_STAGED=1 python3 "$SRC/tests/check_mozyme_gpu_reference.py" "$MOPAC" --data "$DATA" \
     --work-dir "$RUN/crambin_staged" --workers 0 --concurrent 0 --skip-forcets --large-workers 6
+fi
+
+# ---------------------------------------------------------------- 9 H-bond / dispersion kernels
+if [ "${QUICK:-0}" = 1 ]; then HB_OPTS=(--skip-dna); else HB_OPTS=(); fi
+step "9 H-bond / dispersion kernels" hbond.log \
+  python3 "$SRC/tests/check_mozyme_gpu_hbond.py" "$MOPAC" --work-dir "$RUN/hbond" ${HB_OPTS[@]+"${HB_OPTS[@]}"}
+
+# ---------------------------------------------------------------- 10 ctest (CTEST=0 skips)
+if [ "${CTEST:-1}" = 1 ] && [ -z "${MOPAC_BIN:-}" ]; then
+  ctest_gpu() {
+    cmake -S "$SRC" -B "$BUILD" -DTESTS=ON > "$RUN/logs/ctest_configure.log" 2>&1 \
+      || { echo "FAIL ctest: configure with TESTS=ON (logs/ctest_configure.log)"; return 1; }
+    # a target that does not build fails its own tests only: ctest runs anyway
+    local keep=(); [ -f "$BUILD/build.ninja" ] && keep=(-- -k 0)
+    if ! cmake --build "$BUILD" --parallel "$NCPU" ${keep[@]+"${keep[@]}"} > "$RUN/logs/ctest_build.log" 2>&1; then
+      echo "FAIL ctest: build of the test targets (logs/ctest_build.log)"
+      grep -E "error|FAILED:" "$RUN/logs/ctest_build.log" | head -20 | sed 's/^/     /'
+    fi
+    ( cd "$BUILD" && ctest -j "$NCPU" --output-on-failure > "$RUN/logs/ctest_gpu.log" 2>&1 )
+    local summary; summary=$(grep "tests passed" "$RUN/logs/ctest_gpu.log")
+    echo "[ctest] GPU build: ${summary:-no summary (logs/ctest_gpu.log)}"
+    if grep -q "100% tests passed" "$RUN/logs/ctest_gpu.log"; then
+      echo "PASS ctest: $summary"
+      return 0
+    fi
+    sed -n '/The following tests FAILED/,$p' "$RUN/logs/ctest_gpu.log" | grep -E "^[[:space:]]+[0-9]+ - " | sed 's/^[[:space:]]*/     GPU failed: /'
+    ( cd "$BUILD" && MOPAC_NOGPU=1 ctest --rerun-failed --output-on-failure > "$RUN/logs/ctest_nogpu.log" 2>&1 )
+    echo "[ctest] failed tests again with MOPAC_NOGPU=1: $(grep "tests passed" "$RUN/logs/ctest_nogpu.log")"
+    sed -n '/The following tests FAILED/,$p' "$RUN/logs/ctest_nogpu.log" | grep -E "^[[:space:]]+[0-9]+ - " | sed 's/^[[:space:]]*/     NOGPU failed: /'
+    echo "FAIL ctest: $summary"
+    return 1
+  }
+  step "10 ctest (GPU build)" ctest.log ctest_gpu
 fi
