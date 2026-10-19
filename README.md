@@ -548,7 +548,8 @@ statistical averages.
 - **NVE after NVT** restarts from the last NVT geometry with fresh velocities at the same
   temperature: MOPAC cannot read velocities together with a PDB geometry.
 - **Runs on the CPU instead of the GPU:** periodic systems, pKa calculations, and the programming
-  interface (`libmopac` API). COSMO implicit water does run on the GPU (crambin: 2.1 s vs 33 s on the
+  interface (`libmopac` API) except the MOZYME QM/MM session (`mozyme_qmmm_*`, QM regions above
+  100 atoms). COSMO implicit water does run on the GPU (crambin: 2.1 s vs 33 s on the
   CPU, energies within 0.002 kcal/mol).
 - **Reproducibility.** GPU runs are not bit-reproducible; `SEED` fixes the random numbers but not
   the order of the parallel rotations.
