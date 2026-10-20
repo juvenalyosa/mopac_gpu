@@ -1,6 +1,9 @@
-"""Solids, conventional SCF on a Kaggle GPU: medium quartz and silicon (tests/data/materials/medium) with the GPU hcore
-and pair gradient (both on by default) and MOPAC_GPU_PROFILE=1, for the split of the remaining host time.
-(v1 of this kernel validated the pair gradient against the CPU, v2 the hcore image sums.)
+"""Solids, conventional SCF on a Kaggle GPU: two-centre Fock terms on the device (MOPAC_GPU_CONV_FOCK=1).
+
+MOPAC_GPU_FOCK_CHECK=1 builds F on the device and on the CPU and prints "[GPU Fock] check max|F_gpu - F_cpu|=" for
+the first SCF iterations (CPU result kept) on Si, quartz and rutile cells of 144-162 atoms; then medium quartz with
+the device Fock build on and MOPAC_GPU_PROFILE=1.  (v1 validated the pair gradient, v2 the hcore image sums, v3
+profiled the medium cells.)
 
     kaggle kernels push -p scripts/kaggle/mopac_grad_gpu
     kaggle kernels output juvenalyosa/mopac-grad-gpu -p ./grad_results
@@ -46,8 +49,10 @@ sh(f"cmake -S {SRC} -B {BUILD} -G Ninja -DGPU=ON -DCMAKE_BUILD_TYPE=Release -DCU
 say(f"build: {time.time() - T0:.0f} s")
 
 MAT = f"{SRC}/tests/data/materials"
-ON = "MOPAC_GPU_DEBUG=1 MOPAC_GPU_PROFILE=1"
-runs = [("quartz", f"{MAT}/medium/quartz.mop", "", ON), ("silicon", f"{MAT}/medium/silicon.mop", "", ON)]
+CHECK = "MOPAC_GPU_DEBUG=1 MOPAC_GPU_CONV_FOCK=1 MOPAC_GPU_FOCK_CHECK=1"
+ON = "MOPAC_GPU_CONV_FOCK=1 MOPAC_GPU_PROFILE=1"
+runs = [("si144", f"{MAT}/grad/si144.mop", "", CHECK), ("quartz162", f"{MAT}/grad/quartz162.mop", "", CHECK),
+        ("rutile162", f"{MAT}/grad/rutile162.mop", "", CHECK), ("quartz", f"{MAT}/medium/quartz.mop", "", ON)]
 for name, path, extra, env in runs:
     label = name + extra.replace(" ", "_") + ("_check" if "CHECK" in env else "_on")
     d = f"{BASE}/{label}"
@@ -59,9 +64,11 @@ for name, path, extra, env in runs:
     sh(f"cd {d} && {env} timeout 900 {BUILD}/mopac {name}.mop > stdout.txt 2>&1")
     out = open(f"{d}/{name}.out", errors="ignore").read().splitlines() if os.path.exists(f"{d}/{name}.out") else []
     heat = [l.split()[5] for l in out if "FINAL HEAT OF FORMATION" in l]
-    chk = [l.strip() for l in out if "[GPU hcore]" in l or "[GPU gradient]" in l or
+    chk = [l.strip() for l in out if "[GPU hcore]" in l or "[GPU gradient]" in l or "check max|F_gpu" in l or
            ("[PROFILE]" in l and any(k in l for k in ("conv_", "hcore_total", "deriv_dcart", "dcart_")))]
     stages = [l.strip() for l in out if ("AFTER  HCORE" in l or "AFTER  DERIV" in l or "AFTER  ITER" in l)]
+    stages += [l.strip() for l in out if "AFTER  FOCKS" in l][-1:] + [l.strip() for l in out if "AFTER  FULL DIAG" in l][-1:]
+    stages += [f"iterations {sum('TIME FOR ITERATION' in l for l in out)}"]
     say(f"{label:18s} {time.time() - t:7.1f} s  heat {heat[-1] if heat else None}")
     for c in chk + stages:
         say("    " + c)
