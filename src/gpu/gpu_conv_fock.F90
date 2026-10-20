@@ -18,7 +18,9 @@
 ! one-centre terms (fock1) on the host.  hcore bumps conv_w_generation when it
 ! rebuilds w / wk, so the device copies are uploaded once per geometry.
 !
-! MOPAC_GPU_CONV_FOCK=1 enables it.  MOPAC_GPU_FOCK_CHECK=1 builds the device
+! On by default with the GPU in use; MOPAC_GPU_CONV_FOCK=0 turns it off (T4,
+! 2026-10-20: max |F_gpu - F_cpu| <= 2.4e-9 eV on Si, quartz and rutile cells).
+! MOPAC_GPU_FOCK_CHECK=1 builds the device
 ! Fock matrix, lets fock2 build the CPU one, and reports the difference in
 ! gpu_conv_fock2_check_finish (the CPU result is kept).
 module gpu_conv_fock
@@ -62,6 +64,15 @@ contains
     call get_environment_variable(name, v, status=st)
     env_on = (st == 0 .and. len_trim(v) > 0 .and. v(1:1) /= '0')
   end function env_on
+
+  logical function env_off(name)
+    character(len=*), intent(in) :: name
+    character(len=8) :: v
+    integer :: st
+    v = ' '
+    call get_environment_variable(name, v, status=st)
+    env_off = (st == 0 .and. len_trim(v) > 0 .and. v(1:1) == '0')
+  end function env_off
 
   ! Pair table in fock2's order (ii, jj <= ii; w offsets as hcore lays them out).
   subroutine build_tables(numat, nfirst, nlast)
@@ -122,7 +133,7 @@ contains
     logical :: check
     done = .false.
     if (.not. lgpu .or. id == 0 .or. mozyme .or. numat < 1) return
-    if (.not. env_on('MOPAC_GPU_CONV_FOCK') .or. env_on('MOPAC_NOGPU')) return
+    if (env_off('MOPAC_GPU_CONV_FOCK') .or. env_on('MOPAC_NOGPU')) return
     check = env_on('MOPAC_GPU_FOCK_CHECK')
     call build_tables(numat, nfirst, nlast)
     if (check) then
