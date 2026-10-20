@@ -53,6 +53,7 @@ Fock Build and Gradients
   (2026-10-19) and only run on request: `MOPAC_GPU_EXACT_SC=1` (or the legacy `MOPAC_FOCK_GPU=1`) with the
   GPU in use. The MOZYME device Fock builds are separate and unaffected.
 - Gradient reuse: device-resident Fock can be multiplied with C on device (`fmulC_from_dev`).
+- Conventional SCF gradients (molecules and solids with `Tv`, RHF, atoms with s, sp or spd basis; PM7 or any method without `Tv` in three dimensions): when the GPU is in use (more than 100 atoms) the pair loop of `dcart` runs on the device with the same kernels as the MOZYME gradient, every atom of every image cell as a separate entry and the solid-state rules of `dhc` (no overlap beyond 15 Å, point charges beyond `clower`, exchange dropped when (ss|ss) < 4 eV). Distant point-charge pairs stay on the CPU. `MOPAC_GPU_CONV_GRAD=0` turns it off; `MOPAC_GPU_GRAD_CHECK=1` evaluates both and prints `[GPU gradient] check pairs= ms= cpu_ms= max_abs_diff=` (the CPU result is kept). T4, 2026-10-20: Si 144 atoms 8.1 s vs 23.8 s CPU, quartz 162 atoms 3.5 vs 11.7 s, urea crystal 192 atoms 0.16 vs 2.4 s; max difference 4.5e-7 kcal/mol/Å.
 - Experimental gradients: set `MOPAC_GPU_GRAD=1` to request the CUDA gradient path. If no GPU implementation is available the code automatically falls back to the existing CPU routine and continues normally.
 
 BLAS Acceleration and Multi‑GPU

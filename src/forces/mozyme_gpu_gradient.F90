@@ -207,7 +207,8 @@ contains
   end function mozyme_gpu_sp_pair
 
   ! Conventional (dense density) SCF, molecules and solids: the pair loop of
-  ! dcart_build_scf_gradient_cpu on the device when MOPAC_GPU_CONV_GRAD=1.
+  ! dcart_build_scf_gradient_cpu on the device unless MOPAC_GPU_CONV_GRAD=0
+  ! (T4, 2026-10-20: max |CPU - GPU| <= 4.5e-7 kcal/mol/A on Si, quartz, urea).
   ! Not for UHF (the device energy takes pa = pb = p/2), MOZYME (its own
   ! route), or id = 3 with methods other than PM7 (rotate's nddo_to_point).
   logical function conv_gpu_gradient_enabled()
@@ -218,7 +219,7 @@ contains
     implicit none
 #ifdef GPU
     conv_gpu_gradient_enabled = lgpu .and. .not. env_truthy('MOPAC_NOGPU') .and. &
-      env_truthy('MOPAC_GPU_CONV_GRAD') .and. .not. mozyme .and. .not. uhf .and. &
+      .not. env_falsy('MOPAC_GPU_CONV_GRAD') .and. .not. mozyme .and. .not. uhf .and. &
       .not. (id == 3 .and. .not. method_pm7)
 #else
     conv_gpu_gradient_enabled = .false.

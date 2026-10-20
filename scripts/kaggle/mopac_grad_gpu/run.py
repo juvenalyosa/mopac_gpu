@@ -60,7 +60,7 @@ for name, path, extra in runs:
     os.makedirs(d, exist_ok=True)
     open(f"{d}/{name}.mop", "w").write("\n".join(lines) + "\n")
     t = time.time()
-    sh(f"cd {d} && MOPAC_GPU_DEBUG=1 MOPAC_GPU_CONV_GRAD=1 MOPAC_GPU_GRAD_CHECK=1 timeout 900 "
+    sh(f"cd {d} && MOPAC_GPU_DEBUG=1 MOPAC_GPU_GRAD_CHECK=1 timeout 900 "
        f"{BUILD}/mopac {name}.mop > stdout.txt 2>&1")
     out = open(f"{d}/{name}.out", errors="ignore").read().splitlines() if os.path.exists(f"{d}/{name}.out") else []
     heat = [l.split()[5] for l in out if "FINAL HEAT OF FORMATION" in l]
