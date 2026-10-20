@@ -35,6 +35,8 @@ module mozyme_gpu_gradient
   public :: mozyme_gpu_d_pairs_enabled
   public :: conv_gpu_gradient_enabled
   public :: conv_gpu_gradient_run
+  public :: conv_gpu_hcore_enabled
+  public :: conv_gpu_solrot_run
   public :: mozyme_gpu_disp_enabled
   public :: mozyme_gpu_disp_check_enabled
 
@@ -106,6 +108,22 @@ module mozyme_gpu_gradient
       integer(c_int) :: cpu_pairs_c
       integer(c_int) :: rc
     end function mopac_cuda_pair_gradient_ext
+
+    function mopac_cuda_solrot_pairs(npairs_c, pair_ni_c, pair_nj_c, pair_woff_c, pair_kb_c, pair_first_c, &
+        pair_self_c, pair_xi_c, pbest_w1_c, pbest_img_c, nitems_c, item_pair_c, item_img_c, item_xj_c, &
+        item_xjuc_c, tables_c, w_c, wk_c, di_c, e1b_c, e2a_c, enuc_c, ms_c) &
+        bind(C, name='mopac_cuda_solrot_pairs') result(rc)
+      import :: c_int, c_long_long, c_double, mozyme_pair_tables_c
+      integer(c_int), value :: npairs_c, nitems_c
+      integer(c_int) :: pair_ni_c(*), pair_nj_c(*), pair_kb_c(*), pair_first_c(*), pair_self_c(*)
+      integer(c_int) :: pbest_img_c(*), item_pair_c(*), item_img_c(*)
+      integer(c_long_long) :: pair_woff_c(*)
+      real(c_double) :: pair_xi_c(*), pbest_w1_c(*), item_xj_c(*), item_xjuc_c(*)
+      real(c_double) :: w_c(*), wk_c(*), di_c(*), e1b_c(*), e2a_c(*), enuc_c(*)
+      type(mozyme_pair_tables_c) :: tables_c
+      real(c_double) :: ms_c
+      integer(c_int) :: rc
+    end function mopac_cuda_solrot_pairs
   end interface
 #endif
 
@@ -251,6 +269,45 @@ contains
     if (coord(1, 1) /= coord(1, 1)) dxyz(1, 1) = dxyz(1, 1)
 #endif
   end subroutine conv_gpu_gradient_run
+
+  ! Solids (id /= 0), conventional SCF: the image sums of hcore / solrot for
+  ! the images closer than clower on the device when MOPAC_GPU_CONV_HCORE=1.
+  logical function conv_gpu_hcore_enabled()
+#ifdef GPU
+    use mod_vars_cuda, only : lgpu
+    use molkst_C, only : mozyme, id, method_pm7
+#endif
+    implicit none
+#ifdef GPU
+    conv_gpu_hcore_enabled = lgpu .and. .not. env_truthy('MOPAC_NOGPU') .and. &
+      env_truthy('MOPAC_GPU_CONV_HCORE') .and. .not. mozyme .and. id /= 0 .and. &
+      .not. (id == 3 .and. .not. method_pm7)
+#else
+    conv_gpu_hcore_enabled = .false.
+#endif
+  end function conv_gpu_hcore_enabled
+
+  ! For every pair (i, j <= i) of a solid, in hcore's order, the sums over the
+  ! images of solrot and of hcore's h1elec loop: w and wk (common_arrays_C) get
+  ! the pair's J and K integrals at their place, gdi(81, pair) the summed
+  ! h1elec block (9 x 9, column-major), ge1b / ge2a / genuc the summed
+  ! rotate / point terms (genuc times solrot's one) and gkb the number of
+  ! integrals of the pair.  code: 0 success, otherwise nothing usable.
+  subroutine conv_gpu_solrot_run(gdi, ge1b, ge2a, genuc, gkb, code, ms, nitems_out)
+    implicit none
+    double precision, allocatable, intent(out) :: gdi(:,:), ge1b(:,:), ge2a(:,:), genuc(:)
+    integer, allocatable, intent(out) :: gkb(:)
+    integer, intent(out) :: code, nitems_out
+    double precision, intent(out) :: ms
+#ifdef GPU
+    call conv_gpu_solrot_run_gpu(gdi, ge1b, ge2a, genuc, gkb, code, ms, nitems_out)
+#else
+    allocate(gdi(81, 1), ge1b(45, 1), ge2a(45, 1), genuc(1), gkb(1))
+    code = 1
+    ms = 0.d0
+    nitems_out = 0
+#endif
+  end subroutine conv_gpu_solrot_run
 
   ! Pairs with a d-orbital atom go to the device unless MOPAC_MOZYME_DPAIRS_GPU=0.
   logical function mozyme_gpu_d_pairs_enabled()
@@ -732,6 +789,157 @@ contains
     ms = ms_c
     nitems_out = nitems
   end subroutine conv_gpu_gradient_run_gpu
+
+  subroutine conv_gpu_solrot_run_gpu(gdi, ge1b, ge2a, genuc, gkb, code, ms, nitems_out)
+    use common_arrays_C, only : coord, nat, tvec, w, wk
+    use molkst_C, only : numat, l1u, l2u, l3u, clower
+    use parameters_C, only : natorb, tore
+    use funcon_C, only : ev, a0
+    use overlaps_C, only : cutof1
+    implicit none
+    double precision, allocatable, intent(out) :: gdi(:,:), ge1b(:,:), ge2a(:,:), genuc(:)
+    integer, allocatable, intent(out) :: gkb(:)
+    integer, intent(out) :: code, nitems_out
+    double precision, intent(out) :: ms
+    double precision, external :: trunk
+    integer(c_int), allocatable :: pair_ni(:), pair_nj(:), pair_kb(:), pair_first(:), pair_self(:), pbest_img(:)
+    integer(c_int), allocatable :: item_pair(:), item_img(:)
+    integer(c_long_long), allocatable :: pair_woff(:)
+    double precision, allocatable :: pair_xi(:,:), pbest_w1(:), item_xj(:,:), item_xjuc(:,:)
+    double precision, allocatable :: sw(:), se1(:), se2(:), sen(:)
+    type(mozyme_pair_tables_c) :: tables
+    integer(c_int) :: rc
+    real(c_double) :: ms_c
+    integer :: i, j, ii, jj, k, kkkk, p, npairs, nitems, pass, kr, ni, nj, li, lj, nii, njj, l
+    double precision :: xj(3), xjuc(3), r, cutof2, one, ee, ee1, ee2
+
+    code = 1
+    ms = 0.d0
+    nitems_out = 0
+    ! the device sees only the images within clower: overlaps must vanish beyond it
+    if (clower**2 < cutof1) return
+    do i = 1, numat
+      l = natorb(nat(i))
+      if (l /= 1 .and. l /= 4 .and. l /= 9) return
+    end do
+    npairs = (numat*(numat + 1))/2
+    allocate(pair_ni(npairs), pair_nj(npairs), pair_kb(npairs), pair_first(npairs + 1), pair_self(npairs))
+    allocate(pbest_img(npairs), pair_woff(npairs), pair_xi(3, npairs), pbest_w1(npairs))
+    allocate(sw(npairs), se1(npairs), se2(npairs), sen(npairs))
+    allocate(gdi(81, npairs), ge1b(45, npairs), ge2a(45, npairs), genuc(npairs), gkb(npairs))
+    cutof2 = clower**2
+    nitems = 0
+    do pass = 1, 2
+      if (pass == 2) then
+        allocate(item_pair(max(1, nitems)), item_img(max(1, nitems)), item_xj(3, max(1, nitems)), &
+          item_xjuc(3, max(1, nitems)))
+        nitems = 0
+      end if
+      kr = 1
+      p = 0
+      do i = 1, numat
+        ni = nat(i)
+        li = natorb(ni)
+        nii = (li*(li + 1))/2
+        do j = 1, i
+          nj = nat(j)
+          lj = natorb(nj)
+          njj = (lj*(lj + 1))/2
+          p = p + 1
+          if (pass == 1) then
+            pair_ni(p) = int(ni, kind=c_int)
+            pair_nj(p) = int(nj, kind=c_int)
+            pair_kb(p) = int(nii*njj, kind=c_int)
+            pair_woff(p) = int(kr - 1, kind=c_long_long)
+            pair_xi(:, p) = coord(:, i)
+            one = 1.d0
+            if (Abs(coord(1,i) - coord(1,j)) <1.d-20 .and. Abs(coord(2,i) - coord(2,j)) <1.d-20 .and. &
+              Abs(coord(3,i) - coord(3,j)) <1.d-20) one = 0.5D0
+            pair_self(p) = merge(1_c_int, 0_c_int, one < 0.9d0)
+            pbest_w1(p) = 0.d0
+            pbest_img(p) = 0_c_int
+            sw(p) = 0.d0
+            se1(p) = 0.d0
+            se2(p) = 0.d0
+            sen(p) = 0.d0
+          else
+            pair_first(p) = int(nitems, kind=c_int)
+            one = merge(0.5d0, 1.d0, pair_self(p) == 1_c_int)
+          end if
+          kr = kr + nii*njj
+          kkkk = 0
+          do ii = -l1u, l1u
+            do jj = -l2u, l2u
+              do k = -l3u, l3u
+                kkkk = kkkk + 1
+                xj = coord(:,j) + tvec(:,1)*ii + tvec(:,2)*jj + tvec(:,3)*k
+                xjuc = xj - coord(:,i)
+                r = xjuc(1)**2 + xjuc(2)**2 + xjuc(3)**2
+                if (r > cutof2) then
+                  if (pass == 1) then
+                    ! solrot's point(): summed here
+                    r = sqrt(r)
+                    r = trunk(r)
+                    ee = ev*a0/r
+                    ee1 = -ee*tore(nj)
+                    ee2 = -ee*tore(ni)
+                    sw(p) = sw(p) + ee
+                    se1(p) = se1(p) + ee1
+                    se2(p) = se2(p) + ee2
+                    sen(p) = sen(p) + (-ee1*tore(ni))*one
+                    if (pbest_w1(p) < ee) then
+                      pbest_w1(p) = ee
+                      pbest_img(p) = int(kkkk, kind=c_int)
+                    end if
+                  end if
+                  cycle
+                end if
+                if (r < 0.00002D0) cycle   ! rotate and h1elec give zero
+                nitems = nitems + 1
+                if (pass == 2) then
+                  item_pair(nitems) = int(p - 1, kind=c_int)
+                  item_img(nitems) = int(kkkk, kind=c_int)
+                  item_xj(:, nitems) = xj
+                  item_xjuc(:, nitems) = xjuc
+                end if
+              end do
+            end do
+          end do
+        end do
+        kr = kr + nii*nii
+      end do
+    end do
+    pair_first(npairs + 1) = int(nitems, kind=c_int)
+    gkb = pair_kb
+    call fill_tables(tables)
+    ms_c = 0.d0
+    rc = mopac_cuda_solrot_pairs(int(npairs, kind=c_int), pair_ni, pair_nj, pair_woff, pair_kb, pair_first, &
+      pair_self, pair_xi, pbest_w1, pbest_img, int(nitems, kind=c_int), item_pair, item_img, item_xj, &
+      item_xjuc, tables, w, wk, gdi, ge1b, ge2a, genuc, ms_c)
+    code = int(rc)
+    ms = ms_c
+    nitems_out = nitems
+    if (code /= 0) return
+!
+!  Add the point-charge images
+!
+    do p = 1, npairs
+      li = natorb(pair_ni(p))
+      lj = natorb(pair_nj(p))
+      njj = (lj*(lj + 1))/2
+      do ii = 1, li
+        do jj = 1, lj
+          k = int(pair_woff(p)) + ((ii*(ii + 1))/2 - 1)*njj + (jj*(jj + 1))/2
+          w(k) = w(k) + sw(p)
+        end do
+        ge1b((ii*(ii + 1))/2, p) = ge1b((ii*(ii + 1))/2, p) + se1(p)
+      end do
+      do jj = 1, lj
+        ge2a((jj*(jj + 1))/2, p) = ge2a((jj*(jj + 1))/2, p) + se2(p)
+      end do
+      genuc(p) = genuc(p) + sen(p)
+    end do
+  end subroutine conv_gpu_solrot_run_gpu
 
   subroutine mozyme_gpu_hcore_run_gpu(numat_in, coord, h, enuc_add, point_pairs, code, ms, npairs_out, d_pairs_out)
     use molkst_C, only : mpack, id, numat

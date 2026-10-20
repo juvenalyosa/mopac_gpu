@@ -1,9 +1,9 @@
-"""Pair gradient of the conventional SCF on the GPU (MOPAC_GPU_CONV_GRAD=1), checked against the CPU on a Kaggle GPU.
+"""Solids, conventional SCF: hcore/solrot image sums on the GPU (MOPAC_GPU_CONV_HCORE=1), checked against the CPU on a
+Kaggle GPU (v1 of this kernel validated the pair gradient, now on by default).
 
-With MOPAC_GPU_GRAD_CHECK=1 dcart evaluates the pair loop on the CPU and on the device, prints
-"[GPU gradient] check pairs=.. ms=.. cpu_ms=.. max_abs_diff=.." and keeps the CPU result.  Decks:
-tests/data/materials/grad (si144 and quartz162: solids with d orbitals; urea_cluster: a 192-atom molecule)
-and tests/data/materials/small/urea.mop (sp solid), then PRECISE (central differences) for urea and quartz162.
+With MOPAC_GPU_HCORE_CHECK=1 hcore evaluates the image sums on the CPU and on the device, prints
+"[GPU hcore] check pairs=.. items=.. ms=.. cpu_ms=.. max|d| h w wk e1b/e2a enuc=.." and keeps the CPU result.
+Then medium quartz with the device path on (timings with TIMES).
 
     kaggle kernels push -p scripts/kaggle/mopac_grad_gpu
     kaggle kernels output juvenalyosa/mopac-grad-gpu -p ./grad_results
@@ -49,24 +49,26 @@ sh(f"cmake -S {SRC} -B {BUILD} -G Ninja -DGPU=ON -DCMAKE_BUILD_TYPE=Release -DCU
 say(f"build: {time.time() - T0:.0f} s")
 
 MAT = f"{SRC}/tests/data/materials"
-runs = [("si144", f"{MAT}/grad/si144.mop", ""), ("quartz162", f"{MAT}/grad/quartz162.mop", ""),
-        ("urea_cluster", f"{MAT}/grad/urea_cluster.mop", ""), ("urea", f"{MAT}/small/urea.mop", ""),
-        ("urea", f"{MAT}/small/urea.mop", " PRECISE"), ("quartz162", f"{MAT}/grad/quartz162.mop", " PRECISE")]
-for name, path, extra in runs:
-    label = name + extra.replace(" ", "_")
+CHECK = "MOPAC_GPU_DEBUG=1 MOPAC_GPU_CONV_HCORE=1 MOPAC_GPU_HCORE_CHECK=1"
+ON = "MOPAC_GPU_DEBUG=1 MOPAC_GPU_CONV_HCORE=1"
+runs = [("si144", f"{MAT}/grad/si144.mop", "", CHECK), ("quartz162", f"{MAT}/grad/quartz162.mop", "", CHECK),
+        ("rutile162", f"{MAT}/grad/rutile162.mop", "", CHECK), ("urea", f"{MAT}/small/urea.mop", "", CHECK),
+        ("quartz", f"{MAT}/medium/quartz.mop", "", ON)]
+for name, path, extra, env in runs:
+    label = name + extra.replace(" ", "_") + ("_check" if "CHECK" in env else "_on")
     d = f"{BASE}/{label}"
     lines = open(path).read().splitlines()
     lines[0] += extra
     os.makedirs(d, exist_ok=True)
     open(f"{d}/{name}.mop", "w").write("\n".join(lines) + "\n")
     t = time.time()
-    sh(f"cd {d} && MOPAC_GPU_DEBUG=1 MOPAC_GPU_GRAD_CHECK=1 timeout 900 "
-       f"{BUILD}/mopac {name}.mop > stdout.txt 2>&1")
+    sh(f"cd {d} && {env} timeout 900 {BUILD}/mopac {name}.mop > stdout.txt 2>&1")
     out = open(f"{d}/{name}.out", errors="ignore").read().splitlines() if os.path.exists(f"{d}/{name}.out") else []
     heat = [l.split()[5] for l in out if "FINAL HEAT OF FORMATION" in l]
-    chk = [l.strip() for l in out if "[GPU gradient]" in l]
-    say(f"{label:16s} {time.time() - t:7.1f} s  heat {heat[-1] if heat else None}")
-    for c in chk:
+    chk = [l.strip() for l in out if "[GPU hcore]" in l or "[GPU gradient]" in l]
+    stages = [l.strip() for l in out if ("AFTER  HCORE" in l or "AFTER  DERIV" in l or "AFTER  ITER" in l)]
+    say(f"{label:18s} {time.time() - t:7.1f} s  heat {heat[-1] if heat else None}")
+    for c in chk + stages:
         say("    " + c)
     say("    stderr: " + " | ".join(sh(f"tail -3 {d}/stdout.txt").splitlines()))
     sh(f"cp {d}/{name}.out {OUT}/{label}.out")

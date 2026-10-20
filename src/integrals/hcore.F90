@@ -27,6 +27,7 @@
       use MOZYME_C, only : cutofs
       use overlaps_C, only : cutof1, cutof2
       USE chanel_C, only : iw
+      use mozyme_gpu_gradient, only : conv_gpu_hcore_enabled, conv_gpu_solrot_run
 
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
@@ -44,6 +45,13 @@
       logical :: fldon, first, debug, lmolaris_qmmm, exists
       character :: tmpkey*241
       double precision, external :: reada
+!  Solids on the GPU: per-pair image sums from conv_gpu_solrot_run
+      double precision, allocatable :: gdi(:,:), ge1b(:,:), ge2a(:,:), genuc(:)
+      integer, allocatable :: gkb(:)
+      logical :: use_gpu_pairs, gpu_check
+      integer :: ip, gcode, gitems
+      integer(8) :: t0, t1, rate
+      double precision :: gms, dmax_h, dmax_w, dmax_wk, dmax_e, dmax_en
       save first, debug, icalcn, ione, vqc, lmolaris_qmmm
 !***********************************************************************
 !
@@ -157,6 +165,27 @@
       enuclr = 0.d0
       h(:mpack) = 0.d0
       kr = 1
+      ip = 0
+      use_gpu_pairs = .false.
+      gpu_check = .false.
+      if (id /= 0) then
+        if (conv_gpu_hcore_enabled()) then
+          call conv_gpu_solrot_run(gdi, ge1b, ge2a, genuc, gkb, gcode, gms, gitems)
+          use_gpu_pairs = (gcode == 0)
+          if (use_gpu_pairs) then
+            call get_environment_variable('MOPAC_GPU_HCORE_CHECK', line, status=i)
+            gpu_check = (i == 0 .and. len_trim(line) > 0 .and. line(1:1) /= '0')
+            dmax_h = 0.d0
+            dmax_w = 0.d0
+            dmax_wk = 0.d0
+            dmax_e = 0.d0
+            dmax_en = 0.d0
+            call system_clock(t0, rate)
+          else
+            write(iw,'(1x,a,i0)') '[GPU hcore] device path unavailable, CPU used, code=', gcode
+          end if
+        end if
+      end if
       do i = 1, numat
         ia = nfirst(i)
         ib = nlast(i)
@@ -217,8 +246,11 @@
           ja = nfirst(j)
           jb = nlast(j)
           nj = nat(j)
+          if (use_gpu_pairs) ip = ip + 1
           if (id == 0) then
             call h1elec (ni, nj, coord(1,i), coord(1,j), di)
+          else if (use_gpu_pairs .and. .not. gpu_check) then
+            di = reshape(gdi(:,ip), [9,9])
           else
             di = 0.D0
             do ii = -l1u, l1u
@@ -230,6 +262,10 @@
                 end do
               end do
             end do
+            if (gpu_check) then
+              dibits = reshape(gdi(:,ip), [9,9])
+              dmax_h = max(dmax_h, maxval(abs(di(:ib-ia+1,:jb-ja+1) - dibits(:ib-ia+1,:jb-ja+1))))
+            end if
           end if
           i2 = 0
           do i1 = ia, ib
@@ -244,9 +280,23 @@
 !
           if (id == 0) then
             call rotate (ni, nj, coord(1,i), coord(1,j), w(kr), kr, e1b, e2a, enuc)
+          else if (use_gpu_pairs .and. .not. gpu_check) then
+            e1b = ge1b(:,ip)
+            e2a = ge2a(:,ip)
+            enuc = genuc(ip)
+            kr = kr + gkb(ip)
           else
             kro = kr
             call solrot (ni, nj, coord(1,i), coord(1,j), wjd, wkd, kr, e1b, e2a, enuc)
+            if (gpu_check) then
+              dmax_w = max(dmax_w, maxval(abs(w(kro:kr - 1) - wjd(:kr-kro))))
+              dmax_wk = max(dmax_wk, maxval(abs(wk(kro:kr - 1) - wkd(:kr-kro))))
+              k = ((ib - ia + 1)*(ib - ia + 2))/2
+              dmax_e = max(dmax_e, maxval(abs(e1b(:k) - ge1b(:k,ip))))
+              k = ((jb - ja + 1)*(jb - ja + 2))/2
+              dmax_e = max(dmax_e, maxval(abs(e2a(:k) - ge2a(:k,ip))))
+              dmax_en = max(dmax_en, abs(enuc - genuc(ip)))
+            end if
             jj = 0
             w(kro:kr - 1) = wjd(:kr-kro)
             wk(kro:kr - 1) = wkd(:kr-kro)
@@ -286,6 +336,16 @@
           call wstore (w(kr), kr, ni, ii)
         end if
       end do
+      if (use_gpu_pairs) then
+        if (gpu_check) then
+          call system_clock(t1)
+          write(iw,'(1x,a,i0,a,i0,a,f10.1,a,f10.1,a,5es10.2,a)') '[GPU hcore] check pairs=', ip, ' items=', gitems, &
+            ' ms=', gms, ' cpu_ms=', 1.d3*dble(t1 - t0)/dble(rate), ' max|d| h w wk e1b/e2a enuc=', &
+            dmax_h, dmax_w, dmax_wk, dmax_e, dmax_en, ' (CPU result kept)'
+        else if (debug) then
+          write(iw,'(1x,a,i0,a,i0,a,f10.1)') '[GPU hcore] pairs=', ip, ' items=', gitems, ' ms=', gms
+        end if
+      end if
       if (useps) then
 ! In the following routine the dielectric correction to the core-core-
 ! interaction is added to ENUCLR
