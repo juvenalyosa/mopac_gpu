@@ -28,6 +28,7 @@
       use overlaps_C, only : cutof1, cutof2
       USE chanel_C, only : iw
       use mozyme_gpu_gradient, only : conv_gpu_hcore_enabled, conv_gpu_solrot_run
+      use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
 
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
@@ -51,7 +52,7 @@
       logical :: use_gpu_pairs, gpu_check
       integer :: ip, gcode, gitems
       integer(8) :: t0, t1, rate
-      double precision :: gms, dmax_h, dmax_w, dmax_wk, dmax_e, dmax_en
+      double precision :: gms, dmax_h, dmax_w, dmax_wk, dmax_e, dmax_en, t_hcore
       save first, debug, icalcn, ione, vqc, lmolaris_qmmm
 !***********************************************************************
 !
@@ -166,6 +167,7 @@
       h(:mpack) = 0.d0
       kr = 1
       ip = 0
+      call mozyme_section_timer_begin('hcore_total', t_hcore)
       use_gpu_pairs = .false.
       gpu_check = .false.
       if (id /= 0) then
@@ -336,6 +338,7 @@
           call wstore (w(kr), kr, ni, ii)
         end if
       end do
+      call mozyme_section_timer_end('hcore_total', t_hcore)
       if (use_gpu_pairs) then
         if (gpu_check) then
           call system_clock(t1)

@@ -44,7 +44,7 @@
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
 !-----------------------------------------------
-      integer :: idelta, icalcn, i, j, nstep, nw2, ncol
+      integer :: idelta, icalcn, i, j, nstep, nw2, ncol, jat, jcmp, jt, jm, im, jl, kl, ii, nimg
       double precision, dimension(3) :: change
       double precision :: coord(3*natoms), gold(3*natoms), xparam(3*natoms)
 
@@ -54,7 +54,7 @@
       double precision, dimension(3,3) :: tderiv
       double precision, external :: dot, volume
       logical :: scf1, halfe, slow, aifrst, debug, precis, intn, geochk, ci, &
-        aic, noanci, field, saddle, DH_correction, l_redo_bonds, cart_identity
+        aic, noanci, field, saddle, DH_correction, l_redo_bonds, cart_identity, cart_solid
 
       save change, scf1, halfe, idelta, slow, icalcn, aifrst, debug, l_redo_bonds, &
         precis, intn, geochk, ci, aic, grlim, nw2, field, DH_correction
@@ -347,9 +347,59 @@
           end if
         end do
       end if
+!
+!   Solids given entirely in Cartesian coordinates (Tv last, no dummy atoms,
+!   no symmetry relations): gmetry again copies geo into coord, and the
+!   translation vectors only move the images, so the Jacobian is exact: an atom
+!   coordinate moves all its images, a translation vector moves image
+!   (im, jl, kl) by im, jl or kl times its displacement.  The finite-difference
+!   construction below rebuilt every image for every parameter.
+!
+      cart_solid = (id /= 0 .and. ndep == 0 .and. natoms == numat + id .and. &
+        abs(saddle_step) <= 1.d-4)
+      if (cart_solid) then
+        do i = 2, natoms
+          if (na(i) /= 0) then
+            cart_solid = .false.
+            exit
+          end if
+        end do
+      end if
       if (cart_identity) then
         do i = 1, nvar
           gradnt(i) = dxyz(3*(loc(1,i) - 1) + loc(2,i))
+        end do
+      else if (cart_solid) then
+        do i = 1, nvar
+          jat = loc(1,i)
+          jcmp = loc(2,i)
+          sum = 0.d0
+          if (jat <= numat) then
+            do jm = 1, l123
+              sum = sum + dxyz(3*(l123*(jat - 1) + jm - 1) + jcmp)
+            end do
+          else
+            jt = jat - numat
+            do ii = 1, numat
+              jm = 0
+              do im = -l1u, l1u
+                do jl = -l2u, l2u
+                  do kl = -l3u, l3u
+                    jm = jm + 1
+                    if (jt == 1) then
+                      nimg = im
+                    else if (jt == 2) then
+                      nimg = jl
+                    else
+                      nimg = kl
+                    end if
+                    if (nimg /= 0) sum = sum + nimg*dxyz(3*(l123*(ii - 1) + jm - 1) + jcmp)
+                  end do
+                end do
+              end do
+            end do
+          end if
+          gradnt(i) = sum
         end do
       else
         step = change(1)

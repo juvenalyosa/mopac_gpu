@@ -663,7 +663,7 @@ contains
   subroutine conv_gpu_gradient_run_gpu(numat_in, l123_in, coord, dxyz, q, force, chnge, const, code, ms, &
       nitems_out)
     use common_arrays_C, only : p, nfirst, nlast, nat, tvec
-    use molkst_C, only : id, mpack, cutofp, clower, l1u, l2u, l3u
+    use molkst_C, only : id, mpack, cutofp, clower, cupper, l1u, l2u, l3u
     use funcon_C, only : fpc_9, a0, ev
     implicit none
     integer, intent(in) :: numat_in, l123_in
@@ -680,7 +680,7 @@ contains
     integer(c_int) :: rc, cpu_pairs_c
     real(c_double) :: ms_c
     integer :: ii, jj, ik, jk, kl, kkkk, iii, jjj, k, icuc, ione, nent, nitems, pass, n
-    double precision :: near2, rij, ee, deriv, half, d(3)
+    double precision :: near2, rij, ee, deriv, half, d(3), t_section
     double precision :: bound1, bound2, range, cupper_l, c, cr, cr2, clim, wlim
 
     code = 1
@@ -713,6 +713,7 @@ contains
       end do
     end do
     near2 = (2.d0/3.d0*cutofp)**2
+    call mozyme_section_timer_begin('conv_grad_pairlist', t_section)
 !
 !  Pass 1 counts the device pairs, pass 2 stores them.  Pairs beyond 2/3 of
 !  cutofp in a solid are point charges (dcart's derp term), done here.
@@ -735,8 +736,9 @@ contains
               d = coord_e(:, jjj + kkkk) - coord(:, ii)
               rij = d(1)**2 + d(2)**2 + d(3)**2
               if (rij > near2) then
-                if (pass == 2) then
-                  rij = sqrt(rij)
+                rij = sqrt(rij)
+                ! derp is zero beyond clower and cupper: nothing to add
+                if (pass == 2 .and. .not. (rij > clower .and. rij > cupper)) then
                   ee = q(ii)*q(jj)*fpc_9*ev*a0*derp(rij)
                   do k = 1, 3
                     deriv = half*ee*d(k)/rij
@@ -778,15 +780,18 @@ contains
       clim = c + cr * cupper_l + cr2 * cupper_l ** 2
       wlim = 4.d0
     end if
+    call mozyme_section_timer_end('conv_grad_pairlist', t_section)
     call fill_tables(tables)
     cpu_pairs_c = 0_c_int
     ms_c = 0.d0
+    call mozyme_section_timer_begin('conv_grad_device', t_section)
     rc = mopac_cuda_pair_gradient_ext(int(nent, kind=c_int), int(mpack, kind=c_long_long), &
         int(nitems, kind=c_int), item_i, item_j, item_w, first_e, iorbs_e, nat_e, coord_e, p, &
         merge(1_c_int, 0_c_int, id /= 0), real(clower, kind=c_double), real(cupper_l, kind=c_double), &
         real(c, kind=c_double), real(cr, kind=c_double), real(cr2, kind=c_double), real(clim, kind=c_double), &
         real(wlim, kind=c_double), real(chnge, kind=c_double), real(const, kind=c_double), &
         real(fpc_9, kind=c_double), merge(1_c_int, 0_c_int, force), tables, dxyz, ms_c, cpu_pairs_c)
+    call mozyme_section_timer_end('conv_grad_device', t_section)
     code = int(rc)
     if (code == 0) dxyz = dxyz + dfar
     ms = ms_c
@@ -814,7 +819,7 @@ contains
     integer(c_int) :: rc
     real(c_double) :: ms_c
     integer :: i, j, ii, jj, k, kkkk, p, npairs, nitems, pass, kr, ni, nj, li, lj, nii, njj, l
-    double precision :: xj(3), xjuc(3), r, cutof2, one, ee, ee1, ee2
+    double precision :: xj(3), xjuc(3), r, cutof2, one, ee, ee1, ee2, t_section
 
     code = 1
     ms = 0.d0
@@ -832,6 +837,7 @@ contains
     allocate(gdi(81, npairs), ge1b(45, npairs), ge2a(45, npairs), genuc(npairs), gkb(npairs))
     cutof2 = clower**2
     nitems = 0
+    call mozyme_section_timer_begin('conv_hcore_pairlist', t_section)
     do pass = 1, 2
       if (pass == 2) then
         allocate(item_pair(max(1, nitems)), item_img(max(1, nitems)), item_xj(3, max(1, nitems)), &
@@ -914,11 +920,14 @@ contains
     end do
     pair_first(npairs + 1) = int(nitems, kind=c_int)
     gkb = pair_kb
+    call mozyme_section_timer_end('conv_hcore_pairlist', t_section)
     call fill_tables(tables)
     ms_c = 0.d0
+    call mozyme_section_timer_begin('conv_hcore_device', t_section)
     rc = mopac_cuda_solrot_pairs(int(npairs, kind=c_int), pair_ni, pair_nj, pair_woff, pair_kb, pair_first, &
       pair_self, pair_xi, pbest_w1, pbest_img, int(nitems, kind=c_int), item_pair, item_img, item_xj, &
       item_xjuc, tables, w, wk, gdi, ge1b, ge2a, genuc, ms_c)
+    call mozyme_section_timer_end('conv_hcore_device', t_section)
     code = int(rc)
     ms = ms_c
     nitems_out = nitems
