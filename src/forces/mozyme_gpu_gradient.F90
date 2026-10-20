@@ -271,7 +271,10 @@ contains
   end subroutine conv_gpu_gradient_run
 
   ! Solids (id /= 0), conventional SCF: the image sums of hcore / solrot for
-  ! the images closer than clower on the device when MOPAC_GPU_CONV_HCORE=1.
+  ! the images closer than clower on the device unless MOPAC_GPU_CONV_HCORE=0
+  ! (T4, 2026-10-20: h, w, e1b, e2a, enuc within 3e-11 of the CPU on Si, quartz,
+  ! rutile, urea; wk can take another of several equidistant images, a choice
+  ! the CPU makes on the last bit of w(1)).
   logical function conv_gpu_hcore_enabled()
 #ifdef GPU
     use mod_vars_cuda, only : lgpu
@@ -280,7 +283,7 @@ contains
     implicit none
 #ifdef GPU
     conv_gpu_hcore_enabled = lgpu .and. .not. env_truthy('MOPAC_NOGPU') .and. &
-      env_truthy('MOPAC_GPU_CONV_HCORE') .and. .not. mozyme .and. id /= 0 .and. &
+      .not. env_falsy('MOPAC_GPU_CONV_HCORE') .and. .not. mozyme .and. id /= 0 .and. &
       .not. (id == 3 .and. .not. method_pm7)
 #else
     conv_gpu_hcore_enabled = .false.
