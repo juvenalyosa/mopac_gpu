@@ -40,9 +40,11 @@ __device__ __forceinline__ int tri1(int i) { return (i * (i - 1)) / 2; }
 
 // Two-centre two-electron Fock terms for the pair; f is accumulated in place.
 // ptot: total density, pa: alpha density (= 0.5 * ptot for RHF).
+// exchange = false: fock2's periodic branch with wk = 0 (dhc()'s cutoff).
 __device__ __forceinline__ void fock2_diatomic_sp(int n1, int n2, const double *w,
                                                   const double *ptot,
-                                                  const double *pa, double *f) {
+                                                  const double *pa, double *f,
+                                                  bool exchange = true) {
   const int ja = 1, jb = n1;
   const int ia = n1 + 1, ib = n1 + n2;
   int kk = 0;
@@ -66,6 +68,7 @@ __device__ __forceinline__ void fock2_diatomic_sp(int n1, int n2, const double *
           f[ij - 1] += bb * wv * ptot[kl - 1];
           f[kl - 1] += aa * wv * ptot[ij - 1];
           // Exchange
+          if (!exchange) continue;
           const double a = wv * aa * bb * 0.25;
           f[ik - 1] -= a * pa[jl - 1];
           f[il - 1] -= a * pa[jk - 1];
@@ -113,7 +116,8 @@ __device__ __forceinline__ double diatomic_energy_generic(int n1, int n2,
                                                           double enuc,
                                                           const double *pdi,
                                                           double *h, double *f,
-                                                          double *pa) {
+                                                          double *pa,
+                                                          bool exchange = true) {
   const int n = n1 + n2;
   const int linear = tri1(n) + n;
   for (int i = 0; i < linear; ++i) {
@@ -141,7 +145,7 @@ __device__ __forceinline__ double diatomic_energy_generic(int n1, int n2,
     }
   }
   for (int i = 0; i < linear; ++i) f[i] = h[i];
-  fock2_diatomic_sp(n1, n2, w, pdi, pa, f);
+  fock2_diatomic_sp(n1, n2, w, pdi, pa, f, exchange);
   const double ee = helect_packed(n, pa, h, f);
   return 2.0 * ee + enuc;
 }

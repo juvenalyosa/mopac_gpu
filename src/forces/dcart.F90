@@ -22,7 +22,7 @@
       nbonds, ibonds, geoa, geo
       use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
       use mozyme_gpu_gradient, only : mozyme_gpu_gradient_enabled, mozyme_gpu_gradient_check_enabled, &
-      mozyme_gpu_gradient_run, mozyme_gpu_device_pair
+      mozyme_gpu_gradient_run, mozyme_gpu_device_pair, conv_gpu_gradient_enabled, conv_gpu_gradient_run
 !
       USE molkst_C, only : numat, numcal, keywrd, id, l1u, l2u, l3u, l123, mpack, &
       use_ref_geo, cutofp, method_pm6, method_PM7, mozyme, density, N_3_present, &
@@ -211,6 +211,7 @@
           mozyme_gpu_gradient_enabled()) then
         call run_mozyme_gpu_gradient(used_gpu)
       end if
+      if (.not. used_gpu .and. conv_gpu_gradient_enabled()) call run_conv_gpu_gradient(used_gpu)
       if (.not. used_gpu) then
         if (use_gpu_grad) call sync_resident_density()
 #endif
@@ -501,6 +502,82 @@
             call flush(iw)
           end if
         end subroutine run_mozyme_gpu_gradient
+
+        ! Conventional SCF (molecules and solids): pair loop of
+        ! dcart_build_scf_gradient_cpu on the device.  With MOPAC_GPU_GRAD_CHECK=1
+        ! both gradients are evaluated and compared, and the CPU result is kept.
+        subroutine run_conv_gpu_gradient(done)
+          implicit none
+          logical, intent(inout) :: done
+          double precision, allocatable :: dxyz_ref(:,:), dxyz_cpu(:,:)
+          double precision :: gpu_ms, max_diff, rms_diff, diff, gmax
+          integer :: gpu_code, gpu_items, ia, ka
+          integer(8) :: t0, t1, rate
+          logical :: verbose
+          character(len=8) :: env_dbg
+          integer :: env_dbg_stat
+          done = .false.
+          env_dbg = ' '
+          call get_environment_variable('MOPAC_GPU_DEBUG', env_dbg, status=env_dbg_stat)
+          verbose = (env_dbg_stat == 0 .and. len_trim(env_dbg) > 0 .and. env_dbg(1:1) /= '0')
+          allocate(dxyz_ref(3, numtot))
+          dxyz_ref = dxyz(1:3, 1:numtot)
+          if (mozyme_gpu_gradient_check_enabled()) then
+            allocate(dxyz_cpu(3, numtot))
+            call system_clock(t0, rate)
+            call mozyme_section_timer_begin('dcart_gradient_cpu', dcart_timer)
+            call dcart_build_scf_gradient_cpu(numat, l123, coord, dxyz, qbld, chnge, chnge2, &
+                 const, numtot, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat, .false.)
+            call mozyme_section_timer_end('dcart_gradient_cpu', dcart_timer)
+            call system_clock(t1)
+            dxyz_cpu = dxyz(1:3, 1:numtot)
+            dxyz(1:3, 1:numtot) = dxyz_ref
+            call mozyme_section_timer_begin('dcart_gradient_gpu', dcart_timer)
+            call conv_gpu_gradient_run(numat, l123, coord, dxyz, qbld, force, chnge, const, gpu_code, &
+              gpu_ms, gpu_items)
+            call mozyme_section_timer_end('dcart_gradient_gpu', dcart_timer)
+            if (gpu_code == 0) then
+              max_diff = 0.d0
+              rms_diff = 0.d0
+              gmax = 0.d0
+              do ia = 1, numtot
+                do ka = 1, 3
+                  diff = dxyz(ka, ia) - dxyz_cpu(ka, ia)
+                  max_diff = max(max_diff, abs(diff))
+                  gmax = max(gmax, abs(dxyz_cpu(ka, ia)))
+                  rms_diff = rms_diff + diff * diff
+                end do
+              end do
+              rms_diff = sqrt(rms_diff / dble(3 * numtot))
+              write(iw, '(1x,a,i0,a,f10.3,a,f10.3,a,es12.4,a,es12.4,a,es12.4,a)') '[GPU gradient] check pairs=', &
+                gpu_items, ' ms=', gpu_ms, ' cpu_ms=', 1.d3*dble(t1 - t0)/dble(rate), ' max_abs_diff=', &
+                max_diff, ' rms_diff=', rms_diff, ' max_abs_cpu=', gmax, ' kcal/mol/A (CPU result kept)'
+            else
+              write(iw, '(1x,a,i0)') '[GPU gradient] check: device path unavailable, code=', gpu_code
+            end if
+            call flush(iw)
+            dxyz(1:3, 1:numtot) = dxyz_cpu
+            done = .true.
+            return
+          end if
+          call mozyme_section_timer_begin('dcart_gradient_gpu', dcart_timer)
+          call conv_gpu_gradient_run(numat, l123, coord, dxyz, qbld, force, chnge, const, gpu_code, &
+            gpu_ms, gpu_items)
+          call mozyme_section_timer_end('dcart_gradient_gpu', dcart_timer)
+          if (gpu_code == 0) then
+            done = .true.
+            if (verbose) then
+              write(iw, '(1x,a,i0,a,f10.3)') '[GPU gradient] pairs=', gpu_items, ' ms=', gpu_ms
+              call flush(iw)
+            end if
+          else
+            dxyz(1:3, 1:numtot) = dxyz_ref
+            if (verbose) then
+              write(iw, '(1x,a,i0)') '[GPU gradient] fallback_cpu code=', gpu_code
+              call flush(iw)
+            end if
+          end if
+        end subroutine run_conv_gpu_gradient
 
         ! Pairs involving d-orbital atoms (S, P, ... in PM6/PM7) are not
         ! handled by the device kernel; evaluate just those on the CPU.

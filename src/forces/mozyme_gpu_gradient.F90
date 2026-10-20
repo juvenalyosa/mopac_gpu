@@ -20,7 +20,7 @@
 ! compact iij/ijall/iijj lists), hands the parameter tables over and adds the
 ! results on to the Fortran arrays.
 module mozyme_gpu_gradient
-  use iso_c_binding, only : c_int, c_double, c_ptr
+  use iso_c_binding, only : c_int, c_long_long, c_double, c_ptr
   use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
   implicit none
   private
@@ -33,6 +33,8 @@ module mozyme_gpu_gradient
   public :: mozyme_gpu_sp_pair
   public :: mozyme_gpu_device_pair
   public :: mozyme_gpu_d_pairs_enabled
+  public :: conv_gpu_gradient_enabled
+  public :: conv_gpu_gradient_run
   public :: mozyme_gpu_disp_enabled
   public :: mozyme_gpu_disp_check_enabled
 
@@ -87,6 +89,23 @@ module mozyme_gpu_gradient
       integer(c_int) :: d_pairs_c
       integer(c_int) :: rc
     end function mopac_cuda_mozyme_hcore_pairs
+
+    function mopac_cuda_pair_gradient_ext(nent_c, np_c, nitems_c, item_i_c, item_j_c, item_w_c, &
+        first_c, iorbs_c, nat_c, coord_c, p_c, periodic_c, clower_c, cupper_c, trunk_c_c, trunk_cr_c, &
+        trunk_cr2_c, trunk_clim_c, wlim_c, chnge_c, cnst_c, fpc_9_c, force_c, tables_c, dxyz_c, ms_c, &
+        cpu_pairs_c) bind(C, name='mopac_cuda_pair_gradient_ext') result(rc)
+      import :: c_int, c_long_long, c_double, mozyme_pair_tables_c
+      integer(c_int), value :: nent_c, nitems_c, periodic_c, force_c
+      integer(c_long_long), value :: np_c
+      integer(c_int) :: item_i_c(*), item_j_c(*), first_c(*), iorbs_c(*), nat_c(*)
+      real(c_double) :: item_w_c(*), coord_c(*), p_c(*), dxyz_c(*)
+      real(c_double), value :: clower_c, cupper_c, trunk_c_c, trunk_cr_c, trunk_cr2_c, trunk_clim_c
+      real(c_double), value :: wlim_c, chnge_c, cnst_c, fpc_9_c
+      type(mozyme_pair_tables_c) :: tables_c
+      real(c_double) :: ms_c
+      integer(c_int) :: cpu_pairs_c
+      integer(c_int) :: rc
+    end function mopac_cuda_pair_gradient_ext
   end interface
 #endif
 
@@ -186,6 +205,51 @@ contains
     integer, intent(in) :: norb_i, norb_j
     mozyme_gpu_sp_pair = (norb_i == 1 .or. norb_i == 4) .and. (norb_j == 1 .or. norb_j == 4)
   end function mozyme_gpu_sp_pair
+
+  ! Conventional (dense density) SCF, molecules and solids: the pair loop of
+  ! dcart_build_scf_gradient_cpu on the device when MOPAC_GPU_CONV_GRAD=1.
+  ! Not for UHF (the device energy takes pa = pb = p/2), MOZYME (its own
+  ! route), or id = 3 with methods other than PM7 (rotate's nddo_to_point).
+  logical function conv_gpu_gradient_enabled()
+#ifdef GPU
+    use mod_vars_cuda, only : lgpu
+    use molkst_C, only : mozyme, uhf, id, method_pm7
+#endif
+    implicit none
+#ifdef GPU
+    conv_gpu_gradient_enabled = lgpu .and. .not. env_truthy('MOPAC_NOGPU') .and. &
+      env_truthy('MOPAC_GPU_CONV_GRAD') .and. .not. mozyme .and. .not. uhf .and. &
+      .not. (id == 3 .and. .not. method_pm7)
+#else
+    conv_gpu_gradient_enabled = .false.
+#endif
+  end function conv_gpu_gradient_enabled
+
+  ! Adds the pair (and, in solids, the distant point-charge) contributions of
+  ! dcart_build_scf_gradient_cpu on to dxyz(3, numat*l123), q = tore - charge
+  ! per atom.  code: 0 success, 1 unsupported (nothing done), 2 device failure
+  ! (nothing done), 3 some pair failed on the device (nothing done).
+  subroutine conv_gpu_gradient_run(numat_in, l123_in, coord, dxyz, q, force, chnge, const, code, ms, &
+      nitems_out)
+    implicit none
+    integer, intent(in) :: numat_in, l123_in
+    double precision, intent(in) :: coord(3, numat_in), q(numat_in)
+    double precision, intent(inout) :: dxyz(3, numat_in*l123_in)
+    logical, intent(in) :: force
+    double precision, intent(in) :: chnge, const
+    integer, intent(out) :: code, nitems_out
+    double precision, intent(out) :: ms
+#ifdef GPU
+    call conv_gpu_gradient_run_gpu(numat_in, l123_in, coord, dxyz, q, force, chnge, const, code, ms, &
+      nitems_out)
+#else
+    code = 1
+    ms = 0.d0
+    nitems_out = 0
+    if (numat_in < 0 .or. force .or. chnge < 0.d0 .or. const < 0.d0 .or. q(1) /= q(1)) code = 1
+    if (coord(1, 1) /= coord(1, 1)) dxyz(1, 1) = dxyz(1, 1)
+#endif
+  end subroutine conv_gpu_gradient_run
 
   ! Pairs with a d-orbital atom go to the device unless MOPAC_MOZYME_DPAIRS_GPU=0.
   logical function mozyme_gpu_d_pairs_enabled()
@@ -534,6 +598,139 @@ contains
     npairs_out = npairs
     d_pairs_out = int(d_pairs_c)
   end subroutine mozyme_gpu_gradient_run_gpu
+
+  subroutine conv_gpu_gradient_run_gpu(numat_in, l123_in, coord, dxyz, q, force, chnge, const, code, ms, &
+      nitems_out)
+    use common_arrays_C, only : p, nfirst, nlast, nat, tvec
+    use molkst_C, only : id, mpack, cutofp, clower, l1u, l2u, l3u
+    use funcon_C, only : fpc_9, a0, ev
+    implicit none
+    integer, intent(in) :: numat_in, l123_in
+    double precision, intent(in) :: coord(3, numat_in), q(numat_in)
+    double precision, intent(inout) :: dxyz(3, numat_in*l123_in)
+    logical, intent(in) :: force
+    double precision, intent(in) :: chnge, const
+    integer, intent(out) :: code, nitems_out
+    double precision, intent(out) :: ms
+    double precision, external :: derp
+    integer(c_int), allocatable :: item_i(:), item_j(:), first_e(:), iorbs_e(:), nat_e(:)
+    double precision, allocatable :: item_w(:), coord_e(:,:), dfar(:,:)
+    type(mozyme_pair_tables_c) :: tables
+    integer(c_int) :: rc, cpu_pairs_c
+    real(c_double) :: ms_c
+    integer :: ii, jj, ik, jk, kl, kkkk, iii, jjj, k, icuc, ione, nent, nitems, pass, n
+    double precision :: near2, rij, ee, deriv, half, d(3)
+    double precision :: bound1, bound2, range, cupper_l, c, cr, cr2, clim, wlim
+
+    code = 1
+    ms = 0.d0
+    nitems_out = 0
+    if (.not. allocated(p) .or. mpack <= 0) return
+    do ii = 1, numat_in
+      n = nlast(ii) - nfirst(ii) + 1
+      if (n /= 1 .and. n /= 4 .and. n /= 9) return
+    end do
+    icuc = (l123_in + 1)/2
+    ione = 1
+    if (id /= 0) ione = 0
+    nent = numat_in*l123_in
+    allocate(coord_e(3, nent), first_e(nent), iorbs_e(nent), nat_e(nent), dfar(3, nent))
+    dfar = 0.d0
+    do jj = 1, numat_in
+      kkkk = 0
+      do ik = -l1u, l1u
+        do jk = -l2u, l2u
+          do kl = -l3u, l3u
+            kkkk = kkkk + 1
+            k = l123_in*(jj - 1) + kkkk
+            coord_e(:,k) = coord(:,jj) + tvec(:,1)*ik + tvec(:,2)*jk + tvec(:,3)*kl
+            first_e(k) = int(nfirst(jj), kind=c_int)
+            iorbs_e(k) = int(nlast(jj) - nfirst(jj) + 1, kind=c_int)
+            nat_e(k) = int(nat(jj), kind=c_int)
+          end do
+        end do
+      end do
+    end do
+    near2 = (2.d0/3.d0*cutofp)**2
+!
+!  Pass 1 counts the device pairs, pass 2 stores them.  Pairs beyond 2/3 of
+!  cutofp in a solid are point charges (dcart's derp term), done here.
+!
+    nitems = 0
+    do pass = 1, 2
+      if (pass == 2) then
+        allocate(item_i(max(1, nitems)), item_j(max(1, nitems)), item_w(max(1, nitems)))
+        nitems = 0
+      end if
+      do ii = 1, numat_in
+        iii = l123_in*(ii - 1)
+        do jj = 1, ii - ione
+          half = 1.d0
+          if (ii == jj) half = 0.5d0
+          jjj = l123_in*(jj - 1)
+          do kkkk = 1, l123_in
+            if (ii == jj .and. kkkk == icuc) cycle   ! the atom with itself: the two terms cancel
+            if (id /= 0) then
+              d = coord_e(:, jjj + kkkk) - coord(:, ii)
+              rij = d(1)**2 + d(2)**2 + d(3)**2
+              if (rij > near2) then
+                if (pass == 2) then
+                  rij = sqrt(rij)
+                  ee = q(ii)*q(jj)*fpc_9*ev*a0*derp(rij)
+                  do k = 1, 3
+                    deriv = half*ee*d(k)/rij
+                    dfar(k, iii + icuc) = dfar(k, iii + icuc) - deriv
+                    dfar(k, jjj + kkkk) = dfar(k, jjj + kkkk) + deriv
+                  end do
+                end if
+                cycle
+              end if
+            end if
+            nitems = nitems + 1
+            if (pass == 2) then
+              item_i(nitems) = int(iii + icuc, kind=c_int)
+              item_j(nitems) = int(jjj + kkkk, kind=c_int)
+              item_w(nitems) = half
+            end if
+          end do
+        end do
+      end do
+    end do
+!
+!  trunk() and dhc()'s constants for solids
+!
+    bound1 = 0.d0
+    cupper_l = 0.d0
+    c = 0.d0
+    cr = 0.d0
+    cr2 = 0.d0
+    clim = 0.d0
+    wlim = 0.d0
+    if (id /= 0) then
+      bound1 = clower / cutofp
+      cupper_l = cutofp + 0
+      bound2 = cupper_l / cutofp
+      range = bound2 - bound1
+      c = -0.5d0 * bound1 ** 2 * cutofp / range
+      cr = 1.0d0 + bound1 / range
+      cr2 = -1 / (cutofp*2*range)
+      clim = c + cr * cupper_l + cr2 * cupper_l ** 2
+      wlim = 4.d0
+    end if
+    call fill_tables(tables)
+    cpu_pairs_c = 0_c_int
+    ms_c = 0.d0
+    rc = mopac_cuda_pair_gradient_ext(int(nent, kind=c_int), int(mpack, kind=c_long_long), &
+        int(nitems, kind=c_int), item_i, item_j, item_w, first_e, iorbs_e, nat_e, coord_e, p, &
+        merge(1_c_int, 0_c_int, id /= 0), real(clower, kind=c_double), real(cupper_l, kind=c_double), &
+        real(c, kind=c_double), real(cr, kind=c_double), real(cr2, kind=c_double), real(clim, kind=c_double), &
+        real(wlim, kind=c_double), real(chnge, kind=c_double), real(const, kind=c_double), &
+        real(fpc_9, kind=c_double), merge(1_c_int, 0_c_int, force), tables, dxyz, ms_c, cpu_pairs_c)
+    code = int(rc)
+    if (code == 0) dxyz = dxyz + dfar
+    ms = ms_c
+    nitems_out = nitems
+  end subroutine conv_gpu_gradient_run_gpu
 
   subroutine mozyme_gpu_hcore_run_gpu(numat_in, coord, h, enuc_add, point_pairs, code, ms, npairs_out, d_pairs_out)
     use molkst_C, only : mpack, id, numat

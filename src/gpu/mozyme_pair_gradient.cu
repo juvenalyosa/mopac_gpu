@@ -37,6 +37,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 // Fortran section-timer hook (mozyme_section_timers), so the upload / kernel /
 // download split of the hcore entry point shows up in the [PROFILE] report.
@@ -229,7 +230,70 @@ struct PairGradArgs {
   int force;             // central differences (FORCE/PRECISE)
   double *dxyz;          // 3 x numat, accumulated
   double *scratch_d;     // d kernels: kPairScratchD doubles per launched thread
+  // Conventional / periodic route (mopac_cuda_pair_gradient_ext); zero for MOZYME.
+  const double *pair_w;  // dcart's "half" per pair, nullptr = 1
+  int periodic;          // 1: dhc()'s id /= 0 rules (overlap, point-charge and exchange cutoffs)
+  double clower;         // point() beyond clower (Angstrom)
+  double clower2;        // squared
+  double cupper;         // trunk(): c + cr*r + cr2*r**2 between clower and cupper, clim above
+  double trunk_c, trunk_cr, trunk_cr2, trunk_clim;
+  double wlim;           // exchange integrals dropped when w(1) < wlim (eV)
+  unsigned char *ref_flags;  // d kernels, periodic: PairFlags of the reference probes, 3 per pair
+  int dense;             // 1: p is the packed lower triangle of the full density and
+                         //    g.diag_off holds nfirst (1-based) of each entry's atom
 };
+
+// dhc() keeps ignor1, lpoint and cutoff from its mode-1 (reference) call and
+// reuses them for the mode-2 (displaced) calls of the same pair.
+struct PairFlags {
+  bool no_overlap;   // ignor1: rij > 15 A, no h1elec term
+  bool point;        // lpoint: rij > clower, point() instead of rotate()
+  bool no_exchange;  // cutoff: w(1) < wlim, exchange integrals zero
+};
+
+__device__ __forceinline__ unsigned char pack_flags(const PairFlags &f) {
+  return static_cast<unsigned char>((f.no_overlap ? 1 : 0) | (f.point ? 2 : 0) | (f.no_exchange ? 4 : 0));
+}
+
+__device__ __forceinline__ PairFlags unpack_flags(unsigned char b) {
+  PairFlags f;
+  f.no_overlap = (b & 1) != 0;
+  f.point = (b & 2) != 0;
+  f.no_exchange = (b & 4) != 0;
+  return f;
+}
+
+// trunk() (solrot.F90): apparent distance of a point-charge pair.
+__device__ __forceinline__ double pair_trunk(const PairGradArgs &a, double r) {
+  if (r > a.clower) {
+    if (r > a.cupper) return a.trunk_clim;
+    return a.trunk_c + a.trunk_cr * r + a.trunk_cr2 * (r * r);
+  }
+  return r;
+}
+
+// point() (solrot.F90), called as point(r, ni, nj, w, kr, e1b, e2a, enuc).
+__device__ void pair_point_integrals(const PairGradArgs &a, int ni, int nj, double r, double *w,
+                                     int *kr, double *e1b, double *e2a, double *enuc) {
+  const double rt = pair_trunk(a, r);
+  const double ee = a.core.ev * a.core.a0 / rt;
+  const double ee1 = -ee * a.core.tore[nj - 1];
+  const double ee2 = -ee * a.core.tore[ni - 1];
+  const int i = a.core.natorb[ni - 1];
+  const int j = a.core.natorb[nj - 1];
+  const int nii = (i * (i + 1)) / 2;
+  const int njj = (j * (j + 1)) / 2;
+  *kr = nii * njj;
+  for (int k = 0; k < *kr; ++k) w[k] = 0.0;
+  for (int ii = 1; ii <= i; ++ii) {
+    for (int jj = 1; jj <= j; ++jj) w[((ii * (ii + 1)) / 2 - 1) * njj + (jj * (jj + 1)) / 2 - 1] = ee;
+  }
+  for (int k = 0; k < nii; ++k) e1b[k] = 0.0;
+  for (int k = 0; k < njj; ++k) e2a[k] = 0.0;
+  for (int ii = 1; ii <= i; ++ii) e1b[(ii * (ii + 1)) / 2 - 1] = ee1;
+  for (int jj = 1; jj <= j; ++jj) e2a[(jj * (jj + 1)) / 2 - 1] = ee2;
+  *enuc = -ee1 * a.core.tore[ni - 1];
+}
 
 struct HcoreArgs {
   PairGeom g;
@@ -279,15 +343,26 @@ __device__ __forceinline__ int pair_class(const PairGeom &g, int idx, int *ii_ou
 
 // Diatomic energy for atoms (jj = atom 1, ii = atom 2) at coordinates x1/x2.
 // D = false: sp-sp pair (small local arrays); D = true: pair with a d atom.
+// mode is dhc()'s: 1 for the reference call, which sets *fl when a.periodic,
+// 2 for the displaced calls, which use it.
 template <bool D>
 __device__ bool pair_energy(const PairGradArgs &a, int nat1, int nat2, int n1, int n2,
                             const double *x1, const double *x2, const double *pdi,
-                            double *dener, double *scratch) {
+                            double *dener, double *scratch, int mode, PairFlags *fl) {
   constexpr int kL = D ? mozyme_pair::kMaxLinearD : mozyme_pair::kMaxLinear;
   constexpr int kW = D ? mozyme_pair::kMaxWD : mozyme_pair::kMaxW;
+  const bool periodic = a.periodic != 0;
+  double r2 = 0.0;
+  if (periodic) {
+    for (int k = 0; k < 3; ++k) r2 += (x1[k] - x2[k]) * (x1[k] - x2[k]);
+    if (mode == 1) {
+      fl->no_overlap = r2 > 225.0;
+      fl->point = r2 > a.clower2;
+    }
+  }
   double smat[81];
   const double *smat_ptr = nullptr;
-  if (nat1 != 102 && nat2 != 102) {
+  if (nat1 != 102 && nat2 != 102 && !(periodic && fl->no_overlap)) {
     const bool ok = D ? mozyme_pair_h1elec_dev(nat1, nat2, x1, x2, a.ovl, smat)
                       : mozyme_pair_h1elec_sp_dev(nat1, nat2, x1, x2, a.ovl, smat);
     if (!ok) return false;
@@ -300,22 +375,50 @@ __device__ bool pair_energy(const PairGradArgs &a, int nat1, int nat2, int n1, i
   int w_count = 0;
   // dhc(): rotate(ni = nat(ii), nj = nat(jj), xi = coord(ii), xj = coord(jj), w, kr, e2a, e1b, enuc)
   // i.e. rotate's first block belongs to atom ii (= atom 2 here).
-  const bool ok = D ? mozyme_pair_core_dev(nat2, nat1, x2, x1, a.core, w, &w_count, e_at2, e_at1, &enuc,
-                                           scratch + mozyme_pair::kMaxWD)
-                    : mozyme_pair_core_sp_dev(nat2, nat1, x2, x1, a.core, w, &w_count, e_at2, e_at1, &enuc);
+  // dhc() (id /= 0): point(rij, ni, nj, w, kr, e2a, e1b, enuc) beyond clower.
+  bool ok = true;
+  if (periodic && fl->point) {
+    pair_point_integrals(a, nat2, nat1, sqrt(r2), w, &w_count, e_at2, e_at1, &enuc);
+  } else {
+    ok = D ? mozyme_pair_core_dev(nat2, nat1, x2, x1, a.core, w, &w_count, e_at2, e_at1, &enuc,
+                                  scratch + mozyme_pair::kMaxWD)
+           : mozyme_pair_core_sp_dev(nat2, nat1, x2, x1, a.core, w, &w_count, e_at2, e_at1, &enuc);
+  }
   if (!ok) return false;
   // w_count == 0 only for coincident atoms (rotate's small-rij exit): all
   // integrals are zero and the pair contributes nothing.
   const int expect = mozyme_pair::tri1(n2 + 1) * mozyme_pair::tri1(n1 + 1);
   if (w_count != 0 && w_count != expect) return false;
+  if (periodic && mode == 1) fl->no_exchange = w[0] < a.wlim;
+  const bool exchange = !(periodic && fl->no_exchange);
   double h[kL], f[kL], pa[kL];
-  *dener = mozyme_pair::diatomic_energy_generic(n1, n2, smat_ptr, e_at1, e_at2, w, enuc, pdi, h, f, pa);
+  *dener = mozyme_pair::diatomic_energy_generic(n1, n2, smat_ptr, e_at1, e_at2, w, enuc, pdi, h, f, pa,
+                                                exchange);
   return true;
 }
 
 // Packed diatomic density of pair idx, atom jj first (mirrors dcart.F90).
 __device__ __forceinline__ void load_pair_density(const PairGradArgs &a, int idx, int ii, int jj,
                                                   int n1, int n2, double *pdi) {
+  if (a.dense) {
+    // dcart's gather from the packed full density, index for index (for
+    // ii = jj in a solid the "pair" rows run on past the diagonal, as there).
+    const long long jf = a.g.diag_off[jj - 1];
+    const long long jif = a.g.diag_off[ii - 1];
+    int ij = 0;
+    for (int t = 0; t < n1; ++t) {
+      const long long i = jf + t;
+      const long long k = (i * (i - 1)) / 2 + jf - 1;
+      for (int u = 0; u <= t; ++u) pdi[ij++] = a.p[k + u];
+    }
+    for (int t = 0; t < n2; ++t) {
+      const long long i = jif + t;
+      const long long l = (i * (i - 1)) / 2;
+      for (int u = 0; u < n1; ++u) pdi[ij++] = a.p[l + jf - 1 + u];
+      for (int u = 0; u <= t; ++u) pdi[ij++] = a.p[l + jif - 1 + u];
+    }
+    return;
+  }
   int k = a.g.diag_off[jj - 1];
   int ij = 0;
   for (int i = 1; i <= n1; ++i) {
@@ -347,7 +450,10 @@ constexpr int kProbesPerPair = 7;
 
 // Fixed grid (kGridD blocks), grid-stride over pair x probe: every launched
 // thread owns kPairScratchD doubles of a.scratch_d for the large d arrays.
-__global__ void mozyme_pair_energy_d_kernel(PairGradArgs a, double *energies) {
+// phase -1: all probes (MOZYME).  Periodic: phase 0 runs the reference probes
+// (dhc mode 1), which store their PairFlags in a.ref_flags, and phase 1 the
+// displaced probes (mode 2), which read them.
+__global__ void mozyme_pair_energy_d_kernel(PairGradArgs a, double *energies, int phase) {
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;
   double *scratch = a.scratch_d + static_cast<size_t>(tid) * kPairScratchD;
   const int nprobe = a.force ? 6 : 4;
@@ -371,6 +477,12 @@ __global__ void mozyme_pair_energy_d_kernel(PairGradArgs a, double *energies) {
   // Slot layout: 0 = reference, 1..3 = +displacement of atom ii, 4..6 = the
   // -chnge/2 references of FORCE mode (probe p -> slot p+1 in that mode).
   const int slot = a.force ? probe + 1 : probe;
+  const bool reference = a.force ? slot >= 4 : slot == 0;
+  if ((phase == 0 && !reference) || (phase == 1 && reference)) continue;
+  // FORCE: one reference per coordinate (slot 4+k <-> displaced slot 1+k).
+  const int iflag = 3 * idx + (a.force ? (reference ? slot - 4 : slot - 1) : 0);
+  PairFlags fl = {false, false, false};
+  if (phase == 1) fl = unpack_flags(a.ref_flags[iflag]);
   if (!a.force) {
     // dcart: the reference is taken with atom jj shifted by chnge/2 in all
     // three coordinates; slots 1..3 keep that shift and move atom ii by chnge.
@@ -384,10 +496,11 @@ __global__ void mozyme_pair_energy_d_kernel(PairGradArgs a, double *energies) {
     x2[slot - 4] -= a.chnge2;
   }
   double e = 0.0;
-  if (!pair_energy<true>(a, nat1, nat2, n1, n2, x1, x2, pdi, &e, scratch)) {
+  if (!pair_energy<true>(a, nat1, nat2, n1, n2, x1, x2, pdi, &e, scratch, reference ? 1 : 2, &fl)) {
     atomicAdd(a.g.status, 1);
     continue;
   }
+  if (phase == 0) a.ref_flags[iflag] = pack_flags(fl);
   energies[kProbesPerPair * idx + slot] = e;
   }
 }
@@ -398,10 +511,11 @@ __global__ void mozyme_pair_deriv_d_kernel(PairGradArgs a, const double *energie
   int ii, jj;
   if (pair_class(a.g, idx, &ii, &jj, false) != 2) return;
   const double *e = energies + kProbesPerPair * idx;
+  const double half = a.pair_w ? a.pair_w[idx] : 1.0;
   for (int k = 0; k < 3; ++k) {
     const double aa = a.force ? e[4 + k] : e[0];
     const double ee = e[1 + k];
-    const double deriv = (aa - ee) * a.cnst / a.chnge;
+    const double deriv = half * (aa - ee) * a.cnst / a.chnge;
     atomicAdd(&a.dxyz[3 * (ii - 1) + k], -deriv);
     atomicAdd(&a.dxyz[3 * (jj - 1) + k], deriv);
   }
@@ -427,27 +541,29 @@ __global__ void mozyme_pair_gradient_kernel(PairGradArgs a) {
     x2[k] = coord_at(a.g.coord, ii, k);
   }
   double aa = 0.0, ee = 0.0;
+  const double half = a.pair_w ? a.pair_w[idx] : 1.0;
+  PairFlags fl = {false, false, false};
   bool ok = true;
   if (!a.force) {
     x1[0] += a.chnge2;
     x1[1] += a.chnge2;
     x1[2] += a.chnge2;
-    ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &aa, nullptr);
+    ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &aa, nullptr, 1, &fl);
   }
   for (int k = 0; k < 3 && ok; ++k) {
     const double x0 = x2[k];
     if (a.force) {
       x2[k] = x0 - a.chnge2;
-      ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &aa, nullptr);
+      ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &aa, nullptr, 1, &fl);
       if (!ok) break;
       x2[k] = x0 + a.chnge2;
     } else {
       x2[k] = x0 + a.chnge;
     }
-    ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &ee, nullptr);
+    ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &ee, nullptr, 2, &fl);
     x2[k] = x0;
     if (!ok) break;
-    const double deriv = (aa - ee) * a.cnst / a.chnge;
+    const double deriv = half * (aa - ee) * a.cnst / a.chnge;
     atomicAdd(&a.dxyz[3 * (ii - 1) + k], -deriv);
     atomicAdd(&a.dxyz[3 * (jj - 1) + k], deriv);
   }
@@ -817,13 +933,25 @@ int finish_launch(const char *label, const DeviceArray<int> &status, int *d_pair
 // null when the host copy is not known to equal it.
 extern "C" const double *mopac_cuda_mozyme_resident_density_device(int mpack);
 
-extern "C" int mopac_cuda_mozyme_pair_gradient(
+namespace {
+
+// Conventional / periodic route of the pair gradient (pair_gradient_launch
+// with ext != nullptr): per-pair weights, dhc()'s id /= 0 rules, no MOZYME
+// resident density and no MOZYME point-charge pairs.
+struct PairGradExt {
+  const double *pair_w;  // host, npairs
+  long long np;          // size of the packed density
+  int periodic;
+  double clower, cupper, trunk_c, trunk_cr, trunk_cr2, trunk_clim, wlim;
+};
+
+int pair_gradient_launch(
     int numat, int mpack, int npairs, const int *pair_i, const int *pair_j,
     const int *pair_off, const int *row_start, const int *diag_off,
     const int *iorbs, const int *nat, const double *coord, const double *p,
     int distance_gate, int d_on_device, double cutof2, double cutofp, double chnge,
     double cnst, double fpc_9, int force, const MozymePairTablesC *tables,
-    double *dxyz, double *ms_out, int *d_pairs_out) {
+    double *dxyz, double *ms_out, int *d_pairs_out, const PairGradExt *ext) {
   if (numat <= 0 || mpack <= 0 || !iorbs || !nat || !coord || !p || !dxyz || !tables ||
       !row_start || !diag_off) {
     return 1;
@@ -835,20 +963,23 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
   const HostClock::time_point t_start = HostClock::now();
   GeomBuffers geom;
   PairTables tab;
-  DeviceArray<double> d_p, d_dxyz, d_q, d_energies, d_scratch;
+  DeviceArray<double> d_p, d_dxyz, d_q, d_energies, d_scratch, d_pair_w;
+  DeviceArray<unsigned char> d_flags;
   PairGradArgs a;
   std::memset(&a, 0, sizeof(a));
   const size_t na = static_cast<size_t>(numat);
   // The resident SCF just published this density: read it in place instead of
   // re-uploading mpack doubles (identical values; the host copy came from it).
-  const double *resident_p = mopac_cuda_mozyme_resident_density_device(mpack);
+  const double *resident_p = ext ? nullptr : mopac_cuda_mozyme_resident_density_device(mpack);
   if (!geom.upload(numat, npairs, pair_i, pair_j, pair_off, row_start, diag_off, iorbs, nat,
                    coord, a.g) ||
       !tab.upload(*tables) ||
-      (!resident_p && !d_p.upload(p, static_cast<size_t>(mpack))) ||
+      (!resident_p && !d_p.upload(p, ext ? static_cast<size_t>(ext->np) : static_cast<size_t>(mpack))) ||
       !d_dxyz.upload(dxyz, 3 * na) || !d_q.alloc(na) ||
       (d_on_device && !d_energies.alloc(static_cast<size_t>(kProbesPerPair) *
-                                         static_cast<size_t>(std::max(npairs, 1))))) {
+                                         static_cast<size_t>(std::max(npairs, 1)))) ||
+      (ext && ext->pair_w && !d_pair_w.upload(ext->pair_w, static_cast<size_t>(npairs))) ||
+      (ext && ext->periodic && d_on_device && !d_flags.alloc(3 * static_cast<size_t>(std::max(npairs, 1))))) {
     return 2;
   }
   const HostClock::time_point t_uploaded = HostClock::now();
@@ -869,8 +1000,23 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
   a.ev = tables->ev;
   a.force = force;
   a.dxyz = d_dxyz.ptr;
+  if (ext) {
+    a.pair_w = d_pair_w.ptr;
+    a.periodic = ext->periodic;
+    a.clower = ext->clower;
+    a.clower2 = ext->clower * ext->clower;
+    a.cupper = ext->cupper;
+    a.trunk_c = ext->trunk_c;
+    a.trunk_cr = ext->trunk_cr;
+    a.trunk_cr2 = ext->trunk_cr2;
+    a.trunk_clim = ext->trunk_clim;
+    a.wlim = ext->wlim;
+    a.ref_flags = d_flags.ptr;
+    a.dense = 1;
+  }
 
-  mozyme_atom_charge_kernel<<<(numat + 255) / 256, 256>>>(a, d_q.ptr);
+  // (the charges only feed the MOZYME point-charge pairs)
+  if (!ext) mozyme_atom_charge_kernel<<<(numat + 255) / 256, 256>>>(a, d_q.ptr);
   const bool launch_d = d_on_device && any_d_atom(numat, iorbs);
   StackLimitRestore stack_limit;
   if (npairs > 0) {
@@ -879,15 +1025,20 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
     if (launch_d) {
       if (!d_scratch.alloc(static_cast<size_t>(kGridD) * kPairThreadsD * kPairScratchD)) return 2;
       a.scratch_d = d_scratch.ptr;
-      mozyme_pair_energy_d_kernel<<<kGridD, kPairThreadsD, kPairSharedD>>>(a, d_energies.ptr);
+      if (a.periodic) {
+        mozyme_pair_energy_d_kernel<<<kGridD, kPairThreadsD, kPairSharedD>>>(a, d_energies.ptr, 0);
+        mozyme_pair_energy_d_kernel<<<kGridD, kPairThreadsD, kPairSharedD>>>(a, d_energies.ptr, 1);
+      } else {
+        mozyme_pair_energy_d_kernel<<<kGridD, kPairThreadsD, kPairSharedD>>>(a, d_energies.ptr, -1);
+      }
       mozyme_pair_deriv_d_kernel<<<grid, kPairThreads>>>(a, d_energies.ptr);
     }
   }
-  if (numat >= 2) {
+  if (numat >= 2 && !ext) {
     dim3 grid((numat + kPointThreads - 1) / kPointThreads, numat - 1);
     mozyme_point_gradient_kernel<<<grid, kPointThreads>>>(a, d_q.ptr);
   }
-  int code = finish_launch("MOZYME GPU gradient", geom.status, d_pairs_out);
+  int code = finish_launch(ext ? "GPU pair gradient" : "MOZYME GPU gradient", geom.status, d_pairs_out);
   stack_limit.restore();
   const HostClock::time_point t_kernels = HostClock::now();
   add_section_ms("grad_gpu_kernels", host_ms_between(t_uploaded, t_kernels));
@@ -900,6 +1051,54 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
   const double ms = timer.stop_ms();
   if (ms_out) *ms_out = ms;
   return code;
+}
+
+}  // namespace
+
+extern "C" int mopac_cuda_mozyme_pair_gradient(
+    int numat, int mpack, int npairs, const int *pair_i, const int *pair_j,
+    const int *pair_off, const int *row_start, const int *diag_off,
+    const int *iorbs, const int *nat, const double *coord, const double *p,
+    int distance_gate, int d_on_device, double cutof2, double cutofp, double chnge,
+    double cnst, double fpc_9, int force, const MozymePairTablesC *tables,
+    double *dxyz, double *ms_out, int *d_pairs_out) {
+  return pair_gradient_launch(numat, mpack, npairs, pair_i, pair_j, pair_off, row_start, diag_off,
+                              iorbs, nat, coord, p, distance_gate, d_on_device, cutof2, cutofp, chnge,
+                              cnst, fpc_9, force, tables, dxyz, ms_out, d_pairs_out, nullptr);
+}
+
+// Fortran entry point for the conventional (dense density) and periodic pair
+// gradient of dcart_build_scf_gradient_cpu, with the atoms of every image as
+// separate entries: nent = numat*l123 entries (atom a, image k -> entry
+// l123*(a-1)+k), with coord, iorbs, nat and first (= nfirst of the atom) per
+// entry.  One item per (atom ii in the central cell, atom jj in image k)
+// pair: item_i / item_j are entry numbers (1-based), item_w dcart's half.  p is
+// the packed full density (np = mpack).  periodic = 1 applies dhc()'s id /= 0
+// rules (clower, trunk(), wlim).  dxyz (3 x nent) is accumulated in place.
+// Return codes as above; every atom must have 1, 4 or 9 orbitals.
+extern "C" int mopac_cuda_pair_gradient_ext(
+    int nent, long long np, int nitems, const int *item_i, const int *item_j, const double *item_w,
+    const int *first, const int *iorbs, const int *nat, const double *coord, const double *p,
+    int periodic, double clower, double cupper, double trunk_c, double trunk_cr, double trunk_cr2,
+    double trunk_clim, double wlim, double chnge, double cnst, double fpc_9, int force,
+    const MozymePairTablesC *tables, double *dxyz, double *ms_out, int *cpu_pairs_out) {
+  if (nent <= 0 || np <= 0) return 1;
+  std::vector<int> row_start(static_cast<size_t>(nent) + 1, 0);
+  std::vector<int> item_off(static_cast<size_t>(std::max(nitems, 1)), 0);
+  PairGradExt ext;
+  ext.pair_w = item_w;
+  ext.np = np;
+  ext.periodic = periodic;
+  ext.clower = clower;
+  ext.cupper = cupper;
+  ext.trunk_c = trunk_c;
+  ext.trunk_cr = trunk_cr;
+  ext.trunk_cr2 = trunk_cr2;
+  ext.trunk_clim = trunk_clim;
+  ext.wlim = wlim;
+  return pair_gradient_launch(nent, 1, nitems, item_i, item_j, item_off.data(), row_start.data(), first,
+                              iorbs, nat, coord, p, 0, 1, 0.0, 0.0, chnge, cnst, fpc_9, force, tables,
+                              dxyz, ms_out, cpu_pairs_out, &ext);
 }
 
 // Fortran entry point for the block-pair part of hcore_for_MOZYME.  h (mpack)
