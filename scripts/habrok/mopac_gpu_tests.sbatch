@@ -41,6 +41,8 @@
 #                   against the CPU loops of the same run (MOPAC_GPU_DISP_CHECK=1); chignolin, crambin, DNA
 #  10 ctest         (CTEST=0 skips) the MOPAC test suite with this GPU build (TESTS=ON, needs NumPy); failed tests
 #                   run again with MOPAC_NOGPU=1 (GPU results vs a broken CPU path in the GPU build)
+#  11 materials     (MATERIALS=0 skips) tests/check_materials_gpu.py: solids (Tv) - device hcore / Fock / gradient
+#                   check modes, 512-576 atom cells against CPU references, diamond FORCE and DRC GPU vs CPU
 
 set -u
 STAMP=$(date +%Y%m%d_%H%M%S)
@@ -336,4 +338,12 @@ if [ "${CTEST:-1}" = 1 ] && [ -z "${MOPAC_BIN:-}" ]; then
     return 1
   }
   step "10 ctest (GPU build)" ctest.log ctest_gpu
+fi
+
+# ---------------------------------------------------------------- 11 solids (MATERIALS=0 skips)
+if [ "${MATERIALS:-1}" = 1 ]; then
+  if [ "${QUICK:-0}" = 1 ]; then MAT_OPTS=(--medium quartz --skip-force); else MAT_OPTS=(); fi
+  step "11 materials (solids)" materials.log \
+    env OMP_NUM_THREADS="$NCPU" python3 "$SRC/tests/check_materials_gpu.py" "$MOPAC" --work-dir "$RUN/materials" \
+    ${MAT_OPTS[@]+"${MAT_OPTS[@]}"}
 fi
