@@ -40,6 +40,11 @@ DATA = Path(__file__).resolve().parent / "data" / "materials"
 # by ~0.02 kcal/mol (equidistant nearest images: solrot picks one by the last bit of the distance).
 MEDIUM_REF = {"quartz": -40393.65183, "silicon": -3991.12205, "rutile": -38476.65650}
 MEDIUM_CPU_TIME = {"quartz": 239.9, "silicon": 808.9, "rutile": 1223.6}
+# decks without Tv: only the pair gradient is a device path there
+MOLECULES = {"urea_cluster"}
+# MOPAC uses the GPU above 100 atoms only (diamond: 64 + 3 Tv); MOPAC_GPU_DEBUG prints "[GPU gradient] pairs="
+# and "[GPU Fock] pairs=" for every device call, which shows that the GPU did the work
+GPU_ENV = {"MOPAC_FORCEGPU": "1", "MOPAC_GPU_DEBUG": "1"}
 
 failures = []
 
@@ -79,6 +84,21 @@ def floats_after(text, key):
     return [float(x) for x in re.findall(re.escape(key) + r"\s*(-?\d+\.\d+(?:[EeDd][-+]?\d+)?)", text)]
 
 
+def device_calls(text):
+    g = text.count("[GPU gradient] pairs=")
+    f = text.count("[GPU Fock] pairs=")
+    fb = text.count("[GPU gradient] fallback_cpu") + text.count("[GPU Fock] device failure")
+    return f"device gradient calls {g}, device Fock builds {f}, CPU fallbacks {fb}"
+
+
+def gpu_used(text, label):
+    g = text.count("[GPU gradient] pairs=")
+    f = text.count("[GPU Fock] pairs=")
+    fb = text.count("[GPU gradient] fallback_cpu") + text.count("[GPU Fock] device failure")
+    result(g > 0 and f > 0 and fb == 0, f"{label}: ran on the GPU ({g} device gradients, {f} device Fock builds, "
+           f"{fb} CPU fallbacks)")
+
+
 def check_step(mopac, work):
     env = {"MOPAC_GPU_HCORE_CHECK": "1", "MOPAC_GPU_FOCK_CHECK": "1", "MOPAC_GPU_GRAD_CHECK": "1"}
     for name in ("si144", "quartz162", "rutile162", "urea_cluster"):
@@ -90,11 +110,13 @@ def check_step(mopac, work):
         print(f"[materials] check {name}: {wall:.1f} s, heat {heat(text)}, hcore h w wk e1b/e2a enuc "
               f"{hc[-1] if hc else None}, Fock {max(fock) if fock else None} eV, gradient "
               f"{max(grad) if grad else None} kcal/mol/A", flush=True)
+        result(bool(grad) and max(grad) <= 1e-5, f"check {name}: device gradient within 1e-5 kcal/mol/A of the CPU")
+        if name in MOLECULES:
+            continue   # no Tv: the device hcore / Fock of solids do not apply
         # wk may differ where two images are equally near (solrot keeps one): not tested
         h_ok = bool(hc) and all(max(float(v) for i, v in enumerate(c.split()) if i != 2) <= 1e-8 for c in hc)
         result(h_ok, f"check {name}: device hcore h, w, e1b/e2a, enuc within 1e-8 of the CPU")
         result(bool(fock) and max(fock) <= 1e-7, f"check {name}: device Fock within 1e-7 eV of the CPU")
-        result(bool(grad) and max(grad) <= 1e-5, f"check {name}: device gradient within 1e-5 kcal/mol/A of the CPU")
 
 
 def medium_step(mopac, work, names):
@@ -112,13 +134,15 @@ def medium_step(mopac, work, names):
 def force_step(mopac, work):
     deck = DATA / "small" / "diamond.mop"
     res = {}
-    for mode, env in (("gpu", {}), ("cpu", {"MOPAC_NOGPU": "1"})):
+    for mode, env in (("gpu", GPU_ENV), ("cpu", {"MOPAC_NOGPU": "1"})):
         text, wall = run(mopac, work / "force" / mode, "diamond", "PM7 FORCE GEO-OK", deck, env)
         freq = floats_after(text, "FREQUENCY  ")
         zpe = floats_after(text, "ZERO POINT ENERGY")
         res[mode] = (freq, zpe[-1] if zpe else None, wall)
         print(f"[materials] force diamond {mode}: {wall:.1f} s, {len(freq)} frequencies "
-              f"{freq[:1]}..{freq[-1:]} cm-1, ZPE {res[mode][1]} kcal/mol", flush=True)
+              f"{freq[:1]}..{freq[-1:]} cm-1, ZPE {res[mode][1]} kcal/mol, {device_calls(text)}", flush=True)
+        if mode == "gpu":
+            gpu_used(text, "force diamond")
     (fg, zg, tg), (fc, zc, tc) = res["gpu"], res["cpu"]
     ok = bool(fg) and len(fg) == len(fc)
     dmax = max(abs(a - b) for a, b in zip(fg, fc)) if ok else float("nan")
@@ -141,13 +165,15 @@ def drc_step(mopac, work):
     deck = DATA / "small" / "diamond.mop"
     keys = "PM7 DRC TEMPERATURE=300 SEED=7 CYCLES=40 GEO-OK"
     res = {}
-    for mode, env in (("gpu", {}), ("cpu", {"MOPAC_NOGPU": "1"})):
+    for mode, env in (("gpu", GPU_ENV), ("cpu", {"MOPAC_NOGPU": "1"})):
         text, wall = run(mopac, work / "drc" / mode, "diamond", keys, deck, env)
         res[mode] = (drc_points(text), wall)
         pts = res[mode][0]
         drift = max(abs(p[3]) for p in pts) if pts else float("nan")
         print(f"[materials] drc diamond {mode}: {wall:.1f} s, {len(pts)} points, max |total energy error| "
-              f"{drift:.5f} kcal/mol", flush=True)
+              f"{drift:.5f} kcal/mol, {device_calls(text)}", flush=True)
+        if mode == "gpu":
+            gpu_used(text, "drc diamond")
     pg, pc = res["gpu"][0], res["cpu"][0]
     drift = max(abs(p[3]) for p in pg) if pg else float("nan")
     result(len(pg) >= 30 and drift <= 0.05, f"drc diamond: GPU {len(pg)} points, total energy kept within "
