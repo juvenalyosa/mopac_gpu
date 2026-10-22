@@ -84,6 +84,14 @@ double precision function PM6_DH_Dispersion(l_grad)
     if (allocated(dxyz_ref)) deallocate(dxyz_ref)
   end if
 #endif
+  if (id /= 0 .and. l_grad) then
+!
+!  Solids: analytic gradient, added on to the per-image entries of dxyz (see PM6_DH_Disp)
+!
+    E_disp = PM6_DH_Disp(-1, numat)
+    PM6_DH_Dispersion = E_disp
+    return
+  end if
   E_disp = PM6_DH_Disp(0, numat)
   PM6_DH_Dispersion = E_disp
   if (l_grad) call cpu_fd_gradient(dxyz)
@@ -113,6 +121,11 @@ end function PM6_DH_Dispersion
 
 double precision function PM6_DH_Disp(set_a, nsa)
 !
+!  set_a = -1 (solids, nsa = numat): also add the analytic gradient to dxyz.  dxyz holds one
+!  entry per atom and image cell, as dcart lays it out: atom i in the central cell, atom j in
+!  cell (i1, j1, k1).  The finite-difference gradient of PM6_DH_Dispersion put the derivative of
+!  atom k at entry k, which in a solid belongs to another atom, and gave no translation-vector term.
+!
 !  Based on materials provided by Jan Rezak, as described in:
 !
 !  "A Transferable H-bonding Correction For Semiempirical Quantum-Chemical Methods"
@@ -120,8 +133,9 @@ double precision function PM6_DH_Disp(set_a, nsa)
 !
 !  J Chem Theory and Computation 6:344-352 (2010)
 !
-  use common_arrays_C, only: nat, nbonds, tvec, coord
-  use molkst_C, only : Rij => Rab, method_PM7, numcal, line, id, l11, l21, l31, numat
+  use common_arrays_C, only: nat, nbonds, tvec, coord, dxyz
+  use molkst_C, only : Rij => Rab, method_PM7, numcal, line, id, l11, l21, l31, numat, &
+    l1u, l2u, l3u, l123
   use chanel_C, only : iw
   use elemts_C, only : atom_names
   implicit none
@@ -132,6 +146,9 @@ double precision function PM6_DH_Disp(set_a, nsa)
   integer :: ii, i, j, ni, nj, j_start, icalcn = 0, i1, j1, k1
   double precision :: C(86),R(86),N(86)
   double precision :: C6, R0, E_disp_tmp, damp, disp_limit = 6.5d0, sum, E_disp
+  double precision :: f_lr, e_lr, dedr, g(3)
+  integer :: icuc, kkkk, ka, kb
+  logical :: l_grad
   logical, external :: connected
   save :: icalcn, first_1, first_2
 
@@ -190,6 +207,8 @@ double precision function PM6_DH_Disp(set_a, nsa)
     cscale = 0.89d0
   end if
   l_eles = .true.
+  l_grad = (set_a == -1)
+  icuc = (l123 + 1)/2
   do ii = 1, nsa
     if (nsa == numat) then
       i = ii
@@ -270,9 +289,24 @@ double precision function PM6_DH_Disp(set_a, nsa)
 !  of atoms increases as Rij**2.  This makes long-range interactions (6 Angstroms to infinity) more important.
 !  In molecules, there is no equivalent increase.
 !
-
-                  E_disp_tmp = C6/Rij**6*damp/(1000.d0*4.184d0)*(1.d0 - exp(-(Rij*10.d0 - disp_limit)**2))
+                  e_lr = exp(-(Rij*10.d0 - disp_limit)**2)
+                  f_lr = 1.d0 - e_lr
+                  E_disp_tmp = C6/Rij**6*damp/(1000.d0*4.184d0)*f_lr
                     sum = sum + E_disp_tmp
+                  if (l_grad) then
+!
+!  d(E_disp_tmp)/dRij (Rij in nm), then the gradient of -cscale*E_disp_tmp in kcal/mol/Angstrom
+!
+                    dedr = E_disp_tmp*(-6.d0/Rij + alpha/(s*R0)*(1.d0 - damp)) + &
+                      C6/Rij**6*damp/(1000.d0*4.184d0)*20.d0*(Rij*10.d0 - disp_limit)*e_lr
+                    g = -cscale*dedr*0.01d0*V_ab/Rij
+!  V_ab = r(i) - (r(j) - tvec*(i1, j1, k1)): the image of j is in cell (-i1, -j1, -k1)
+                    kkkk = ((l1u - i1)*(2*l2u + 1) + l2u - j1)*(2*l3u + 1) + l3u - k1 + 1
+                    ka = 3*(l123*(i - 1) + icuc - 1)
+                    kb = 3*(l123*(j - 1) + kkkk - 1)
+                    dxyz(ka + 1:ka + 3) = dxyz(ka + 1:ka + 3) + g
+                    dxyz(kb + 1:kb + 3) = dxyz(kb + 1:kb + 3) - g
+                  end if
                 end if
               end do
             end do

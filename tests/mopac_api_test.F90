@@ -1361,15 +1361,17 @@ subroutine test_crystal1(nfail)
     allocate(test_target%lattice_update(3*3))
     test_target%lattice_update = test_in%lattice
     allocate(test_target%lattice_deriv(3*3))
-    test_target%lattice_deriv(1) = -2.329702d0
-    test_target%lattice_deriv(2) = -2.324697d0
-    test_target%lattice_deriv(3) = 2.296600d0
-    test_target%lattice_deriv(4) = -2.314736d0
-    test_target%lattice_deriv(5) = 2.301304d0
-    test_target%lattice_deriv(6) = -2.299118d0
-    test_target%lattice_deriv(7) = 2.302052d0
-    test_target%lattice_deriv(8) = -2.296322d0
-    test_target%lattice_deriv(9) = -2.281867d0
+    ! PM7 dispersion contributes to the lattice derivatives since 2026-10-22 (analytic gradient for
+    ! solids); before, only the SCF part was there (PM7-: -2.33)
+    test_target%lattice_deriv(1) = 0.789862d0
+    test_target%lattice_deriv(2) = 0.794866d0
+    test_target%lattice_deriv(3) = -0.823262d0
+    test_target%lattice_deriv(4) = 0.804866d0
+    test_target%lattice_deriv(5) = -0.818518d0
+    test_target%lattice_deriv(6) = 0.820489d0
+    test_target%lattice_deriv(7) = -0.817664d0
+    test_target%lattice_deriv(8) = 0.823385d0
+    test_target%lattice_deriv(9) = 0.837841d0
     allocate(test_target%charge(54))
     test_target%charge(1) = 0.855660d0
     test_target%charge(2) = -0.855642d0
@@ -1426,9 +1428,9 @@ subroutine test_crystal1(nfail)
     test_target%charge(53) = 0.855636d0
     test_target%charge(54) = -0.855641d0
     test_target%dipole(:) = 0.0d0
-    test_target%stress(1) = -0.550d0
-    test_target%stress(2) = -0.553d0
-    test_target%stress(3) = -0.554d0
+    test_target%stress(1) = 0.198d0
+    test_target%stress(2) = 0.194d0
+    test_target%stress(3) = 0.194d0
     test_target%stress(4) = 0.001d0
     test_target%stress(5) = 0.000d0
     test_target%stress(6) = 0.002d0
