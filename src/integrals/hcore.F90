@@ -20,7 +20,7 @@
       USE molkst_C, only : numcal, numat, norbs, id, l1u, l2u, l3u, &
       & keywrd, enuclr, n2elec, efield, mpack, line
       use common_arrays_C, only : nfirst, nlast, nat, uspd, &
-      & coord, h, w, wk, tvec
+      & coord, h, w, wk, tvec, wk_image
       use cosmo_C, only : useps
       USE funcon_C, only : a0, ev, fpc_9
       USE parameters_C, only : tore, dd
@@ -53,7 +53,7 @@
       double precision, allocatable :: gdi(:,:), ge1b(:,:), ge2a(:,:), genuc(:)
       integer, allocatable :: gkb(:)
       logical :: use_gpu_pairs, gpu_check
-      integer :: ip, gcode, gitems
+      integer :: ip, gcode, gitems, kimg
       integer(8) :: t0, t1, rate
       double precision :: gms, dmax_h, dmax_w, dmax_wk, dmax_e, dmax_en, t_hcore
       save first, debug, icalcn, ione, vqc, lmolaris_qmmm
@@ -174,6 +174,11 @@
       use_gpu_pairs = .false.
       gpu_check = .false.
       if (id /= 0) then
+        if (allocated(wk_image)) then
+          if (size(wk_image) /= (numat*(numat + 1))/2) deallocate(wk_image)
+        end if
+        if (.not. allocated(wk_image)) allocate(wk_image((numat*(numat + 1))/2))
+        wk_image = 0
         if (conv_gpu_hcore_enabled()) then
           call conv_gpu_solrot_run(gdi, ge1b, ge2a, genuc, gkb, gcode, gms, gitems)
           use_gpu_pairs = (gcode == 0)
@@ -292,7 +297,8 @@
             kr = kr + gkb(ip)
           else
             kro = kr
-            call solrot (ni, nj, coord(1,i), coord(1,j), wjd, wkd, kr, e1b, e2a, enuc)
+            call solrot (ni, nj, coord(1,i), coord(1,j), wjd, wkd, kr, e1b, e2a, enuc, kimg)
+            wk_image((i*(i - 1))/2 + j) = kimg
             if (gpu_check) then
               dmax_w = max(dmax_w, maxval(abs(w(kro:kr - 1) - wjd(:kr-kro))))
               dmax_wk = max(dmax_wk, maxval(abs(wk(kro:kr - 1) - wkd(:kr-kro))))

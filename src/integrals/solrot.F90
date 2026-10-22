@@ -13,7 +13,7 @@
 ! See the License for the specific language governing permissions and
 ! limitations under the License.
 
-      subroutine solrot(ni, nj, xi, xj, wj, wk, kr, e1b, e2a, enuc)
+      subroutine solrot(ni, nj, xi, xj, wj, wk, kr, e1b, e2a, enuc, kimg)
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
@@ -29,6 +29,7 @@
       integer  :: ni
       integer  :: nj
       integer , intent(inout) :: kr
+      integer , intent(out) :: kimg   ! image whose integrals are in wk (loop number), 0 for none
       double precision , intent(out) :: enuc
       double precision , intent(in) :: xi(3)
       double precision , intent(in) :: xj(3)
@@ -39,7 +40,7 @@
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
 !-----------------------------------------------
-      integer :: icalcn, i, j, k, kb
+      integer :: icalcn, i, j, k, kb, m
       double precision, dimension(:), allocatable :: wsum, wmax, wbits
       double precision, dimension(3) :: xjuc
       double precision, dimension(45) :: e1bits = 0.d0, e2bits = 0.d0
@@ -72,9 +73,12 @@
       e1b = 0.D0
       e2a = 0.D0
       enuc = 0.D0
+      kimg = 0
+      m = 0
       do i = -l1u, l1u
         do j = -l2u, l2u
           do k = -l3u, l3u
+            m = m + 1
             xjuc = xj + tvec(:,1)*i + tvec(:,2)*j + tvec(:,3)*k - xi
             r = xjuc(1)**2 + xjuc(2)**2 + xjuc(3)**2
             if (r > cutof2) then
@@ -91,14 +95,20 @@
               call rotate (ni, nj, xdumy, xjuc, wbits, kb, e1bits, e2bits, enubit)
             end if
             wsum(:kb) = wsum(:kb) + wbits(:kb)
-            if (wmax(1) < wbits(1)) wmax(:kb) = wbits(:kb) ! "K" integrals apply only to nearest pair
+            if (wmax(1) < wbits(1)) then  ! "K" integrals apply only to nearest pair
+              wmax(:kb) = wbits(:kb)
+              kimg = m
+            end if
             e1b = e1b + e1bits
             e2a = e2a + e2bits
             enuc = enuc + enubit*one
           end do
         end do
       end do
-      if (one < 0.9D0) wmax(:kb) = 0.D0
+      if (one < 0.9D0) then
+        wmax(:kb) = 0.D0
+        kimg = 0
+      end if
       wk(:kb) = wmax(:kb)
       wj(:kb) = wsum(:kb)
       kr = kb + kr

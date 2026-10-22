@@ -598,7 +598,7 @@
       subroutine dcart_build_scf_gradient_cpu(numat_in, l123_in, coord, dxyz, q, chnge, chnge2, &
            const, numtot_in, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat, d_pairs_only)
       use funcon_C, only : fpc_9, a0, ev
-      use common_arrays_C, only : nfirst, nlast, nat, p, pa, pb, tvec
+      use common_arrays_C, only : nfirst, nlast, nat, p, pa, pb, tvec, wk_image
       use molkst_C, only : mozyme, id, cutofp, l1u, l2u, l3u, dhc_exchange
       use MOZYME_C, only : iorbs, part_dxyz, mode, jopt
       use mozyme_gpu_gradient, only : mozyme_gpu_device_pair
@@ -749,11 +749,14 @@
           end if
           if (id /= 0) then
 !
-!  The image of jj whose exchange integrals solrot keeps: the nearest, the first one
-!  in the loop order when several are equally near; none when jj is ii.
+!  The image of jj whose exchange integrals the energy has: hcore records it (solrot keeps
+!  the first image with the largest w(1), i.e. the nearest; none when jj is ii).  Without
+!  that record (MOZYME), the first nearest image.
 !
             knear = 0
-            if (ii /= jj) then
+            if (.not. mozyme .and. allocated(wk_image)) then
+              knear = wk_image((ii*(ii - 1))/2 + jj)
+            else if (ii /= jj) then
               rnear = huge(1.d0)
               kkkk = 0
               do ik = -l1u, l1u

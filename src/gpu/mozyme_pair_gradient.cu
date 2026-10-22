@@ -1288,16 +1288,17 @@ __global__ void solrot_wk_kernel(SolrotArgs a) {
 // pair in image order.  On return w and wk hold the near-image J sums and the
 // K integrals of the image with the largest w(1) (the host adds the point
 // charges to w), di (81 per pair) the summed h1elec, e1b/e2a (45 per pair) and
-// enuc the summed rotate terms (enuc already times solrot's one).  w and wk
-// are written only at the pair segments.  Returns 0 on success, 1 on bad
+// enuc the summed rotate terms (enuc already times solrot's one), and win
+// (npairs) the image whose integrals are in wk (0: none; dcart's exchange
+// image).  w and wk are written only at the pair segments.  Returns 0 on success, 1 on bad
 // arguments, 2 on CUDA failure, 3 if some pair failed on the device.
 extern "C" int mopac_cuda_solrot_pairs(
     int npairs, const int *pair_ni, const int *pair_nj, const long long *pair_woff, const int *pair_kb,
     const int *pair_first, const int *pair_self, const double *pair_xi, const double *pbest_w1,
     const int *pbest_img, int nitems, const int *item_pair, const int *item_img, const double *item_xj,
     const double *item_xjuc, const MozymePairTablesC *tables, double *w, double *wk, double *di,
-    double *e1b, double *e2a, double *enuc, double *ms_out) {
-  if (npairs <= 0 || nitems < 0 || !tables || !w || !wk || !di || !e1b || !e2a || !enuc) return 1;
+    double *e1b, double *e2a, double *enuc, int *win_out, double *ms_out) {
+  if (npairs <= 0 || nitems < 0 || !tables || !w || !wk || !di || !e1b || !e2a || !enuc || !win_out) return 1;
   EventTimer timer;
   PairTables tab;
   if (!tab.upload(*tables)) return 2;
@@ -1427,11 +1428,13 @@ extern "C" int mopac_cuda_solrot_pairs(
                    cudaMemcpyDeviceToHost) != cudaSuccess ||
         cudaMemcpy(e2a + 45 * static_cast<size_t>(p0), d_e2a.ptr, 45 * nps * sizeof(double),
                    cudaMemcpyDeviceToHost) != cudaSuccess ||
-        cudaMemcpy(enuc + p0, d_enuc.ptr, nps * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess) {
+        cudaMemcpy(enuc + p0, d_enuc.ptr, nps * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess ||
+        cudaMemcpy(win.data(), d_win.ptr, nps * sizeof(int), cudaMemcpyDeviceToHost) != cudaSuccess) {
       code = 2;
       break;
     }
     for (int p = 0; p < np; ++p) {
+      win_out[p0 + p] = (pair_self[p0 + p] || win[p] == 0x7fffffff) ? 0 : win[p];
       const size_t o = static_cast<size_t>(woff[p]);
       const size_t g = static_cast<size_t>(pair_woff[p0 + p]);
       std::memcpy(w + g, hw.data() + o, pair_kb[p0 + p] * sizeof(double));

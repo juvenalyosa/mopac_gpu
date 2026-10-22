@@ -46,6 +46,7 @@ subroutine hcore_for_MOZYME ()
   character (len=248) :: tmpkey
   logical :: calci, calcij, calcj, fldon
   logical, save :: debug
+  integer :: kimg
   integer :: i1, i2, ii, im1, io1, ione, ired, j, j1, jj, jo1, jred, k, &
  & krmax, kro, ks, mm, nj, kr, i, ni, itemp, imol=0
   double precision :: const, enuc, fldcon, fnuc, half, hterme, xf, yf, zf, xj(3)
@@ -365,7 +366,7 @@ subroutine hcore_for_MOZYME ()
             ! AND THE NUCLEAR-NUCLEAR TERM ENUC.
             !
             kro = kr
-            call solrot (ni, nj, coord(1,i), coord(1,j), wjd, wkd, kr, e1b, e2a, enuc)
+            call solrot (ni, nj, coord(1,i), coord(1,j), wjd, wkd, kr, e1b, e2a, enuc, kimg)
             w(kro:kr - 1) = wjd(:kr-kro)
             wk(kro:kr - 1) = wkd(:kr-kro)
             enuclr = enuclr + enuc

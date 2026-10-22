@@ -55,6 +55,9 @@ module Common_arrays_C
   &ipKa_unsorted,& ! List of ionizable hydrogen atoms, not yet sorted by pKa
   &  dummy
   integer(c_int), dimension (:), allocatable, target :: nfirst, nlast
+  integer, dimension (:), allocatable :: &
+  &  wk_image      !  Solids: for each pair i, j <= i (number i*(i-1)/2 + j), the image of j (solrot's loop
+                   !  number) whose exchange integrals are in wk; 0 for none.  Set by hcore, used by dcart.
   integer, dimension (:,:), allocatable :: &
   &  loc,        & !  Indices of atoms and coordinates marked for optimization
   &  ibonds,     & !  Atom numbers of atoms bonded to a given atom

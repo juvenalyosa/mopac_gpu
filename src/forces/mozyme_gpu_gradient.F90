@@ -111,12 +111,12 @@ module mozyme_gpu_gradient
 
     function mopac_cuda_solrot_pairs(npairs_c, pair_ni_c, pair_nj_c, pair_woff_c, pair_kb_c, pair_first_c, &
         pair_self_c, pair_xi_c, pbest_w1_c, pbest_img_c, nitems_c, item_pair_c, item_img_c, item_xj_c, &
-        item_xjuc_c, tables_c, w_c, wk_c, di_c, e1b_c, e2a_c, enuc_c, ms_c) &
+        item_xjuc_c, tables_c, w_c, wk_c, di_c, e1b_c, e2a_c, enuc_c, win_c, ms_c) &
         bind(C, name='mopac_cuda_solrot_pairs') result(rc)
       import :: c_int, c_long_long, c_double, mozyme_pair_tables_c
       integer(c_int), value :: npairs_c, nitems_c
       integer(c_int) :: pair_ni_c(*), pair_nj_c(*), pair_kb_c(*), pair_first_c(*), pair_self_c(*)
-      integer(c_int) :: pbest_img_c(*), item_pair_c(*), item_img_c(*)
+      integer(c_int) :: pbest_img_c(*), item_pair_c(*), item_img_c(*), win_c(*)
       integer(c_long_long) :: pair_woff_c(*)
       real(c_double) :: pair_xi_c(*), pbest_w1_c(*), item_xj_c(*), item_xjuc_c(*)
       real(c_double) :: w_c(*), wk_c(*), di_c(*), e1b_c(*), e2a_c(*), enuc_c(*)
@@ -662,7 +662,7 @@ contains
 
   subroutine conv_gpu_gradient_run_gpu(numat_in, l123_in, coord, dxyz, q, force, chnge, const, code, ms, &
       nitems_out)
-    use common_arrays_C, only : p, nfirst, nlast, nat, tvec
+    use common_arrays_C, only : p, nfirst, nlast, nat, tvec, wk_image
     use molkst_C, only : id, mpack, cutofp, clower, cupper, l1u, l2u, l3u
     use funcon_C, only : fpc_9, a0, ev
     implicit none
@@ -730,10 +730,12 @@ contains
           half = 1.d0
           if (ii == jj) half = 0.5d0
           jjj = l123_in*(jj - 1)
-          ! the image whose exchange integrals the energy has (dcart's dhc_exchange):
-          ! the nearest, the first one when several are equally near; none for ii = jj
+          ! the image whose exchange integrals the energy has (dcart's dhc_exchange): as
+          ! hcore recorded it, otherwise the first nearest one; none for ii = jj
           knear = 0
-          if (id /= 0 .and. pass == 2 .and. ii /= jj) then
+          if (id /= 0 .and. allocated(wk_image)) then
+            knear = wk_image((ii*(ii - 1))/2 + jj)
+          else if (id /= 0 .and. pass == 2 .and. ii /= jj) then
             rnear = huge(1.d0)
             do kkkk = 1, l123_in
               d = coord_e(:, jjj + kkkk) - coord(:, ii)
@@ -815,7 +817,7 @@ contains
   end subroutine conv_gpu_gradient_run_gpu
 
   subroutine conv_gpu_solrot_run_gpu(gdi, ge1b, ge2a, genuc, gkb, code, ms, nitems_out)
-    use common_arrays_C, only : coord, nat, tvec, w, wk
+    use common_arrays_C, only : coord, nat, tvec, w, wk, wk_image
     use molkst_C, only : numat, l1u, l2u, l3u, clower
     use parameters_C, only : natorb, tore
     use funcon_C, only : ev, a0
@@ -827,6 +829,7 @@ contains
     double precision, intent(out) :: ms
     double precision, external :: trunk
     integer(c_int), allocatable :: pair_ni(:), pair_nj(:), pair_kb(:), pair_first(:), pair_self(:), pbest_img(:)
+    integer(c_int), allocatable :: win(:)
     integer(c_int), allocatable :: item_pair(:), item_img(:)
     integer(c_long_long), allocatable :: pair_woff(:)
     double precision, allocatable :: pair_xi(:,:), pbest_w1(:), item_xj(:,:), item_xjuc(:,:)
@@ -848,7 +851,7 @@ contains
     end do
     npairs = (numat*(numat + 1))/2
     allocate(pair_ni(npairs), pair_nj(npairs), pair_kb(npairs), pair_first(npairs + 1), pair_self(npairs))
-    allocate(pbest_img(npairs), pair_woff(npairs), pair_xi(3, npairs), pbest_w1(npairs))
+    allocate(pbest_img(npairs), win(npairs), pair_woff(npairs), pair_xi(3, npairs), pbest_w1(npairs))
     allocate(sw(npairs), se1(npairs), se2(npairs), sen(npairs))
     allocate(gdi(81, npairs), ge1b(45, npairs), ge2a(45, npairs), genuc(npairs), gkb(npairs))
     cutof2 = clower**2
@@ -942,12 +945,13 @@ contains
     call mozyme_section_timer_begin('conv_hcore_device', t_section)
     rc = mopac_cuda_solrot_pairs(int(npairs, kind=c_int), pair_ni, pair_nj, pair_woff, pair_kb, pair_first, &
       pair_self, pair_xi, pbest_w1, pbest_img, int(nitems, kind=c_int), item_pair, item_img, item_xj, &
-      item_xjuc, tables, w, wk, gdi, ge1b, ge2a, genuc, ms_c)
+      item_xjuc, tables, w, wk, gdi, ge1b, ge2a, genuc, win, ms_c)
     call mozyme_section_timer_end('conv_hcore_device', t_section)
     code = int(rc)
     ms = ms_c
     nitems_out = nitems
     if (code /= 0) return
+    wk_image(1:npairs) = int(win(1:npairs))
 !
 !  Add the point-charge images
 !
