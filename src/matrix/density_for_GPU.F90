@@ -20,7 +20,7 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
       Use density_cuda_i
       Use mopac_cublas_interfaces
       use gpu_density_interfaces
-      use gpu_diag_state, only: have_device_eigvecs, device_eigvecs_n, gpu_diag_clear
+      use gpu_diag_state, only: have_device_eigvecs, device_eigvecs_n, gpu_diag_clear, gpu_diag_matches
       use gpu_runtime_interfaces, only: mopac_cuda_set_resident_mode
 #endif
       implicit none
@@ -160,10 +160,11 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
 #endif
         case(2)   ! Option to use dgemm from CUBLAS
 #ifdef GPU
-          if (allow_gpu .and. have_device_eigvecs .and. device_eigvecs_n == norbs) then
+          if (allow_gpu .and. gpu_diag_matches(c, norbs)) then
             gpu_density_used = .true.
             allocate(xmat(norbs,norbs),stat = i)
             call mopac_cuda_density_from_dev_gemm(norbs, nl2, nu2, nl1, nu1, sign, frac, xmat, norbs)
+            if (use_resident) call download_full(xmat)
             if (need_host_density) then
               forall (i=1:norbs)
                  xmat(i,i) = xmat(i,i) + cst
@@ -383,10 +384,11 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
 #endif
         case(4)   ! Option to use dsyrk from CUBLAS
 #ifdef GPU
-          if (allow_gpu .and. have_device_eigvecs .and. device_eigvecs_n == norbs .and. fract < 1.d-2) then
+          if (allow_gpu .and. fract < 1.d-2 .and. gpu_diag_matches(c, norbs)) then
             gpu_density_used = .true.
             allocate(xmat(norbs,norbs),stat = i)
             call mopac_cuda_density_from_dev_syrk(norbs, ndubl, occ, xmat, norbs)
+            if (use_resident) call download_full(xmat)
             call dtrttp('u', norbs, xmat, norbs, pp, i )
             if (debug_density) then
               allocate(xmat_ref(norbs,norbs), stat=istat_loc)
@@ -534,4 +536,23 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
     End select
     continue
     return
+#ifdef GPU
+contains
+  ! In resident mode the device density builders leave the density on the device;
+  ! the host copy is filled from it here.
+  subroutine download_full(x)
+    double precision, intent(out) :: x(norbs, norbs)
+    interface
+      function mopac_cuda_download_density_full(n_c, c_c, ldc_c) &
+          bind(C, name='mopac_cuda_download_density_full') result(ok_c)
+        import :: c_int, c_double
+        integer(c_int), value :: n_c, ldc_c
+        real(c_double) :: c_c(*)
+        integer(c_int) :: ok_c
+      end function mopac_cuda_download_density_full
+    end interface
+    if (mopac_cuda_download_density_full(int(norbs, c_int), x, int(norbs, c_int)) /= 1) &
+      stop 'density_for_GPU: device density download failed'
+  end subroutine download_full
+#endif
 End subroutine density_for_GPU

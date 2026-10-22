@@ -6880,6 +6880,8 @@ static int  g_device_eigvecs_n = 0;
 
 void mopac_cuda_dsyevd(int n, double *A, int lda, double *W, int *info) {
   if (info) *info = -1000;
+  // d_A is shared with the keep variant: whatever it held is replaced
+  g_have_device_eigvecs = false;
   if (!A || !W || !info || n <= 0 || lda < n) {
     return;
   }
@@ -7131,6 +7133,20 @@ void mopac_cuda_density_from_dev_gemm(int n,
     cudaMemcpyAsync(C, d_C, bytesC, cudaMemcpyDeviceToHost, g_stream);
     cudaStreamSynchronize(g_stream);
   }
+}
+
+// Copy the full density built by density_from_dev_syrk / _gemm to the host (in
+// resident mode those leave it on the device).  Returns 1 on success.
+int mopac_cuda_download_density_full(int n, double *C, int ldc) {
+  if (!C || !g_density_full_valid || n != g_density_full_n || ldc != g_density_full_ld) return 0;
+  size_t bytesC = (size_t)ldc * (size_t)n * sizeof(double);
+  if (cudaMemcpyAsync(C, g_density_full.ptr, bytesC, cudaMemcpyDeviceToHost, g_stream) != cudaSuccess) return 0;
+  return cudaStreamSynchronize(g_stream) == cudaSuccess ? 1 : 0;
+}
+
+// 1 when the device holds the eigenvectors of the last keep diagonalization of size n
+int mopac_cuda_device_eigvecs_valid(int n) {
+  return (g_have_device_eigvecs && n == g_device_eigvecs_n) ? 1 : 0;
 }
 
 // Fetch device-resident eigenvectors into host buffer A (ld=lda)

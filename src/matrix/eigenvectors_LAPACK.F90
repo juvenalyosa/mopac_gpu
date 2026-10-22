@@ -17,7 +17,9 @@
       USE chanel_C, only : iw
 #ifdef GPU
       Use mod_vars_cuda, only: lgpu, ngpus, prec
-      use eigenvectors_cuda_mod, only: eigenvectors_CUDA, eigenvectors_CUDA_keep, eigenvectors_CUDA_fetch
+      use eigenvectors_cuda_mod, only: eigenvectors_CUDA, eigenvectors_CUDA_keep, eigenvectors_CUDA_fetch, &
+        eigenvectors_CUDA_keep_fetch
+      use gpu_diag_state, only: gpu_diag_clear
       use gpu_ortho_interfaces
       use overlap_build, only: build_overlap_packed, unpack_upper_to_full
       use partial_eig_gpu
@@ -55,7 +57,7 @@
       logical, save :: mg_checked = .false., mg_available = .false., mg_warned = .false.
       ! Current device CC for auto policy
       integer(c_int) :: ccmaj, ccmin
-      logical :: use_partial_eig, use_mg_eig
+      logical :: use_partial_eig, use_mg_eig, keep_ok
       interface
         subroutine mopac_cuda_get_cc(maj, min) bind(C, name='get_current_device_cc')
           import :: c_int
@@ -278,7 +280,20 @@ end if
               call eigenvectors_CUDA_fetch(eigenvecs, ndim)
             end if
           else
-            call eigenvectors_CUDA(eigenvecs, xmat, eigvals, ndim)
+!
+!  Keep the eigenvectors on the device as well, so that density_for_GPU builds
+!  the density there (DSYRK) instead of on the host; MOPAC_GPU_KEEP_EIGVECS=0 turns
+!  it off.  (A100, 576-atom cells: the host DSYRK took 0.11-0.19 s per iteration.)
+!
+            keep_ok = .false.
+            env = '' ; stat_env = 1
+            call get_environment_variable('MOPAC_GPU_KEEP_EIGVECS', env, status=stat_env)
+            if (.not. (stat_env == 0 .and. len_trim(env) > 0 .and. env(1:1) == '0')) &
+              call eigenvectors_CUDA_keep_fetch(eigenvecs, eigvals, ndim, keep_ok)
+            if (.not. keep_ok) then
+              call gpu_diag_clear()
+              call eigenvectors_CUDA(eigenvecs, xmat, eigvals, ndim)
+            end if
           end if
           return
         end if

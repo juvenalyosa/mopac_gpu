@@ -22,6 +22,7 @@ module eigenvectors_cuda_mod
   public :: eigenvectors_CUDA
   public :: eigenvectors_CUDA_keep
   public :: eigenvectors_CUDA_fetch
+  public :: eigenvectors_CUDA_keep_fetch
 
   interface
     subroutine mopac_cuda_dsyevd(n, a, lda, w, info) bind(C, name="mopac_cuda_dsyevd")
@@ -83,6 +84,27 @@ contains
     call mopac_cuda_dsyevd_keep(ndim, eigenvecs, ndim, eigvals, info)
     call gpu_diag_mark(ndim)
   end subroutine eigenvectors_CUDA_keep
+
+  ! Eigenvectors on the device for the density (density_for_GPU) and on the host;
+  ! ok = .false. when the device solve failed (nothing is marked).
+  subroutine eigenvectors_CUDA_keep_fetch(eigenvecs, eigvals, ndim, ok)
+    use gpu_diag_state, only: gpu_diag_mark, gpu_diag_clear, gpu_diag_fingerprint_set
+    implicit none
+    integer, intent(in) :: ndim
+    real(c_double), intent(inout) :: eigenvecs(:,:)
+    real(c_double), intent(out)   :: eigvals(:)
+    logical, intent(out) :: ok
+    integer :: info
+    call mopac_cuda_dsyevd_keep(ndim, eigenvecs, ndim, eigvals, info)
+    ok = (info == 0)
+    if (.not. ok) then
+      call gpu_diag_clear()
+      return
+    end if
+    call mopac_cuda_fetch_eigenvectors(ndim, eigenvecs, ndim)
+    call gpu_diag_mark(ndim)
+    call gpu_diag_fingerprint_set(eigenvecs, ndim)
+  end subroutine eigenvectors_CUDA_keep_fetch
 
   subroutine eigenvectors_CUDA_fetch(eigenvecs, ndim)
     implicit none

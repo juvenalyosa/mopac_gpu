@@ -17,7 +17,59 @@ module gpu_diag_state
   implicit none
   logical :: have_device_eigvecs = .false.
   integer :: device_eigvecs_n = 0
+  ! Fingerprint of the host copy of the kept eigenvectors (gpu_diag_fingerprint_set): the
+  ! density is built from the device copy only while the host matrix is still that one
+  ! (iter's swap, for example, exchanges columns after the diagonalization).
+  double precision :: device_eigvecs_fp = 0.d0
+  logical :: device_eigvecs_fp_set = .false.
 contains
+  double precision function eigvecs_fingerprint(c, n) result(fp)
+    implicit none
+    integer, intent(in) :: n
+    double precision, intent(in) :: c(n, n)
+    integer :: j
+    fp = 0.d0
+    do j = 1, n
+      fp = fp + dble(j)*sum(c(:, j))
+    end do
+  end function eigvecs_fingerprint
+
+  subroutine gpu_diag_fingerprint_set(c, n)
+    implicit none
+    integer, intent(in) :: n
+    double precision, intent(in) :: c(n, n)
+    device_eigvecs_fp = eigvecs_fingerprint(c, n)
+    device_eigvecs_fp_set = .true.
+  end subroutine gpu_diag_fingerprint_set
+
+  ! True when the device holds the eigenvectors of size n and the host matrix c is
+  ! still the one they were fetched into.
+  logical function gpu_diag_matches(c, n) result(ok)
+#ifdef GPU
+    use iso_c_binding, only: c_int
+#endif
+    implicit none
+    integer, intent(in) :: n
+    double precision, intent(in) :: c(n, n)
+#ifdef GPU
+    interface
+      function mopac_cuda_device_eigvecs_valid(n_c) bind(C, name='mopac_cuda_device_eigvecs_valid') result(v)
+        import :: c_int
+        integer(c_int), value :: n_c
+        integer(c_int) :: v
+      end function mopac_cuda_device_eigvecs_valid
+    end interface
+    ok = have_device_eigvecs .and. device_eigvecs_n == n .and. device_eigvecs_fp_set
+    if (.not. ok) return
+    ok = mopac_cuda_device_eigvecs_valid(int(n, c_int)) == 1
+    if (.not. ok) return
+    ok = eigvecs_fingerprint(c, n) == device_eigvecs_fp
+#else
+    ok = .false.
+    if (n < 0) ok = c(1, 1) /= c(1, 1)
+#endif
+  end function gpu_diag_matches
+
   subroutine gpu_diag_mark(n)
     implicit none
     integer, intent(in) :: n
@@ -29,6 +81,7 @@ contains
     implicit none
     have_device_eigvecs = .false.
     device_eigvecs_n = 0
+    device_eigvecs_fp_set = .false.
   end subroutine gpu_diag_clear
 end module gpu_diag_state
 
