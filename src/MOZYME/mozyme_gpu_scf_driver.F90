@@ -2154,6 +2154,7 @@ contains
   end function mozyme_gpu_scf_profile_enabled
 
   subroutine ensure_request_state()
+    use molkst_C, only: keywrd
     implicit none
     logical :: strict_requested, full_scf_requested, resident_requested
 
@@ -2187,6 +2188,10 @@ contains
       request_reason = 'disabled_by_MOZYME_GPU_OFF'
     else if (env_is_cpu_task('MOPAC_GPU_SCFTASK')) then
       request_reason = 'disabled_by_MOPAC_GPU_SCFTASK'
+    else if (index(keywrd, " PL ") /= 0 .and. .not. strict_requested) then
+      ! PL prints the energy of the old LMOs and every iteration from the host
+      ! loop; the resident loop runs them on the device without printing.
+      request_reason = 'disabled_by_PL'
     else
       request_enabled = .true.
       request_reason = 'requested'
