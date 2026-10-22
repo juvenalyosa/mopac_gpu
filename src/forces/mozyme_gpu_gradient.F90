@@ -679,8 +679,8 @@ contains
     type(mozyme_pair_tables_c) :: tables
     integer(c_int) :: rc, cpu_pairs_c
     real(c_double) :: ms_c
-    integer :: ii, jj, ik, jk, kl, kkkk, iii, jjj, k, icuc, ione, nent, nitems, pass, n
-    double precision :: near2, rij, ee, deriv, half, d(3), t_section
+    integer :: ii, jj, ik, jk, kl, kkkk, iii, jjj, k, icuc, ione, nent, nitems, pass, n, knear
+    double precision :: near2, rij, ee, deriv, half, d(3), t_section, rnear
     double precision :: bound1, bound2, range, cupper_l, c, cr, cr2, clim, wlim
 
     code = 1
@@ -730,6 +730,20 @@ contains
           half = 1.d0
           if (ii == jj) half = 0.5d0
           jjj = l123_in*(jj - 1)
+          ! the image whose exchange integrals the energy has (dcart's dhc_exchange):
+          ! the nearest, the first one when several are equally near; none for ii = jj
+          knear = 0
+          if (id /= 0 .and. pass == 2 .and. ii /= jj) then
+            rnear = huge(1.d0)
+            do kkkk = 1, l123_in
+              d = coord_e(:, jjj + kkkk) - coord(:, ii)
+              rij = d(1)**2 + d(2)**2 + d(3)**2
+              if (rij < rnear) then
+                rnear = rij
+                knear = kkkk
+              end if
+            end do
+          end if
           do kkkk = 1, l123_in
             if (ii == jj .and. kkkk == icuc) cycle   ! the atom with itself: the two terms cancel
             if (id /= 0) then
@@ -754,6 +768,8 @@ contains
               item_i(nitems) = int(iii + icuc, kind=c_int)
               item_j(nitems) = int(jjj + kkkk, kind=c_int)
               item_w(nitems) = half
+              ! periodic: a negative weight tells the kernel to leave out the exchange integrals
+              if (id /= 0 .and. kkkk /= knear) item_w(nitems) = -half
             end if
           end do
         end do

@@ -14,7 +14,7 @@
 ! limitations under the License.
 
 subroutine dhc (p, pa, pb, xi, nat, if, il, jf, jl, dener, mode)
-    use molkst_C, only : numcal, cutofp, id, uhf, clower
+    use molkst_C, only : numcal, cutofp, id, uhf, clower, dhc_exchange
     implicit none
     integer, intent (in) :: if, il, jf, jl, mode
     double precision, intent (out) :: dener
@@ -126,7 +126,12 @@ subroutine dhc (p, pa, pb, xi, nat, if, il, jf, jl, dener, mode)
           wk(i) = w(i)
         end do
         if (mode == 1) then
-          cutoff = (w(1) < wlim)
+!
+!  The energy (solrot) has the exchange integrals of the nearest image of each pair only,
+!  whatever their size, and none between an atom and its own images: dcart says which.
+!  (Exchange for every image with w(1) > 4 eV gave gradients that did not match the energy.)
+!
+          cutoff = .not. dhc_exchange
         end if
         if (cutoff) then
           do i = 1, kr - 1

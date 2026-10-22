@@ -231,13 +231,13 @@ struct PairGradArgs {
   double *dxyz;          // 3 x numat, accumulated
   double *scratch_d;     // d kernels: kPairScratchD doubles per launched thread
   // Conventional / periodic route (mopac_cuda_pair_gradient_ext); zero for MOZYME.
-  const double *pair_w;  // dcart's "half" per pair, nullptr = 1
-  int periodic;          // 1: dhc()'s id /= 0 rules (overlap, point-charge and exchange cutoffs)
+  const double *pair_w;  // dcart's "half" per pair, nullptr = 1; periodic: negative = no exchange
+  int periodic;          // 1: dhc()'s id /= 0 rules (overlap, point-charge and exchange choice)
   double clower;         // point() beyond clower (Angstrom)
   double clower2;        // squared
   double cupper;         // trunk(): c + cr*r + cr2*r**2 between clower and cupper, clim above
   double trunk_c, trunk_cr, trunk_cr2, trunk_clim;
-  double wlim;           // exchange integrals dropped when w(1) < wlim (eV)
+  double wlim;           // unused: the exchange choice comes with pair_w (dcart's dhc_exchange)
   unsigned char *ref_flags;  // d kernels, periodic: PairFlags of the reference probes, 3 per pair
   int dense;             // 1: p is the packed lower triangle of the full density and
                          //    g.diag_off holds nfirst (1-based) of each entry's atom
@@ -248,7 +248,7 @@ struct PairGradArgs {
 struct PairFlags {
   bool no_overlap;   // ignor1: rij > 15 A, no h1elec term
   bool point;        // lpoint: rij > clower, point() instead of rotate()
-  bool no_exchange;  // cutoff: w(1) < wlim, exchange integrals zero
+  bool no_exchange;  // cutoff: not the pair's nearest image (dcart's dhc_exchange), exchange integrals zero
 };
 
 __device__ __forceinline__ unsigned char pack_flags(const PairFlags &f) {
@@ -260,6 +260,18 @@ __device__ __forceinline__ PairFlags unpack_flags(unsigned char b) {
   f.no_overlap = (b & 1) != 0;
   f.point = (b & 2) != 0;
   f.no_exchange = (b & 4) != 0;
+  return f;
+}
+
+// dcart's half of pair idx and, for solids, whether the pair keeps its exchange
+// integrals (the nearest image of two different atoms, as solrot): the sign.
+__device__ __forceinline__ double pair_half(const PairGradArgs &a, int idx) {
+  return a.pair_w ? fabs(a.pair_w[idx]) : 1.0;
+}
+
+__device__ __forceinline__ PairFlags initial_flags(const PairGradArgs &a, int idx) {
+  PairFlags f = {false, false, false};
+  f.no_exchange = a.periodic && a.pair_w && a.pair_w[idx] < 0.0;
   return f;
 }
 
@@ -389,7 +401,6 @@ __device__ bool pair_energy(const PairGradArgs &a, int nat1, int nat2, int n1, i
   // integrals are zero and the pair contributes nothing.
   const int expect = mozyme_pair::tri1(n2 + 1) * mozyme_pair::tri1(n1 + 1);
   if (w_count != 0 && w_count != expect) return false;
-  if (periodic && mode == 1) fl->no_exchange = w[0] < a.wlim;
   const bool exchange = !(periodic && fl->no_exchange);
   double h[kL], f[kL], pa[kL];
   *dener = mozyme_pair::diatomic_energy_generic(n1, n2, smat_ptr, e_at1, e_at2, w, enuc, pdi, h, f, pa,
@@ -481,7 +492,7 @@ __global__ void mozyme_pair_energy_d_kernel(PairGradArgs a, double *energies, in
   if ((phase == 0 && !reference) || (phase == 1 && reference)) continue;
   // FORCE: one reference per coordinate (slot 4+k <-> displaced slot 1+k).
   const int iflag = 3 * idx + (a.force ? (reference ? slot - 4 : slot - 1) : 0);
-  PairFlags fl = {false, false, false};
+  PairFlags fl = initial_flags(a, idx);
   if (phase == 1) fl = unpack_flags(a.ref_flags[iflag]);
   if (!a.force) {
     // dcart: the reference is taken with atom jj shifted by chnge/2 in all
@@ -511,7 +522,7 @@ __global__ void mozyme_pair_deriv_d_kernel(PairGradArgs a, const double *energie
   int ii, jj;
   if (pair_class(a.g, idx, &ii, &jj, false) != 2) return;
   const double *e = energies + kProbesPerPair * idx;
-  const double half = a.pair_w ? a.pair_w[idx] : 1.0;
+  const double half = pair_half(a, idx);
   for (int k = 0; k < 3; ++k) {
     const double aa = a.force ? e[4 + k] : e[0];
     const double ee = e[1 + k];
@@ -541,8 +552,8 @@ __global__ void mozyme_pair_gradient_kernel(PairGradArgs a) {
     x2[k] = coord_at(a.g.coord, ii, k);
   }
   double aa = 0.0, ee = 0.0;
-  const double half = a.pair_w ? a.pair_w[idx] : 1.0;
-  PairFlags fl = {false, false, false};
+  const double half = pair_half(a, idx);
+  PairFlags fl = initial_flags(a, idx);
   bool ok = true;
   if (!a.force) {
     x1[0] += a.chnge2;

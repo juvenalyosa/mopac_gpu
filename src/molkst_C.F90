@@ -283,6 +283,8 @@ module molkst_C
   character :: errtxt*200, dh*20
 !
   logical :: hb_smooth = .false. ! HB-SMOOTH: smooth max/abs/cut-offs in the PM6-DH+ / PM7 H-bond correction
+  logical :: dhc_exchange = .true. ! Solids: dhc includes the exchange integrals of the pair; dcart sets it,
+                                   ! true only for the nearest image of two different atoms, as in solrot
   logical ::            &
      moperr,            & !
      uhf,               & !  Term        Should the Unrestricted Hartree Fock method be used?

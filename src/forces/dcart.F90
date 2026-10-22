@@ -599,7 +599,7 @@
            const, numtot_in, icuc, ione, force, pdi, padi, pbdi, cdi, ndi, dstat, d_pairs_only)
       use funcon_C, only : fpc_9, a0, ev
       use common_arrays_C, only : nfirst, nlast, nat, p, pa, pb, tvec
-      use molkst_C, only : mozyme, id, cutofp, l1u, l2u, l3u
+      use molkst_C, only : mozyme, id, cutofp, l1u, l2u, l3u, dhc_exchange
       use MOZYME_C, only : iorbs, part_dxyz, mode, jopt
       use mozyme_gpu_gradient, only : mozyme_gpu_device_pair
       implicit none
@@ -619,8 +619,8 @@
       double precision, external :: derp
       integer, external :: ijbo
       integer :: i2, j2, ii, jj, iii, jjj, im1, jf, jl, if, il
-      integer :: ij, i, j, k, l, ik, jk, kl, kkkk
-      double precision :: half, rij, deriv, aa, ee
+      integer :: ij, i, j, k, l, ik, jk, kl, kkkk, knear
+      double precision :: half, rij, deriv, aa, ee, rnear
       logical :: point, only_d
 
       only_d = d_pairs_only .and. mozyme
@@ -747,6 +747,29 @@
               end if
             end do
           end if
+          if (id /= 0) then
+!
+!  The image of jj whose exchange integrals solrot keeps: the nearest, the first one
+!  in the loop order when several are equally near; none when jj is ii.
+!
+            knear = 0
+            if (ii /= jj) then
+              rnear = huge(1.d0)
+              kkkk = 0
+              do ik = -l1u, l1u
+                do jk = -l2u, l2u
+                  do kl = -l3u, l3u
+                    kkkk = kkkk + 1
+                    rij = sum((coord(:,jj) + tvec(:,1)*ik + tvec(:,2)*jk + tvec(:,3)*kl - coord(:,ii))**2)
+                    if (rij < rnear) then
+                      rnear = rij
+                      knear = kkkk
+                    end if
+                  end do
+                end do
+              end do
+            end if
+          end if
           kkkk = 0
           do ik = -l1u, l1u
             do jk = -l2u, l2u
@@ -754,6 +777,7 @@
                 kkkk = kkkk + 1
                 cdi(:,1) = coord(:,jj) + tvec(:,1)*ik + tvec(:,2)*jk + tvec(:,3)*kl
                 if (id /= 0) then
+                  dhc_exchange = (kkkk == knear)
                   rij = (cdi(1, 1)-cdi(1, 2)) ** 2 &
                        & + (cdi(2, 1)-cdi(2, 2)) ** 2 &
                        & + (cdi(3, 1)-cdi(3, 2)) ** 2

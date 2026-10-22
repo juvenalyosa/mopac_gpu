@@ -1361,17 +1361,18 @@ subroutine test_crystal1(nfail)
     allocate(test_target%lattice_update(3*3))
     test_target%lattice_update = test_in%lattice
     allocate(test_target%lattice_deriv(3*3))
-    ! PM7 dispersion contributes to the lattice derivatives since 2026-10-22 (analytic gradient for
-    ! solids); before, only the SCF part was there (PM7-: -2.33)
-    test_target%lattice_deriv(1) = 0.789862d0
-    test_target%lattice_deriv(2) = 0.794866d0
-    test_target%lattice_deriv(3) = -0.823262d0
-    test_target%lattice_deriv(4) = 0.804866d0
-    test_target%lattice_deriv(5) = -0.818518d0
-    test_target%lattice_deriv(6) = 0.820489d0
-    test_target%lattice_deriv(7) = -0.817664d0
-    test_target%lattice_deriv(8) = 0.823385d0
-    test_target%lattice_deriv(9) = 0.837841d0
+    ! 2026-10-22: PM7 dispersion now contributes to the lattice derivatives, and the SCF part has
+    ! exchange only for the nearest image of each pair, as the energy (solrot).  Rocksalt has many
+    ! equally near images; the energy keeps the first one, so the stress is not exactly isotropic.
+    test_target%lattice_deriv(1) = 0.936391d0
+    test_target%lattice_deriv(2) = 0.953485d0
+    test_target%lattice_deriv(3) = -0.994024d0
+    test_target%lattice_deriv(4) = 1.044000d0
+    test_target%lattice_deriv(5) = -1.043598d0
+    test_target%lattice_deriv(6) = 1.033447d0
+    test_target%lattice_deriv(7) = -1.111259d0
+    test_target%lattice_deriv(8) = 1.104573d0
+    test_target%lattice_deriv(9) = 1.156980d0
     allocate(test_target%charge(54))
     test_target%charge(1) = 0.855660d0
     test_target%charge(2) = -0.855642d0
@@ -1428,12 +1429,12 @@ subroutine test_crystal1(nfail)
     test_target%charge(53) = 0.855636d0
     test_target%charge(54) = -0.855641d0
     test_target%dipole(:) = 0.0d0
-    test_target%stress(1) = 0.198d0
-    test_target%stress(2) = 0.194d0
-    test_target%stress(3) = 0.194d0
-    test_target%stress(4) = 0.001d0
-    test_target%stress(5) = 0.000d0
-    test_target%stress(6) = 0.002d0
+    test_target%stress(1) = 0.282d0
+    test_target%stress(2) = 0.266d0
+    test_target%stress(3) = 0.265d0
+    test_target%stress(4) = 0.008d0
+    test_target%stress(5) = 0.004d0
+    test_target%stress(6) = 0.013d0
     allocate(test_target%bond_index(55))
     do i = 1, 55
         test_target%bond_index(i) = 1 + 7*(i-1)
