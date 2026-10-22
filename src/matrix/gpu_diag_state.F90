@@ -27,10 +27,13 @@ contains
     implicit none
     integer, intent(in) :: n
     double precision, intent(in) :: c(n, n)
-    integer :: j
+    integer :: j, m
+    ! three rows of every column, weighted by the column number: O(n), and a column
+    ! exchange or another matrix changes it
+    m = max(1, n/2)
     fp = 0.d0
     do j = 1, n
-      fp = fp + dble(j)*sum(c(:, j))
+      fp = fp + dble(j)*(c(1, j) + 2.d0*c(m, j) + 3.d0*c(n, j))
     end do
   end function eigvecs_fingerprint
 

@@ -388,8 +388,18 @@ subroutine density_for_GPU (c, fract, ndubl, nsingl, occ, mpack, norbs, mode, pp
             gpu_density_used = .true.
             allocate(xmat(norbs,norbs),stat = i)
             call mopac_cuda_density_from_dev_syrk(norbs, ndubl, occ, xmat, norbs)
-            if (use_resident) call download_full(xmat)
-            call dtrttp('u', norbs, xmat, norbs, pp, i )
+            if (use_resident) then
+!
+!  The density stays on the device: pack it there and fetch only the packed triangle
+!
+              call mopac_cuda_register_packed_density(mpack, pp)
+              if (.not. mopac_cuda_fetch_packed_density(pp, int(mpack, kind=c_size_t))) then
+                call download_full(xmat)
+                call dtrttp('u', norbs, xmat, norbs, pp, i )
+              end if
+            else
+              call dtrttp('u', norbs, xmat, norbs, pp, i )
+            end if
             if (debug_density) then
               allocate(xmat_ref(norbs,norbs), stat=istat_loc)
               xmat_ref = 0.d0
