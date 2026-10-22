@@ -198,6 +198,12 @@ def main():
     a = ap.parse_args()
     mopac = str(Path(a.mopac).resolve())
     work = Path(a.work_dir).resolve()
+    try:
+        gpu = subprocess.run(["nvidia-smi", "--query-gpu=name,clocks.sm,clocks.max.sm,temperature.gpu,power.draw",
+                              "--format=csv,noheader"], capture_output=True, text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        gpu = "unknown"
+    print(f"[materials] GPU: {gpu or 'unknown'}", flush=True)
     if not a.skip_check:
         check_step(mopac, work)
     if a.medium:
