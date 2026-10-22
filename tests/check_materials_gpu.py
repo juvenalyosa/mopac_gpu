@@ -18,7 +18,7 @@
   1 check   cells of 144-192 atoms, 1SCF GRADIENTS with MOPAC_GPU_HCORE_CHECK, MOPAC_GPU_FOCK_CHECK and
             MOPAC_GPU_GRAD_CHECK: the device hcore / Fock / gradient against the CPU loops of the same run
   2 medium  576-atom quartz and rutile, 512-atom Si: GPU heat and time against stored Linux CPU references
-  3 force   diamond (64 atoms) FORCE: GPU frequencies and ZPE against the same binary with MOPAC_NOGPU=1
+  3 force   diamond (64 atoms) FORCE SCFCRT=1.D-10: GPU frequencies and ZPE against the same binary with MOPAC_NOGPU=1
   4 drc     diamond DRC TEMPERATURE=300 CYCLES=40: GPU energy conservation, GPU potential against the CPU one
 
     python3 tests/check_materials_gpu.py build/mopac --work-dir /scratch/$USER/materials [--skip-force] ...
@@ -45,6 +45,10 @@ MOLECULES = {"urea_cluster"}
 # MOPAC uses the GPU above 100 atoms only (diamond: 64 + 3 Tv); MOPAC_GPU_DEBUG prints "[GPU gradient] pairs="
 # and "[GPU Fock] pairs=" for every device call, which shows that the GPU did the work
 GPU_ENV = {"MOPAC_FORCEGPU": "1", "MOPAC_GPU_DEBUG": "1"}
+# FORCE of a solid with the default SCF criterion (1e-7 x numat/20 for FORCE) is not converged: diamond ZPE
+# 269.07 (default), 268.85 (SCFCRT=1e-8), 268.82 (1e-10), 268.80 (1e-12); highest frequency 1262.4 -> 1261.3 cm-1
+# (CPU, 2026-10-22).  GPU and CPU are compared at SCFCRT=1e-10, where the remaining spread is <= 0.3 cm-1.
+FORCE_KEYS = "PM7 FORCE GEO-OK SCFCRT=1.D-10"
 
 failures = []
 
@@ -135,7 +139,7 @@ def force_step(mopac, work):
     deck = DATA / "small" / "diamond.mop"
     res = {}
     for mode, env in (("gpu", GPU_ENV), ("cpu", {"MOPAC_NOGPU": "1"})):
-        text, wall = run(mopac, work / "force" / mode, "diamond", "PM7 FORCE GEO-OK", deck, env)
+        text, wall = run(mopac, work / "force" / mode, "diamond", FORCE_KEYS, deck, env)
         freq = floats_after(text, "FREQUENCY  ")
         zpe = floats_after(text, "ZERO POINT ENERGY")
         res[mode] = (freq, zpe[-1] if zpe else None, wall)
@@ -146,8 +150,8 @@ def force_step(mopac, work):
     (fg, zg, tg), (fc, zc, tc) = res["gpu"], res["cpu"]
     ok = bool(fg) and len(fg) == len(fc)
     dmax = max(abs(a - b) for a, b in zip(fg, fc)) if ok else float("nan")
-    result(ok and dmax <= 1.0, f"force diamond: max |freq GPU - CPU| {dmax:.3f} cm-1 ({len(fg)} / {len(fc)} modes)")
-    result(zg is not None and zc is not None and abs(zg - zc) <= 0.01,
+    result(ok and dmax <= 0.5, f"force diamond: max |freq GPU - CPU| {dmax:.3f} cm-1 ({len(fg)} / {len(fc)} modes)")
+    result(zg is not None and zc is not None and abs(zg - zc) <= 0.03,
            f"force diamond: ZPE GPU - CPU {(zg or float('nan')) - (zc or float('nan')):+.4f} kcal/mol, "
            f"time GPU {tg:.0f} s CPU {tc:.0f} s")
 
