@@ -297,8 +297,14 @@ if(GPU)
   if(CMAKE_CUDA_ARCHITECTURES)
     set_property(TARGET mopac-core PROPERTY CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
   endif()
+  # libcu++ (CCCL) in CUDA 13 rejects C++14 (#error "libcu++ requires at least C++ 17")
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13)
+    set(_mopac_cuda_std 17)
+  else()
+    set(_mopac_cuda_std 14)
+  endif()
   set_target_properties(mopac-core PROPERTIES
-    CUDA_STANDARD 14
+    CUDA_STANDARD ${_mopac_cuda_std}
     CUDA_STANDARD_REQUIRED ON
   )
   target_link_libraries(mopac-core PUBLIC CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
