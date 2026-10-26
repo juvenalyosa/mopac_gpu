@@ -95,7 +95,7 @@
         times, force, allcon, trans, halfe, w1, w2, random, gs, shift, shiftb, &
         shfmax, capps, ten, tenold, incitr, irrr, plchek, timitr, &
         scorr, shfto, shftbo, titer0, jalp, ialp, jbet, ibet, enrgy, &
-        iopc_calcp, solid_shift
+        iopc_calcp, solid_shift, hybrid_enable, adaptive_shift_on, damp_enable
       data icalcn/ 0/
       data debug/ .FALSE./
       data prtfok/ .FALSE./
@@ -108,10 +108,8 @@
       data plb/ 0.D0/
       data scorr/ 0.D0/
       data abprt/ '     ', 'ALPHA', ' BETA'/
-      ! Defaults for hybrid SCF (off by default unless enabled via env/keywords)
-      hybrid_enable = .false.
-      adaptive_shift_on = .false.
-      damp_enable = .false.
+      ! hybrid_enable, adaptive_shift_on and damp_enable are set once per calculation (below);
+      ! they were reset here on every call, so EDIIS acted on the first SCF of a job only
       hybrid_allow_cdiis = .true.
       hybrid_switch_pl = 1.0D-2
       alpha_min_h = 0.10D0
@@ -207,6 +205,9 @@
         prtvec = index(keywrd,' VEC') + index(keywrd,' ALLVEC') /=0 .and. debug
         debug = index(keywrd,' ITER') /= 0
         ! EDIIS: hybrid EDIIS -> CDIIS SCF with damping and an adaptive level shift (docs/BACKGROUND.md)
+        hybrid_enable = .false.
+        adaptive_shift_on = .false.
+        damp_enable = .false.
         if (index(keywrd,' EDIIS') /= 0) then
           hybrid_enable = .true.
           adaptive_shift_on = .true.
@@ -234,14 +235,24 @@
         if (index(keywrd,' FILL') /= 0) ifill = -nint(reada(keywrd,index(keywrd,' FILL')))
         if (index(keywrd,' SHIFT') /= 0) bshift = -reada(keywrd,index(keywrd,' SHIFT'))
 !
-!  Polymers, layers and solids use a constant level shift of the virtual levels, 80 eV unless
-!  SHIFT is given.  80 eV converges slowly and can stop short of the minimum (PM7, rutile 162
-!  atoms: 288 iterations, heat 0.008 kcal/mol too high; SHIFT=20: 60 iterations, converged), but
-!  a smaller shift can end in another electronic state: rutile 576 atoms with SHIFT=20 converged
-!  to a charge-ordered state (two kinds of Ti, gap 3.0 eV) 225 kcal/mol above the 80 eV one.
+!  Polymers, layers and solids use a constant level shift of the virtual levels.  Unless SHIFT is
+!  given it is 20 eV, with the damped density mixing of EDIIS in the first iterations (at most
+!  6, until PL < 0.01).  SHIFT=80 gives the original 80 eV without damping.
+!  PM7 rutile, 80 eV / 20 eV / 20 eV + damping: 576 atoms 245 / 33 / 26 iterations, but 20 eV alone
+!  ends in a charge-ordered state (gap 3.0 eV) 225 kcal/mol too high; 54 atoms: 80 eV and 20 eV
+!  both end in a state with a 0.1 eV gap 164 kcal/mol too high, 20 eV + damping in the insulating
+!  one (gap 7 eV); 162 atoms 288 / 60 / 26 iterations, 80 eV stops 0.008 kcal/mol short.
 !
-        solid_shift = -80.D0
-        if (index(keywrd,' SHIFT') /= 0) solid_shift = bshift
+        if (index(keywrd,' SHIFT') /= 0) then
+          solid_shift = bshift
+        else
+          solid_shift = -80.D0
+          if (id /= 0) then
+            solid_shift = -20.D0
+            hybrid_enable = .true.
+            damp_enable = .true.
+          end if
+        end if
         if (Abs(bshift) > 1.d-20) ten = bshift
         if (index(keywrd,' ITRY') /= 0) itrmax = nint(reada(keywrd,index(keywrd,' ITRY')))
         ci = index(keywrd,' MICROS') + index(keywrd,' C.I.') /= 0 .and. .not. method_indo
