@@ -679,7 +679,8 @@ contains
     type(mozyme_pair_tables_c) :: tables
     integer(c_int) :: rc, cpu_pairs_c
     real(c_double) :: ms_c
-    integer :: ii, jj, ik, jk, kl, kkkk, iii, jjj, k, icuc, ione, nent, nitems, pass, n, knear
+    integer :: ii, jj, ik, jk, kl, kkkk, iii, jjj, k, icuc, ione, nent, nitems, n, knear, npl, pp
+    integer, allocatable :: pcnt(:), pstart(:)
     double precision :: near2, rij, ee, deriv, half, d(3), t_section, rnear
     double precision :: bound1, bound2, range, cupper_l, c, cr, cr2, clim, wlim
 
@@ -715,68 +716,95 @@ contains
     near2 = (2.d0/3.d0*cutofp)**2
     call mozyme_section_timer_begin('conv_grad_pairlist', t_section)
 !
-!  Pass 1 counts the device pairs, pass 2 stores them.  Pairs beyond 2/3 of
-!  cutofp in a solid are point charges (dcart's derp term), done here.
+!  Pass 1 counts the device pairs of each atom pair, pass 2 stores them from the
+!  prefix sum of the counts (same order as one serial loop).  Pairs beyond 2/3
+!  of cutofp in a solid are point charges (dcart's derp term), done here in
+!  pass 2.  Both passes run over the atoms in parallel.
 !
-    nitems = 0
-    do pass = 1, 2
-      if (pass == 2) then
-        allocate(item_i(max(1, nitems)), item_j(max(1, nitems)), item_w(max(1, nitems)))
-        nitems = 0
-      end if
-      do ii = 1, numat_in
-        iii = l123_in*(ii - 1)
-        do jj = 1, ii - ione
-          half = 1.d0
-          if (ii == jj) half = 0.5d0
-          jjj = l123_in*(jj - 1)
-          ! the image whose exchange integrals the energy has (dcart's dhc_exchange): as
-          ! hcore recorded it, otherwise the first nearest one; none for ii = jj
-          knear = 0
-          if (id /= 0 .and. allocated(wk_image)) then
-            knear = wk_image((ii*(ii - 1))/2 + jj)
-          else if (id /= 0 .and. pass == 2 .and. ii /= jj) then
-            rnear = huge(1.d0)
-            do kkkk = 1, l123_in
-              d = coord_e(:, jjj + kkkk) - coord(:, ii)
-              rij = d(1)**2 + d(2)**2 + d(3)**2
-              if (rij < rnear) then
-                rnear = rij
-                knear = kkkk
-              end if
-            end do
+    npl = (numat_in*(numat_in + 1))/2 - ione*numat_in
+    allocate(pcnt(max(1, npl)), pstart(max(1, npl)))
+!$omp parallel do schedule(dynamic, 4) default(shared) private(ii, jj, jjj, kkkk, d, rij, n, pp)
+    do ii = 1, numat_in
+      do jj = 1, ii - ione
+        pp = (ii*(ii - 1))/2 + jj - ione*(ii - 1)
+        jjj = l123_in*(jj - 1)
+        n = 0
+        do kkkk = 1, l123_in
+          if (ii == jj .and. kkkk == icuc) cycle
+          if (id /= 0) then
+            d = coord_e(:, jjj + kkkk) - coord(:, ii)
+            rij = d(1)**2 + d(2)**2 + d(3)**2
+            if (rij > near2) cycle
           end if
+          n = n + 1
+        end do
+        pcnt(pp) = n
+      end do
+    end do
+!$omp end parallel do
+    nitems = 0
+    do pp = 1, npl
+      pstart(pp) = nitems
+      nitems = nitems + pcnt(pp)
+    end do
+    allocate(item_i(max(1, nitems)), item_j(max(1, nitems)), item_w(max(1, nitems)))
+    ! derp sets its constants on the first call of a calculation: make that call outside the threads
+    if (id /= 0) rij = derp(clower)
+!$omp parallel do schedule(dynamic, 4) default(shared) reduction(+:dfar) &
+!$omp   private(ii, jj, iii, jjj, kkkk, d, rij, half, knear, rnear, ee, deriv, k, n, pp)
+    do ii = 1, numat_in
+      iii = l123_in*(ii - 1)
+      do jj = 1, ii - ione
+        pp = (ii*(ii - 1))/2 + jj - ione*(ii - 1)
+        n = pstart(pp)
+        half = 1.d0
+        if (ii == jj) half = 0.5d0
+        jjj = l123_in*(jj - 1)
+        ! the image whose exchange integrals the energy has (dcart's dhc_exchange): as
+        ! hcore recorded it, otherwise the first nearest one; none for ii = jj
+        knear = 0
+        if (id /= 0 .and. allocated(wk_image)) then
+          knear = wk_image((ii*(ii - 1))/2 + jj)
+        else if (id /= 0 .and. ii /= jj) then
+          rnear = huge(1.d0)
           do kkkk = 1, l123_in
-            if (ii == jj .and. kkkk == icuc) cycle   ! the atom with itself: the two terms cancel
-            if (id /= 0) then
-              d = coord_e(:, jjj + kkkk) - coord(:, ii)
-              rij = d(1)**2 + d(2)**2 + d(3)**2
-              if (rij > near2) then
-                rij = sqrt(rij)
-                ! derp is zero beyond clower and cupper: nothing to add
-                if (pass == 2 .and. .not. (rij > clower .and. rij > cupper)) then
-                  ee = q(ii)*q(jj)*fpc_9*ev*a0*derp(rij)
-                  do k = 1, 3
-                    deriv = half*ee*d(k)/rij
-                    dfar(k, iii + icuc) = dfar(k, iii + icuc) - deriv
-                    dfar(k, jjj + kkkk) = dfar(k, jjj + kkkk) + deriv
-                  end do
-                end if
-                cycle
-              end if
-            end if
-            nitems = nitems + 1
-            if (pass == 2) then
-              item_i(nitems) = int(iii + icuc, kind=c_int)
-              item_j(nitems) = int(jjj + kkkk, kind=c_int)
-              item_w(nitems) = half
-              ! periodic: a negative weight tells the kernel to leave out the exchange integrals
-              if (id /= 0 .and. kkkk /= knear) item_w(nitems) = -half
+            d = coord_e(:, jjj + kkkk) - coord(:, ii)
+            rij = d(1)**2 + d(2)**2 + d(3)**2
+            if (rij < rnear) then
+              rnear = rij
+              knear = kkkk
             end if
           end do
+        end if
+        do kkkk = 1, l123_in
+          if (ii == jj .and. kkkk == icuc) cycle   ! the atom with itself: the two terms cancel
+          if (id /= 0) then
+            d = coord_e(:, jjj + kkkk) - coord(:, ii)
+            rij = d(1)**2 + d(2)**2 + d(3)**2
+            if (rij > near2) then
+              rij = sqrt(rij)
+              ! derp is zero beyond clower and cupper: nothing to add
+              if (.not. (rij > clower .and. rij > cupper)) then
+                ee = q(ii)*q(jj)*fpc_9*ev*a0*derp(rij)
+                do k = 1, 3
+                  deriv = half*ee*d(k)/rij
+                  dfar(k, iii + icuc) = dfar(k, iii + icuc) - deriv
+                  dfar(k, jjj + kkkk) = dfar(k, jjj + kkkk) + deriv
+                end do
+              end if
+              cycle
+            end if
+          end if
+          n = n + 1
+          item_i(n) = int(iii + icuc, kind=c_int)
+          item_j(n) = int(jjj + kkkk, kind=c_int)
+          item_w(n) = half
+          ! periodic: a negative weight tells the kernel to leave out the exchange integrals
+          if (id /= 0 .and. kkkk /= knear) item_w(n) = -half
         end do
       end do
     end do
+!$omp end parallel do
 !
 !  trunk() and dhc()'s constants for solids
 !
@@ -837,7 +865,10 @@ contains
     type(mozyme_pair_tables_c) :: tables
     integer(c_int) :: rc
     real(c_double) :: ms_c
-    integer :: i, j, ii, jj, k, kkkk, p, npairs, nitems, pass, kr, ni, nj, li, lj, nii, njj, l
+    integer :: i, j, ii, jj, k, kkkk, p, npairs, nitems, ni, nj, li, lj, nii, njj, l
+    integer, allocatable :: csum(:), item_cnt(:)
+    integer(c_long_long), allocatable :: row_off(:)
+    integer(c_long_long) :: kr8
     double precision :: xj(3), xjuc(3), r, cutof2, one, ee, ee1, ee2, t_section
 
     code = 1
@@ -855,89 +886,128 @@ contains
     allocate(sw(npairs), se1(npairs), se2(npairs), sen(npairs))
     allocate(gdi(81, npairs), ge1b(45, npairs), ge2a(45, npairs), genuc(npairs), gkb(npairs))
     cutof2 = clower**2
-    nitems = 0
     call mozyme_section_timer_begin('conv_hcore_pairlist', t_section)
-    do pass = 1, 2
-      if (pass == 2) then
-        allocate(item_pair(max(1, nitems)), item_img(max(1, nitems)), item_xj(3, max(1, nitems)), &
-          item_xjuc(3, max(1, nitems)))
-        nitems = 0
-      end if
-      kr = 1
-      p = 0
-      do i = 1, numat
-        ni = nat(i)
-        li = natorb(ni)
-        nii = (li*(li + 1))/2
-        do j = 1, i
-          nj = nat(j)
-          lj = natorb(nj)
-          njj = (lj*(lj + 1))/2
-          p = p + 1
-          if (pass == 1) then
-            pair_ni(p) = int(ni, kind=c_int)
-            pair_nj(p) = int(nj, kind=c_int)
-            pair_kb(p) = int(nii*njj, kind=c_int)
-            pair_woff(p) = int(kr - 1, kind=c_long_long)
-            pair_xi(:, p) = coord(:, i)
-            one = 1.d0
-            if (Abs(coord(1,i) - coord(1,j)) <1.d-20 .and. Abs(coord(2,i) - coord(2,j)) <1.d-20 .and. &
-              Abs(coord(3,i) - coord(3,j)) <1.d-20) one = 0.5D0
-            pair_self(p) = merge(1_c_int, 0_c_int, one < 0.9d0)
-            pbest_w1(p) = 0.d0
-            pbest_img(p) = 0_c_int
-            sw(p) = 0.d0
-            se1(p) = 0.d0
-            se2(p) = 0.d0
-            sen(p) = 0.d0
-          else
-            pair_first(p) = int(nitems, kind=c_int)
-            one = merge(0.5d0, 1.d0, pair_self(p) == 1_c_int)
-          end if
-          kr = kr + nii*njj
-          kkkk = 0
-          do ii = -l1u, l1u
-            do jj = -l2u, l2u
-              do k = -l3u, l3u
-                kkkk = kkkk + 1
-                xj = coord(:,j) + tvec(:,1)*ii + tvec(:,2)*jj + tvec(:,3)*k
-                xjuc = xj - coord(:,i)
-                r = xjuc(1)**2 + xjuc(2)**2 + xjuc(3)**2
-                if (r > cutof2) then
-                  if (pass == 1) then
-                    ! solrot's point(): summed here
-                    r = sqrt(r)
-                    r = trunk(r)
-                    ee = ev*a0/r
-                    ee1 = -ee*tore(nj)
-                    ee2 = -ee*tore(ni)
-                    sw(p) = sw(p) + ee
-                    se1(p) = se1(p) + ee1
-                    se2(p) = se2(p) + ee2
-                    sen(p) = sen(p) + (-ee1*tore(ni))*one
-                    if (pbest_w1(p) < ee) then
-                      pbest_w1(p) = ee
-                      pbest_img(p) = int(kkkk, kind=c_int)
-                    end if
-                  end if
-                  cycle
+!
+!  Start of each row (atom i) of the integral list w, as hcore fills it: the pairs (i, j <= i),
+!  nii*njj integrals each, then the one-centre block of i, nii*nii.  csum(j) = sum of njj, j' <= j.
+!
+    allocate(csum(0:numat), row_off(numat), item_cnt(npairs))
+    csum(0) = 0
+    do i = 1, numat
+      lj = natorb(nat(i))
+      csum(i) = csum(i - 1) + (lj*(lj + 1))/2
+    end do
+    kr8 = 0
+    do i = 1, numat
+      li = natorb(nat(i))
+      nii = (li*(li + 1))/2
+      row_off(i) = kr8
+      kr8 = kr8 + int(nii, kind=c_long_long)*(csum(i) + nii)
+    end do
+!
+!  Pass 1, pairs in parallel: pair data, solrot's point() over the far images (summed here, in
+!  image order), and the number of near images of each pair.  trunk sets its constants on the
+!  first call of a calculation: make that call here, outside the threads.
+!
+    r = trunk(clower)
+!$omp parallel do schedule(dynamic, 4) default(shared) &
+!$omp   private(i, j, p, ni, nj, li, lj, nii, njj, one, kkkk, ii, jj, k, xj, xjuc, r, ee, ee1, ee2)
+    do i = 1, numat
+      ni = nat(i)
+      li = natorb(ni)
+      nii = (li*(li + 1))/2
+      do j = 1, i
+        nj = nat(j)
+        lj = natorb(nj)
+        njj = (lj*(lj + 1))/2
+        p = (i*(i - 1))/2 + j
+        pair_ni(p) = int(ni, kind=c_int)
+        pair_nj(p) = int(nj, kind=c_int)
+        pair_kb(p) = int(nii*njj, kind=c_int)
+        pair_woff(p) = int(row_off(i) + int(nii, kind=c_long_long)*csum(j - 1), kind=c_long_long)
+        pair_xi(:, p) = coord(:, i)
+        one = 1.d0
+        if (Abs(coord(1,i) - coord(1,j)) <1.d-20 .and. Abs(coord(2,i) - coord(2,j)) <1.d-20 .and. &
+          Abs(coord(3,i) - coord(3,j)) <1.d-20) one = 0.5D0
+        pair_self(p) = merge(1_c_int, 0_c_int, one < 0.9d0)
+        pbest_w1(p) = 0.d0
+        pbest_img(p) = 0_c_int
+        sw(p) = 0.d0
+        se1(p) = 0.d0
+        se2(p) = 0.d0
+        sen(p) = 0.d0
+        item_cnt(p) = 0
+        kkkk = 0
+        do ii = -l1u, l1u
+          do jj = -l2u, l2u
+            do k = -l3u, l3u
+              kkkk = kkkk + 1
+              xj = coord(:,j) + tvec(:,1)*ii + tvec(:,2)*jj + tvec(:,3)*k
+              xjuc = xj - coord(:,i)
+              r = xjuc(1)**2 + xjuc(2)**2 + xjuc(3)**2
+              if (r > cutof2) then
+                ! solrot's point(): summed here
+                r = sqrt(r)
+                r = trunk(r)
+                ee = ev*a0/r
+                ee1 = -ee*tore(nj)
+                ee2 = -ee*tore(ni)
+                sw(p) = sw(p) + ee
+                se1(p) = se1(p) + ee1
+                se2(p) = se2(p) + ee2
+                sen(p) = sen(p) + (-ee1*tore(ni))*one
+                if (pbest_w1(p) < ee) then
+                  pbest_w1(p) = ee
+                  pbest_img(p) = int(kkkk, kind=c_int)
                 end if
-                if (r < 0.00002D0) cycle   ! rotate and h1elec give zero
-                nitems = nitems + 1
-                if (pass == 2) then
-                  item_pair(nitems) = int(p - 1, kind=c_int)
-                  item_img(nitems) = int(kkkk, kind=c_int)
-                  item_xj(:, nitems) = xj
-                  item_xjuc(:, nitems) = xjuc
-                end if
-              end do
+                cycle
+              end if
+              if (r < 0.00002D0) cycle   ! rotate and h1elec give zero
+              item_cnt(p) = item_cnt(p) + 1
             end do
           end do
         end do
-        kr = kr + nii*nii
       end do
     end do
+!$omp end parallel do
+    nitems = 0
+    do p = 1, npairs
+      pair_first(p) = int(nitems, kind=c_int)
+      nitems = nitems + item_cnt(p)
+    end do
     pair_first(npairs + 1) = int(nitems, kind=c_int)
+    allocate(item_pair(max(1, nitems)), item_img(max(1, nitems)), item_xj(3, max(1, nitems)), &
+      item_xjuc(3, max(1, nitems)))
+!
+!  Pass 2, pairs in parallel: the near images, from pair_first(p), in image order
+!
+!$omp parallel do schedule(dynamic, 4) default(shared) &
+!$omp   private(i, j, p, l, kkkk, ii, jj, k, xj, xjuc, r)
+    do i = 1, numat
+      do j = 1, i
+        p = (i*(i - 1))/2 + j
+        l = pair_first(p)
+        kkkk = 0
+        do ii = -l1u, l1u
+          do jj = -l2u, l2u
+            do k = -l3u, l3u
+              kkkk = kkkk + 1
+              xj = coord(:,j) + tvec(:,1)*ii + tvec(:,2)*jj + tvec(:,3)*k
+              xjuc = xj - coord(:,i)
+              r = xjuc(1)**2 + xjuc(2)**2 + xjuc(3)**2
+              if (r > cutof2) cycle
+              if (r < 0.00002D0) cycle
+              l = l + 1
+              item_pair(l) = int(p - 1, kind=c_int)
+              item_img(l) = int(kkkk, kind=c_int)
+              item_xj(:, l) = xj
+              item_xjuc(:, l) = xjuc
+            end do
+          end do
+        end do
+      end do
+    end do
+!$omp end parallel do
     gkb = pair_kb
     call mozyme_section_timer_end('conv_hcore_pairlist', t_section)
     call fill_tables(tables)
