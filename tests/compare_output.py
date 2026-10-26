@@ -35,6 +35,9 @@ skip_criteria = re.compile(r'([A-Z][a-z][a-z] [A-Z][a-z][a-z] [ 0-9][0-9] [0-9][
                            r'|(CLOCK)|(TIME)|(SECONDS)|(Version)|(THE VIBRATIONAL FREQUENCY)|(ITERATION)|(SCF CALCULATIONS)|(Stewart)'
                            r'|(remaining)|(\*  THREADS)|(\*  ISOTOPE)|(\*  DENOUT)|(\*  OLDENS)|(\*  SETUP)|(ITER.)|(\*\* )|(web-site)|(MOPAC)|(GRADIENT NORM)')
 
+# regular expression pattern for the trace lines of a GPU build
+gpu_trace_criteria = re.compile(r'\s*\[(MOZYME GPU|GPU|STREAM|MGPU|PROFILE)')
+
 # regular expression pattern for an eigenvector block
 eigen_criteria = re.compile(r'(Root No.)|(ROOT NO.)')
 
@@ -86,6 +89,10 @@ def parse_mopac_out_file(path):
 
             # skip lines as necessary
             if skip_criteria.search(line):
+                continue
+
+            # GPU trace lines (a GPU build writes its fallbacks, e.g. the DENOUT hand-back) are diagnostics
+            if gpu_trace_criteria.match(line):
                 continue
 
             # switch to or continue geo mode
