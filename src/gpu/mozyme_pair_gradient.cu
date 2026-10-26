@@ -37,6 +37,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 // Fortran section-timer hook (mozyme_section_timers), so the upload / kernel /
@@ -1462,11 +1463,39 @@ extern "C" int mopac_cuda_solrot_pairs(
       code = 3;
       break;
     }
-    // copy back: integrals segment by segment (the one-centre blocks between
-    // atoms belong to the host), the per-pair sums in one piece
-    std::vector<double> hw(static_cast<size_t>(span)), hwk(static_cast<size_t>(span));
-    if (cudaMemcpy(hw.data(), d_w.ptr, span * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess ||
-        cudaMemcpy(hwk.data(), d_wk.ptr, span * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess ||
+    // copy back: the integrals of the chunk in one piece straight into w / wk, with the
+    // one-centre blocks between the pairs (which belong to the host) saved before and put
+    // back after; the per-pair sums in one piece.  (A staging copy of the span, zero-filled,
+    // then copied pair by pair, cost ~3 s for a 512-atom Si cell: 4 GB of integrals.)
+    std::vector<std::pair<size_t, size_t>> gaps;  // (offset in the span, length)
+    for (int p = 0; p + 1 < np; ++p) {
+      const size_t end = static_cast<size_t>(woff[p]) + pair_kb[p0 + p];
+      const size_t next = static_cast<size_t>(woff[p + 1]);
+      if (next > end) gaps.emplace_back(end, next - end);
+    }
+    size_t gap_total = 0;
+    for (const auto &g : gaps) gap_total += g.second;
+    std::vector<double> saved(2 * gap_total);
+    {
+      size_t s = 0;
+      for (const auto &g : gaps) {
+        std::memcpy(saved.data() + s, w + base + g.first, g.second * sizeof(double));
+        std::memcpy(saved.data() + gap_total + s, wk + base + g.first, g.second * sizeof(double));
+        s += g.second;
+      }
+    }
+    const bool w_ok =
+        cudaMemcpy(w + base, d_w.ptr, span * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess &&
+        cudaMemcpy(wk + base, d_wk.ptr, span * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess;
+    {
+      size_t s = 0;
+      for (const auto &g : gaps) {
+        std::memcpy(w + base + g.first, saved.data() + s, g.second * sizeof(double));
+        std::memcpy(wk + base + g.first, saved.data() + gap_total + s, g.second * sizeof(double));
+        s += g.second;
+      }
+    }
+    if (!w_ok ||
         cudaMemcpy(di + 81 * static_cast<size_t>(p0), d_di.ptr, 81 * nps * sizeof(double),
                    cudaMemcpyDeviceToHost) != cudaSuccess ||
         cudaMemcpy(e1b + 45 * static_cast<size_t>(p0), d_e1b.ptr, 45 * nps * sizeof(double),
@@ -1480,10 +1509,6 @@ extern "C" int mopac_cuda_solrot_pairs(
     }
     for (int p = 0; p < np; ++p) {
       win_out[p0 + p] = (pair_self[p0 + p] || win[p] == 0x7fffffff) ? 0 : win[p];
-      const size_t o = static_cast<size_t>(woff[p]);
-      const size_t g = static_cast<size_t>(pair_woff[p0 + p]);
-      std::memcpy(w + g, hw.data() + o, pair_kb[p0 + p] * sizeof(double));
-      std::memcpy(wk + g, hwk.data() + o, pair_kb[p0 + p] * sizeof(double));
     }
     p0 = p1;
   }
