@@ -109,6 +109,49 @@ constexpr int kGridD = 128;
 constexpr int kPairScratchD = mozyme_pair::kMaxWD + kMozymePairCoreScratchD;
 constexpr size_t kPairSharedD = 40 * 1024;
 
+// Launch shape of a d kernel for `work` grid-stride items.  kGridD blocks are one warp per SM
+// on an A100: enough for the few d pairs of a protein, but the image sums of a solid with Si,
+// Ti, ... (10^5-10^6 d items, every pair of atoms with d orbitals) were latency bound there.
+// Large jobs get up to MOPAC_GPU_D_BLOCKS_PER_SM (default 8) blocks per SM, at least four
+// items per thread, the dummy shared allocation sized so that this many blocks fit on an SM
+// (which still bounds the driver's local-memory reservation), and a scratch of at most a
+// quarter of the free device memory.
+struct DGrid {
+  int blocks = kGridD;
+  size_t shared = kPairSharedD;
+};
+
+DGrid d_grid(long long work) {
+  DGrid g;
+  int dev = 0, sms = 0, smem = 0;
+  if (cudaGetDevice(&dev) != cudaSuccess ||
+      cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess ||
+      cudaDeviceGetAttribute(&smem, cudaDevAttrMaxSharedMemoryPerMultiprocessor, dev) != cudaSuccess) {
+    cudaGetLastError();
+    return g;
+  }
+  int per_sm = 8;
+  if (const char *env = std::getenv("MOPAC_GPU_D_BLOCKS_PER_SM")) {
+    if (*env) per_sm = std::atoi(env);
+  }
+  per_sm = std::max(1, std::min(per_sm, 32));
+  const long long want = (work + 4LL * kPairThreadsD - 1) / (4LL * kPairThreadsD);
+  long long blocks = std::min<long long>(want, static_cast<long long>(sms) * per_sm);
+  size_t free_b = 0, total_b = 0;
+  if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess) {
+    const size_t per_block = static_cast<size_t>(kPairThreadsD) * kPairScratchD * sizeof(double);
+    blocks = std::min<long long>(blocks, static_cast<long long>(free_b / 4 / per_block));
+  } else {
+    cudaGetLastError();
+  }
+  if (blocks <= kGridD) return g;
+  g.blocks = static_cast<int>(blocks);
+  // ~1 KB of shared memory per block is reserved by the system
+  const size_t fit = static_cast<size_t>(smem) / per_sm;
+  g.shared = std::min(kPairSharedD, fit > 2048 ? fit - 1024 : size_t(1024));
+  return g;
+}
+
 template <typename T>
 struct DeviceArray {
   T *ptr = nullptr;
@@ -1034,13 +1077,14 @@ int pair_gradient_launch(
     const int grid = (npairs + kPairThreads - 1) / kPairThreads;
     mozyme_pair_gradient_kernel<false><<<grid, kPairThreads>>>(a);
     if (launch_d) {
-      if (!d_scratch.alloc(static_cast<size_t>(kGridD) * kPairThreadsD * kPairScratchD)) return 2;
+      const DGrid dg = d_grid(static_cast<long long>(npairs) * (force ? 6 : 4));
+      if (!d_scratch.alloc(static_cast<size_t>(dg.blocks) * kPairThreadsD * kPairScratchD)) return 2;
       a.scratch_d = d_scratch.ptr;
       if (a.periodic) {
-        mozyme_pair_energy_d_kernel<<<kGridD, kPairThreadsD, kPairSharedD>>>(a, d_energies.ptr, 0);
-        mozyme_pair_energy_d_kernel<<<kGridD, kPairThreadsD, kPairSharedD>>>(a, d_energies.ptr, 1);
+        mozyme_pair_energy_d_kernel<<<dg.blocks, kPairThreadsD, dg.shared>>>(a, d_energies.ptr, 0);
+        mozyme_pair_energy_d_kernel<<<dg.blocks, kPairThreadsD, dg.shared>>>(a, d_energies.ptr, 1);
       } else {
-        mozyme_pair_energy_d_kernel<<<kGridD, kPairThreadsD, kPairSharedD>>>(a, d_energies.ptr, -1);
+        mozyme_pair_energy_d_kernel<<<dg.blocks, kPairThreadsD, dg.shared>>>(a, d_energies.ptr, -1);
       }
       mozyme_pair_deriv_d_kernel<<<grid, kPairThreads>>>(a, d_energies.ptr);
     }
@@ -1311,7 +1355,8 @@ extern "C" int mopac_cuda_solrot_pairs(
     any_d = (tables->natorb[pair_ni[p] - 1] == 9 || tables->natorb[pair_nj[p] - 1] == 9);
   }
   DeviceArray<double> d_scratch;
-  if (!d_scratch.alloc(static_cast<size_t>(kGridD) * kPairThreadsD * kPairScratchD)) return 2;
+  const DGrid dg = d_grid(any_d ? std::max<long long>(nitems, npairs) : npairs);
+  if (!d_scratch.alloc(static_cast<size_t>(dg.blocks) * kPairThreadsD * kPairScratchD)) return 2;
   DeviceArray<int> d_status;
   if (!d_status.alloc(1) || cudaMemset(d_status.ptr, 0, sizeof(int)) != cudaSuccess) return 2;
   StackLimitRestore stack_limit;
@@ -1396,11 +1441,11 @@ extern "C" int mopac_cuda_solrot_pairs(
     a.status = d_status.ptr;
     if (ni_items > 0) {
       solrot_near_kernel<false><<<(ni_items + kPairThreads - 1) / kPairThreads, kPairThreads>>>(a);
-      if (any_d) solrot_near_kernel<true><<<kGridD, kPairThreadsD, kPairSharedD>>>(a);
+      if (any_d) solrot_near_kernel<true><<<dg.blocks, kPairThreadsD, dg.shared>>>(a);
       solrot_tie_kernel<<<(ni_items + kPairThreads - 1) / kPairThreads, kPairThreads>>>(a);
     }
     solrot_point_tie_kernel<<<(np + kPairThreads - 1) / kPairThreads, kPairThreads>>>(a);
-    solrot_wk_kernel<<<kGridD, kPairThreadsD, kPairSharedD>>>(a);
+    solrot_wk_kernel<<<dg.blocks, kPairThreadsD, dg.shared>>>(a);
     cudaError_t err = cudaGetLastError();
     if (err == cudaSuccess) err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
@@ -1507,9 +1552,10 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
     const int grid = (npairs + kPairThreads - 1) / kPairThreads;
     mozyme_hcore_pairs_kernel<false><<<grid, kPairThreads>>>(a);
     if (launch_d) {
-      if (!d_scratch.alloc(static_cast<size_t>(kGridD) * kPairThreadsD * kPairScratchD)) return 2;
+      const DGrid dg = d_grid(npairs);
+      if (!d_scratch.alloc(static_cast<size_t>(dg.blocks) * kPairThreadsD * kPairScratchD)) return 2;
       a.scratch_d = d_scratch.ptr;
-      mozyme_hcore_pairs_kernel<true><<<kGridD, kPairThreadsD, kPairSharedD>>>(a);
+      mozyme_hcore_pairs_kernel<true><<<dg.blocks, kPairThreadsD, dg.shared>>>(a);
     }
   }
   if (point_on_device && numat >= 2) {
