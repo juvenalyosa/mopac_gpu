@@ -312,10 +312,11 @@
     double precision, intent (inout) :: dxyz(3, numat*l123)
     double precision :: grad_hh(3, numat*l123)
     double precision :: e_corr, r, d_rad, g(3), energy_corr_hh_rep
-    integer :: i, j, iii, jjj, i_cell, j_cell, kkkk
+    integer :: i, j, iii, jjj, i_cell, j_cell, kkkk, icuc
     double precision, external :: distance, poly
     e_hh = 0.d0
     grad_hh = 0.d0
+    icuc = (l123 + 1)/2
 !
 ! Iterate over H atoms twice
 !
@@ -341,10 +342,13 @@
 !
 ! Add pair contribution to the global gradient
 !
+!  dxyz layout of dcart: atom i in the central cell, atom j in its cell (kl fastest); distance(j, i)
+!  put the nearest image of j in cell +cell_ijk
+!
           iii = l123*(i - 1)
           jjj = l123*(j - 1)
-          kkkk = (l3u - cell_ijk(3)) + (2*l3u + 1)*(l2u - cell_ijk(2) + (2*l2u + 1)*(l1u - cell_ijk(1))) + 1
-          i_cell = iii + kkkk
+          kkkk = ((l1u + cell_ijk(1))*(2*l2u + 1) + l2u + cell_ijk(2))*(2*l3u + 1) + l3u + cell_ijk(3) + 1
+          i_cell = iii + icuc
           j_cell = jjj + kkkk
           grad_hh(:,i_cell) = grad_hh(:,i_cell) - g(:)
           grad_hh(:,j_cell) = grad_hh(:,j_cell) + g(:)
@@ -357,7 +361,8 @@
       if (index(keywrd, " DERIV") > 0) then
         write (iw, '(/25X,a)')"HH REPULSION"
         write (iw, '(" NUMBER  ATOM  ",5X,"X",12X,"Y",12X,"Z",/)')
-        write (iw, '(I6,4x,a2,F13.6,2F13.6)') (i, elemnt(nat(i)), grad_hh(:,i), i = 1,numat)
+        write (iw, '(I6,4x,a2,F13.6,2F13.6)') (i, elemnt(nat(i)), &
+          sum(grad_hh(:,l123*(i - 1) + 1:l123*i), dim=2), i = 1,numat)
       end if
     end if
     return

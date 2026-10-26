@@ -29,13 +29,13 @@
   use elemts_C, only: elemnt
   use parameters_C, only: par7, par8, par9, par10
   implicit none
-  double precision, intent (inout) ::  dxyz(3, numat)
+  double precision, intent (inout) ::  dxyz(3, numat*l123)
   logical, intent (in):: l_grad
 !
 ! local and dummy variables
 !
   integer, parameter :: max_elem = 94, maxc = 5 ! maximum coordination number references per element
-  integer :: i, mxc(max_elem), icalcn = -1
+  integer :: i, mxc(max_elem), icalcn = -1, icuc
   logical :: D3H4, first = .true.
   double precision :: au_to_kcal, e6, e8, rs6, rs8, s6, s18, store_tvec(3,3), &
     alp6, alp8, rs18, alp, ehb, hbscale
@@ -46,6 +46,7 @@
     r0ab(max_elem, max_elem)                   ! cut - off radii for all element pairs
     double precision, allocatable :: &
     dxyz_temp(:,:),                          &  ! Contribution to gradient
+    g_hb(:,:),                               &  ! H-bond gradient, one entry per atom
     store_coord(:,:)                                    ! Coordinates in au
 
   save
@@ -138,7 +139,18 @@
 ! HBOND
 !
       if (.not. D3H4) then
-        call hbsimple(numat, nat, coord, hbscale, ehb, l_grad, dxyz_temp)
+!
+!  hbsimple uses the atoms of the central cell only and returns one gradient entry per atom;
+!  in a solid that is the central-cell entry of the atom in dcart's layout
+!
+        allocate(g_hb(3,numat))
+        g_hb = 0.d0
+        call hbsimple(numat, nat, coord, hbscale, ehb, l_grad, g_hb)
+        icuc = (l123 + 1)/2
+        do i = 1, numat
+          dxyz_temp(:,l123*(i - 1) + icuc) = g_hb(:,i)
+        end do
+        deallocate(g_hb)
       else
         ehb = 0.d0
       end if
@@ -146,11 +158,16 @@
       dftd3  = E_disp + E_hb
       if(l_grad)then
         call gdisp(r0ab, rs6, alp6, c6ab, s6, s18,mxc, r2r4, rcov, rs8, alp8, dxyz_temp)
-        dxyz = dxyz + 2.d0*dxyz_temp*au_to_kcal
+!
+!  Hartree/Bohr to kcal/mol/Angstrom.  The factor was 2*au_to_kcal, 2*a0 = 1.058 times too large
+!  (urea crystal, PM6-D3 minus PM6: 6% against central differences of the heat, atoms and Tv).
+!
+        dxyz = dxyz + dxyz_temp*au_to_kcal/a0
         if (index(keywrd, " DERIV") > 0) then
           write (iw, '(/16X,a)')"GRIMME'S D3 CORRECTIONS"
           write (iw, '(" NUMBER  ATOM  ",5X,"X",12X,"Y",12X,"Z",/)')
-          write (iw, '(I6,4x,a2,F13.6,2F13.6)') (i, elemnt(nat(i)), dxyz_temp(:,i)*2.d0*au_to_kcal, i = 1,numat)
+          write (iw, '(I6,4x,a2,F13.6,2F13.6)') (i, elemnt(nat(i)), &
+            sum(dxyz_temp(:,l123*(i - 1) + 1:l123*i), dim=2)*au_to_kcal/a0, i = 1,numat)
         end if
       end if
       coord(:,:numat) = store_coord

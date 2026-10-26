@@ -21,12 +21,13 @@
 !
   use common_arrays_C, only: nat, cell_ijk, Vab
   use molkst_C, only : numat, l123, l1u, l2u, l3u
+  use funcon_C, only : a0
   implicit none
   double precision, parameter :: k1 = 16.d0
   integer, parameter :: max_elem = 94, maxc = 5 ! maximum coordination number references per element
   double precision :: &
   c6ab(max_elem, max_elem, maxc, maxc, 3), & ! C6 for all element pairs
-  dxyz_temp(3,numat),                      & ! Contribution to gradient
+  dxyz_temp(3,numat*l123),                 & ! Contribution to gradient, one entry per atom and cell (as dcart)
   rcov(max_elem),                          & ! covalent radii
   cn(numat),                               & ! coordination numbers of the atoms
   r0ab(max_elem, max_elem),                & ! cut  -  off radii for all element pairs
@@ -35,9 +36,9 @@
 !
 !  Local variables
 !
-  integer :: i, j, linij, iii, jjj, i_cell, j_cell, kkkk
+  integer :: i, j, linij, iii, jjj, i_cell, j_cell, kkkk, icuc
   double precision :: R0, r2, damp6, damp8, c6, tmp1, tmp2, r, dc6_rest, rij(3), dc6iji, dc6ijj, r6, r7, t6, t8, &
-  rcovij, expterm, dcn,x1, r42, r8, r9
+  rcovij, expterm, dcn,x1, r42, r8, r9, rthr2
   double precision, allocatable :: drij(:), dc6i(:)
   double precision, external :: distance
   integer, external :: lin
@@ -50,12 +51,18 @@
   drij = 0.d0
   dc6i = 0.d0
   dc6_rest = 0.0d0
+!
+!  The same cut-off as the energy (edisp: 15 Angstroms).  It was 100 Bohr (53 Angstroms), so the
+!  gradient had pairs the energy does not have.
+!
+  rthr2 = (15.d0/a0)**2
+  icuc = (l123 + 1)/2
   do i = 2, numat
     do j = 1, i - 1
       r = distance(j,i)
       if (r < 0.1d0) cycle
       r2 = r**2
-      if (r2 > 10000.d0) cycle
+      if (r2 > rthr2) cycle
       linij = lin(i,j)
       r0 = r0ab(nat(j),nat(i))
       r42=r2r4(nat(i))*r2r4(nat(j))
@@ -106,11 +113,17 @@
         dcn = 0.d0
       end if
       x1 = drij(linij) + dcn*(dc6i(i) + dc6i(j))
+!
+!  dxyz layout of dcart: atom i in the central cell, atom j in cell (ik, jk, kl), counted with kl
+!  fastest.  distance(j, i) put the nearest image of j at coord(j) + tvec*cell_ijk, so j is in
+!  cell +cell_ijk.  (Before, both atoms went to the entries of cell -cell_ijk: the sums over the
+!  cells, the atom gradients, were right, the translation-vector gradient was not.)
+!
       iii = l123*(i - 1)
       jjj = l123*(j - 1)
-      kkkk = (l3u - cell_ijk(3)) + (2*l3u + 1)*(l2u - cell_ijk(2) + (2*l2u + 1)*(l1u - cell_ijk(1))) + 1
-      i_cell = iii + kkkk 
-      j_cell = jjj + kkkk       
+      kkkk = ((l1u + cell_ijk(1))*(2*l2u + 1) + l2u + cell_ijk(2))*(2*l3u + 1) + l3u + cell_ijk(3) + 1
+      i_cell = iii + icuc
+      j_cell = jjj + kkkk
       dxyz_temp(:,i_cell) = dxyz_temp(:,i_cell) + x1*rij/r
       dxyz_temp(:,j_cell) = dxyz_temp(:,j_cell) - x1*rij/r
     end do
