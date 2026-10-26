@@ -234,12 +234,13 @@
         if (index(keywrd,' FILL') /= 0) ifill = -nint(reada(keywrd,index(keywrd,' FILL')))
         if (index(keywrd,' SHIFT') /= 0) bshift = -reada(keywrd,index(keywrd,' SHIFT'))
 !
-!  Polymers, layers and solids use a constant level shift of the virtual levels, 20 eV unless
-!  SHIFT is given.  It was 80 eV: the SCF then crept down the energy and stopped before the
-!  minimum (PM7, rutile 162 atoms: 288 iterations, heat 0.008 kcal/mol too high; 20 eV: 60
-!  iterations, converged; ZnO 103 -> 17, Si 35 -> 14, quartz 35 -> 20 iterations).
+!  Polymers, layers and solids use a constant level shift of the virtual levels, 80 eV unless
+!  SHIFT is given.  80 eV converges slowly and can stop short of the minimum (PM7, rutile 162
+!  atoms: 288 iterations, heat 0.008 kcal/mol too high; SHIFT=20: 60 iterations, converged), but
+!  a smaller shift can end in another electronic state: rutile 576 atoms with SHIFT=20 converged
+!  to a charge-ordered state (two kinds of Ti, gap 3.0 eV) 225 kcal/mol above the 80 eV one.
 !
-        solid_shift = -20.D0
+        solid_shift = -80.D0
         if (index(keywrd,' SHIFT') /= 0) solid_shift = bshift
         if (Abs(bshift) > 1.d-20) ten = bshift
         if (index(keywrd,' ITRY') /= 0) itrmax = nint(reada(keywrd,index(keywrd,' ITRY')))
