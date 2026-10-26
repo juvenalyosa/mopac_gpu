@@ -62,7 +62,7 @@
       double precision, dimension(numat) :: q
       double precision, dimension(10) :: escf0
       double precision :: plb, scfcrt, pl, bshift, pltest, trans, w1, w2, random
-      double precision :: shift, shiftb, shfmax, ten, tenold, plchek, scorr, shfto, shftbo, titer0
+      double precision :: shift, shiftb, shfmax, ten, tenold, plchek, scorr, shfto, shftbo, titer0, solid_shift
       double precision :: enrgy, sellim, summ, eold_alpha, eold_beta, ofract, sum1, sum2, diff, eold, escf, titer
       double precision, dimension(norbs) :: theta
       ! Hybrid SCF controls (EDIIS->CDIIS), damping and adaptive shift
@@ -95,7 +95,7 @@
         times, force, allcon, trans, halfe, w1, w2, random, gs, shift, shiftb, &
         shfmax, capps, ten, tenold, incitr, irrr, plchek, timitr, &
         scorr, shfto, shftbo, titer0, jalp, ialp, jbet, ibet, enrgy, &
-        iopc_calcp
+        iopc_calcp, solid_shift
       data icalcn/ 0/
       data debug/ .FALSE./
       data prtfok/ .FALSE./
@@ -233,6 +233,14 @@
 !
         if (index(keywrd,' FILL') /= 0) ifill = -nint(reada(keywrd,index(keywrd,' FILL')))
         if (index(keywrd,' SHIFT') /= 0) bshift = -reada(keywrd,index(keywrd,' SHIFT'))
+!
+!  Polymers, layers and solids use a constant level shift of the virtual levels, 20 eV unless
+!  SHIFT is given.  It was 80 eV: the SCF then crept down the energy and stopped before the
+!  minimum (PM7, rutile 162 atoms: 288 iterations, heat 0.008 kcal/mol too high; 20 eV: 60
+!  iterations, converged; ZnO 103 -> 17, Si 35 -> 14, quartz 35 -> 20 iterations).
+!
+        solid_shift = -20.D0
+        if (index(keywrd,' SHIFT') /= 0) solid_shift = bshift
         if (Abs(bshift) > 1.d-20) ten = bshift
         if (index(keywrd,' ITRY') /= 0) itrmax = nint(reada(keywrd,index(keywrd,' ITRY')))
         ci = index(keywrd,' MICROS') + index(keywrd,' C.I.') /= 0 .and. .not. method_indo
@@ -348,6 +356,12 @@
           scfcrt = scfcrt*0.01D0
         end if
         if (index(keywrd,' POLAR') /= 0) scfcrt = min(1.d-6, scfcrt)
+!
+!  Vibrations of polymers, layers and solids: the FORCE criterion above leaves the frequencies
+!  unconverged (diamond, 64 atoms: ZPE 269.07 kcal/mol with it, 268.82 with 1.D-10, 268.80 with
+!  1.D-12; highest frequency 1 cm-1 too high).
+!
+        if (force .and. id /= 0) scfcrt = min(scfcrt, 1.D-10)
         scfcrt = max(scfcrt,1.D-12)
 !
 !  THE USER CAN STATE THE SCF CRITERION, IF DESIRED.
@@ -363,7 +377,11 @@
 !  For solids, reduce the SCF criterion to match a system with ~20 atoms
 !
         if (id == 3) scfcrt = scfcrt*numat/20
-        if (debug .or. i + j /= 0) write (iw, '(''  SCF CRITERION ='',G14.4)') scfcrt
+        if (force .and. id /= 0 .and. i + j == 0) then
+          write (iw, "('  SCF CRITERION =',G14.4,' (FORCE: VIBRATIONAL FREQUENCIES NEED A CONVERGED SCF)')") scfcrt
+        else if (debug .or. i + j /= 0) then
+          write (iw, '(''  SCF CRITERION ='',G14.4)') scfcrt
+        end if
         if (scfcrt < 1.D-12) write (iw, &
       '(2/2X,'' THERE IS A RISK OF INFINITE LOOPING WITH THE SCFCRT LESS THAN 1.D-12'')')
 !
@@ -723,7 +741,7 @@
           shift = shfto
         end if
         if (id == 0) eigs(ihomo+1:norbs) = eigs(ihomo+1:norbs) + shift
-        if (id /= 0) shift = -80.D0
+        if (id /= 0) shift = solid_shift
         if (lxfac) shift=0.d0
         forall (i=1:mpack)
           f(i) = h(i) + shift*pa(i) + 1.D-16*i
