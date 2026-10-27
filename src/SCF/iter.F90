@@ -66,7 +66,7 @@
       ! MOPAC_PDIAG: rotations by pseudo_diag_gemm between full diagonalizations
       logical :: pd_on
       integer :: pd_start, pd_every, pd_last_full, pd_rotations
-      double precision :: pd_xmax, pd_gmax, pd_glast
+      double precision :: pd_xmax, pd_gmax, pd_glast, pd_grow
       double precision :: enrgy, sellim, summ, eold_alpha, eold_beta, ofract, sum1, sum2, diff, eold, escf, titer
       double precision, dimension(norbs) :: theta
       ! Hybrid SCF controls (EDIIS->CDIIS), damping and adaptive shift
@@ -100,7 +100,7 @@
         shfmax, capps, ten, tenold, incitr, irrr, plchek, timitr, &
         scorr, shfto, shftbo, titer0, jalp, ialp, jbet, ibet, enrgy, &
         iopc_calcp, solid_shift, hybrid_enable, adaptive_shift_on, damp_enable, &
-        pd_on, pd_start, pd_every, pd_xmax
+        pd_on, pd_start, pd_every, pd_xmax, pd_grow
       data icalcn/ 0/
       data debug/ .FALSE./
       data prtfok/ .FALSE./
@@ -220,8 +220,9 @@
         pd_on = lgpu
 #endif
         pd_start = 3
-        pd_every = 8
+        pd_every = 16
         pd_xmax = 0.2d0
+        pd_grow = 4.d0
         call get_environment_variable('MOPAC_PDIAG', line, status=i)
         if (i == 0 .and. len_trim(line) > 0) pd_on = (trim(adjustl(line)) == '1')
         call get_environment_variable('MOPAC_PDIAG_START', line, status=i)
@@ -230,6 +231,8 @@
         if (i == 0) read (line, *, iostat=j) pd_every
         call get_environment_variable('MOPAC_PDIAG_XMAX', line, status=i)
         if (i == 0) read (line, *, iostat=j) pd_xmax
+        call get_environment_variable('MOPAC_PDIAG_GROW', line, status=i)
+        if (i == 0) read (line, *, iostat=j) pd_grow
         if (index(keywrd,' EDIIS') /= 0) then
           hybrid_enable = .true.
           adaptive_shift_on = .true.
@@ -1647,8 +1650,8 @@
 !  MOPAC_PDIAG=1 (experimental): between full diagonalizations, RHF iterations rotate the
 !  occupied and virtual vectors with pseudo_diag_gemm (level-3 BLAS) instead of diagonalizing.
 !  A full diagonalization is done for the first MOPAC_PDIAG_START iterations (default 3), every
-!  MOPAC_PDIAG_EVERY iterations (default 8), and after a rotation step in which the
-!  occupied-virtual coupling grew by more than half.
+!  MOPAC_PDIAG_EVERY iterations (default 16), and after a rotation step in which the
+!  occupied-virtual coupling grew by more than a factor MOPAC_PDIAG_GROW (default 4).
 !
         logical function pdiag_step()
           pdiag_step = pd_on .and. .not. (uhf .or. halfe .or. ci) .and. niter > pd_start .and. &
@@ -1693,7 +1696,7 @@
           call pseudo_diag_gemm(f, c, eigs, norbs, na2el, pd_xmax, pd_gmax)
           if (timitr) call timer ('AFTER  PSEUDO DIAG')
 #endif
-          if (pd_gmax > 1.5d0*pd_glast) pd_last_full = niter - pd_every   ! next step: full diagonalization
+          if (pd_gmax > pd_grow*pd_glast) pd_last_full = niter - pd_every   ! next step: full diagonalization
           pd_glast = pd_gmax
           pd_rotations = pd_rotations + 1
         end subroutine pdiag_rotate
