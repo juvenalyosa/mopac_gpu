@@ -7160,6 +7160,140 @@ void mopac_cuda_fetch_eigenvectors(int n, double *A, int lda) {
   cudaStreamSynchronize(g_stream);
 }
 
+// --- Pseudo-diagonalization of the device eigenvectors (src/SCF/pseudo_diag_gemm.F90) ---
+// Packed lower triangle (row-wise: (i, j <= i) at i(i-1)/2 + j, 1-based) to a full symmetric matrix.
+__global__ void unpack_lower_packed_kernel(const double *fp, double *F, int n) {
+  const size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= (size_t)n * (size_t)n) return;
+  const int i = (int)(idx % n);   // row (0-based), column-major storage
+  const int j = (int)(idx / n);
+  const size_t r = (size_t)(i > j ? i : j), c = (size_t)(i > j ? j : i);
+  F[idx] = fp[r * (r + 1) / 2 + c];
+}
+
+// X(i,a) = -G(i,a) / max(e_a - e_i, dmin), G no x nv (column-major); per-block max |G|, max |X|.
+__global__ void pdiag_x_kernel(double *G, const double *eig, int no, int nv, double dmin, double *gmax,
+                               double *xmax) {
+  __shared__ double sg[256], sx[256];
+  const size_t total = (size_t)no * (size_t)nv;
+  double mg = 0.0, mx = 0.0;
+  for (size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x; idx < total;
+       idx += (size_t)gridDim.x * blockDim.x) {
+    const int i = (int)(idx % no);
+    const int a = (int)(idx / no);
+    const double g = G[idx];
+    double d = eig[no + a] - eig[i];
+    if (d < dmin) d = dmin;
+    const double x = -g / d;
+    G[idx] = x;
+    mg = fmax(mg, fabs(g));
+    mx = fmax(mx, fabs(x));
+  }
+  sg[threadIdx.x] = mg;
+  sx[threadIdx.x] = mx;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < s) {
+      sg[threadIdx.x] = fmax(sg[threadIdx.x], sg[threadIdx.x + s]);
+      sx[threadIdx.x] = fmax(sx[threadIdx.x], sx[threadIdx.x + s]);
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) {
+    gmax[blockIdx.x] = sg[0];
+    xmax[blockIdx.x] = sx[0];
+  }
+}
+
+// One rotation step of pseudo_diag_gemm on the eigenvectors kept on the device by
+// mopac_cuda_dsyevd_keep (columns 1..nocc occupied).  fpacked: the Fock matrix, packed lower
+// triangle; eig: eigenvalues of the last full diagonalization; xlim: largest rotation.  On return
+// *gmax_out = max |F(occ, virt)| before the rotation.  Returns 1 on success, 0 if the device holds
+// no eigenvectors of size n or a CUDA call failed (the device vectors are then invalid).
+int mopac_cuda_pseudo_diag(int n, int nocc, const double *fpacked, const double *eig, double xlim,
+                           double *gmax_out) {
+  if (gmax_out) *gmax_out = 0.0;
+  if (!g_have_device_eigvecs || n != g_device_eigvecs_n || nocc < 1 || nocc >= n || !fpacked || !eig) return 0;
+  if (!g_blas) create_handle();
+  if (!g_blas) return 0;
+  if (!g_solver && !report_cusolver_error("cusolverDnCreate pdiag", cusolverDnCreate(&g_solver))) return 0;
+  const int nv = n - nocc;
+  const size_t nn = (size_t)n * (size_t)n;
+  const size_t npack = (size_t)n * (size_t)(n + 1) / 2;
+  const int kBlocks = 256;
+  static DevBuf<double> d_fp, d_F, d_W, d_G, d_Cold, d_S, d_eig, d_red, d_work;
+  static DevBuf<int> d_info;
+  static HostBuf<double> h_red;
+  bool ok = d_fp.ensure(npack * sizeof(double)) && d_F.ensure(nn * sizeof(double)) &&
+            d_W.ensure((size_t)n * nv * sizeof(double)) && d_G.ensure((size_t)nocc * nv * sizeof(double)) &&
+            d_Cold.ensure(nn * sizeof(double)) &&
+            d_S.ensure((size_t)(nocc > nv ? nocc : nv) * (size_t)(nocc > nv ? nocc : nv) * sizeof(double)) &&
+            d_eig.ensure((size_t)n * sizeof(double)) && d_red.ensure(2 * kBlocks * sizeof(double)) &&
+            d_info.ensure(2 * sizeof(int));
+  h_red.ensure(2 * kBlocks * sizeof(double));
+  if (!ok || !h_red.ptr) return 0;
+  double *C = g_dsyevd_A.ptr;
+  double *Co = C, *Cv = C + (size_t)nocc * n;
+  double *Coo = d_Cold.ptr, *Cvo = d_Cold.ptr + (size_t)nocc * n;
+  ok = report_cublas_error("pdiag cublasSetStream", cublasSetStream(g_blas, g_stream)) &&
+       report_cusolver_error("pdiag cusolverDnSetStream", cusolverDnSetStream(g_solver, g_stream)) &&
+       report_cuda_error("pdiag F host->device",
+                         cudaMemcpyAsync(d_fp.ptr, fpacked, npack * sizeof(double), cudaMemcpyHostToDevice, g_stream)) &&
+       report_cuda_error("pdiag eig host->device",
+                         cudaMemcpyAsync(d_eig.ptr, eig, (size_t)n * sizeof(double), cudaMemcpyHostToDevice, g_stream)) &&
+       report_cuda_error("pdiag C copy", cudaMemcpyAsync(Coo, C, nn * sizeof(double), cudaMemcpyDeviceToDevice, g_stream));
+  if (!ok) { g_have_device_eigvecs = false; return 0; }
+  unpack_lower_packed_kernel<<<(unsigned)((nn + 255) / 256), 256, 0, g_stream>>>(d_fp.ptr, d_F.ptr, n);
+  const double one = 1.0, zero = 0.0;
+  // W = F Cv, G = Co^T W
+  ok = report_cublas_error("pdiag W", cublasDgemm(g_blas, CUBLAS_OP_N, CUBLAS_OP_N, n, nv, n, &one, d_F.ptr, n,
+                                                   Cvo, n, &zero, d_W.ptr, n)) &&
+       report_cublas_error("pdiag G", cublasDgemm(g_blas, CUBLAS_OP_T, CUBLAS_OP_N, nocc, nv, n, &one, Coo, n,
+                                                   d_W.ptr, n, &zero, d_G.ptr, nocc));
+  if (!ok) { g_have_device_eigvecs = false; return 0; }
+  pdiag_x_kernel<<<kBlocks, 256, 0, g_stream>>>(d_G.ptr, d_eig.ptr, nocc, nv, 0.5, d_red.ptr, d_red.ptr + kBlocks);
+  ok = report_cuda_error("pdiag max device->host", cudaMemcpyAsync(h_red.ptr, d_red.ptr, 2 * kBlocks * sizeof(double),
+                                                                     cudaMemcpyDeviceToHost, g_stream)) &&
+       report_cuda_error("pdiag sync", cudaStreamSynchronize(g_stream));
+  if (!ok) { g_have_device_eigvecs = false; return 0; }
+  double gm = 0.0, xm = 0.0;
+  for (int b = 0; b < kBlocks; ++b) {
+    gm = std::max(gm, h_red.ptr[b]);
+    xm = std::max(xm, h_red.ptr[kBlocks + b]);
+  }
+  if (gmax_out) *gmax_out = gm;
+  const double scale = (xm > xlim) ? xlim / xm : 1.0, mscale = -scale;
+  // Co = Co + Cv X^T, Cv = Cv - Co X (old Co, Cv on the right)
+  ok = report_cublas_error("pdiag Co", cublasDgemm(g_blas, CUBLAS_OP_N, CUBLAS_OP_T, n, nocc, nv, &scale, Cvo, n,
+                                                    d_G.ptr, nocc, &one, Co, n)) &&
+       report_cublas_error("pdiag Cv", cublasDgemm(g_blas, CUBLAS_OP_N, CUBLAS_OP_N, n, nv, nocc, &mscale, Coo, n,
+                                                    d_G.ptr, nocc, &one, Cv, n));
+  // re-orthonormalize each block: C <- C L^-T, L L^T = C^T C
+  for (int blk = 0; blk < 2 && ok; ++blk) {
+    const int m = blk == 0 ? nocc : nv;
+    double *Cb = blk == 0 ? Co : Cv;
+    int lwork = 0;
+    ok = report_cublas_error("pdiag S", cublasDsyrk(g_blas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, m, n, &one, Cb, n,
+                                                     &zero, d_S.ptr, m)) &&
+         report_cusolver_error("pdiag potrf size", cusolverDnDpotrf_bufferSize(g_solver, CUBLAS_FILL_MODE_LOWER, m,
+                                                                               d_S.ptr, m, &lwork)) &&
+         d_work.ensure((size_t)(lwork > 0 ? lwork : 1) * sizeof(double)) &&
+         report_cusolver_error("pdiag potrf", cusolverDnDpotrf(g_solver, CUBLAS_FILL_MODE_LOWER, m, d_S.ptr, m,
+                                                               d_work.ptr, lwork, d_info.ptr + blk)) &&
+         report_cublas_error("pdiag trsm", cublasDtrsm(g_blas, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T,
+                                                        CUBLAS_DIAG_NON_UNIT, n, m, &one, d_S.ptr, m, Cb, n));
+  }
+  int info[2] = {0, 0};
+  ok = ok && report_cuda_error("pdiag info device->host",
+                               cudaMemcpyAsync(info, d_info.ptr, 2 * sizeof(int), cudaMemcpyDeviceToHost, g_stream)) &&
+       report_cuda_error("pdiag final sync", cudaStreamSynchronize(g_stream));
+  if (!ok || info[0] != 0 || info[1] != 0) {
+    g_have_device_eigvecs = false;
+    return 0;
+  }
+  return 1;
+}
+
 // --- MOZYME rotation: GPU-assisted drot over two columns ---
 __global__ void drot_cols_kernel(double *V, int n, int i_col, int j_col, double alpha, double beta) {
   int r = blockDim.x * blockIdx.x + threadIdx.x;

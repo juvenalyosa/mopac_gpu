@@ -63,6 +63,10 @@
       double precision, dimension(10) :: escf0
       double precision :: plb, scfcrt, pl, bshift, pltest, trans, w1, w2, random
       double precision :: shift, shiftb, shfmax, ten, tenold, plchek, scorr, shfto, shftbo, titer0, solid_shift
+      ! MOPAC_PDIAG: rotations by pseudo_diag_gemm between full diagonalizations
+      logical :: pd_on
+      integer :: pd_start, pd_every, pd_last_full, pd_rotations
+      double precision :: pd_xmax, pd_gmax, pd_glast
       double precision :: enrgy, sellim, summ, eold_alpha, eold_beta, ofract, sum1, sum2, diff, eold, escf, titer
       double precision, dimension(norbs) :: theta
       ! Hybrid SCF controls (EDIIS->CDIIS), damping and adaptive shift
@@ -95,7 +99,8 @@
         times, force, allcon, trans, halfe, w1, w2, random, gs, shift, shiftb, &
         shfmax, capps, ten, tenold, incitr, irrr, plchek, timitr, &
         scorr, shfto, shftbo, titer0, jalp, ialp, jbet, ibet, enrgy, &
-        iopc_calcp, solid_shift, hybrid_enable, adaptive_shift_on, damp_enable
+        iopc_calcp, solid_shift, hybrid_enable, adaptive_shift_on, damp_enable, &
+        pd_on, pd_start, pd_every, pd_xmax
       data icalcn/ 0/
       data debug/ .FALSE./
       data prtfok/ .FALSE./
@@ -208,6 +213,18 @@
         hybrid_enable = .false.
         adaptive_shift_on = .false.
         damp_enable = .false.
+        pd_on = .false.
+        pd_start = 3
+        pd_every = 8
+        pd_xmax = 0.2d0
+        call get_environment_variable('MOPAC_PDIAG', line, status=i)
+        if (i == 0) pd_on = (trim(adjustl(line)) == '1')
+        call get_environment_variable('MOPAC_PDIAG_START', line, status=i)
+        if (i == 0) read (line, *, iostat=j) pd_start
+        call get_environment_variable('MOPAC_PDIAG_EVERY', line, status=i)
+        if (i == 0) read (line, *, iostat=j) pd_every
+        call get_environment_variable('MOPAC_PDIAG_XMAX', line, status=i)
+        if (i == 0) read (line, *, iostat=j) pd_xmax
         if (index(keywrd,' EDIIS') /= 0) then
           hybrid_enable = .true.
           adaptive_shift_on = .true.
@@ -604,6 +621,9 @@
       iredy = 1
  180 continue
       niter = 0
+      pd_last_full = 0
+      pd_glast = huge(1.d0)
+      pd_rotations = 0
       frst = .TRUE.
       ! Print SCF hybrid profile once per calculation
       if (nscf == 0 .and. debug) then
@@ -1226,6 +1246,9 @@
 !           using BLAS level-1 operations right now. This could be
 !           accelerated using a QR diagonalization analog at some point ...
 !          if (halfe .or. camkin) then
+            if (pdiag_step()) then
+              call pdiag_rotate()
+            else
             if (timitr) call timer ('BEFORE FULL DIAG')
 #ifdef GPU
             current_spin = 1
@@ -1235,6 +1258,9 @@
             current_spin = 0
 #endif
             if (timitr) call timer ('AFTER  FULL DIAG')
+            pd_last_full = niter
+            pd_glast = huge(1.d0)
+            end if
 !          else
 !            if (lgpu) then
 !               if (timitr) call timer ('BEFORE GPU DIAG')
@@ -1247,9 +1273,15 @@
 !            end if
 !          end if
         else
-          if (timitr) call timer ('BEFORE FULL DIAG')
-          call eigenvectors_LAPACK(c, f, eigs, norbs)
-          if (timitr) call timer ('AFTER  FULL DIAG')
+          if (pdiag_step()) then
+            call pdiag_rotate()
+          else
+            if (timitr) call timer ('BEFORE FULL DIAG')
+            call eigenvectors_LAPACK(c, f, eigs, norbs)
+            if (timitr) call timer ('AFTER  FULL DIAG')
+            pd_last_full = niter
+            pd_glast = huge(1.d0)
+          end if
         end if
         j = 1
         if (prtvec) then
@@ -1605,6 +1637,61 @@
         emin = min(emin,escf)
       end if
       return
+      contains
+!
+!  MOPAC_PDIAG=1 (experimental): between full diagonalizations, RHF iterations rotate the
+!  occupied and virtual vectors with pseudo_diag_gemm (level-3 BLAS) instead of diagonalizing.
+!  A full diagonalization is done for the first MOPAC_PDIAG_START iterations (default 3), every
+!  MOPAC_PDIAG_EVERY iterations (default 8), and after a rotation step in which the
+!  occupied-virtual coupling grew by more than half.
+!
+        logical function pdiag_step()
+          pdiag_step = pd_on .and. .not. (uhf .or. halfe .or. ci) .and. niter > pd_start .and. &
+            pd_last_full > 0 .and. niter - pd_last_full < pd_every
+        end function pdiag_step
+
+        subroutine pdiag_rotate()
+#ifdef GPU
+          use iso_c_binding, only : c_int, c_double
+          interface
+            integer(c_int) function mopac_cuda_pseudo_diag(n, nocc, fp, eig, xlim, gmax) &
+                bind(C, name='mopac_cuda_pseudo_diag')
+              import :: c_int, c_double
+              integer(c_int), value :: n, nocc
+              real(c_double), intent(in) :: fp(*), eig(*)
+              real(c_double), value :: xlim
+              real(c_double), intent(out) :: gmax
+            end function mopac_cuda_pseudo_diag
+          end interface
+          if (timitr) call timer ('BEFORE PSEUDO DIAG')
+          if (lgpu .and. have_device_eigvecs) then
+            ! rotate the eigenvectors kept on the device; the density is built from them, and the
+            ! host c, untouched, still matches their fingerprint
+            if (mopac_cuda_pseudo_diag(int(norbs, c_int), int(na2el, c_int), f, eigs, real(pd_xmax, c_double), &
+                pd_gmax) /= 1) then
+              ! the device vectors are lost: diagonalize now
+              call eigenvectors_LAPACK(c, f, eigs, norbs)
+              pd_last_full = niter
+              pd_glast = huge(1.d0)
+              return
+            end if
+            if (timitr) call timer ('AFTER  PSEUDO DIAG')
+          else
+            if (have_device_eigvecs) call eigenvectors_CUDA_fetch(c, norbs)
+            call pseudo_diag_gemm(f, c, eigs, norbs, na2el, pd_xmax, pd_gmax)
+            if (timitr) call timer ('AFTER  PSEUDO DIAG')
+            ! the density must be built from the rotated host vectors
+            have_device_eigvecs = .false.
+          end if
+#else
+          if (timitr) call timer ('BEFORE PSEUDO DIAG')
+          call pseudo_diag_gemm(f, c, eigs, norbs, na2el, pd_xmax, pd_gmax)
+          if (timitr) call timer ('AFTER  PSEUDO DIAG')
+#endif
+          if (pd_gmax > 1.5d0*pd_glast) pd_last_full = niter - pd_every   ! next step: full diagonalization
+          pd_glast = pd_gmax
+          pd_rotations = pd_rotations + 1
+        end subroutine pdiag_rotate
       end subroutine iter
       subroutine delete_iter_arrays
 !
