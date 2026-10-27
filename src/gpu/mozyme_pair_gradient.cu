@@ -122,6 +122,37 @@ struct DGrid {
   size_t shared = kPairSharedD;
 };
 
+// MOPAC_GPU_DPAIR_PROFILE=1: thread-cycles of the phases of the d-pair code (mpc_prof), printed
+// per device call as [GPU dpair profile] lines on stdout.
+bool dprof_begin() {
+  const char *env = std::getenv("MOPAC_GPU_DPAIR_PROFILE");
+  if (!env || std::strcmp(env, "1") != 0) return false;
+  unsigned long long zero[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  const int on = 1;
+  return cudaMemcpyToSymbol(mpc_prof, zero, sizeof(zero)) == cudaSuccess &&
+         cudaMemcpyToSymbol(mpc_prof_on, &on, sizeof(on)) == cudaSuccess;
+}
+
+void dprof_end(bool active, const char *label, long long items) {
+  if (!active) return;
+  unsigned long long c[8];
+  const int off = 0;
+  if (cudaDeviceSynchronize() != cudaSuccess || cudaMemcpyFromSymbol(c, mpc_prof, sizeof(c)) != cudaSuccess) {
+    cudaGetLastError();
+    return;
+  }
+  cudaMemcpyToSymbol(mpc_prof_on, &off, sizeof(off));
+  double total = 0.0;
+  for (int k = 0; k < 8; ++k) total += static_cast<double>(c[k]);
+  if (total <= 0.0) total = 1.0;
+  const char *names[8] = {"setup", "reppd2", "rotate_w", "pm7_copy", "elenuc_ccrep", "h1elec", "energy",
+                          "accumulate"};
+  std::printf("[GPU dpair profile] %s items=%lld Gcycles=%.3f", label, items, total * 1e-9);
+  for (int k = 0; k < 8; ++k) std::printf(" %s=%.1f%%", names[k], 100.0 * static_cast<double>(c[k]) / total);
+  std::printf("\n");
+  std::fflush(stdout);
+}
+
 DGrid d_grid(long long work) {
   DGrid g;
   int dev = 0, sms = 0, smem = 0;
@@ -418,12 +449,15 @@ __device__ bool pair_energy(const PairGradArgs &a, int nat1, int nat2, int n1, i
   }
   double smat[81];
   const double *smat_ptr = nullptr;
+  MPC_PROF_T(tq0);
   if (nat1 != 102 && nat2 != 102 && !(periodic && fl->no_overlap)) {
     const bool ok = D ? mozyme_pair_h1elec_dev(nat1, nat2, x1, x2, a.ovl, smat)
                       : mozyme_pair_h1elec_sp_dev(nat1, nat2, x1, x2, a.ovl, smat);
     if (!ok) return false;
     smat_ptr = smat;
   }
+  MPC_PROF_T(tq1);
+  if (D) MPC_PROF_ADD(5, tq0, tq1);
   double e_at2[45], e_at1[45];
   double w_local[D ? 1 : kW];
   double *w = D ? scratch : w_local;   // D: w(2025) then the core scratch
@@ -447,8 +481,11 @@ __device__ bool pair_energy(const PairGradArgs &a, int nat1, int nat2, int n1, i
   if (w_count != 0 && w_count != expect) return false;
   const bool exchange = !(periodic && fl->no_exchange);
   double h[kL], f[kL], pa[kL];
+  MPC_PROF_T(tq2);
   *dener = mozyme_pair::diatomic_energy_generic(n1, n2, smat_ptr, e_at1, e_at2, w, enuc, pdi, h, f, pa,
                                                 exchange);
+  MPC_PROF_T(tq3);
+  if (D) MPC_PROF_ADD(6, tq2, tq3);
   return true;
 }
 
@@ -1078,6 +1115,7 @@ int pair_gradient_launch(
     const int grid = (npairs + kPairThreads - 1) / kPairThreads;
     mozyme_pair_gradient_kernel<false><<<grid, kPairThreads>>>(a);
     if (launch_d) {
+      const bool prof = dprof_begin();
       const DGrid dg = d_grid(static_cast<long long>(npairs) * (force ? 6 : 4));
       if (!d_scratch.alloc(static_cast<size_t>(dg.blocks) * kPairThreadsD * kPairScratchD)) return 2;
       a.scratch_d = d_scratch.ptr;
@@ -1088,6 +1126,7 @@ int pair_gradient_launch(
         mozyme_pair_energy_d_kernel<<<dg.blocks, kPairThreadsD, dg.shared>>>(a, d_energies.ptr, -1);
       }
       mozyme_pair_deriv_d_kernel<<<grid, kPairThreads>>>(a, d_energies.ptr);
+      dprof_end(prof, ext ? "gradient" : "mozyme_gradient", static_cast<long long>(npairs) * (force ? 6 : 4));
     }
   }
   if (numat >= 2 && !ext) {
@@ -1215,8 +1254,11 @@ __global__ void solrot_near_kernel(SolrotArgs a) {
     const double *xj = a.item_xj + 3 * static_cast<size_t>(idx);
     const double *xjuc = a.item_xjuc + 3 * static_cast<size_t>(idx);
     double smat[81];
+    MPC_PROF_T(ts0);
     bool ok = D ? mozyme_pair_h1elec_dev(ni, nj, xi, xj, a.ovl, smat)
                 : mozyme_pair_h1elec_sp_dev(ni, nj, xi, xj, a.ovl, smat);
+    MPC_PROF_T(ts1);
+    if (D) MPC_PROF_ADD(5, ts0, ts1);
     if (!ok) {
       atomicAdd(a.status, 1);
       continue;
@@ -1241,6 +1283,7 @@ __global__ void solrot_near_kernel(SolrotArgs a) {
       atomicAdd(a.status, 1);
       continue;
     }
+    MPC_PROF_T(ts2);
     double *wp = a.w + a.pair_woff[p];
     for (int t = 0; t < wc; ++t) {
       if (w[t] != 0.0) atomicAdd(&wp[t], w[t]);
@@ -1257,6 +1300,8 @@ __global__ void solrot_near_kernel(SolrotArgs a) {
     const double w1 = wc ? w[0] : 0.0;
     a.item_w1[idx] = w1;
     if (w1 > 0.0) atomicMax(&a.key[p], dbl_bits(w1));
+    MPC_PROF_T(ts3);
+    if (D) MPC_PROF_ADD(7, ts2, ts3);
   }
 }
 
@@ -1361,6 +1406,7 @@ extern "C" int mopac_cuda_solrot_pairs(
   DeviceArray<int> d_status;
   if (!d_status.alloc(1) || cudaMemset(d_status.ptr, 0, sizeof(int)) != cudaSuccess) return 2;
   StackLimitRestore stack_limit;
+  const bool prof = any_d && dprof_begin();
   int code = 0;
   int p0 = 0;
   while (p0 < npairs && code == 0) {
@@ -1512,6 +1558,7 @@ extern "C" int mopac_cuda_solrot_pairs(
     }
     p0 = p1;
   }
+  dprof_end(prof, "solid_hcore", nitems);
   stack_limit.restore();
   const double ms = timer.stop_ms();
   if (ms_out) *ms_out = ms;

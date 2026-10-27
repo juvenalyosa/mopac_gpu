@@ -1971,6 +1971,21 @@ static __device__ __forceinline__ void mpc_elenuc_full(const MozymePairRotD &rot
 // reserve local memory for every thread the GPU can hold (~10 GB on an A100).
 constexpr int kMozymePairCoreScratchD = 491 + 2025 + 2025;
 
+// Per-phase thread-cycle counters of the d-pair code (MOPAC_GPU_DPAIR_PROFILE=1; one copy per
+// translation unit, read by the host code of that unit).  0 setup (rotmat, reppd, spcore),
+// 1 reppd2, 2 rotate_w_full, 3 PM7 d block and copy, 4 elenuc and ccrep, 5 h1elec, 6 diatomic
+// energy (gradient), 7 accumulation of the results (solid hcore).
+#if defined(__CUDACC__)
+static __device__ unsigned long long mpc_prof[8];
+static __device__ int mpc_prof_on;
+#define MPC_PROF_T(t) const long long t = mpc_prof_on ? clock64() : 0
+#define MPC_PROF_ADD(k, t0, t1) \
+  if (mpc_prof_on) atomicAdd(&mpc_prof[(k)], static_cast<unsigned long long>((t1) - (t0)))
+#else
+#define MPC_PROF_T(t) const long long t = 0
+#define MPC_PROF_ADD(k, t0, t1)
+#endif
+
 static __device__ __forceinline__ bool mozyme_pair_core_dev(
     int ni, int nj, const double *xi, const double *xj, const MozymePairCoreParams &prm,
     double *w, int *w_count, double *e1b, double *e2a, double *enuc, double *scratch) {
@@ -1996,6 +2011,7 @@ static __device__ __forceinline__ bool mozyme_pair_core_dev(
     if (rij2 < 0.00002) return true;
   }
   const bool dorb = (li == 9) || (lj == 9);
+  MPC_PROF_T(tp0);
 
   // rotatd: rotmat(nj, ni, ci, cj, r)
   MozymePairRotD rot;
@@ -2022,7 +2038,11 @@ static __device__ __forceinline__ bool mozyme_pair_core_dev(
     point = 0.0;
   }
   double *rep = scratch;
+  MPC_PROF_T(tp1);
+  MPC_PROF_ADD(0, tp0, tp1);
   mpc_reppd2(prm, ni, nj, r, ri, rep, cored1, cored2);
+  MPC_PROF_T(tp2);
+  MPC_PROF_ADD(1, tp1, tp2);
   point = -(prm.ev / r) * prm.tore[nj - 1];
   cored1[0] = cored1[0] * cnst + (1.0 - cnst) * point;
   cored1[1] = cored1[1] * cnst;
@@ -2048,7 +2068,10 @@ static __device__ __forceinline__ bool mozyme_pair_core_dev(
 
   // two-electron integrals in the molecular frame, ww(2025)
   double *ww = scratch + 491;
+  MPC_PROF_T(tp3);
   mpc_rotate_w_full(rot, rep, li, lj, ww, scratch + 491 + 2025);
+  MPC_PROF_T(tp4);
+  MPC_PROF_ADD(2, tp3, tp4);
 
   // PM7 "d"-orbital balance block of rotatd, complete.  Fortran 1-based
   // ww(n) -> ww[n-1].
@@ -2133,6 +2156,8 @@ static __device__ __forceinline__ bool mozyme_pair_core_dev(
   const int istep = limij * limkl;
   for (int n = 0; n < istep; ++n) w[n] = ww[n];
   *w_count = istep;
+  MPC_PROF_T(tp5);
+  MPC_PROF_ADD(3, tp4, tp5);
 
   // elenuc
   mpc_elenuc_full(rot, cored1, li, e1b);
@@ -2140,6 +2165,8 @@ static __device__ __forceinline__ bool mozyme_pair_core_dev(
 
   // ccrep (distance passed in Bohr, converted back inside)
   *enuc = mpc_ccrep(prm, ni, nj, r, gab);
+  MPC_PROF_T(tp6);
+  MPC_PROF_ADD(4, tp5, tp6);
   return true;
 }
 
