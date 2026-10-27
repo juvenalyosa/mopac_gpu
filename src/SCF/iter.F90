@@ -213,12 +213,17 @@
         hybrid_enable = .false.
         adaptive_shift_on = .false.
         damp_enable = .false.
+        ! on by default when the GPU is in use (a rotation is ~20 ms on an A100 against ~190 ms for
+        ! a full diagonalization of 3264 orbitals); on the CPU both cost ~4 n^3 flop
         pd_on = .false.
+#ifdef GPU
+        pd_on = lgpu
+#endif
         pd_start = 3
         pd_every = 8
         pd_xmax = 0.2d0
         call get_environment_variable('MOPAC_PDIAG', line, status=i)
-        if (i == 0) pd_on = (trim(adjustl(line)) == '1')
+        if (i == 0 .and. len_trim(line) > 0) pd_on = (trim(adjustl(line)) == '1')
         call get_environment_variable('MOPAC_PDIAG_START', line, status=i)
         if (i == 0) read (line, *, iostat=j) pd_start
         call get_environment_variable('MOPAC_PDIAG_EVERY', line, status=i)
