@@ -37,7 +37,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -61,6 +60,7 @@ inline void add_section_ms(const char *name, double ms) {
 #include "mozyme_pair_overlap.cuh"
 #include "mozyme_pair_core.cuh"
 #include "mozyme_pair_fock.cuh"
+#include "pinned_copy.h"
 
 // Mirror of the Fortran bind(C) type mozyme_pair_tables_c (mozyme_gpu_gradient.F90).
 struct MozymePairTablesC {
@@ -1041,63 +1041,6 @@ struct EventTimer {
   }
 };
 
-// Device -> host copy of a large array through two pinned staging buffers: the device copy of one
-// piece overlaps the host copy (several threads) of the previous one.  A pageable cudaMemcpy of
-// the w / wk of a solid (4.25 GB for a 512-atom Si cell) ran at ~1.4 GB/s on an A100.  The
-// staging buffers are kept for the next calls.  Falls back to cudaMemcpy.
-bool d2h_staged(double *host, const double *dev, size_t n) {
-  constexpr size_t kPiece = size_t(16) << 20;  // doubles (128 MB)
-  static double *stage = nullptr;
-  static cudaStream_t stream = nullptr;
-  static cudaEvent_t done[2];
-  static bool broken = false;
-  if (n <= kPiece || broken) return cudaMemcpy(host, dev, n * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess;
-  if (!stage) {
-    if (cudaMallocHost(reinterpret_cast<void **>(&stage), 2 * kPiece * sizeof(double)) != cudaSuccess ||
-        cudaStreamCreate(&stream) != cudaSuccess || cudaEventCreate(&done[0]) != cudaSuccess ||
-        cudaEventCreate(&done[1]) != cudaSuccess) {
-      cudaGetLastError();
-      broken = true;
-      return cudaMemcpy(host, dev, n * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess;
-    }
-  }
-  const unsigned hw = std::thread::hardware_concurrency();
-  const int nt = static_cast<int>(std::max(1u, std::min(hw ? hw : 1u, 8u)));
-  const size_t npieces = (n + kPiece - 1) / kPiece;
-  auto issue = [&](size_t k) {
-    const size_t len = std::min(kPiece, n - k * kPiece);
-    double *buf = stage + (k & 1) * kPiece;
-    return cudaMemcpyAsync(buf, dev + k * kPiece, len * sizeof(double), cudaMemcpyDeviceToHost, stream) ==
-               cudaSuccess &&
-           cudaEventRecord(done[k & 1], stream) == cudaSuccess;
-  };
-  bool ok = issue(0);
-  for (size_t k = 0; k < npieces && ok; ++k) {
-    // the buffer of piece k+1 held piece k-1, already copied out
-    if (k + 1 < npieces) ok = issue(k + 1);
-    if (!ok || cudaEventSynchronize(done[k & 1]) != cudaSuccess) {
-      ok = false;
-      break;
-    }
-    const size_t len = std::min(kPiece, n - k * kPiece);
-    const double *buf = stage + (k & 1) * kPiece;
-    double *dst = host + k * kPiece;
-    const size_t part = (len + nt - 1) / nt;
-    std::vector<std::thread> pool;
-    for (int t = 1; t < nt; ++t) {
-      const size_t a = std::min(len, t * part), b = std::min(len, (t + 1) * part);
-      if (b > a) pool.emplace_back([=] { std::memcpy(dst + a, buf + a, (b - a) * sizeof(double)); });
-    }
-    std::memcpy(dst, buf, std::min(len, part) * sizeof(double));
-    for (auto &th : pool) th.join();
-  }
-  if (!ok) {
-    cudaStreamSynchronize(stream);
-    cudaGetLastError();
-  }
-  return ok;
-}
-
 // Sync, read the status counters; returns the return code (0 ok, 2 CUDA
 // failure, 3 some pair failed on the device).
 int finish_launch(const char *label, const DeviceArray<int> &status, int *d_pairs_out) {
@@ -1745,8 +1688,8 @@ extern "C" int mopac_cuda_solrot_pairs(
       }
     }
     const bool w_ok =
-        d2h_staged(w + base, chunk_w, static_cast<size_t>(span)) &&
-        d2h_staged(wk + base, chunk_wk, static_cast<size_t>(span));
+        mopac_pinned_d2h(w + base, chunk_w, static_cast<size_t>(span) * sizeof(double)) &&
+        mopac_pinned_d2h(wk + base, chunk_wk, static_cast<size_t>(span) * sizeof(double));
     {
       size_t s = 0;
       for (const auto &g : gaps) {
