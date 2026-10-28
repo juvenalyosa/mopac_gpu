@@ -32,6 +32,8 @@
 
 #include <cuda_runtime.h>
 
+#include "pinned_copy.h"
+
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -42,6 +44,12 @@
 extern "C" void mozyme_section_timer_add_c(const char *name, int name_len, double ms);
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+void add_section(const char *name, const Clock::time_point &t0, const Clock::time_point &t1) {
+  mozyme_section_timer_add_c(name, static_cast<int>(std::strlen(name)),
+                             std::chrono::duration<double, std::milli>(t1 - t0).count());
+}
 
 __constant__ unsigned char c_ti[45];
 __constant__ unsigned char c_tj[45];
@@ -205,7 +213,7 @@ bool up(T **dst, const T *src, size_t n) {
     *dst = nullptr;
     return false;
   }
-  return cudaMemcpy(*dst, src, n * sizeof(T), cudaMemcpyHostToDevice) == cudaSuccess;
+  return mopac_pinned_h2d(*dst, src, n * sizeof(T)) == 1;
 }
 
 }  // namespace
@@ -253,9 +261,7 @@ extern "C" int mopac_cuda_conv_fock2(long long mpack, long long n2elec, int npai
     } else {
       g_offer.release();
       w_ok = up(&c.w, w, n) && up(&c.wk, wk, n);
-      const char *name = "conv_fock_w_upload";
-      mozyme_section_timer_add_c(name, static_cast<int>(std::strlen(name)),
-                                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tu).count());
+      add_section("conv_fock_w_upload", tu, Clock::now());
     }
     if (!w_ok || !up(&c.pia, pair_ia, npairs) || !up(&c.pib, pair_ib, npairs) ||
         !up(&c.pja, pair_ja, npairs) || !up(&c.pjb, pair_jb, npairs) || !up(&c.poff, pair_off, npairs) ||
@@ -274,11 +280,13 @@ extern "C" int mopac_cuda_conv_fock2(long long mpack, long long n2elec, int npai
     c.mpack = mpack;
   }
   const size_t bytes = static_cast<size_t>(mpack) * sizeof(double);
-  if (cudaMemcpy(c.ptot, ptot, bytes, cudaMemcpyHostToDevice) != cudaSuccess ||
-      cudaMemcpy(c.p, p, bytes, cudaMemcpyHostToDevice) != cudaSuccess ||
-      cudaMemcpy(c.f, f, bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+  const auto th0 = Clock::now();
+  if (mopac_pinned_h2d(c.ptot, ptot, bytes) != 1 || mopac_pinned_h2d(c.p, p, bytes) != 1 ||
+      mopac_pinned_h2d(c.f, f, bytes) != 1) {
     return 2;
   }
+  const auto th1 = Clock::now();
+  add_section("conv_fock_h2d", th0, th1);
   FockArgs a;
   a.npairs = npairs;
   a.pair_ia = c.pia;
@@ -305,7 +313,10 @@ extern "C" int mopac_cuda_conv_fock2(long long mpack, long long n2elec, int npai
     std::fprintf(stderr, "[GPU ERROR] conventional Fock: %s\n", cudaGetErrorString(err));
     return 2;
   }
-  if (cudaMemcpy(f, c.f, bytes, cudaMemcpyDeviceToHost) != cudaSuccess) return 2;
+  const auto tk = Clock::now();
+  add_section("conv_fock_kernels", th1, tk);
+  if (mopac_pinned_d2h(f, c.f, bytes) != 1) return 2;
+  add_section("conv_fock_d2h", tk, Clock::now());
   if (ms_out) {
     *ms_out = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   }

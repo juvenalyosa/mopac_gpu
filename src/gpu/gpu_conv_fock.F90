@@ -130,10 +130,11 @@ contains
     use mod_vars_cuda, only : lgpu, gpu_trace
     use cosmo_C, only : useps
     use chanel_C, only : iw
+    use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
     integer, intent(in) :: numat, nfirst(numat), nlast(numat)
     double precision, intent(inout) :: f(mpack)
     double precision, intent(in) :: ptot(mpack), p(mpack), w(n2elec), wk(n2elec)
-    double precision :: ms
+    double precision :: ms, t_section
     integer :: ii, ia, ib, ilim, kk
     integer(c_int) :: rc
     logical :: check
@@ -162,6 +163,7 @@ contains
       check_pending = .false.
       return
     end if
+    call mozyme_section_timer_begin('conv_fock_fock1', t_section)
     do ii = 1, numat
       ia = nfirst(ii)
       ib = nlast(ii)
@@ -173,6 +175,7 @@ contains
         call fock1(f, ptot, p, mpack, w(kk + 1), kk, ia, ib, ilim)
       end if
     end do
+    call mozyme_section_timer_end('conv_fock_fock1', t_section)
     if (check) then
       if (useps) call addfck(f_dev, ptot)
       check_pending = .true.

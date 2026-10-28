@@ -15959,3 +15959,21 @@ extern "C" int mopac_cuda_mozyme_makvec(
   return code;
 #endif
 }
+
+// Large host <-> device copies for the other GPU code (conventional / periodic SCF, solid hcore)
+// through the same pinned double-buffered staging.  The copies run on the staging stream, a
+// blocking stream: they follow the kernels queued on the legacy default stream, but the caller
+// must synchronize its own non-default streams before a device -> host copy.  Both return when
+// the data has arrived.  1 on success.
+#ifdef __CUDACC__
+extern "C" int mopac_pinned_d2h(void *host, const void *device, size_t bytes) {
+  return copy_d2h_fast(host, device, bytes, "pinned d2h") ? 1 : 0;
+}
+
+extern "C" int mopac_pinned_h2d(void *device, const void *host, size_t bytes) {
+  return copy_h2d_fast(device, host, bytes, "pinned h2d") ? 1 : 0;
+}
+#else
+extern "C" int mopac_pinned_d2h(void *, const void *, size_t) { return 0; }
+extern "C" int mopac_pinned_h2d(void *, const void *, size_t) { return 0; }
+#endif

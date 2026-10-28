@@ -42,6 +42,7 @@
 #include <limits>
 
 #include "grad_launch.h"
+#include "pinned_copy.h"
 
 // Fortran section-timer hook (mozyme_section_timers): lets the resident Fock
 // plan packing report its upload / count / build split in the [PROFILE] table.
@@ -6996,21 +6997,22 @@ void mopac_cuda_dsyevd_keep(int n, double *A, int lda, double *W, int *info) {
     return;
   }
 
-  static HostBuf<double> h_dsyevd_A, h_dsyevd_W;
-  h_dsyevd_A.ensure(bytesA);
+  static HostBuf<double> h_dsyevd_W;
   h_dsyevd_W.ensure(bytesW);
-  if (!h_dsyevd_A.ptr || !h_dsyevd_W.ptr) {
+  if (!h_dsyevd_W.ptr) {
     poison_host_doubles(W, static_cast<std::size_t>(n));
     g_have_device_eigvecs = false;
     *info = -1103;
     return;
   }
-  // Copy host-packed upper triangle (in A) that was unpacked by caller into full matrix; here A is ignored.
-  // Caller should have already unpacked; we accept A as a full matrix buffer for simplicity.
-  std::memcpy(h_dsyevd_A.ptr, A, bytesA);
+  // A: the full matrix (the caller unpacked it).  The earlier work on d_A (density, pseudo-
+  // diagonalization) must be done before the staging stream overwrites it.
+  const auto t_diag0 = std::chrono::steady_clock::now();
   bool ok = true;
-  ok = report_cuda_error("DSYEVD keep copy A host->device",
-                         cudaMemcpyAsync(d_A, h_dsyevd_A.ptr, bytesA, cudaMemcpyHostToDevice, g_stream)) && ok;
+  ok = report_cuda_error("DSYEVD keep sync", cudaStreamSynchronize(g_stream)) && ok;
+  ok = (mopac_pinned_h2d(d_A, A, bytesA) == 1) && ok;
+  mz_add_section_ms("scf_diag_h2d", mz_host_ms_since(t_diag0));
+  const auto t_diag1 = std::chrono::steady_clock::now();
 
   int lwork = 0;
   ok = report_cusolver_error("cusolverDnSetStream keep", cusolverDnSetStream(g_solver, g_stream)) && ok;
@@ -7043,6 +7045,7 @@ void mopac_cuda_dsyevd_keep(int n, double *A, int lda, double *W, int *info) {
   ok = report_cuda_error("DSYEVD keep copy info device->host",
                          cudaMemcpyAsync(info, d_info, sizeof(int), cudaMemcpyDeviceToHost, g_stream)) && ok;
   ok = report_cuda_error("DSYEVD keep stream synchronize", cudaStreamSynchronize(g_stream)) && ok;
+  mz_add_section_ms("scf_diag_dsyevd", mz_host_ms_since(t_diag1));
   if (ok && *info == 0) {
     std::memcpy(W, h_dsyevd_W.ptr, bytesW);
     g_have_device_eigvecs = true;
@@ -7156,8 +7159,13 @@ void mopac_cuda_fetch_eigenvectors(int n, double *A, int lda) {
     return;
   }
   size_t bytesA = (size_t)lda * (size_t)n * sizeof(double);
-  cudaMemcpyAsync(A, g_dsyevd_A.ptr, bytesA, cudaMemcpyDeviceToHost, g_stream);
+  const auto t0 = std::chrono::steady_clock::now();
   cudaStreamSynchronize(g_stream);
+  if (mopac_pinned_d2h(A, g_dsyevd_A.ptr, bytesA) != 1) {
+    cudaMemcpyAsync(A, g_dsyevd_A.ptr, bytesA, cudaMemcpyDeviceToHost, g_stream);
+    cudaStreamSynchronize(g_stream);
+  }
+  mz_add_section_ms("scf_eigvec_d2h", mz_host_ms_since(t0));
 }
 
 // --- Pseudo-diagonalization of the device eigenvectors (src/SCF/pseudo_diag_gemm.F90) ---
@@ -7235,10 +7243,12 @@ int mopac_cuda_pseudo_diag(int n, int nocc, const double *fpacked, const double 
   double *C = g_dsyevd_A.ptr;
   double *Co = C, *Cv = C + (size_t)nocc * n;
   double *Coo = d_Cold.ptr, *Cvo = d_Cold.ptr + (size_t)nocc * n;
-  ok = report_cublas_error("pdiag cublasSetStream", cublasSetStream(g_blas, g_stream)) &&
+  const auto t_fp = std::chrono::steady_clock::now();
+  ok = report_cuda_error("pdiag sync", cudaStreamSynchronize(g_stream)) &&
+       mopac_pinned_h2d(d_fp.ptr, fpacked, npack * sizeof(double)) == 1;
+  mz_add_section_ms("scf_pdiag_h2d", mz_host_ms_since(t_fp));
+  ok = ok && report_cublas_error("pdiag cublasSetStream", cublasSetStream(g_blas, g_stream)) &&
        report_cusolver_error("pdiag cusolverDnSetStream", cusolverDnSetStream(g_solver, g_stream)) &&
-       report_cuda_error("pdiag F host->device",
-                         cudaMemcpyAsync(d_fp.ptr, fpacked, npack * sizeof(double), cudaMemcpyHostToDevice, g_stream)) &&
        report_cuda_error("pdiag eig host->device",
                          cudaMemcpyAsync(d_eig.ptr, eig, (size_t)n * sizeof(double), cudaMemcpyHostToDevice, g_stream)) &&
        report_cuda_error("pdiag C copy", cudaMemcpyAsync(Coo, C, nn * sizeof(double), cudaMemcpyDeviceToDevice, g_stream));
@@ -7862,8 +7872,13 @@ extern "C" bool mopac_cuda_fetch_packed_density(double *host_ptr, size_t linear)
   PackedDensitySlot *slot = find_packed_slot(host_ptr, linear);
   if (!slot) return false;
   cudaStream_t s = g_stream ? g_stream : 0;
-  if (cudaMemcpyAsync(host_ptr, slot->buf.ptr, sizeof(double)*linear, cudaMemcpyDeviceToHost, s) != cudaSuccess) return false;
+  const auto t0 = std::chrono::steady_clock::now();
   cudaStreamSynchronize(s);
+  if (mopac_pinned_d2h(host_ptr, slot->buf.ptr, sizeof(double) * linear) != 1) {
+    if (cudaMemcpyAsync(host_ptr, slot->buf.ptr, sizeof(double)*linear, cudaMemcpyDeviceToHost, s) != cudaSuccess) return false;
+    cudaStreamSynchronize(s);
+  }
+  mz_add_section_ms("scf_density_d2h", mz_host_ms_since(t0));
   return true;
 }
 

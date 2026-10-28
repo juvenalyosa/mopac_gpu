@@ -51,6 +51,7 @@
       use gpu_scf_interfaces, only: gpu_scf_run, gpu_scf_last_error
       use gpu_scf_stream_driver, only: gpu_scf_stream_fock
 #endif
+      use mozyme_section_timers, only: mozyme_section_timer_begin, mozyme_section_timer_end
       implicit none
       double precision , intent(out) :: ee
       logical , intent(in) :: fulscf
@@ -62,6 +63,7 @@
       double precision, dimension(numat) :: q
       double precision, dimension(10) :: escf0
       double precision :: plb, scfcrt, pl, bshift, pltest, trans, w1, w2, random
+      double precision :: t_scf_section
       double precision :: shift, shiftb, shfmax, ten, tenold, plchek, scorr, shfto, shftbo, titer0, solid_shift
       ! MOPAC_PDIAG: rotations by pseudo_diag_gemm between full diagonalizations
       logical :: pd_on
@@ -783,9 +785,11 @@
         if (id == 0) eigs(ihomo+1:norbs) = eigs(ihomo+1:norbs) + shift
         if (id /= 0) shift = solid_shift
         if (lxfac) shift=0.d0
+        call mozyme_section_timer_begin('scf_fock_init', t_scf_section)
         forall (i=1:mpack)
           f(i) = h(i) + shift*pa(i) + 1.D-16*i
         endforall
+        call mozyme_section_timer_end('scf_fock_init', t_scf_section)
 
         do i=1,norbs
            f(i*(i+1)/2) = f(i*(i+1)/2) - shift
@@ -1383,6 +1387,7 @@
 #ifdef GPU
           call fetch_packed_density_if_needed(p, mpack, need_fetch_p, 'p', niter)
 #endif
+          call mozyme_section_timer_begin('scf_cnvg', t_scf_section)
           ! EDIIS-like damped mixing (RHF) before CNVG when hybrid mode and CDIIS not yet allowed
           if (hybrid_enable .and. damp_enable .and. .not. hybrid_allow_cdiis) then
             t_res = max(pl, 1.0D-12)
@@ -1393,6 +1398,7 @@
             end do
           end if
           call cnvg (p, pold, pold2,  niter, pl)
+          call mozyme_section_timer_end('scf_cnvg', t_scf_section)
         end if
       end if
 #ifdef GPU
