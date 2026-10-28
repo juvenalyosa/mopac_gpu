@@ -1348,6 +1348,17 @@ MPC_TABLE double mpc_ch_tab[675] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
 // under -rdc=true, or constant-cache broadcast is not applicable (one thread
 // per pair reads different entries), change MPC_TABLE to `static __device__`.
 
+// The large d arrays (rep, ww, v, w) are passed as S: a plain double * (contiguous per thread)
+// or an MpcStrided view of a scratch interleaved across the threads of a grid, element n of
+// thread t at base[n * stride + t].  With one contiguous block per thread every warp access
+// touches 32 cache lines; interleaved, the threads of a warp at the same n read one segment.
+struct MpcStrided {
+  double *p;
+  long long s;
+  __device__ __forceinline__ double &operator[](int n) const { return p[n * s]; }
+  __device__ __forceinline__ MpcStrided operator+(int n) const { return MpcStrided{p + n * s, s}; }
+};
+
 // indexd(i,j) = -(j(j-1))/2 + i + 9(j-1) for i >= j, symmetric (fordd)
 static __device__ __forceinline__ int mpc_indexd(int i, int j) {
   if (i < j) {
@@ -1648,8 +1659,9 @@ static __device__ __forceinline__ double mpc_rotmat_full(const double *xi, const
 // reppd2 (mndod.F90): rep(1..491) from ri (sp part) and rijkl (d part), and
 // cored(5..10, 1..2).  r in Bohr.  core1/core2 are the 10-entry cored columns.
 // ---------------------------------------------------------------------------
+template <class S>
 static __device__ __forceinline__ void mpc_reppd2(const MozymePairCoreParams &prm, int ni, int nj,
-                                                  double r, const double *ri, double *rep,
+                                                  double r, const double *ri, S rep,
                                                   double *core1, double *core2) {
   const int ipos[34] = {1, 5, 11, 12, 12, 2, 6, 13, 14, 14, 3, 8, 16, 18, 18, 7, 15,
                         10, 20, 4, 9, 17, 19, 21, 7, 15, 10, 20, 22, 4, 9, 17, 21, 19};
@@ -1724,20 +1736,21 @@ static __device__ __forceinline__ void mpc_reppd2(const MozymePairCoreParams &pr
 }
 
 // ---------------------------------------------------------------------------
-// tx (mndod.F90), full spd version.  v[ij-1][kl-1]: ij = indexd pair on atom
-// ni (1..45), kl = indx pair on atom nj (1..limkl).
+// tx (mndod.F90), full spd version.  v[45*(ij-1) + kl-1]: ij = indexd pair on
+// atom ni (1..45), kl = indx pair on atom nj (1..limkl).
 // ---------------------------------------------------------------------------
-static __device__ __forceinline__ void mpc_tx_full(const MozymePairRotD &rot, const double *rep,
-                                                   int ii, int kk, double v[45][45]) {
+template <class S>
+static __device__ __forceinline__ void mpc_tx_full(const MozymePairRotD &rot, S rep, int ii, int kk,
+                                                   S v) {
   const int met[45] = {1, 2, 3, 2, 3, 3, 2, 3, 3, 3, 4, 5, 5, 5, 6, 4, 5, 5, 5, 6, 6, 4, 5,
                        5, 5, 6, 6, 6, 4, 5, 5, 5, 6, 6, 6, 6, 4, 5, 5, 5, 6, 6, 6, 6, 6};
   const int limkl = mpc_indx(kk, kk);
   for (int a = 0; a < 45; ++a)
-    for (int b = 0; b < limkl; ++b) v[a][b] = 0.0;
+    for (int b = 0; b < limkl; ++b) v[45 * a + b] = 0.0;
   for (int i1 = 1; i1 <= ii; ++i1) {
     for (int j1 = 1; j1 <= i1; ++j1) {
       const int ij = mpc_indexd(i1, j1);
-      double *vij = v[ij - 1];
+      S vij = v + 45 * (ij - 1);
       for (int k1 = 1; k1 <= kk; ++k1) {
         for (int l1 = 1; l1 <= k1; ++l1) {
           const int kl = mpc_indexd(k1, l1);
@@ -1829,14 +1842,13 @@ static __device__ __forceinline__ void mpc_tx_full(const MozymePairRotD &rot, co
 
 // rotatd second step (full spd): ww[(indx(i,j)-1)*limkl + (kl-1)], 1-based
 // Fortran ww(indw(i,j)) with indw = (indx(i,j)-1)*limkl + kl.
-static __device__ __forceinline__ void mpc_rotate_w_full(const MozymePairRotD &rot,
-                                                         const double *rep, int ii, int kk,
-                                                         double *ww, double *v_scratch) {
+template <class S>
+static __device__ __forceinline__ void mpc_rotate_w_full(const MozymePairRotD &rot, S rep, int ii,
+                                                         int kk, S ww, S v) {
   const int met[45] = {1, 2, 3, 2, 3, 3, 2, 3, 3, 3, 4, 5, 5, 5, 6, 4, 5, 5, 5, 6, 6, 4, 5,
                        5, 5, 6, 6, 6, 4, 5, 5, 5, 6, 6, 6, 6, 4, 5, 5, 5, 6, 6, 6, 6, 6};
   // v (45 x 45) lives in the caller's scratch, not on the stack (see
   // kMozymePairCoreScratchD).
-  double (*v)[45] = reinterpret_cast<double (*)[45]>(v_scratch);
   for (int n = 0; n < 2025; ++n) ww[n] = 0.0;
   if (ii * kk <= 0) return;
   const int limkl = mpc_indx(kk, kk);
@@ -1850,7 +1862,7 @@ static __device__ __forceinline__ void mpc_rotate_w_full(const MozymePairRotD &r
       for (int k = 1; k <= kk; ++k) {
         for (int l = 1; l <= k; ++l) {
           const int kl = mpc_indx(k, l);
-          const double wrepp = v[ij - 1][kl - 1];
+          const double wrepp = v[45 * (ij - 1) + kl - 1];
           if (wrepp == 0.0) continue;  // logv
           switch (mm) {
             case 1:
@@ -1971,9 +1983,25 @@ static __device__ __forceinline__ void mpc_elenuc_full(const MozymePairRotD &rot
 // reserve local memory for every thread the GPU can hold (~10 GB on an A100).
 constexpr int kMozymePairCoreScratchD = 491 + 2025 + 2025;
 
+// Per-phase thread-cycle counters of the d-pair code (MOPAC_GPU_DPAIR_PROFILE=1; one copy per
+// translation unit, read by the host code of that unit).  0 setup (rotmat, reppd, spcore),
+// 1 reppd2, 2 rotate_w_full, 3 PM7 d block and copy, 4 elenuc and ccrep, 5 h1elec, 6 diatomic
+// energy (gradient), 7 accumulation of the results (solid hcore).
+#if defined(__CUDACC__)
+static __device__ unsigned long long mpc_prof[8];
+static __device__ int mpc_prof_on;
+#define MPC_PROF_T(t) const long long t = mpc_prof_on ? clock64() : 0
+#define MPC_PROF_ADD(k, t0, t1) \
+  if (mpc_prof_on) atomicAdd(&mpc_prof[(k)], static_cast<unsigned long long>((t1) - (t0)))
+#else
+#define MPC_PROF_T(t) const long long t = 0
+#define MPC_PROF_ADD(k, t0, t1)
+#endif
+
+template <class S>
 static __device__ __forceinline__ bool mozyme_pair_core_dev(
     int ni, int nj, const double *xi, const double *xj, const MozymePairCoreParams &prm,
-    double *w, int *w_count, double *e1b, double *e2a, double *enuc, double *scratch) {
+    S w, int *w_count, double *e1b, double *e2a, double *enuc, S scratch) {
   if (ni < 1 || ni > 107 || nj < 1 || nj > 107) return false;
   const int li = prm.natorb[ni - 1];
   const int lj = prm.natorb[nj - 1];
@@ -1996,6 +2024,7 @@ static __device__ __forceinline__ bool mozyme_pair_core_dev(
     if (rij2 < 0.00002) return true;
   }
   const bool dorb = (li == 9) || (lj == 9);
+  MPC_PROF_T(tp0);
 
   // rotatd: rotmat(nj, ni, ci, cj, r)
   MozymePairRotD rot;
@@ -2021,8 +2050,12 @@ static __device__ __forceinline__ bool mozyme_pair_core_dev(
     cnst = 1.0;
     point = 0.0;
   }
-  double *rep = scratch;
+  S rep = scratch;
+  MPC_PROF_T(tp1);
+  MPC_PROF_ADD(0, tp0, tp1);
   mpc_reppd2(prm, ni, nj, r, ri, rep, cored1, cored2);
+  MPC_PROF_T(tp2);
+  MPC_PROF_ADD(1, tp1, tp2);
   point = -(prm.ev / r) * prm.tore[nj - 1];
   cored1[0] = cored1[0] * cnst + (1.0 - cnst) * point;
   cored1[1] = cored1[1] * cnst;
@@ -2047,8 +2080,11 @@ static __device__ __forceinline__ bool mozyme_pair_core_dev(
   cored2[9] = cored2[9] * cnst + (1.0 - cnst) * point;
 
   // two-electron integrals in the molecular frame, ww(2025)
-  double *ww = scratch + 491;
+  S ww = scratch + 491;
+  MPC_PROF_T(tp3);
   mpc_rotate_w_full(rot, rep, li, lj, ww, scratch + 491 + 2025);
+  MPC_PROF_T(tp4);
+  MPC_PROF_ADD(2, tp3, tp4);
 
   // PM7 "d"-orbital balance block of rotatd, complete.  Fortran 1-based
   // ww(n) -> ww[n-1].
@@ -2133,6 +2169,8 @@ static __device__ __forceinline__ bool mozyme_pair_core_dev(
   const int istep = limij * limkl;
   for (int n = 0; n < istep; ++n) w[n] = ww[n];
   *w_count = istep;
+  MPC_PROF_T(tp5);
+  MPC_PROF_ADD(3, tp4, tp5);
 
   // elenuc
   mpc_elenuc_full(rot, cored1, li, e1b);
@@ -2140,6 +2178,8 @@ static __device__ __forceinline__ bool mozyme_pair_core_dev(
 
   // ccrep (distance passed in Bohr, converted back inside)
   *enuc = mpc_ccrep(prm, ni, nj, r, gab);
+  MPC_PROF_T(tp6);
+  MPC_PROF_ADD(4, tp5, tp6);
   return true;
 }
 
