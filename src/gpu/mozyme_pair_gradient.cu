@@ -1276,6 +1276,7 @@ struct SolrotArgs {
   const double *pair_xi;      // coord(i), 3 per pair
   const double *pbest_w1;     // largest point-charge w(1) of the pair (0: none)
   const int *pbest_img;
+  const double *pair_sw;      // point-charge images: sum of point()'s ee, added to the (ii,ii|jj,jj) w
   int nitems;                 // images closer than clower
   const int *item_pair;       // pair (0-based, within the chunk)
   const int *item_img;        // image number, solrot's loop order
@@ -1392,6 +1393,21 @@ __global__ void solrot_point_tie_kernel(SolrotArgs a) {
   if (w1 > 0.0 && dbl_bits(w1) == a.key[p]) atomicMin(&a.win[p], a.pbest_img[p]);
 }
 
+// The point-charge images of each pair (summed on the host): sw on the (ii,ii|jj,jj) integrals,
+// after the near images, as the host did it.
+__global__ void solrot_point_w_kernel(SolrotArgs a) {
+  const int p = blockIdx.x * blockDim.x + threadIdx.x;
+  if (p >= a.npairs) return;
+  const int li = a.core.natorb[a.pair_ni[p] - 1];
+  const int lj = a.core.natorb[a.pair_nj[p] - 1];
+  const int njj = (lj * (lj + 1)) / 2;
+  const double sw = a.pair_sw[p];
+  double *wp = a.w + a.pair_woff[p];
+  for (int ii = 1; ii <= li; ++ii) {
+    for (int jj = 1; jj <= lj; ++jj) wp[((ii * (ii + 1)) / 2 - 1) * njj + (jj * (jj + 1)) / 2 - 1] += sw;
+  }
+}
+
 // wk of each pair: the integrals of the winning image (zero for i = j).
 __global__ void solrot_wk_kernel(SolrotArgs a) {
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1447,23 +1463,57 @@ __global__ void solrot_wk_kernel(SolrotArgs a) {
 // number, pair_first the first item (npairs+1 entries), pair_self 1 for i = j,
 // pair_xi coord(i), pbest_w1 / pbest_img the largest point-charge w(1) and its
 // image.  Items: images closer than clower (and not coincident), grouped by
-// pair in image order.  On return w and wk hold the near-image J sums and the
-// K integrals of the image with the largest w(1) (the host adds the point
-// charges to w), di (81 per pair) the summed h1elec, e1b/e2a (45 per pair) and
-// enuc the summed rotate terms (enuc already times solrot's one), and win
-// (npairs) the image whose integrals are in wk (0: none; dcart's exchange
-// image).  w and wk are written only at the pair segments.  Returns 0 on success, 1 on bad
-// arguments, 2 on CUDA failure, 3 if some pair failed on the device.
+// pair in image order.  pair_sw: the point-charge images of each pair, sum of
+// point()'s ee.  On return w and wk hold the J sums (near images, then sw on
+// the (ii,ii|jj,jj) integrals) and the K integrals of the image with the
+// largest w(1), di (81 per pair) the summed h1elec, e1b/e2a (45 per pair) and
+// enuc the summed rotate terms of the near images (enuc already times solrot's
+// one), and win (npairs) the image whose integrals are in wk (0: none; dcart's
+// exchange image).  w and wk are written only at the pair segments.
+// w / wk (n2elec) are built in full-size device buffers when they fit
+// (MOPAC_GPU_W_RESIDENT=0: never) and offered to the device Fock build
+// (periodic_fock.cu), which then need not upload the host copies.  Returns 0 on
+// success, 1 on bad arguments, 2 on CUDA failure, 3 if some pair failed on the
+// device.
+extern "C" void mopac_cuda_conv_fock_offer_w(double *w, double *wk, long long n2elec);
+extern "C" void mopac_cuda_conv_fock_drop_w();
+
 extern "C" int mopac_cuda_solrot_pairs(
-    int npairs, const int *pair_ni, const int *pair_nj, const long long *pair_woff, const int *pair_kb,
-    const int *pair_first, const int *pair_self, const double *pair_xi, const double *pbest_w1,
-    const int *pbest_img, int nitems, const int *item_pair, const int *item_img, const double *item_xj,
-    const double *item_xjuc, const MozymePairTablesC *tables, double *w, double *wk, double *di,
-    double *e1b, double *e2a, double *enuc, int *win_out, double *ms_out) {
-  if (npairs <= 0 || nitems < 0 || !tables || !w || !wk || !di || !e1b || !e2a || !enuc || !win_out) return 1;
+    int npairs, long long n2elec, const int *pair_ni, const int *pair_nj, const long long *pair_woff,
+    const int *pair_kb, const int *pair_first, const int *pair_self, const double *pair_xi,
+    const double *pbest_w1, const int *pbest_img, const double *pair_sw, int nitems, const int *item_pair,
+    const int *item_img, const double *item_xj, const double *item_xjuc, const MozymePairTablesC *tables,
+    double *w, double *wk, double *di, double *e1b, double *e2a, double *enuc, int *win_out, double *ms_out) {
+  if (npairs <= 0 || n2elec <= 0 || nitems < 0 || !tables || !w || !wk || !pair_sw || !di || !e1b || !e2a ||
+      !enuc || !win_out) {
+    return 1;
+  }
   EventTimer timer;
   PairTables tab;
   if (!tab.upload(*tables)) return 2;
+  // full-size w / wk on the device: the last generation's copies of the Fock build go first
+  DeviceArray<double> d_wfull, d_wkfull;
+  bool resident = false;
+  {
+    const char *env = std::getenv("MOPAC_GPU_W_RESIDENT");
+    if (!(env && *env == '0')) {
+      mopac_cuda_conv_fock_drop_w();
+      const size_t bytes = static_cast<size_t>(n2elec) * sizeof(double);
+      size_t free_b = 0, total_b = 0;
+      // leave room for the scratch, the chunk arrays and the SCF (1 GB + an eighth of the device)
+      resident = cudaMemGetInfo(&free_b, &total_b) == cudaSuccess &&
+                 free_b > 2 * bytes + (size_t(1) << 30) + total_b / 8 &&
+                 d_wfull.alloc(static_cast<size_t>(n2elec)) && d_wkfull.alloc(static_cast<size_t>(n2elec)) &&
+                 cudaMemset(d_wfull.ptr, 0, bytes) == cudaSuccess && cudaMemset(d_wkfull.ptr, 0, bytes) == cudaSuccess;
+      if (!resident) {
+        cudaGetLastError();
+        if (d_wfull.ptr) cudaFree(d_wfull.ptr);
+        if (d_wkfull.ptr) cudaFree(d_wkfull.ptr);
+        d_wfull.ptr = d_wkfull.ptr = nullptr;
+      }
+    }
+  }
+  double ms_kernels = 0.0, ms_d2h = 0.0;
   const char *lim_env = std::getenv("MOPAC_GPU_SOLROT_CHUNK");
   // integrals per chunk buffer (w and wk each); 64 M doubles = 512 MB
   long long limit = lim_env && *lim_env ? std::atoll(lim_env) : (64LL << 20);
@@ -1527,7 +1577,7 @@ extern "C" int mopac_cuda_solrot_pairs(
     }
     DeviceArray<int> d_ni, d_nj, d_kb, d_first, d_self, d_pimg, d_ipair, d_iimg, d_win;
     DeviceArray<long long> d_woff;
-    DeviceArray<double> d_xi, d_pw1, d_xj, d_xjuc, d_w1, d_w, d_wk, d_di, d_e1b, d_e2a, d_enuc;
+    DeviceArray<double> d_xi, d_pw1, d_sw, d_xj, d_xjuc, d_w1, d_w, d_wk, d_di, d_e1b, d_e2a, d_enuc;
     DeviceArray<unsigned long long> d_key;
     const size_t nps = static_cast<size_t>(np);
     const size_t nis = static_cast<size_t>(ni_items);
@@ -1535,14 +1585,15 @@ extern "C" int mopac_cuda_solrot_pairs(
         !d_first.upload(first.data(), nps + 1) || !d_self.upload(pair_self + p0, nps) ||
         !d_pimg.upload(pbest_img + p0, nps) || !d_woff.upload(woff.data(), nps) ||
         !d_xi.upload(pair_xi + 3 * static_cast<size_t>(p0), 3 * nps) || !d_pw1.upload(pbest_w1 + p0, nps) ||
+        !d_sw.upload(pair_sw + p0, nps) ||
         !d_key.upload(key.data(), nps) || !d_win.upload(win.data(), nps) ||
         (nis > 0 && (!d_ipair.upload(ipair.data(), nis) || !d_iimg.upload(item_img + i0, nis) ||
                      !d_xj.upload(item_xj + 3 * static_cast<size_t>(i0), 3 * nis) ||
                      !d_xjuc.upload(item_xjuc + 3 * static_cast<size_t>(i0), 3 * nis) || !d_w1.alloc(nis))) ||
-        !d_w.alloc(static_cast<size_t>(span)) || !d_wk.alloc(static_cast<size_t>(span)) ||
+        (!resident && (!d_w.alloc(static_cast<size_t>(span)) || !d_wk.alloc(static_cast<size_t>(span)) ||
+                       cudaMemset(d_w.ptr, 0, span * sizeof(double)) != cudaSuccess ||
+                       cudaMemset(d_wk.ptr, 0, span * sizeof(double)) != cudaSuccess)) ||
         !d_di.alloc(81 * nps) || !d_e1b.alloc(45 * nps) || !d_e2a.alloc(45 * nps) || !d_enuc.alloc(nps) ||
-        cudaMemset(d_w.ptr, 0, span * sizeof(double)) != cudaSuccess ||
-        cudaMemset(d_wk.ptr, 0, span * sizeof(double)) != cudaSuccess ||
         cudaMemset(d_di.ptr, 0, 81 * nps * sizeof(double)) != cudaSuccess ||
         cudaMemset(d_e1b.ptr, 0, 45 * nps * sizeof(double)) != cudaSuccess ||
         cudaMemset(d_e2a.ptr, 0, 45 * nps * sizeof(double)) != cudaSuccess ||
@@ -1564,14 +1615,17 @@ extern "C" int mopac_cuda_solrot_pairs(
     a.pair_xi = d_xi.ptr;
     a.pbest_w1 = d_pw1.ptr;
     a.pbest_img = d_pimg.ptr;
+    a.pair_sw = d_sw.ptr;
     a.nitems = ni_items;
     a.item_pair = d_ipair.ptr;
     a.item_img = d_iimg.ptr;
     a.item_xj = d_xj.ptr;
     a.item_xjuc = d_xjuc.ptr;
     a.item_w1 = d_w1.ptr;
-    a.w = d_w.ptr;
-    a.wk = d_wk.ptr;
+    double *const chunk_w = resident ? d_wfull.ptr + base : d_w.ptr;
+    double *const chunk_wk = resident ? d_wkfull.ptr + base : d_wk.ptr;
+    a.w = chunk_w;
+    a.wk = chunk_wk;
     a.di = d_di.ptr;
     a.e1b = d_e1b.ptr;
     a.e2a = d_e2a.ptr;
@@ -1590,9 +1644,13 @@ extern "C" int mopac_cuda_solrot_pairs(
       solrot_tie_kernel<<<(ni_items + kPairThreads - 1) / kPairThreads, kPairThreads>>>(a);
     }
     solrot_point_tie_kernel<<<(np + kPairThreads - 1) / kPairThreads, kPairThreads>>>(a);
+    solrot_point_w_kernel<<<(np + kPairThreads - 1) / kPairThreads, kPairThreads>>>(a);
     solrot_wk_kernel<<<dg.blocks, kPairThreadsD, dg.shared>>>(a);
+    const HostClock::time_point tk0 = HostClock::now();
     cudaError_t err = cudaGetLastError();
     if (err == cudaSuccess) err = cudaDeviceSynchronize();
+    const HostClock::time_point tk1 = HostClock::now();
+    ms_kernels += host_ms_between(tk0, tk1);
     if (err != cudaSuccess) {
       std::fprintf(stderr, "[GPU ERROR] solrot pairs: %s\n", cudaGetErrorString(err));
       code = 2;
@@ -1629,8 +1687,8 @@ extern "C" int mopac_cuda_solrot_pairs(
       }
     }
     const bool w_ok =
-        cudaMemcpy(w + base, d_w.ptr, span * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess &&
-        cudaMemcpy(wk + base, d_wk.ptr, span * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess;
+        cudaMemcpy(w + base, chunk_w, span * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess &&
+        cudaMemcpy(wk + base, chunk_wk, span * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess;
     {
       size_t s = 0;
       for (const auto &g : gaps) {
@@ -1654,7 +1712,14 @@ extern "C" int mopac_cuda_solrot_pairs(
     for (int p = 0; p < np; ++p) {
       win_out[p0 + p] = (pair_self[p0 + p] || win[p] == 0x7fffffff) ? 0 : win[p];
     }
+    ms_d2h += host_ms_between(tk1, HostClock::now());
     p0 = p1;
+  }
+  add_section_ms("conv_hcore_kernels", ms_kernels);
+  add_section_ms("conv_hcore_d2h", ms_d2h);
+  if (code == 0 && resident) {
+    mopac_cuda_conv_fock_offer_w(d_wfull.ptr, d_wkfull.ptr, n2elec);
+    d_wfull.ptr = d_wkfull.ptr = nullptr;
   }
   dprof_end(prof, "solid_hcore", nitems);
   stack_limit.restore();

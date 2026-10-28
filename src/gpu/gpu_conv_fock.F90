@@ -27,7 +27,7 @@ module gpu_conv_fock
   use iso_c_binding, only : c_int, c_long_long, c_double
   implicit none
   private
-  public :: gpu_conv_fock2, gpu_conv_fock2_check_finish, conv_w_generation
+  public :: gpu_conv_fock2, gpu_conv_fock2_check_finish, conv_w_generation, gpu_conv_fock_confirm_w
 
   integer, save :: conv_w_generation = 0
 
@@ -52,6 +52,12 @@ module gpu_conv_fock
       real(c_double) :: ms
       integer(c_int) :: rc
     end function mopac_cuda_conv_fock2
+
+    subroutine mopac_cuda_conv_fock_confirm_w(gen, keep) bind(C, name='mopac_cuda_conv_fock_confirm_w')
+      import :: c_int, c_long_long
+      integer(c_long_long), value :: gen
+      integer(c_int), value :: keep
+    end subroutine mopac_cuda_conv_fock_confirm_w
   end interface
 
 contains
@@ -176,6 +182,13 @@ contains
     if (gpu_trace) write(iw, '(1x,a,i0,a,i0,a,f10.2)') '[GPU Fock] pairs=', npairs, ' self=', nself, ' ms=', ms
     done = .true.
   end function gpu_conv_fock2
+
+  ! hcore, after bumping conv_w_generation: keep = .true. when its w / wk are the ones the device
+  ! hcore built and offered (device path, no check mode), so the Fock builds take them.
+  subroutine gpu_conv_fock_confirm_w(keep)
+    logical, intent(in) :: keep
+    call mopac_cuda_conv_fock_confirm_w(int(conv_w_generation, c_long_long), merge(1_c_int, 0_c_int, keep))
+  end subroutine gpu_conv_fock_confirm_w
 
   ! Check mode: f is fock2's CPU result; report its difference from the device one.
   subroutine gpu_conv_fock2_check_finish(f)
