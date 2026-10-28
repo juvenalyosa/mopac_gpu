@@ -19,6 +19,7 @@ module cosmo_C
   logical :: swig = .false.  ! Smooth (switching/Gaussian) COSMO surface, keyword SWIG (swig.F90)
   integer :: nspa, nps, nps2, nden, lenabc, nppa = 1082, &
   amat_dim, isude_dim, nipc, ioldcv
+  integer :: cosmo_mat_gen = 0  ! bumped when amat (coscl1) or bmat (mkbmat) is rebuilt (device copies)
   integer, dimension (2) :: n0
   integer, dimension(:), allocatable, target :: &
   & iatsp,   & !

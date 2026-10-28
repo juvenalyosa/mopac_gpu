@@ -164,6 +164,27 @@ def check_step(mopac, work):
               flush=True)
         result(bool(grad) and max(grad) <= 1e-5,
                f"check {name} UHF: device gradient within 1e-5 kcal/mol/A of the CPU")
+    # COSMO in the SCF (addfck's dense algebra on the device): crambin in water, the device terms
+    # against the CPU ones, then the job with and without the device COSMO terms
+    kw_c = "PM7 1SCF GRADIENTS GEO-OK CHARGE=-1 EPS=78.4"
+    text, wall = run(mopac, work / "check" / "crambin_cosmocheck", "crambin", kw_c, mol,
+                     {"MOPAC_GPU_COSMO_CHECK": "1"})
+    m = re.findall(r"\[GPU COSMO\] check nps=\s*(\d+) max\|phi_gpu - phi_cpu\|=\s*(\S+) "
+                   r"max\|qsc_gpu - qsc_cpu\|=\s*(\S+) max\|qsc_cpu\|=\s*(\S+)", text)
+    rel = max(float(q) / max(float(s), 1e-30) for _, _, q, s in m) if m else None
+    print(f"[materials] check crambin COSMO: {wall:.1f} s, heat {heat(text)}, nps {m[0][0] if m else None}, "
+          f"max relative |qsc GPU - CPU| {rel}", flush=True)
+    result(rel is not None and rel <= 1e-9, "check crambin COSMO: device COSMO charges within 1e-9 (relative) of the CPU")
+    runs = {}
+    for tag, env in (("gpu_cosmo", {}), ("cpu_cosmo", {"MOPAC_GPU_COSMO": "0"})):
+        text, wall = run(mopac, work / "check" / f"crambin_{tag}", "crambin", kw_c + " TIMES", mol,
+                         dict(env, MOPAC_GPU_PROFILE="1"))
+        runs[tag] = (heat(text), wall)
+        print(f"[materials] crambin {tag}: {wall:.1f} s, heat {runs[tag][0]}", flush=True)
+    (hg, tg), (hc, tc) = runs["gpu_cosmo"], runs["cpu_cosmo"]
+    dh = "n/a" if hg is None or hc is None else f"{hg - hc:+.5f}"
+    result(hg is not None and hc is not None and abs(hg - hc) <= 1e-3,
+           f"crambin COSMO: device COSMO heat - CPU COSMO heat {dh} kcal/mol, time {tg:.1f} s vs {tc:.1f} s")
     # PRECISE: central differences (dcart's force), the other probe layout of the d-pair kernel
     for name in ("si144", "rutile162"):
         text, wall = run(mopac, work / "check" / f"{name}_precise", name, "PM7 1SCF GRADIENTS GEO-OK PRECISE",

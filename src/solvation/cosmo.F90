@@ -14,6 +14,9 @@
 ! limitations under the License.
 
 subroutine addfck (f, p)
+#ifdef GPU
+    use gpu_cosmo_fock, only : gpu_cosmo_addfck, gpu_cosmo_check_finish
+#endif
     use molkst_C, only : lm61, numat, mpack
     use funcon_C, only : a0, ev
     use cosmo_C, only : ediel, fepsi, nps, &
@@ -23,6 +26,10 @@ subroutine addfck (f, p)
     double precision, dimension(mpack), intent(inout) :: f
     integer :: i, iat, im, j
     double precision :: fcon, fim, phi, qsc3, s1, s3
+#ifdef GPU
+    ! the dense algebra (B^T qd, the Cholesky solve, B qsc) on the device: gpu_cosmo_fock.F90
+    if (gpu_cosmo_addfck(f, p)) return
+#endif
     fcon = a0 * ev
     do i = 1, numat
       qscat(i) = 0.d0
@@ -66,6 +73,9 @@ subroutine addfck (f, p)
       end do
       f(im) = f(im) - fcon * fim
     end do
+#ifdef GPU
+    call gpu_cosmo_check_finish()
+#endif
 end subroutine addfck
 subroutine addhcr
     use molkst_C, only : lm61
@@ -613,6 +623,7 @@ subroutine coscav
     100 continue
 end subroutine coscav
 subroutine coscl1 (a, id, n)
+    use cosmo_C, only : cosmo_mat_gen
    ! THIS ROUTINE PERFORMS A CHOLESKY FACTORIZATION
    ! INPUT:   A = PACKED LOWER TRIANGLE OF A
    !               SYMMETRIC POSITIVE DEFINITE N*N MATRIX
@@ -633,6 +644,7 @@ subroutine coscl1 (a, id, n)
     do i = 1, n
       a(i+id(i)) = 1.0d0/a(i+id(i))
     end do
+    cosmo_mat_gen = cosmo_mat_gen + 1
 end subroutine coscl1
 subroutine coscl2 (a, id, x, y, n)
    ! THIS ROUTINE SOLVES THE LINEAR SYSTEM CX = Y BASED ON
@@ -1168,7 +1180,7 @@ subroutine mfinel (ips, k, finel, nar_csm, nsetf, nset, rsc, nipsrs, dirvec, tm,
 end subroutine mfinel
 subroutine mkbmat
     use molkst_C, only : numat, method_indo
-    use cosmo_C, only : nps, bmat, cosurf
+    use cosmo_C, only : nps, bmat, cosurf, cosmo_mat_gen
     use parameters_C, only : dd, qq, dsd, dpd, ddd
     use funcon_C, only : a0
     use common_arrays_C, only : coord, nfirst, nlast, nat
@@ -1301,6 +1313,7 @@ subroutine mkbmat
       end do
       iden = iden + (idel*(idel + 1))/2
     end do
+    cosmo_mat_gen = cosmo_mat_gen + 1
 end subroutine mkbmat
 subroutine surclo (coord, nipa, lipa, din, dim_din, rsc, isort, ipsrs, nipsrs, nat, &
 & srad, cosurf, iatsp, nar_csm, nsetf, isude, sude, maxrs)

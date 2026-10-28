@@ -87,6 +87,9 @@ if(GPU)
     # CUDA two-centre Fock terms of solids (conventional SCF) + Fortran driver
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/periodic_fock.cu)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_conv_fock.F90)
+    # CUDA COSMO Fock terms (addfck's dense algebra) + Fortran driver
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/cosmo_fock.cu)
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/gpu_cosmo_fock.F90)
 endif()
 
 # Small API control module is added from src/interface/CMakeLists.txt
@@ -113,6 +116,7 @@ if(GPU)
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hmtr_optimizer.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/cosmo_gradient.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/periodic_fock.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/gpu/cosmo_fock.cu
         PROPERTIES LANGUAGE CUDA
     )
     # The pinned host<->device staging in mozyme_scf_context.cu splits its
