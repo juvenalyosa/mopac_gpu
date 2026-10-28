@@ -121,6 +121,15 @@ def check_step(mopac, work):
         h_ok = bool(hc) and all(max(float(v) for i, v in enumerate(c.split()) if i != 2) <= 1e-8 for c in hc)
         result(h_ok, f"check {name}: device hcore h, w, e1b/e2a, enuc within 1e-8 of the CPU")
         result(bool(fock) and max(fock) <= 1e-7, f"check {name}: device Fock within 1e-7 eV of the CPU")
+    # PRECISE: central differences (dcart's force), the other probe layout of the d-pair kernel
+    for name in ("si144", "rutile162"):
+        text, wall = run(mopac, work / "check" / f"{name}_precise", name, "PM7 1SCF GRADIENTS GEO-OK PRECISE",
+                         DATA / "grad" / f"{name}.mop", {"MOPAC_GPU_GRAD_CHECK": "1"})
+        grad = floats_after(text, "max_abs_diff=")
+        print(f"[materials] check {name} PRECISE: {wall:.1f} s, heat {heat(text)}, gradient "
+              f"{max(grad) if grad else None} kcal/mol/A", flush=True)
+        result(bool(grad) and max(grad) <= 1e-5,
+               f"check {name} PRECISE: device gradient within 1e-5 kcal/mol/A of the CPU")
 
 
 def medium_step(mopac, work, names):

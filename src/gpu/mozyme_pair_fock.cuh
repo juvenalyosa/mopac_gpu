@@ -41,7 +41,9 @@ __device__ __forceinline__ int tri1(int i) { return (i * (i - 1)) / 2; }
 // Two-centre two-electron Fock terms for the pair; f is accumulated in place.
 // ptot: total density, pa: alpha density (= 0.5 * ptot for RHF).
 // exchange = false: fock2's periodic branch with wk = 0 (dhc()'s cutoff).
-__device__ __forceinline__ void fock2_diatomic_sp(int n1, int n2, const double *w,
+// w: const double * or an MpcStrided view (d pairs).
+template <class W>
+__device__ __forceinline__ void fock2_diatomic_sp(int n1, int n2, W w,
                                                   const double *ptot,
                                                   const double *pa, double *f,
                                                   bool exchange = true) {
@@ -108,11 +110,12 @@ __device__ __forceinline__ double helect_packed(int n, const double *pa,
 // Valid for any orbital counts as long as w follows rotate()'s ordering
 // (fock2's general branch is basis-independent; for d atoms it is the path
 // the periodic code takes instead of fockdorbs).
+template <class W>
 __device__ __forceinline__ double diatomic_energy_generic(int n1, int n2,
                                                           const double *smat,
                                                           const double *e_at1,
                                                           const double *e_at2,
-                                                          const double *w,
+                                                          W w,
                                                           double enuc,
                                                           const double *pdi,
                                                           double *h, double *f,
