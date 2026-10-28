@@ -344,6 +344,7 @@ struct PairGradArgs {
   unsigned char *ref_flags;  // d kernels, periodic: PairFlags of the reference probes, 3 per pair
   int dense;             // 1: p is the packed lower triangle of the full density and
                          //    g.diag_off holds nfirst (1-based) of each entry's atom
+  const double *pa, *pb; // UHF (dense route): packed alpha / beta densities; nullptr: RHF
 };
 
 // dhc() keeps ignor1, lpoint and cutoff from its mode-1 (reference) call and
@@ -464,6 +465,7 @@ __device__ __forceinline__ int pair_class(const PairGeom &g, int idx, int *ii_ou
 template <bool D>
 __device__ bool pair_energy(const PairGradArgs &a, int nat1, int nat2, int n1, int n2,
                             const double *x1, const double *x2, const double *pdi,
+                            const double *padi, const double *pbdi,
                             double *dener, MpcStrided scratch, int mode, PairFlags *fl) {
   constexpr int kL = D ? mozyme_pair::kMaxLinearD : mozyme_pair::kMaxLinear;
   constexpr int kW = D ? mozyme_pair::kMaxWD : mozyme_pair::kMaxW;
@@ -518,16 +520,20 @@ __device__ bool pair_energy(const PairGradArgs &a, int nat1, int nat2, int n1, i
   const bool exchange = !(periodic && fl->no_exchange);
   double h[kL], f[kL], pa[kL];
   MPC_PROF_T(tq2);
-  *dener = mozyme_pair::diatomic_energy_generic(n1, n2, smat_ptr, e_at1, e_at2, w, enuc, pdi, h, f, pa,
-                                                exchange);
+  // UHF: padi / pbdi, the diatomic alpha / beta densities (dhc's uhf branch)
+  *dener = padi ? mozyme_pair::diatomic_energy_uhf(n1, n2, smat_ptr, e_at1, e_at2, w, enuc, pdi, padi, pbdi, h, f,
+                                                   exchange)
+                : mozyme_pair::diatomic_energy_generic(n1, n2, smat_ptr, e_at1, e_at2, w, enuc, pdi, h, f, pa,
+                                                       exchange);
   MPC_PROF_T(tq3);
   if (D) MPC_PROF_ADD(6, tq2, tq3);
   return true;
 }
 
-// Packed diatomic density of pair idx, atom jj first (mirrors dcart.F90).
-__device__ __forceinline__ void load_pair_density(const PairGradArgs &a, int idx, int ii, int jj,
-                                                  int n1, int n2, double *pdi) {
+// Packed diatomic density of pair idx, atom jj first (mirrors dcart.F90), from the packed
+// density src (a.p, or a.pa / a.pb for UHF).
+__device__ __forceinline__ void load_pair_density(const PairGradArgs &a, const double *src, int idx, int ii,
+                                                  int jj, int n1, int n2, double *pdi) {
   if (a.dense) {
     // dcart's gather from the packed full density, index for index (for
     // ii = jj in a solid the "pair" rows run on past the diagonal, as there).
@@ -537,34 +543,34 @@ __device__ __forceinline__ void load_pair_density(const PairGradArgs &a, int idx
     for (int t = 0; t < n1; ++t) {
       const long long i = jf + t;
       const long long k = (i * (i - 1)) / 2 + jf - 1;
-      for (int u = 0; u <= t; ++u) pdi[ij++] = a.p[k + u];
+      for (int u = 0; u <= t; ++u) pdi[ij++] = src[k + u];
     }
     for (int t = 0; t < n2; ++t) {
       const long long i = jif + t;
       const long long l = (i * (i - 1)) / 2;
-      for (int u = 0; u < n1; ++u) pdi[ij++] = a.p[l + jf - 1 + u];
-      for (int u = 0; u <= t; ++u) pdi[ij++] = a.p[l + jif - 1 + u];
+      for (int u = 0; u < n1; ++u) pdi[ij++] = src[l + jf - 1 + u];
+      for (int u = 0; u <= t; ++u) pdi[ij++] = src[l + jif - 1 + u];
     }
     return;
   }
   int k = a.g.diag_off[jj - 1];
   int ij = 0;
   for (int i = 1; i <= n1; ++i) {
-    for (int j = 1; j <= i; ++j) pdi[ij++] = a.p[k++];
+    for (int j = 1; j <= i; ++j) pdi[ij++] = src[k++];
   }
   ij = n1;
   k = a.g.pair_off[idx];
   for (int i = 1; i <= n2; ++i) {
     ++ij;
     int l = (ij * (ij - 1)) / 2;
-    for (int j = 1; j <= n1; ++j) pdi[l++] = a.p[k++];
+    for (int j = 1; j <= n1; ++j) pdi[l++] = src[k++];
   }
   k = a.g.diag_off[ii - 1];
   ij = n1;
   for (int i = 1; i <= n2; ++i) {
     ++ij;
     int l = (ij * (ij - 1)) / 2 + n1;
-    for (int j = 1; j <= i; ++j) pdi[l++] = a.p[k++];
+    for (int j = 1; j <= i; ++j) pdi[l++] = src[k++];
   }
 }
 
@@ -609,8 +615,12 @@ __global__ void mozyme_pair_energy_d_kernel(PairGradArgs a, double *energies, in
   const int n1 = a.g.iorbs[jj - 1];
   const int nat1 = a.g.nat[jj - 1];
   const int nat2 = a.g.nat[ii - 1];
-  double pdi[mozyme_pair::kMaxLinearD];
-  load_pair_density(a, idx, ii, jj, n1, n2, pdi);
+  double pdi[mozyme_pair::kMaxLinearD], padi[mozyme_pair::kMaxLinearD], pbdi[mozyme_pair::kMaxLinearD];
+  load_pair_density(a, a.p, idx, ii, jj, n1, n2, pdi);
+  if (a.pa) {
+    load_pair_density(a, a.pa, idx, ii, jj, n1, n2, padi);
+    load_pair_density(a, a.pb, idx, ii, jj, n1, n2, pbdi);
+  }
   double x1[3], x2[3];
   for (int k = 0; k < 3; ++k) {
     x1[k] = coord_at(a.g.coord, jj, k);
@@ -634,7 +644,8 @@ __global__ void mozyme_pair_energy_d_kernel(PairGradArgs a, double *energies, in
     x2[slot - 4] -= a.chnge2;
   }
   double e = 0.0;
-  if (!pair_energy<true>(a, nat1, nat2, n1, n2, x1, x2, pdi, &e, scratch, reference ? 1 : 2, &fl)) {
+  if (!pair_energy<true>(a, nat1, nat2, n1, n2, x1, x2, pdi, a.pa ? padi : nullptr, pbdi, &e, scratch,
+                         reference ? 1 : 2, &fl)) {
     atomicAdd(a.g.status, 1);
     continue;
   }
@@ -670,8 +681,14 @@ __global__ void mozyme_pair_gradient_kernel(PairGradArgs a) {
   const int nat1 = a.g.nat[jj - 1];
   const int nat2 = a.g.nat[ii - 1];
 
-  double pdi[D ? mozyme_pair::kMaxLinearD : mozyme_pair::kMaxLinear];
-  load_pair_density(a, idx, ii, jj, n1, n2, pdi);
+  constexpr int kLd = D ? mozyme_pair::kMaxLinearD : mozyme_pair::kMaxLinear;
+  double pdi[kLd], padi[kLd], pbdi[kLd];
+  load_pair_density(a, a.p, idx, ii, jj, n1, n2, pdi);
+  if (a.pa) {
+    load_pair_density(a, a.pa, idx, ii, jj, n1, n2, padi);
+    load_pair_density(a, a.pb, idx, ii, jj, n1, n2, pbdi);
+  }
+  const double *pa_use = a.pa ? padi : nullptr;
 
   double x1[3], x2[3];
   for (int k = 0; k < 3; ++k) {
@@ -686,19 +703,19 @@ __global__ void mozyme_pair_gradient_kernel(PairGradArgs a) {
     x1[0] += a.chnge2;
     x1[1] += a.chnge2;
     x1[2] += a.chnge2;
-    ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &aa, MpcStrided{nullptr, 0}, 1, &fl);
+    ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, pa_use, pbdi, &aa, MpcStrided{nullptr, 0}, 1, &fl);
   }
   for (int k = 0; k < 3 && ok; ++k) {
     const double x0 = x2[k];
     if (a.force) {
       x2[k] = x0 - a.chnge2;
-      ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &aa, MpcStrided{nullptr, 0}, 1, &fl);
+      ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, pa_use, pbdi, &aa, MpcStrided{nullptr, 0}, 1, &fl);
       if (!ok) break;
       x2[k] = x0 + a.chnge2;
     } else {
       x2[k] = x0 + a.chnge;
     }
-    ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, &ee, MpcStrided{nullptr, 0}, 2, &fl);
+    ok = pair_energy<D>(a, nat1, nat2, n1, n2, x1, x2, pdi, pa_use, pbdi, &ee, MpcStrided{nullptr, 0}, 2, &fl);
     x2[k] = x0;
     if (!ok) break;
     const double deriv = half * (aa - ee) * a.cnst / a.chnge;
@@ -1081,6 +1098,7 @@ namespace {
 struct PairGradExt {
   const double *pair_w;  // host, npairs
   long long np;          // size of the packed density
+  const double *pa, *pb; // host, UHF alpha / beta densities (np each); nullptr: RHF
   int periodic;
   double clower, cupper, trunk_c, trunk_cr, trunk_cr2, trunk_clim, wlim;
 };
@@ -1103,7 +1121,7 @@ int pair_gradient_launch(
   const HostClock::time_point t_start = HostClock::now();
   GeomBuffers geom;
   PairTables tab;
-  DeviceArray<double> d_p, d_dxyz, d_q, d_energies, d_scratch, d_pair_w;
+  DeviceArray<double> d_p, d_pa, d_pb, d_dxyz, d_q, d_energies, d_scratch, d_pair_w;
   DeviceArray<unsigned char> d_flags;
   DeviceArray<int> d_dpairs;
   PairGradArgs a;
@@ -1120,6 +1138,8 @@ int pair_gradient_launch(
       (d_on_device && !d_energies.alloc(static_cast<size_t>(kProbesPerPair) *
                                          static_cast<size_t>(std::max(npairs, 1)))) ||
       (ext && ext->pair_w && !d_pair_w.upload(ext->pair_w, static_cast<size_t>(npairs))) ||
+      (ext && ext->pa && (!ext->pb || !d_pa.upload(ext->pa, static_cast<size_t>(ext->np)) ||
+                          !d_pb.upload(ext->pb, static_cast<size_t>(ext->np)))) ||
       (ext && ext->periodic && d_on_device && !d_flags.alloc(3 * static_cast<size_t>(std::max(npairs, 1))))) {
     return 2;
   }
@@ -1154,6 +1174,8 @@ int pair_gradient_launch(
     a.wlim = ext->wlim;
     a.ref_flags = d_flags.ptr;
     a.dense = 1;
+    a.pa = d_pa.ptr;
+    a.pb = d_pb.ptr;
   }
 
   // (the charges only feed the MOZYME point-charge pairs)
@@ -1230,11 +1252,13 @@ extern "C" int mopac_cuda_mozyme_pair_gradient(
 // entry.  One item per (atom ii in the central cell, atom jj in image k)
 // pair: item_i / item_j are entry numbers (1-based), item_w dcart's half.  p is
 // the packed full density (np = mpack).  periodic = 1 applies dhc()'s id /= 0
-// rules (clower, trunk(), wlim).  dxyz (3 x nent) is accumulated in place.
+// rules (clower, trunk(), wlim).  dxyz (3 x nent) is accumulated in place.  UHF: uhf = 1 and
+// pa / pb the packed alpha / beta densities (dhc's uhf energy); RHF: uhf = 0 (pa, pb unused).
 // Return codes as above; every atom must have 1, 4 or 9 orbitals.
 extern "C" int mopac_cuda_pair_gradient_ext(
     int nent, long long np, int nitems, const int *item_i, const int *item_j, const double *item_w,
     const int *first, const int *iorbs, const int *nat, const double *coord, const double *p,
+    const double *pa, const double *pb, int uhf,
     int periodic, double clower, double cupper, double trunk_c, double trunk_cr, double trunk_cr2,
     double trunk_clim, double wlim, double chnge, double cnst, double fpc_9, int force,
     const MozymePairTablesC *tables, double *dxyz, double *ms_out, int *cpu_pairs_out) {
@@ -1244,6 +1268,8 @@ extern "C" int mopac_cuda_pair_gradient_ext(
   PairGradExt ext;
   ext.pair_w = item_w;
   ext.np = np;
+  ext.pa = uhf ? pa : nullptr;
+  ext.pb = uhf ? pb : nullptr;
   ext.periodic = periodic;
   ext.clower = clower;
   ext.cupper = cupper;

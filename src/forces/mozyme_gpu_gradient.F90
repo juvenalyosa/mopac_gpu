@@ -93,14 +93,15 @@ module mozyme_gpu_gradient
     end function mopac_cuda_mozyme_hcore_pairs
 
     function mopac_cuda_pair_gradient_ext(nent_c, np_c, nitems_c, item_i_c, item_j_c, item_w_c, &
-        first_c, iorbs_c, nat_c, coord_c, p_c, periodic_c, clower_c, cupper_c, trunk_c_c, trunk_cr_c, &
+        first_c, iorbs_c, nat_c, coord_c, p_c, pa_c, pb_c, uhf_c, periodic_c, clower_c, cupper_c, trunk_c_c, &
+        trunk_cr_c, &
         trunk_cr2_c, trunk_clim_c, wlim_c, chnge_c, cnst_c, fpc_9_c, force_c, tables_c, dxyz_c, ms_c, &
         cpu_pairs_c) bind(C, name='mopac_cuda_pair_gradient_ext') result(rc)
       import :: c_int, c_long_long, c_double, mozyme_pair_tables_c
-      integer(c_int), value :: nent_c, nitems_c, periodic_c, force_c
+      integer(c_int), value :: nent_c, nitems_c, periodic_c, force_c, uhf_c
       integer(c_long_long), value :: np_c
       integer(c_int) :: item_i_c(*), item_j_c(*), first_c(*), iorbs_c(*), nat_c(*)
-      real(c_double) :: item_w_c(*), coord_c(*), p_c(*), dxyz_c(*)
+      real(c_double) :: item_w_c(*), coord_c(*), p_c(*), pa_c(*), pb_c(*), dxyz_c(*)
       real(c_double), value :: clower_c, cupper_c, trunk_c_c, trunk_cr_c, trunk_cr2_c, trunk_clim_c
       real(c_double), value :: wlim_c, chnge_c, cnst_c, fpc_9_c
       type(mozyme_pair_tables_c) :: tables_c
@@ -229,7 +230,7 @@ contains
   ! Conventional (dense density) SCF, molecules and solids: the pair loop of
   ! dcart_build_scf_gradient_cpu on the device unless MOPAC_GPU_CONV_GRAD=0
   ! (T4, 2026-10-20: max |CPU - GPU| <= 4.5e-7 kcal/mol/A on Si, quartz, urea).
-  ! Not for UHF (the device energy takes pa = pb = p/2), MOZYME (its own
+  ! UHF too (the device energy takes pa and pb, as dhc).  Not for MOZYME (its own
   ! route), or id = 3 with methods other than PM7 (rotate's nddo_to_point).
   logical function conv_gpu_gradient_enabled()
 #ifdef GPU
@@ -239,7 +240,7 @@ contains
     implicit none
 #ifdef GPU
     conv_gpu_gradient_enabled = lgpu .and. .not. env_truthy('MOPAC_NOGPU') .and. &
-      .not. env_falsy('MOPAC_GPU_CONV_GRAD') .and. .not. mozyme .and. .not. uhf .and. &
+      .not. env_falsy('MOPAC_GPU_CONV_GRAD') .and. .not. mozyme .and. &
       .not. (id == 3 .and. .not. method_pm7)
 #else
     conv_gpu_gradient_enabled = .false.
@@ -664,8 +665,8 @@ contains
 
   subroutine conv_gpu_gradient_run_gpu(numat_in, l123_in, coord, dxyz, q, force, chnge, const, code, ms, &
       nitems_out)
-    use common_arrays_C, only : p, nfirst, nlast, nat, tvec, wk_image
-    use molkst_C, only : id, mpack, cutofp, clower, cupper, l1u, l2u, l3u
+    use common_arrays_C, only : p, pa, pb, nfirst, nlast, nat, tvec, wk_image
+    use molkst_C, only : id, mpack, cutofp, clower, cupper, l1u, l2u, l3u, uhf
     use funcon_C, only : fpc_9, a0, ev
     implicit none
     integer, intent(in) :: numat_in, l123_in
@@ -690,6 +691,10 @@ contains
     ms = 0.d0
     nitems_out = 0
     if (.not. allocated(p) .or. mpack <= 0) return
+    if (uhf) then
+      if (.not. allocated(pa) .or. .not. allocated(pb)) return
+      if (size(pa) < mpack .or. size(pb) < mpack) return
+    end if
     do ii = 1, numat_in
       n = nlast(ii) - nfirst(ii) + 1
       if (n /= 1 .and. n /= 4 .and. n /= 9) return
@@ -833,12 +838,21 @@ contains
     cpu_pairs_c = 0_c_int
     ms_c = 0.d0
     call mozyme_section_timer_begin('conv_grad_device', t_section)
-    rc = mopac_cuda_pair_gradient_ext(int(nent, kind=c_int), int(mpack, kind=c_long_long), &
-        int(nitems, kind=c_int), item_i, item_j, item_w, first_e, iorbs_e, nat_e, coord_e, p, &
-        merge(1_c_int, 0_c_int, id /= 0), real(clower, kind=c_double), real(cupper_l, kind=c_double), &
-        real(c, kind=c_double), real(cr, kind=c_double), real(cr2, kind=c_double), real(clim, kind=c_double), &
-        real(wlim, kind=c_double), real(chnge, kind=c_double), real(const, kind=c_double), &
-        real(fpc_9, kind=c_double), merge(1_c_int, 0_c_int, force), tables, dxyz, ms_c, cpu_pairs_c)
+    if (uhf) then
+      rc = mopac_cuda_pair_gradient_ext(int(nent, kind=c_int), int(mpack, kind=c_long_long), &
+          int(nitems, kind=c_int), item_i, item_j, item_w, first_e, iorbs_e, nat_e, coord_e, p, &
+          pa, pb, 1_c_int, merge(1_c_int, 0_c_int, id /= 0), real(clower, kind=c_double), real(cupper_l, kind=c_double), &
+          real(c, kind=c_double), real(cr, kind=c_double), real(cr2, kind=c_double), real(clim, kind=c_double), &
+          real(wlim, kind=c_double), real(chnge, kind=c_double), real(const, kind=c_double), &
+          real(fpc_9, kind=c_double), merge(1_c_int, 0_c_int, force), tables, dxyz, ms_c, cpu_pairs_c)
+    else
+      rc = mopac_cuda_pair_gradient_ext(int(nent, kind=c_int), int(mpack, kind=c_long_long), &
+          int(nitems, kind=c_int), item_i, item_j, item_w, first_e, iorbs_e, nat_e, coord_e, p, &
+          p, p, 0_c_int, merge(1_c_int, 0_c_int, id /= 0), real(clower, kind=c_double), real(cupper_l, kind=c_double), &
+          real(c, kind=c_double), real(cr, kind=c_double), real(cr2, kind=c_double), real(clim, kind=c_double), &
+          real(wlim, kind=c_double), real(chnge, kind=c_double), real(const, kind=c_double), &
+          real(fpc_9, kind=c_double), merge(1_c_int, 0_c_int, force), tables, dxyz, ms_c, cpu_pairs_c)
+    end if
     call mozyme_section_timer_end('conv_grad_device', t_section)
     code = int(rc)
     if (code == 0) dxyz = dxyz + dfar

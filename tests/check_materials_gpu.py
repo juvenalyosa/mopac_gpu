@@ -152,6 +152,18 @@ def check_step(mopac, work):
     dh = "n/a" if hg is None or hc is None else f"{hg - hc:+.5f}"
     result(hg is not None and hc is not None and abs(hg - hc) <= 1e-3 and ng > 0,
            f"crambin: device Fock heat - CPU Fock heat {dh} kcal/mol, time {tg:.1f} s vs {tc:.1f} s")
+    # UHF gradient on the device (dhc's uhf energy: pa and pb): an open-shell molecule (neutral
+    # crambin, a doublet) and a solid, each against dcart on the CPU in the same run
+    for name, kw_u, deck in (("crambin", "PM7 UHF 1SCF GRADIENTS GEO-OK CHARGE=0", mol),
+                             ("si144", "PM7 UHF 1SCF GRADIENTS GEO-OK", DATA / "grad" / "si144.mop")):
+        text, wall = run(mopac, work / "check" / f"{name}_uhf", name, kw_u, deck,
+                         {"MOPAC_GPU_GRAD_CHECK": "1", "MOPAC_GPU_DEBUG": "1"})
+        grad = floats_after(text, "max_abs_diff=")
+        print(f"[materials] check {name} UHF: {wall:.1f} s, heat {heat(text)}, gradient "
+              f"{max(grad) if grad else None} kcal/mol/A, device Fock builds {text.count('[GPU Fock] pairs=')}",
+              flush=True)
+        result(bool(grad) and max(grad) <= 1e-5,
+               f"check {name} UHF: device gradient within 1e-5 kcal/mol/A of the CPU")
     # PRECISE: central differences (dcart's force), the other probe layout of the d-pair kernel
     for name in ("si144", "rutile162"):
         text, wall = run(mopac, work / "check" / f"{name}_precise", name, "PM7 1SCF GRADIENTS GEO-OK PRECISE",

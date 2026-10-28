@@ -96,6 +96,35 @@ __device__ __forceinline__ double helect_packed(int n, const double *pa,
   return ee + 0.5 * ed;
 }
 
+// One-electron matrix of the diatomic system: the h1elec block (smat, may be nullptr) and the
+// core attractions e_at1 / e_at2 on the diagonal blocks.
+__device__ __forceinline__ void diatomic_h(int n1, int n2, const double *smat, const double *e_at1,
+                                           const double *e_at2, double *h) {
+  const int n = n1 + n2;
+  const int linear = tri1(n) + n;
+  for (int i = 0; i < linear; ++i) h[i] = 0.0;
+  if (smat) {
+    for (int j1 = 1; j1 <= n2; ++j1) {
+      const int base = tri1(n1 + j1);
+      for (int i1 = 1; i1 <= n1; ++i1) {
+        h[base + i1 - 1] = smat[(i1 - 1) + 9 * (j1 - 1)];
+      }
+    }
+  }
+  {
+    int i2 = 0;
+    for (int i1 = 1; i1 <= n1; ++i1) {
+      const int base = tri1(i1);
+      for (int j1 = 1; j1 <= i1; ++j1) h[base + j1 - 1] += e_at1[i2++];
+    }
+    i2 = 0;
+    for (int i1 = n1 + 1; i1 <= n; ++i1) {
+      const int base = tri1(i1) + n1;
+      for (int j1 = 1; j1 <= i1 - n1; ++j1) h[base + j1 - 1] += e_at2[i2++];
+    }
+  }
+}
+
 // Assemble the diatomic energy given the already-evaluated integrals:
 //   smat  : 9x9 column-major overlap-derived one-electron block, row = atom-1
 //           orbital, column = atom-2 orbital (h1elec(nat1, nat2, x1, x2)); may
@@ -123,34 +152,31 @@ __device__ __forceinline__ double diatomic_energy_generic(int n1, int n2,
                                                           bool exchange = true) {
   const int n = n1 + n2;
   const int linear = tri1(n) + n;
-  for (int i = 0; i < linear; ++i) {
-    h[i] = 0.0;
-    pa[i] = 0.5 * pdi[i];
-  }
-  if (smat) {
-    for (int j1 = 1; j1 <= n2; ++j1) {
-      const int base = tri1(n1 + j1);
-      for (int i1 = 1; i1 <= n1; ++i1) {
-        h[base + i1 - 1] = smat[(i1 - 1) + 9 * (j1 - 1)];
-      }
-    }
-  }
-  {
-    int i2 = 0;
-    for (int i1 = 1; i1 <= n1; ++i1) {
-      const int base = tri1(i1);
-      for (int j1 = 1; j1 <= i1; ++j1) h[base + j1 - 1] += e_at1[i2++];
-    }
-    i2 = 0;
-    for (int i1 = n1 + 1; i1 <= n; ++i1) {
-      const int base = tri1(i1) + n1;
-      for (int j1 = 1; j1 <= i1 - n1; ++j1) h[base + j1 - 1] += e_at2[i2++];
-    }
-  }
+  for (int i = 0; i < linear; ++i) pa[i] = 0.5 * pdi[i];
+  diatomic_h(n1, n2, smat, e_at1, e_at2, h);
   for (int i = 0; i < linear; ++i) f[i] = h[i];
   fock2_diatomic_sp(n1, n2, w, pdi, pa, f, exchange);
   const double ee = helect_packed(n, pa, h, f);
   return 2.0 * ee + enuc;
+}
+
+// UHF (dhc's uhf branch): helect(pa, h, fa) + helect(pb, h, fb) + enuc, with fa / fb the Fock
+// matrices from the total density pdi and the exchange of padi / pbdi.  h, f: scratch.
+template <class W>
+__device__ __forceinline__ double diatomic_energy_uhf(int n1, int n2, const double *smat, const double *e_at1,
+                                                      const double *e_at2, W w, double enuc, const double *pdi,
+                                                      const double *padi, const double *pbdi, double *h,
+                                                      double *f, bool exchange = true) {
+  const int n = n1 + n2;
+  const int linear = tri1(n) + n;
+  diatomic_h(n1, n2, smat, e_at1, e_at2, h);
+  for (int i = 0; i < linear; ++i) f[i] = h[i];
+  fock2_diatomic_sp(n1, n2, w, pdi, padi, f, exchange);
+  double ee = helect_packed(n, padi, h, f);
+  for (int i = 0; i < linear; ++i) f[i] = h[i];
+  fock2_diatomic_sp(n1, n2, w, pdi, pbdi, f, exchange);
+  ee += helect_packed(n, pbdi, h, f);
+  return ee + enuc;
 }
 
 __device__ __forceinline__ double diatomic_energy_sp(int n1, int n2,
