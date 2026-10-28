@@ -22,6 +22,9 @@
       USE chanel_C, only : iw
       use derivs_C, only : b, ab, fb
       use common_arrays_C, only : c, w, eigs
+#ifdef GPU
+      use gpu_conv_fock, only : gpu_conv_w_ensure_host
+#endif
       implicit none
       integer  :: minear
       integer  :: ninear
@@ -103,6 +106,9 @@
 !
 !***********************************************************************
       data icalcn/ 0/
+#ifdef GPU
+      call gpu_conv_w_ensure_host()   ! solids: w may live only on the device
+#endif
       time1 = 0.d0
       time2 = 0.d0
       allocate (bab(70,70), babinv(4900))

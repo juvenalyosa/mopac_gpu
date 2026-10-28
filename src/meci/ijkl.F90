@@ -23,6 +23,9 @@
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
+#ifdef GPU
+      use gpu_conv_fock, only : gpu_conv_w_ensure_host
+#endif
       implicit none
 !-----------------------------------------------
 !   D u m m y   A r g u m e n t s
@@ -69,6 +72,9 @@
 !  I.
 !  ALL ACTIVE-SPACE INTERACTIONS ARE COPIED INTO THE ARRAY XY
 !
+#ifdef GPU
+      call gpu_conv_w_ensure_host()   ! solids: w may live only on the device
+#endif
       ij = 0
       do i = 1, nmos
         do j = 1, i

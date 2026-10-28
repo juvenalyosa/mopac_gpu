@@ -27,7 +27,8 @@ module gpu_conv_fock
   use iso_c_binding, only : c_int, c_long_long, c_double
   implicit none
   private
-  public :: gpu_conv_fock2, gpu_conv_fock2_check_finish, conv_w_generation, gpu_conv_fock_confirm_w
+  public :: gpu_conv_fock2, gpu_conv_fock2_check_finish, conv_w_generation, gpu_conv_fock_confirm_w, &
+    gpu_conv_w_ensure_host
 
   integer, save :: conv_w_generation = 0
 
@@ -53,11 +54,20 @@ module gpu_conv_fock
       integer(c_int) :: rc
     end function mopac_cuda_conv_fock2
 
-    subroutine mopac_cuda_conv_fock_confirm_w(gen, keep) bind(C, name='mopac_cuda_conv_fock_confirm_w')
+    subroutine mopac_cuda_conv_fock_confirm_w(gen, keep, nblk, blk_off, blk_len) &
+        bind(C, name='mopac_cuda_conv_fock_confirm_w')
       import :: c_int, c_long_long
       integer(c_long_long), value :: gen
-      integer(c_int), value :: keep
+      integer(c_int), value :: keep, nblk
+      integer(c_long_long) :: blk_off(*), blk_len(*)
     end subroutine mopac_cuda_conv_fock_confirm_w
+
+    function mopac_cuda_conv_w_sync_host(w, wk, n2elec_c) bind(C, name='mopac_cuda_conv_w_sync_host') result(rc)
+      import :: c_int, c_long_long, c_double
+      real(c_double) :: w(*), wk(*)
+      integer(c_long_long), value :: n2elec_c
+      integer(c_int) :: rc
+    end function mopac_cuda_conv_w_sync_host
   end interface
 
 contains
@@ -191,10 +201,46 @@ contains
 
   ! hcore, after bumping conv_w_generation: keep = .true. when its w / wk are the ones the device
   ! hcore built and offered (device path, no check mode), so the Fock builds take them.
+  ! The device hcore may also have left the pair segments of the host w / wk unfilled (the device
+  ! Fock build does not need them); the one-centre blocks, built here, are passed along so that
+  ! gpu_conv_w_ensure_host can fill the rest later.
   subroutine gpu_conv_fock_confirm_w(keep)
+    use molkst_C, only : numat
+    use common_arrays_C, only : nfirst, nlast
     logical, intent(in) :: keep
-    call mopac_cuda_conv_fock_confirm_w(int(conv_w_generation, c_long_long), merge(1_c_int, 0_c_int, keep))
+    integer(c_long_long), allocatable :: boff(:), blen(:)
+    integer(c_long_long) :: kk
+    integer :: ii, jj, ni, nj
+    allocate(boff(max(1, numat)), blen(max(1, numat)))
+    kk = 0
+    do ii = 1, numat
+      ni = nlast(ii) - nfirst(ii) + 1
+      ni = (ni*(ni + 1))/2
+      do jj = 1, ii
+        nj = nlast(jj) - nfirst(jj) + 1
+        kk = kk + int(ni, c_long_long)*((nj*(nj + 1))/2)
+      end do
+      boff(ii) = kk
+      blen(ii) = int(ni, c_long_long)*ni
+      kk = kk + blen(ii)
+    end do
+    call mopac_cuda_conv_fock_confirm_w(int(conv_w_generation, c_long_long), merge(1_c_int, 0_c_int, keep), &
+      int(numat, c_int), boff, blen)
   end subroutine gpu_conv_fock_confirm_w
+
+  ! Before CPU code reads the pair segments of w / wk in a solid: fetch them from the device if the
+  ! device hcore did not fill the host copies.
+  subroutine gpu_conv_w_ensure_host()
+    use common_arrays_C, only : w, wk
+    use molkst_C, only : n2elec, id
+    use chanel_C, only : iw
+    if (id == 0 .or. .not. allocated(w) .or. .not. allocated(wk)) return
+    if (size(w) < n2elec .or. size(wk) < n2elec) return
+    if (mopac_cuda_conv_w_sync_host(w, wk, int(n2elec, c_long_long)) /= 1) then
+      write(iw, '(1x,a)') '[GPU hcore] the device copies of w / wk are lost; run with MOPAC_GPU_W_DOWNLOAD=1'
+      call mopend('device two-electron integrals lost')
+    end if
+  end subroutine gpu_conv_w_ensure_host
 
   ! Check mode: f is fock2's CPU result; report its difference from the device one.
   subroutine gpu_conv_fock2_check_finish(f)

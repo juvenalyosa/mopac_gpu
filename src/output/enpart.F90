@@ -33,6 +33,9 @@
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
+#ifdef GPU
+      use gpu_conv_fock, only : gpu_conv_w_ensure_host
+#endif
       implicit none
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
@@ -70,6 +73,9 @@
 !***********************************************************************
 ! *** RECALCULATE THE DENSITY MATRICES IN THE UHF SCHEME
 !
+#ifdef GPU
+      call gpu_conv_w_ensure_host()   ! solids: w may live only on the device
+#endif
       allocate (ea((numat*(numat + 1))/2,2), e((numat*(numat + 1))/2,4), &
       ex((numat*(numat + 1))/2,3), w2(8100), stat = i)
       if (i /= 0) then

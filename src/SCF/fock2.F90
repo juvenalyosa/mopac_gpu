@@ -23,7 +23,7 @@
       use gpu_fock_interfaces, only: mopac_cuda_fock2_scf
       use gpu_scf_stream_driver, only: gpu_scf_stream_fock
       use gpu_scf_stream_trace, only: gpu_stream_trace_block
-      use gpu_conv_fock, only : gpu_conv_fock2, gpu_conv_fock2_check_finish
+      use gpu_conv_fock, only : gpu_conv_fock2, gpu_conv_fock2_check_finish, gpu_conv_w_ensure_host
       use iso_c_binding, only: c_bool, c_int
 #endif
       use cosmo_C, only : useps
@@ -103,6 +103,8 @@
       if (.not. deriv .and. mode == 2) then
         if (gpu_conv_fock2(f, ptot, p, w, wk, numat, nfirst, nlast)) return
       end if
+      ! the CPU build below reads the pair segments of w / wk, which may be on the device only
+      if (.not. lid .and. .not. deriv) call gpu_conv_w_ensure_host()
       ! The device Fock builds (dense and disk streaming) give wrong Fock matrices (ctest on a T4,
       ! 2026-10-19: PM3, port and the API test), so they only run on request: MOPAC_GPU_EXACT_SC=1
       ! (or the legacy MOPAC_FOCK_GPU) with the GPU in use.  Otherwise the CPU build below is used.
