@@ -1212,7 +1212,7 @@ inline bool cuda_context_ok(cudaError_t status, const char *where) {
 // single core copies ~5 GB/s, the measured host<->device rate was 2.3-4.8 GB/s
 // at 7000 atoms while the DMA side of a pinned chunk runs at >15 GB/s).
 constexpr int kStagingCopyThreads = 4;
-constexpr std::size_t kStagingParallelMin = static_cast<std::size_t>(4) << 20;
+constexpr std::size_t kStagingParallelMin = static_cast<std::size_t>(1) << 20;
 inline void parallel_memcpy(void *dst, const void *src, std::size_t bytes) {
   if (bytes < kStagingParallelMin) {
     std::memcpy(dst, src, bytes);
@@ -1247,6 +1247,13 @@ class PinnedStaging {
  public:
   static constexpr std::size_t kChunkBytes = static_cast<std::size_t>(32) << 20;
   static constexpr std::size_t kMinStagedBytes = static_cast<std::size_t>(2) << 20;
+  // Pieces of at most kChunkBytes and at least a quarter of the copy (2 MB minimum): an 11 MB array
+  // (the mpack arrays of a 650-atom molecule) went in one piece, with no overlap of the host memcpy
+  // and the DMA (~4 GB/s).
+  static std::size_t piece_bytes(std::size_t bytes) {
+    const std::size_t lo = static_cast<std::size_t>(2) << 20;
+    return std::min(kChunkBytes, std::max(lo, bytes / 4));
+  }
 
   static PinnedStaging &instance() {
     static PinnedStaging staging;
@@ -1266,12 +1273,13 @@ class PinnedStaging {
     }
     auto *dst = static_cast<char *>(host);
     const auto *src = static_cast<const char *>(device);
+    const std::size_t piece = piece_bytes(bytes);
     std::size_t prev_off = 0;
     std::size_t prev_len = 0;
     int k = 0;
-    for (std::size_t off = 0; off < bytes; off += kChunkBytes, ++k) {
+    for (std::size_t off = 0; off < bytes; off += piece, ++k) {
       const int buf = k & 1;
-      const std::size_t len = std::min(kChunkBytes, bytes - off);
+      const std::size_t len = std::min(piece, bytes - off);
       if (!cuda_context_ok(cudaMemcpyAsync(buf_[buf], src + off, len,
                                            cudaMemcpyDeviceToHost, stream_), label) ||
           !cuda_context_ok(cudaEventRecord(ev_[buf], stream_), label)) {
@@ -1303,10 +1311,11 @@ class PinnedStaging {
     }
     auto *dst = static_cast<char *>(device);
     const auto *src = static_cast<const char *>(host);
+    const std::size_t piece = piece_bytes(bytes);
     int k = 0;
-    for (std::size_t off = 0; off < bytes; off += kChunkBytes, ++k) {
+    for (std::size_t off = 0; off < bytes; off += piece, ++k) {
       const int buf = k & 1;
-      const std::size_t len = std::min(kChunkBytes, bytes - off);
+      const std::size_t len = std::min(piece, bytes - off);
       // The bounce buffer was last used by chunk k-2; wait for its DMA.
       if (k >= 2 && !cuda_context_ok(cudaEventSynchronize(ev_[buf]), label)) {
         cudaStreamSynchronize(stream_);
