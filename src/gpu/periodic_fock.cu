@@ -180,7 +180,10 @@ struct Cache {
   long long mpack = 0;
   double *ptot = nullptr, *p = nullptr, *f = nullptr;
   bool tables = false;
+  bool wk_is_w = false;   // molecules: K from the same integrals, one device copy
   void release() {
+    if (wk_is_w) wk = nullptr;
+    wk_is_w = false;
     void *ptrs[] = {w, wk, pia, pib, pja, pjb, sia, sib, poff, soff, ptot, p, f};
     for (void *q : ptrs) {
       if (q) cudaFree(q);
@@ -274,7 +277,13 @@ extern "C" int mopac_cuda_conv_fock2(long long mpack, long long n2elec, int npai
       g_offer.release();
       // never upload host pair segments that the device hcore did not fill
       if (g_w_host_stale && g_stale_gen == gen) return 2;
-      w_ok = up(&c.w, w, n) && up(&c.wk, wk, n);
+      if (wk == w) {
+        w_ok = up(&c.w, w, n);
+        c.wk = c.w;
+        c.wk_is_w = true;
+      } else {
+        w_ok = up(&c.w, w, n) && up(&c.wk, wk, n);
+      }
       add_section("conv_fock_w_upload", tu, Clock::now());
     }
     if (!w_ok || !up(&c.pia, pair_ia, npairs) || !up(&c.pib, pair_ib, npairs) ||
