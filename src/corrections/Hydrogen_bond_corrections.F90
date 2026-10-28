@@ -233,11 +233,12 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
 !
 ! Add in gradient contribution, if requested
 !
-!   H_bonds4 (PM6-D3H4) is smooth: every bond with an energy counts (the weak ones, |E| < 0.01,
-!   have gradients too) and so does the displaced energy when the bond switches off; skipping
-!   either left ~2% errors in the PM6-D3H4 gradient of a urea cluster.  The other H-bond terms
-!   (PM7, PM6-DH+, PM6-DH2) keep the thresholds, which also step over their discontinuities.
-    if (l_grad .and. (sum < -0.01d0 .or. (smooth_hb .and. sum /= 0.d0))) then
+!   Every bond with an energy counts: the weak ones (|E| < 0.01) have gradients too; leaving
+!   them out put the H-bond gradient of a urea cluster off by up to 2.6% (PM6-D3H4) and 2%
+!   (PM7).  H_bonds4 (PM6-D3H4) is smooth, so the displaced energy also counts when the bond
+!   switches off; the other H-bond terms (PM7, PM6-DH+, PM6-DH2) have steps, and keep skipping
+!   displaced energies below 1e-5.
+    if (l_grad .and. sum /= 0.d0) then
       do j = 1, nd_list
         k = d_list(j)
         iii = l123*(k - 1)

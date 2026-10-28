@@ -484,7 +484,8 @@ __global__ void hbond_gradient_kernel(HbArgs a) {
   const int slot = probe / 3;
   const int comp = probe % 3;
   const double e0 = a.e_pair[ii];
-  if (!(e0 < -0.01)) return;
+  // every pair with an energy (as Hydrogen_bond_corrections: weak bonds have gradients too)
+  if (e0 == 0.0) return;
   PairGeom g;
   load_pair(a, ii, &g);
   const int k = g.atom[slot];
