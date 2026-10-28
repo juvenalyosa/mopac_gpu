@@ -36,7 +36,7 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
 !
   integer :: i, j, k, l, D, H, A, nd_list, d_list(20), d_l(20), i_cell, ii, iii, kkkk, &
     nrpairs, max_h_bonds, icalcn = -1
-  logical :: n_h_bonds, first = .true.
+  logical :: n_h_bonds, first = .true., smooth_hb
   integer, allocatable :: nrbondsa(:), nrbondsb(:)
   double precision :: EC, ER, vector(numat), sum, sum1, delta = 1.d-5, covrad(94), hb_timer
   double precision, external :: EC_plus_ER, EH_plus_blend, h_bonds4
@@ -193,6 +193,8 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
 
   N_Hbonds = 0
   E_hb = 0.d0
+  smooth_hb = .not. (method_pm6_dh_plus .or. method_pm7) .and. &
+    (method_pm6_d3h4 .or. method_pm6_d3h4x .or. method_pm6_org)
   do ii = 1, nrpairs
     if (method_pm6_dh_plus .or. method_pm7) then
       H = hblist(ii,9)
@@ -231,7 +233,11 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
 !
 ! Add in gradient contribution, if requested
 !
-    if (l_grad .and. sum < -0.01d0) then
+!   H_bonds4 (PM6-D3H4) is smooth: every bond with an energy counts (the weak ones, |E| < 0.01,
+!   have gradients too) and so does the displaced energy when the bond switches off; skipping
+!   either left ~2% errors in the PM6-D3H4 gradient of a urea cluster.  The other H-bond terms
+!   (PM7, PM6-DH+, PM6-DH2) keep the thresholds, which also step over their discontinuities.
+    if (l_grad .and. (sum < -0.01d0 .or. (smooth_hb .and. sum /= 0.d0))) then
       do j = 1, nd_list
         k = d_list(j)
         iii = l123*(k - 1)
@@ -256,7 +262,7 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
             else
               sum1 = EC_plus_ER(D, H, A, q(H), q(A), EC, ER, d_l, l)
             end if
-            if (abs(sum1) > 1.d-5) then
+            if (smooth_hb .or. abs(sum1) > 1.d-5) then
               sum1 = (sum1 - sum)/delta
               dxyz(i_cell*3 + i) = dxyz(i_cell*3 + i) + sum1
             end if
