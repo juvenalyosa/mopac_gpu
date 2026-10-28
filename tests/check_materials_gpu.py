@@ -132,6 +132,26 @@ def check_step(mopac, work):
               f"{max(fock) if fock else None} eV, host w fetched {synced}", flush=True)
         result(bool(fock) and max(fock) <= 1e-7 and synced,
                f"check {name}: w / wk fetched from the device, CPU Fock within 1e-7 eV of the device one")
+    # A molecule (conventional SCF, no Tv): the device Fock build against fock2 on the CPU, then the
+    # job with the device Fock build and with MOPAC_GPU_CONV_FOCK=0 (time and heat)
+    mol = DATA / "molecules" / "crambin.mop"
+    kw = "PM7 1SCF GRADIENTS GEO-OK CHARGE=-1"
+    text, wall = run(mopac, work / "check" / "crambin_fockcheck", "crambin", kw, mol, {"MOPAC_GPU_FOCK_CHECK": "1"})
+    fock = floats_after(text, "check max|F_gpu - F_cpu|=")
+    print(f"[materials] check crambin Fock: {wall:.1f} s, heat {heat(text)}, Fock {max(fock) if fock else None} eV",
+          flush=True)
+    result(bool(fock) and max(fock) <= 1e-7, "check crambin: device Fock within 1e-7 eV of the CPU")
+    runs = {}
+    for tag, env in (("gpu_fock", {}), ("cpu_fock", {"MOPAC_GPU_CONV_FOCK": "0"})):
+        env = dict(env, MOPAC_GPU_PROFILE="1", MOPAC_GPU_DEBUG="1")
+        text, wall = run(mopac, work / "check" / f"crambin_{tag}", "crambin", kw + " TIMES", mol, env)
+        runs[tag] = (heat(text), wall, text.count("[GPU Fock] pairs="))
+        print(f"[materials] crambin {tag}: {wall:.1f} s, heat {runs[tag][0]}, device Fock builds {runs[tag][2]}",
+              flush=True)
+    (hg, tg, ng), (hc, tc, _) = runs["gpu_fock"], runs["cpu_fock"]
+    dh = "n/a" if hg is None or hc is None else f"{hg - hc:+.5f}"
+    result(hg is not None and hc is not None and abs(hg - hc) <= 1e-3 and ng > 0,
+           f"crambin: device Fock heat - CPU Fock heat {dh} kcal/mol, time {tg:.1f} s vs {tc:.1f} s")
     # PRECISE: central differences (dcart's force), the other probe layout of the d-pair kernel
     for name in ("si144", "rutile162"):
         text, wall = run(mopac, work / "check" / f"{name}_precise", name, "PM7 1SCF GRADIENTS GEO-OK PRECISE",

@@ -34,7 +34,7 @@ module gpu_conv_fock
 
   integer(c_int), allocatable, save :: pia(:), pib(:), pja(:), pjb(:), sia(:), sib(:)
   integer(c_long_long), allocatable, save :: poff(:), soff(:)
-  integer, allocatable, save :: one_off(:)
+  integer(c_long_long), allocatable, save :: one_off(:)
   integer, save :: tab_numcal = -1, tab_numat = -1, npairs = 0, nself = 0
   double precision, allocatable, save :: f_dev(:)
   logical, save :: check_pending = .false.
@@ -90,12 +90,16 @@ contains
     env_off = (st == 0 .and. len_trim(v) > 0 .and. v(1:1) == '0')
   end function env_off
 
-  ! Pair table in fock2's order (ii, jj <= ii; w offsets as hcore lays them out).
+  ! Pair table in fock2's order (ii, jj <= ii; w offsets as hcore lays them out).  Molecules
+  ! (id = 0) have no pairs ii = jj (an atom with its own images): hcore's rows stop at jj = ii - 1.
   subroutine build_tables(numat, nfirst, nlast)
-    use molkst_C, only : numcal
+    use molkst_C, only : numcal, id
     integer, intent(in) :: numat, nfirst(numat), nlast(numat)
-    integer :: ii, jj, ni, nj, kk, ns, np
+    integer :: ii, jj, ni, nj, ns, np, ione
+    integer(c_long_long) :: kk
     if (tab_numcal == numcal .and. tab_numat == numat .and. allocated(pia)) return
+    ione = 0
+    if (id == 0) ione = 1
     if (allocated(pia)) deallocate(pia, pib, pja, pjb, sia, sib, poff, soff, one_off)
     np = (numat*(numat - 1))/2
     allocate(pia(max(1, np)), pib(max(1, np)), pja(max(1, np)), pjb(max(1, np)), poff(max(1, np)))
@@ -106,7 +110,7 @@ contains
     do ii = 1, numat
       ni = nlast(ii) - nfirst(ii) + 1
       ni = (ni*(ni + 1))/2
-      do jj = 1, ii
+      do jj = 1, ii - ione
         nj = nlast(jj) - nfirst(jj) + 1
         nj = (nj*(nj + 1))/2
         if (jj < ii) then
@@ -115,17 +119,17 @@ contains
           pib(np) = int(nlast(ii), c_int)
           pja(np) = int(nfirst(jj), c_int)
           pjb(np) = int(nlast(jj), c_int)
-          poff(np) = int(kk, c_long_long)
+          poff(np) = kk
         else
           ns = ns + 1
           sia(ns) = int(nfirst(ii), c_int)
           sib(ns) = int(nlast(ii), c_int)
-          soff(ns) = int(kk, c_long_long)
+          soff(ns) = kk
         end if
-        kk = kk + ni*nj
+        kk = kk + int(ni, c_long_long)*nj
       end do
       one_off(ii) = kk
-      kk = kk + ni*ni
+      kk = kk + int(ni, c_long_long)*ni
     end do
     npairs = np
     nself = ns
@@ -133,10 +137,12 @@ contains
     tab_numat = numat
   end subroutine build_tables
 
-  ! Builds f (mode 2: two-centre and one-centre terms, COSMO) for a solid.
+  ! Builds f (mode 2: two-centre and one-centre terms, COSMO) for a solid or, with at least
+  ! MOPAC_GPU_CONV_FOCK_MOL_MIN orbitals (default 300; smaller ones are faster on the CPU), a
+  ! molecule (fock2's J and K from the same w; jab / kab / fockdorbs are the same sums).
   ! Returns .false. when fock2 must do it (path off, check mode, device failure).
   logical function gpu_conv_fock2(f, ptot, p, w, wk, numat, nfirst, nlast) result(done)
-    use molkst_C, only : mpack, n2elec, id, mozyme
+    use molkst_C, only : mpack, n2elec, id, mozyme, norbs
     use mod_vars_cuda, only : lgpu, gpu_trace
     use cosmo_C, only : useps
     use chanel_C, only : iw
@@ -145,12 +151,23 @@ contains
     double precision, intent(inout) :: f(mpack)
     double precision, intent(in) :: ptot(mpack), p(mpack), w(n2elec), wk(n2elec)
     double precision :: ms, t_section
-    integer :: ii, ia, ib, ilim, kk
+    integer :: ii, ia, ib, ilim, kk, mol_min, st
+    character(len=16) :: v
     integer(c_int) :: rc
     logical :: check
     done = .false.
-    if (.not. lgpu .or. id == 0 .or. mozyme .or. numat < 1) return
+    if (.not. lgpu .or. mozyme .or. numat < 1) return
     if (env_off('MOPAC_GPU_CONV_FOCK') .or. env_on('MOPAC_NOGPU')) return
+    if (id == 0) then
+      mol_min = 300
+      v = ' '
+      call get_environment_variable('MOPAC_GPU_CONV_FOCK_MOL_MIN', v, status=st)
+      if (st == 0 .and. len_trim(v) > 0) then
+        read(v, *, iostat=st) mol_min
+        if (st /= 0) mol_min = 300
+      end if
+      if (norbs < mol_min) return
+    end if
     check = env_on('MOPAC_GPU_FOCK_CHECK')
     call build_tables(numat, nfirst, nlast)
     if (check) then
