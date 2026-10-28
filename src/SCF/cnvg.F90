@@ -17,7 +17,7 @@
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
-      use molkst_C, only : norbs, numcal, keywrd, mpack, method_indo
+      use molkst_C, only : norbs, numcal, keywrd, mpack, method_indo, id
 #ifdef GPU
       use mod_vars_cuda, only : resident_scf
       use gpu_density_interfaces, only : mopac_cuda_update_density_from_host
@@ -93,17 +93,23 @@
       if (facb > 1.d-10 .and. faca < (100.d0*facb)) then
         fac = Sqrt (faca/facb)
       end if
-      ie = 0
+!
+!  Off-diagonal elements (independent of each other and of the diagonal), then the diagonal.
+!  Threads only for large matrices: small SCFs (and ctest's parallel jobs) stay serial.
+!
+!$omp parallel do schedule(guided) default(shared) private(i, j, ie, a) if (mpack > 1000000)
+      do i = 2, norbs
+        ie = (i*(i - 1))/2
+        do j = ie + 1, ie + i - 1
+          a = pnew(j)
+          p(j) = a + fac*(a-p(j))
+          pnew(j) = p(j)
+        end do
+      end do
+!$omp end parallel do
       sum2 = 0.d0
       do i = 1, norbs
-        ii = i - 1
-        do j = 1, ii
-          ie = ie + 1
-          a = pnew(ie)
-          p(ie) = a + fac*(a-p(ie))
-          pnew(ie) = p(ie)
-        end do
-        ie = ie + 1
+        ie = (i*(i + 1))/2
         if (Abs (p(ie) - p1(i)) > damp) then
           p(ie) = p1(i) + Sign (damp, p(ie) - p1(i))
         else
@@ -147,6 +153,8 @@
         end do
       end do
 #ifdef GPU
-      if (resident_scf) call mopac_cuda_update_density_from_host(mpack, p)
+!  (solids: the device Fock build takes the density from the host, and the next device density
+!   build replaces the device copy, so it is not refreshed here)
+      if (resident_scf .and. id == 0) call mopac_cuda_update_density_from_host(mpack, p)
 #endif
       end subroutine cnvg

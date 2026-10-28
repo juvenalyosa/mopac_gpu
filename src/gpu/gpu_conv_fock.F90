@@ -164,6 +164,8 @@ contains
       return
     end if
     call mozyme_section_timer_begin('conv_fock_fock1', t_section)
+    ! one atom per thread: fock1 adds only to the atom's own diagonal block of f
+!$omp parallel do schedule(dynamic, 8) default(shared) private(ii, ia, ib, ilim, kk) if (mpack > 1000000)
     do ii = 1, numat
       ia = nfirst(ii)
       ib = nlast(ii)
@@ -175,6 +177,7 @@ contains
         call fock1(f, ptot, p, mpack, w(kk + 1), kk, ia, ib, ilim)
       end if
     end do
+!$omp end parallel do
     call mozyme_section_timer_end('conv_fock_fock1', t_section)
     if (check) then
       if (useps) call addfck(f_dev, ptot)
