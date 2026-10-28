@@ -94,9 +94,10 @@
         fac = Sqrt (faca/facb)
       end if
 !
-!  Off-diagonal elements (independent of each other and of the diagonal), then the diagonal
+!  Off-diagonal elements (independent of each other and of the diagonal), then the diagonal.
+!  Threads only for large matrices: small SCFs (and ctest's parallel jobs) stay serial.
 !
-!$omp parallel do schedule(guided) default(shared) private(i, j, ie, a)
+!$omp parallel do schedule(guided) default(shared) private(i, j, ie, a) if (mpack > 1000000)
       do i = 2, norbs
         ie = (i*(i - 1))/2
         do j = ie + 1, ie + i - 1

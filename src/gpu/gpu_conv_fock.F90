@@ -165,7 +165,7 @@ contains
     end if
     call mozyme_section_timer_begin('conv_fock_fock1', t_section)
     ! one atom per thread: fock1 adds only to the atom's own diagonal block of f
-!$omp parallel do schedule(dynamic, 8) default(shared) private(ii, ia, ib, ilim, kk)
+!$omp parallel do schedule(dynamic, 8) default(shared) private(ii, ia, ib, ilim, kk) if (mpack > 1000000)
     do ii = 1, numat
       ia = nfirst(ii)
       ib = nlast(ii)

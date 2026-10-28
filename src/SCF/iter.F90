@@ -786,7 +786,7 @@
         if (id /= 0) shift = solid_shift
         if (lxfac) shift=0.d0
         call mozyme_section_timer_begin('scf_fock_init', t_scf_section)
-!$omp parallel do schedule(static) default(shared) private(i)
+!$omp parallel do schedule(static) default(shared) private(i) if (mpack > 1000000)
         do i = 1, mpack
           f(i) = h(i) + shift*pa(i) + 1.D-16*i
         end do
@@ -1569,7 +1569,7 @@
            p(i) = pa(i) + pb(i)
         endforall
       else
-!$omp parallel do schedule(static) default(shared) private(i)
+!$omp parallel do schedule(static) default(shared) private(i) if (mpack > 1000000)
         do i = 1, mpack
            pa(i) = p(i)*0.5d0
            pb(i) = pa(i)
