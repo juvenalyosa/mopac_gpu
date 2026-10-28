@@ -185,6 +185,15 @@ def check_step(mopac, work):
     dh = "n/a" if hg is None or hc is None else f"{hg - hc:+.5f}"
     result(hg is not None and hc is not None and abs(hg - hc) <= 1e-3,
            f"crambin COSMO: device COSMO heat - CPU COSMO heat {dh} kcal/mol, time {tg:.1f} s vs {tc:.1f} s")
+    # MgO slab with water (2D): a slow SCF under the 20 eV shift (CPU 822 iterations before Pulay
+    # was switched on after 50; 190 now, heat -3912.2546)
+    text, wall = run(mopac, work / "check" / "mgo_water", "mgo_water", "PM7 1SCF GEO-OK PL",
+                     DATA / "small" / "mgo_water.mop")
+    iters = len(re.findall(r"^ ITERATION", text, re.M))
+    h = heat(text)
+    print(f"[materials] check mgo_water: {wall:.1f} s, {iters} iterations, heat {h} (CPU -3912.2546)", flush=True)
+    result(h is not None and abs(h + 3912.2546) <= 0.01,
+           f"check mgo_water: SCF converged, heat within 0.01 kcal/mol of the CPU ({iters} iterations)")
     # PRECISE: central differences (dcart's force), the other probe layout of the d-pair kernel
     for name in ("si144", "rutile162"):
         text, wall = run(mopac, work / "check" / f"{name}_precise", name, "PM7 1SCF GRADIENTS GEO-OK PRECISE",

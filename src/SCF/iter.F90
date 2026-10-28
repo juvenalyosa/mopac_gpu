@@ -64,6 +64,8 @@
       double precision, dimension(10) :: escf0
       double precision :: plb, scfcrt, pl, bshift, pltest, trans, w1, w2, random
       double precision :: t_scf_section
+      integer :: pulay_after
+      logical :: pulay_kw
       double precision :: shift, shiftb, shfmax, ten, tenold, plchek, scorr, shfto, shftbo, titer0, solid_shift
       ! MOPAC_PDIAG: rotations by pseudo_diag_gemm between full diagonalizations
       logical :: pd_on
@@ -102,7 +104,7 @@
         shfmax, capps, ten, tenold, incitr, irrr, plchek, timitr, &
         scorr, shfto, shftbo, titer0, jalp, ialp, jbet, ibet, enrgy, &
         iopc_calcp, solid_shift, hybrid_enable, adaptive_shift_on, damp_enable, &
-        pd_on, pd_start, pd_every, pd_xmax, pd_grow
+        pd_on, pd_start, pd_every, pd_xmax, pd_grow, pulay_after, pulay_kw
       data icalcn/ 0/
       data debug/ .FALSE./
       data prtfok/ .FALSE./
@@ -284,6 +286,19 @@
         if (index(keywrd,' ITRY') /= 0) itrmax = nint(reada(keywrd,index(keywrd,' ITRY')))
         ci = index(keywrd,' MICROS') + index(keywrd,' C.I.') /= 0 .and. .not. method_indo
         okpuly = index(keywrd,' PULAY') /= 0
+        pulay_kw = okpuly
+!
+!  Solids: Pulay's converger once an SCF has taken MOPAC_SOLID_PULAY_AFTER iterations (default 50,
+!  0: never).  The cells of tests/data/materials converge in 15-45 iterations either way; the
+!  MgO slab with water crept for 800 iterations under the 20 eV shift (240 with Pulay from the
+!  start, which slows rutile 26 -> 34 and urea 45 -> 52).
+!
+        pulay_after = 50
+        call get_environment_variable('MOPAC_SOLID_PULAY_AFTER', line, status=i)
+        if (i == 0 .and. len_trim(line) > 0) then
+          read(line, *, iostat=i) pulay_after
+          if (i /= 0) pulay_after = 50
+        end if
         oknewd = abs(bshift) < 0.001D0
         if (camkin .and. abs(bshift)>1.D-5) bshift = 4.44D0
         times = index(keywrd,' TIMES') /= 0
@@ -660,6 +675,14 @@
 
       incitr = modea/=3 .and. modeb/=3
       if (incitr) niter = niter + 1
+      if (id /= 0 .and. .not. allcon) then
+        if (niter <= 1) okpuly = pulay_kw
+        if (pulay_after > 0 .and. niter == pulay_after .and. .not. okpuly) then
+          okpuly = .true.
+          if (prtpl .or. debug) write (iw, '(a,i0,a)') ' SCF not converged after ', niter, &
+            ' iterations: Pulay''s converger on'
+        end if
+      end if
       ! Hybrid switching: allow CDIIS (Pulay) only after residual drops or after a few iterations
       if (hybrid_enable) then
         hybrid_allow_cdiis = (pl <= hybrid_switch_pl) .or. (niter > ediis_max_iter)
