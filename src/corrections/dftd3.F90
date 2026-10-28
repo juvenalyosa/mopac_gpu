@@ -23,7 +23,8 @@
 !
 !
   use funcon_C, only : a0, fpc_9, fpc_2
-  use molkst_C, only : numat, keywrd, E_hb, E_disp, numcal, method_pm8, method_pm6_org, l123
+  use molkst_C, only : numat, keywrd, E_hb, E_disp, numcal, method_pm8, method_pm6_org, l123, id
+  use dftd3_pbc, only : edisp_pbc, gdisp_pbc
   use common_arrays_C, only: coord, nat, tvec
   use chanel_C, only : iw
   use elemts_C, only: elemnt
@@ -130,7 +131,12 @@
       store_coord = coord(:,:numat)
       coord(:,:numat) = coord(:,:numat)/a0
       tvec = tvec/a0
-      call edisp(max_elem, maxc, numat, nat, c6ab, mxc, r2r4, r0ab, rcov, rs6, rs8, alp6, alp8, e6, e8)
+      if (id /= 0) then
+        ! a solid: every image within the cutoff (dftd3_pbc.F90), not only the nearest one
+        call edisp_pbc(c6ab, mxc, r2r4, r0ab, rcov, rs6, rs8, alp6, alp8, e6, e8)
+      else
+        call edisp(max_elem, maxc, numat, nat, c6ab, mxc, r2r4, r0ab, rcov, rs6, rs8, alp6, alp8, e6, e8)
+      end if
       e6 = e6*s6
       e8 = e8*s18
       E_disp = (- e6 - e8)*au_to_kcal
@@ -157,7 +163,11 @@
       E_hb   = ehb*au_to_kcal
       dftd3  = E_disp + E_hb
       if(l_grad)then
-        call gdisp(r0ab, rs6, alp6, c6ab, s6, s18,mxc, r2r4, rcov, rs8, alp8, dxyz_temp)
+        if (id /= 0) then
+          call gdisp_pbc(r0ab, rs6, alp6, c6ab, s6, s18, mxc, r2r4, rcov, rs8, alp8, dxyz_temp)
+        else
+          call gdisp(r0ab, rs6, alp6, c6ab, s6, s18,mxc, r2r4, rcov, rs8, alp8, dxyz_temp)
+        end if
 !
 !  Hartree/Bohr to kcal/mol/Angstrom.  The factor was 2*au_to_kcal, 2*a0 = 1.058 times too large
 !  (urea crystal, PM6-D3 minus PM6: 6% against central differences of the heat, atoms and Tv).

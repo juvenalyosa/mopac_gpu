@@ -10,6 +10,12 @@ The D3 dispersion model implementation was derived and adapted from the DFTD3 li
 [https://github.com/dftbplus/dftd3-lib] with permission from Stephan Grimme. The files
 derived from this source are `copyc6.F90`, `dftd3.F90`, `dftd3_bits.F90`, and `gdisp.F90`.
 
+In solids (translation vectors) the D3 energy, coordination numbers and gradient are summed over all
+the images within the cutoff (`dftd3_pbc.F90`), with the pair terms switched smoothly to zero between
+15 and 17 Angstroms; molecules keep the original code (hard 15 Angstrom cutoff).  The original
+periodic code took only the nearest image of each atom pair and no atom with its own images, which
+missed 2-12% of the dispersion of typical cells and gave kinks where two images were equally near.
+
 The H4 model implementation was derived and adapted from the h_bonds4 library written by
 Jan Rezac, available either as a standalone C implementation [https://www.rezacovi.cz]
 or in Ruby as part of the Cuby4 framework [http://cuby4.molecular.cz]. The file derived from
