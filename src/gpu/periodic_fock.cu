@@ -25,13 +25,21 @@
 //
 // The one-centre terms (fock1) stay on the host.  w and wk (n2elec each) stay
 // on the device between calls with the same generation number (one hcore).
+// The device hcore of a solid (mopac_cuda_solrot_pairs) can hand over the w / wk
+// it built on the device (mopac_cuda_conv_fock_offer_w), which hcore confirms for
+// its generation (mopac_cuda_conv_fock_confirm_w); the first Fock call of that
+// generation then takes them instead of uploading the host copies.
 
 #include <cuda_runtime.h>
 
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
+
+// Fortran section-timer hook (mozyme_section_timers).
+extern "C" void mozyme_section_timer_add_c(const char *name, int name_len, double ms);
 
 namespace {
 
@@ -175,6 +183,21 @@ struct Cache {
 };
 Cache g_cache;
 
+// w / wk offered by the device hcore: unconfirmed (gen = -1) until hcore confirms them.
+struct Offer {
+  double *w = nullptr, *wk = nullptr;
+  long long n2elec = 0;
+  long long gen = -1;
+  void release() {
+    if (w) cudaFree(w);
+    if (wk) cudaFree(wk);
+    w = wk = nullptr;
+    n2elec = 0;
+    gen = -1;
+  }
+};
+Offer g_offer;
+
 template <typename T>
 bool up(T **dst, const T *src, size_t n) {
   if (n == 0) return true;
@@ -219,7 +242,22 @@ extern "C" int mopac_cuda_conv_fock2(long long mpack, long long n2elec, int npai
   if (c.gen != gen || c.n2elec != n2elec || c.npairs != npairs || c.nself != nself || c.mpack != mpack) {
     c.release();
     const size_t n = static_cast<size_t>(n2elec);
-    if (!up(&c.w, w, n) || !up(&c.wk, wk, n) || !up(&c.pia, pair_ia, npairs) || !up(&c.pib, pair_ib, npairs) ||
+    const auto tu = std::chrono::steady_clock::now();
+    bool w_ok;
+    if (g_offer.w && g_offer.gen == gen && g_offer.n2elec == n2elec) {
+      c.w = g_offer.w;
+      c.wk = g_offer.wk;
+      g_offer.w = g_offer.wk = nullptr;
+      g_offer.release();
+      w_ok = true;
+    } else {
+      g_offer.release();
+      w_ok = up(&c.w, w, n) && up(&c.wk, wk, n);
+      const char *name = "conv_fock_w_upload";
+      mozyme_section_timer_add_c(name, static_cast<int>(std::strlen(name)),
+                                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tu).count());
+    }
+    if (!w_ok || !up(&c.pia, pair_ia, npairs) || !up(&c.pib, pair_ib, npairs) ||
         !up(&c.pja, pair_ja, npairs) || !up(&c.pjb, pair_jb, npairs) || !up(&c.poff, pair_off, npairs) ||
         !up(&c.sia, self_ia, nself) || !up(&c.sib, self_ib, nself) || !up(&c.soff, self_off, nself) ||
         cudaMalloc(reinterpret_cast<void **>(&c.ptot), mpack * sizeof(double)) != cudaSuccess ||
@@ -276,3 +314,30 @@ extern "C" int mopac_cuda_conv_fock2(long long mpack, long long n2elec, int npai
 
 // Frees the device copies (end of a run or when memory is needed elsewhere).
 extern "C" void mopac_cuda_conv_fock2_release() { g_cache.release(); }
+
+// Device hcore of a solid: w and wk (device buffers of n2elec doubles, the pair segments as
+// hcore lays them out) for the Fock builds of the coming generation.  Ownership passes here.
+extern "C" void mopac_cuda_conv_fock_offer_w(double *w, double *wk, long long n2elec) {
+  g_offer.release();
+  g_offer.w = w;
+  g_offer.wk = wk;
+  g_offer.n2elec = n2elec;
+  g_offer.gen = -1;
+}
+
+// hcore, after bumping the generation: keep = 1 when its host w / wk are the offered ones (device
+// hcore, no check mode), else the offer is dropped.
+extern "C" void mopac_cuda_conv_fock_confirm_w(long long gen, int keep) {
+  if (keep && g_offer.w) {
+    g_offer.gen = gen;
+  } else {
+    g_offer.release();
+  }
+}
+
+// Frees the device w / wk of the last generation (a new hcore replaces them), so the device
+// hcore has room for its own full-size buffers.
+extern "C" void mopac_cuda_conv_fock_drop_w() {
+  g_cache.release();
+  g_offer.release();
+}

@@ -109,12 +109,14 @@ module mozyme_gpu_gradient
       integer(c_int) :: rc
     end function mopac_cuda_pair_gradient_ext
 
-    function mopac_cuda_solrot_pairs(npairs_c, pair_ni_c, pair_nj_c, pair_woff_c, pair_kb_c, pair_first_c, &
-        pair_self_c, pair_xi_c, pbest_w1_c, pbest_img_c, nitems_c, item_pair_c, item_img_c, item_xj_c, &
-        item_xjuc_c, tables_c, w_c, wk_c, di_c, e1b_c, e2a_c, enuc_c, win_c, ms_c) &
+    function mopac_cuda_solrot_pairs(npairs_c, n2elec_c, pair_ni_c, pair_nj_c, pair_woff_c, pair_kb_c, &
+        pair_first_c, pair_self_c, pair_xi_c, pbest_w1_c, pbest_img_c, pair_sw_c, nitems_c, item_pair_c, &
+        item_img_c, item_xj_c, item_xjuc_c, tables_c, w_c, wk_c, di_c, e1b_c, e2a_c, enuc_c, win_c, ms_c) &
         bind(C, name='mopac_cuda_solrot_pairs') result(rc)
       import :: c_int, c_long_long, c_double, mozyme_pair_tables_c
       integer(c_int), value :: npairs_c, nitems_c
+      integer(c_long_long), value :: n2elec_c
+      real(c_double) :: pair_sw_c(*)
       integer(c_int) :: pair_ni_c(*), pair_nj_c(*), pair_kb_c(*), pair_first_c(*), pair_self_c(*)
       integer(c_int) :: pbest_img_c(*), item_pair_c(*), item_img_c(*), win_c(*)
       integer(c_long_long) :: pair_woff_c(*)
@@ -846,7 +848,7 @@ contains
 
   subroutine conv_gpu_solrot_run_gpu(gdi, ge1b, ge2a, genuc, gkb, code, ms, nitems_out)
     use common_arrays_C, only : coord, nat, tvec, w, wk, wk_image
-    use molkst_C, only : numat, l1u, l2u, l3u, clower
+    use molkst_C, only : numat, l1u, l2u, l3u, clower, n2elec
     use parameters_C, only : natorb, tore
     use funcon_C, only : ev, a0
     use overlaps_C, only : cutof1
@@ -1013,9 +1015,9 @@ contains
     call fill_tables(tables)
     ms_c = 0.d0
     call mozyme_section_timer_begin('conv_hcore_device', t_section)
-    rc = mopac_cuda_solrot_pairs(int(npairs, kind=c_int), pair_ni, pair_nj, pair_woff, pair_kb, pair_first, &
-      pair_self, pair_xi, pbest_w1, pbest_img, int(nitems, kind=c_int), item_pair, item_img, item_xj, &
-      item_xjuc, tables, w, wk, gdi, ge1b, ge2a, genuc, win, ms_c)
+    rc = mopac_cuda_solrot_pairs(int(npairs, kind=c_int), int(n2elec, kind=c_long_long), pair_ni, pair_nj, &
+      pair_woff, pair_kb, pair_first, pair_self, pair_xi, pbest_w1, pbest_img, sw, int(nitems, kind=c_int), &
+      item_pair, item_img, item_xj, item_xjuc, tables, w, wk, gdi, ge1b, ge2a, genuc, win, ms_c)
     call mozyme_section_timer_end('conv_hcore_device', t_section)
     code = int(rc)
     ms = ms_c
@@ -1023,17 +1025,12 @@ contains
     if (code /= 0) return
     wk_image(1:npairs) = int(win(1:npairs))
 !
-!  Add the point-charge images
+!  Add the point-charge images (to w on the device)
 !
     do p = 1, npairs
       li = natorb(pair_ni(p))
       lj = natorb(pair_nj(p))
-      njj = (lj*(lj + 1))/2
       do ii = 1, li
-        do jj = 1, lj
-          k = int(pair_woff(p)) + ((ii*(ii + 1))/2 - 1)*njj + (jj*(jj + 1))/2
-          w(k) = w(k) + sw(p)
-        end do
         ge1b((ii*(ii + 1))/2, p) = ge1b((ii*(ii + 1))/2, p) + se1(p)
       end do
       do jj = 1, lj

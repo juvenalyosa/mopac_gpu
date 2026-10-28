@@ -30,7 +30,7 @@
       use mozyme_gpu_gradient, only : conv_gpu_hcore_enabled, conv_gpu_solrot_run
       use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
 #ifdef GPU
-      use gpu_conv_fock, only : conv_w_generation
+      use gpu_conv_fock, only : conv_w_generation, gpu_conv_fock_confirm_w
 #endif
 
 !-----------------------------------------------
@@ -350,6 +350,7 @@
       call mozyme_section_timer_end('hcore_total', t_hcore)
 #ifdef GPU
       conv_w_generation = conv_w_generation + 1   ! new w / wk for the device Fock build
+      call gpu_conv_fock_confirm_w(use_gpu_pairs .and. .not. gpu_check)
 #endif
       if (use_gpu_pairs) then
         if (gpu_check) then
