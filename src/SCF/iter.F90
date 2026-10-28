@@ -786,9 +786,11 @@
         if (id /= 0) shift = solid_shift
         if (lxfac) shift=0.d0
         call mozyme_section_timer_begin('scf_fock_init', t_scf_section)
-        forall (i=1:mpack)
+!$omp parallel do schedule(static) default(shared) private(i)
+        do i = 1, mpack
           f(i) = h(i) + shift*pa(i) + 1.D-16*i
-        endforall
+        end do
+!$omp end parallel do
         call mozyme_section_timer_end('scf_fock_init', t_scf_section)
 
         do i=1,norbs
@@ -1567,10 +1569,12 @@
            p(i) = pa(i) + pb(i)
         endforall
       else
-        forall (i=1:mpack)
+!$omp parallel do schedule(static) default(shared) private(i)
+        do i = 1, mpack
            pa(i) = p(i)*0.5d0
            pb(i) = pa(i)
-        endforall
+        end do
+!$omp end parallel do
       end if
       if (debug) then
         call chrge (p, q)
