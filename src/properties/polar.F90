@@ -30,6 +30,9 @@
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
+#ifdef GPU
+    use gpu_conv_fock, only : gpu_conv_w_ensure_host
+#endif
       implicit none
       double precision, allocatable, dimension (:,:) :: x1, x2, x3, x4, x5, x6, x7, x8, &
         x19, x10, x11, x12, x13
@@ -58,6 +61,9 @@
 !
 !**********************************************************************
 !..
+#ifdef GPU
+    call gpu_conv_w_ensure_host()   ! solids: w may live only on the device
+#endif
     allocate(x1(norbs,norbs), x2(norbs,norbs), x3(norbs,norbs), x4(norbs,norbs), &
       x5(norbs,norbs), x6(norbs,norbs), x7(norbs,norbs), x8(norbs,norbs), &
       x19(norbs,norbs), x10(norbs,norbs), x11(norbs,norbs), x12(norbs,norbs), x13(norbs,norbs), &

@@ -28,7 +28,10 @@
 // The device hcore of a solid (mopac_cuda_solrot_pairs) can hand over the w / wk
 // it built on the device (mopac_cuda_conv_fock_offer_w), which hcore confirms for
 // its generation (mopac_cuda_conv_fock_confirm_w); the first Fock call of that
-// generation then takes them instead of uploading the host copies.
+// generation then takes them instead of uploading the host copies.  When the
+// device hcore did not download them either, the host copies of the pair
+// segments are stale until mopac_cuda_conv_w_sync_host fetches them (for the
+// CPU code that reads w: fock2's CPU path, C.I., ENPART, POLAR, ...).
 
 #include <cuda_runtime.h>
 
@@ -38,6 +41,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 // Fortran section-timer hook (mozyme_section_timers).
@@ -196,15 +200,23 @@ struct Offer {
   double *w = nullptr, *wk = nullptr;
   long long n2elec = 0;
   long long gen = -1;
+  bool host_current = true;   // the host w / wk hold the same pair segments
   void release() {
     if (w) cudaFree(w);
     if (wk) cudaFree(wk);
     w = wk = nullptr;
     n2elec = 0;
     gen = -1;
+    host_current = true;
   }
 };
 Offer g_offer;
+
+// Host w / wk of generation g_stale_gen lack their pair segments (device hcore without download);
+// the one-centre blocks (built on the host) are g_blocks: (0-based offset, length) in w.
+bool g_w_host_stale = false;
+long long g_stale_gen = -1;
+std::vector<std::pair<long long, long long>> g_blocks;
 
 template <typename T>
 bool up(T **dst, const T *src, size_t n) {
@@ -260,6 +272,8 @@ extern "C" int mopac_cuda_conv_fock2(long long mpack, long long n2elec, int npai
       w_ok = true;
     } else {
       g_offer.release();
+      // never upload host pair segments that the device hcore did not fill
+      if (g_w_host_stale && g_stale_gen == gen) return 2;
       w_ok = up(&c.w, w, n) && up(&c.wk, wk, n);
       add_section("conv_fock_w_upload", tu, Clock::now());
     }
@@ -328,22 +342,73 @@ extern "C" void mopac_cuda_conv_fock2_release() { g_cache.release(); }
 
 // Device hcore of a solid: w and wk (device buffers of n2elec doubles, the pair segments as
 // hcore lays them out) for the Fock builds of the coming generation.  Ownership passes here.
-extern "C" void mopac_cuda_conv_fock_offer_w(double *w, double *wk, long long n2elec) {
+// host_current = 0: the pair segments were not copied to the host w / wk.
+extern "C" void mopac_cuda_conv_fock_offer_w(double *w, double *wk, long long n2elec, int host_current) {
   g_offer.release();
   g_offer.w = w;
   g_offer.wk = wk;
   g_offer.n2elec = n2elec;
   g_offer.gen = -1;
+  g_offer.host_current = host_current != 0;
 }
 
-// hcore, after bumping the generation: keep = 1 when its host w / wk are the offered ones (device
-// hcore, no check mode), else the offer is dropped.
-extern "C" void mopac_cuda_conv_fock_confirm_w(long long gen, int keep) {
+// hcore, after bumping the generation: keep = 1 when its w / wk are the offered ones (device
+// hcore, no check mode), else the offer is dropped.  blk_off / blk_len (nblk): the one-centre
+// blocks of w (0-based offsets), which only the host has.
+extern "C" void mopac_cuda_conv_fock_confirm_w(long long gen, int keep, int nblk, const long long *blk_off,
+                                               const long long *blk_len) {
+  g_w_host_stale = false;
   if (keep && g_offer.w) {
     g_offer.gen = gen;
+    if (!g_offer.host_current) {
+      g_w_host_stale = true;
+      g_stale_gen = gen;
+      g_blocks.assign(static_cast<size_t>(nblk), {0, 0});
+      for (int b = 0; b < nblk; ++b) g_blocks[b] = {blk_off[b], blk_len[b]};
+    }
   } else {
     g_offer.release();
   }
+}
+
+// Fills the pair segments of the host w / wk (n2elec) from the device copies when they are stale,
+// keeping the host's one-centre blocks.  Returns 1 on success (or nothing to do), 0 if the device
+// copies are gone or a copy failed (the host w / wk are then unusable).
+extern "C" int mopac_cuda_conv_w_sync_host(double *w, double *wk, long long n2elec) {
+  if (!g_w_host_stale) return 1;
+  const double *dw = nullptr, *dwk = nullptr;
+  if (g_cache.w && g_cache.gen == g_stale_gen && g_cache.n2elec == n2elec) {
+    dw = g_cache.w;
+    dwk = g_cache.wk;
+  } else if (g_offer.w && g_offer.gen == g_stale_gen && g_offer.n2elec == n2elec) {
+    dw = g_offer.w;
+    dwk = g_offer.wk;
+  }
+  if (!dw || !dwk) return 0;
+  const auto t0 = Clock::now();
+  size_t total = 0;
+  for (const auto &b : g_blocks) total += static_cast<size_t>(b.second);
+  std::vector<double> saved(total);
+  size_t k = 0;
+  for (const auto &b : g_blocks) {
+    std::memcpy(saved.data() + k, w + b.first, static_cast<size_t>(b.second) * sizeof(double));
+    k += static_cast<size_t>(b.second);
+  }
+  const size_t bytes = static_cast<size_t>(n2elec) * sizeof(double);
+  if (cudaDeviceSynchronize() != cudaSuccess || mopac_pinned_d2h(w, dw, bytes) != 1 ||
+      mopac_pinned_d2h(wk, dwk, bytes) != 1) {
+    cudaGetLastError();
+    return 0;
+  }
+  k = 0;
+  for (const auto &b : g_blocks) {
+    std::memcpy(w + b.first, saved.data() + k, static_cast<size_t>(b.second) * sizeof(double));
+    std::memset(wk + b.first, 0, static_cast<size_t>(b.second) * sizeof(double));
+    k += static_cast<size_t>(b.second);
+  }
+  g_w_host_stale = false;
+  add_section("conv_w_sync_host", t0, Clock::now());
+  return 1;
 }
 
 // Frees the device w / wk of the last generation (a new hcore replaces them), so the device
@@ -351,4 +416,5 @@ extern "C" void mopac_cuda_conv_fock_confirm_w(long long gen, int keep) {
 extern "C" void mopac_cuda_conv_fock_drop_w() {
   g_cache.release();
   g_offer.release();
+  g_w_host_stale = false;
 }

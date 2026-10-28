@@ -1476,7 +1476,7 @@ __global__ void solrot_wk_kernel(SolrotArgs a) {
 // (periodic_fock.cu), which then need not upload the host copies.  Returns 0 on
 // success, 1 on bad arguments, 2 on CUDA failure, 3 if some pair failed on the
 // device.
-extern "C" void mopac_cuda_conv_fock_offer_w(double *w, double *wk, long long n2elec);
+extern "C" void mopac_cuda_conv_fock_offer_w(double *w, double *wk, long long n2elec, int host_current);
 extern "C" void mopac_cuda_conv_fock_drop_w();
 
 extern "C" int mopac_cuda_solrot_pairs(
@@ -1514,6 +1514,19 @@ extern "C" int mopac_cuda_solrot_pairs(
       }
     }
   }
+  // The host w / wk are filled here unless the device Fock build takes the device copies and no
+  // check compares them on the host; the CPU code that reads w fetches them later
+  // (mopac_cuda_conv_w_sync_host).  MOPAC_GPU_W_DOWNLOAD=1 always fills them.
+  auto env_is = [](const char *name, char c) {
+    const char *v = std::getenv(name);
+    return v && *v == c;
+  };
+  const bool hcore_check = [] {
+    const char *v = std::getenv("MOPAC_GPU_HCORE_CHECK");
+    return v && *v && *v != '0';
+  }();
+  const bool download_w = !resident || hcore_check || env_is("MOPAC_GPU_CONV_FOCK", '0') ||
+                          env_is("MOPAC_GPU_W_DOWNLOAD", '1');
   double ms_kernels = 0.0, ms_d2h = 0.0;
   const char *lim_env = std::getenv("MOPAC_GPU_SOLROT_CHUNK");
   // integrals per chunk buffer (w and wk each); 64 M doubles = 512 MB
@@ -1671,7 +1684,7 @@ extern "C" int mopac_cuda_solrot_pairs(
     // back after; the per-pair sums in one piece.  (A staging copy of the span, zero-filled,
     // then copied pair by pair, cost ~3 s for a 512-atom Si cell: 4 GB of integrals.)
     std::vector<std::pair<size_t, size_t>> gaps;  // (offset in the span, length)
-    for (int p = 0; p + 1 < np; ++p) {
+    for (int p = 0; download_w && p + 1 < np; ++p) {
       const size_t end = static_cast<size_t>(woff[p]) + pair_kb[p0 + p];
       const size_t next = static_cast<size_t>(woff[p + 1]);
       if (next > end) gaps.emplace_back(end, next - end);
@@ -1688,8 +1701,9 @@ extern "C" int mopac_cuda_solrot_pairs(
       }
     }
     const bool w_ok =
-        mopac_pinned_d2h(w + base, chunk_w, static_cast<size_t>(span) * sizeof(double)) &&
-        mopac_pinned_d2h(wk + base, chunk_wk, static_cast<size_t>(span) * sizeof(double));
+        !download_w ||
+        (mopac_pinned_d2h(w + base, chunk_w, static_cast<size_t>(span) * sizeof(double)) &&
+         mopac_pinned_d2h(wk + base, chunk_wk, static_cast<size_t>(span) * sizeof(double)));
     {
       size_t s = 0;
       for (const auto &g : gaps) {
@@ -1719,7 +1733,7 @@ extern "C" int mopac_cuda_solrot_pairs(
   add_section_ms("conv_hcore_kernels", ms_kernels);
   add_section_ms("conv_hcore_d2h", ms_d2h);
   if (code == 0 && resident) {
-    mopac_cuda_conv_fock_offer_w(d_wfull.ptr, d_wkfull.ptr, n2elec);
+    mopac_cuda_conv_fock_offer_w(d_wfull.ptr, d_wkfull.ptr, n2elec, download_w ? 1 : 0);
     d_wfull.ptr = d_wkfull.ptr = nullptr;
   }
   dprof_end(prof, "solid_hcore", nitems);

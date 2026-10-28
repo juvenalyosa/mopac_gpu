@@ -121,6 +121,17 @@ def check_step(mopac, work):
         h_ok = bool(hc) and all(max(float(v) for i, v in enumerate(c.split()) if i != 2) <= 1e-8 for c in hc)
         result(h_ok, f"check {name}: device hcore h, w, e1b/e2a, enuc within 1e-8 of the CPU")
         result(bool(fock) and max(fock) <= 1e-7, f"check {name}: device Fock within 1e-7 eV of the CPU")
+    # Fock check alone: the device hcore leaves w / wk on the device, and the CPU Fock build of the
+    # check must fetch them (mopac_cuda_conv_w_sync_host)
+    for name in ("si144", "rutile162"):
+        text, wall = run(mopac, work / "check" / f"{name}_wsync", name, "PM7 1SCF GRADIENTS GEO-OK",
+                         DATA / "grad" / f"{name}.mop", {"MOPAC_GPU_FOCK_CHECK": "1", "MOPAC_GPU_PROFILE": "1"})
+        fock = floats_after(text, "check max|F_gpu - F_cpu|=")
+        synced = "conv_w_sync_host" in text
+        print(f"[materials] check {name} w on the device: {wall:.1f} s, heat {heat(text)}, Fock "
+              f"{max(fock) if fock else None} eV, host w fetched {synced}", flush=True)
+        result(bool(fock) and max(fock) <= 1e-7 and synced,
+               f"check {name}: w / wk fetched from the device, CPU Fock within 1e-7 eV of the device one")
     # PRECISE: central differences (dcart's force), the other probe layout of the d-pair kernel
     for name in ("si144", "rutile162"):
         text, wall = run(mopac, work / "check" / f"{name}_precise", name, "PM7 1SCF GRADIENTS GEO-OK PRECISE",
