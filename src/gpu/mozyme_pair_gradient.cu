@@ -518,13 +518,12 @@ __device__ bool pair_energy(const PairGradArgs &a, int nat1, int nat2, int n1, i
   const int expect = mozyme_pair::tri1(n2 + 1) * mozyme_pair::tri1(n1 + 1);
   if (w_count != 0 && w_count != expect) return false;
   const bool exchange = !(periodic && fl->no_exchange);
-  double h[kL], f[kL], pa[kL];
+  double h[kL];
   MPC_PROF_T(tq2);
-  // UHF: padi / pbdi, the diatomic alpha / beta densities (dhc's uhf branch)
-  *dener = padi ? mozyme_pair::diatomic_energy_uhf(n1, n2, smat_ptr, e_at1, e_at2, w, enuc, pdi, padi, pbdi, h, f,
-                                                   exchange)
-                : mozyme_pair::diatomic_energy_generic(n1, n2, smat_ptr, e_at1, e_at2, w, enuc, pdi, h, f, pa,
-                                                       exchange);
+  // dhc's energy contracted directly (no Fock matrix); UHF: padi / pbdi, the diatomic alpha / beta
+  // densities (dhc's uhf branch)
+  *dener = mozyme_pair::diatomic_energy_direct(n1, n2, smat_ptr, e_at1, e_at2, w, enuc, pdi, padi, pbdi, h,
+                                               exchange);
   MPC_PROF_T(tq3);
   if (D) MPC_PROF_ADD(6, tq2, tq3);
   return true;
