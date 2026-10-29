@@ -52,7 +52,7 @@ GPU_ENV = {"MOPAC_FORCEGPU": "1", "MOPAC_GPU_DEBUG": "1"}
 # (CPU, 2026-10-22).  GPU and CPU are compared at SCFCRT=1e-10, where the remaining spread is <= 0.3 cm-1.
 FORCE_KEYS = "PM7 FORCE GEO-OK SCFCRT=1.D-10"
 # MOZYME 1SCF GRADIENTS heats (macOS CPU build, 2026-10-29), kcal/mol
-MOZYME_REF = {"urea768": -7792.66076, "quartz": None}
+MOZYME_REF = {"urea768": -7792.66076, "quartz": -40392.81847}
 MOZYME_STATUS_RE = re.compile(r"\[MOZYME GPU SCF\] status=(\S+) reason=")
 
 failures = []
