@@ -558,11 +558,12 @@ __device__ __forceinline__ void load_pair_density(const PairGradArgs &a, const d
     for (int j = 1; j <= i; ++j) pdi[ij++] = src[k++];
   }
   ij = n1;
+  // periodic MOZYME: a negative offset is an atom and its own image (dcart: no off-diagonal block)
   k = a.g.pair_off[idx];
   for (int i = 1; i <= n2; ++i) {
     ++ij;
     int l = (ij * (ij - 1)) / 2;
-    for (int j = 1; j <= n1; ++j) pdi[l++] = src[k++];
+    for (int j = 1; j <= n1; ++j) pdi[l++] = k < 0 ? 0.0 : src[k++];
   }
   k = a.g.diag_off[ii - 1];
   ij = n1;
@@ -1100,6 +1101,7 @@ struct PairGradExt {
   const double *pa, *pb; // host, UHF alpha / beta densities (np each); nullptr: RHF
   int periodic;
   double clower, cupper, trunk_c, trunk_cr, trunk_cr2, trunk_clim, wlim;
+  bool sparse;           // periodic MOZYME: p is the MOZYME density, pair_off / diag_off its block offsets
 };
 
 int pair_gradient_launch(
@@ -1172,7 +1174,7 @@ int pair_gradient_launch(
     a.trunk_clim = ext->trunk_clim;
     a.wlim = ext->wlim;
     a.ref_flags = d_flags.ptr;
-    a.dense = 1;
+    a.dense = ext->sparse ? 0 : 1;
     a.pa = d_pa.ptr;
     a.pb = d_pb.ptr;
   }
@@ -1277,7 +1279,40 @@ extern "C" int mopac_cuda_pair_gradient_ext(
   ext.trunk_cr2 = trunk_cr2;
   ext.trunk_clim = trunk_clim;
   ext.wlim = wlim;
+  ext.sparse = false;
   return pair_gradient_launch(nent, 1, nitems, item_i, item_j, item_off.data(), row_start.data(), first,
+                              iorbs, nat, coord, p, 0, 1, 0.0, 0.0, chnge, cnst, fpc_9, force, tables,
+                              dxyz, ms_out, cpu_pairs_out, &ext);
+}
+
+// Periodic MOZYME (dcart_build_scf_gradient_cpu with mozyme, id /= 0): the entries and items of
+// mopac_cuda_pair_gradient_ext, but p is the MOZYME density (np = mpack), diag_off the ijbo(a, a)
+// of each entry's atom and item_off the ijbo(ii, jj) of each item (-1: atom ii with an image of
+// itself, no off-diagonal block).  Only pairs with a density block are items; the point-charge
+// pairs (delsta) stay with the caller.
+extern "C" int mopac_cuda_mozyme_pbc_pair_gradient(
+    int nent, long long np, int nitems, const int *item_i, const int *item_j, const double *item_w,
+    const int *item_off, const int *diag_off, const int *iorbs, const int *nat, const double *coord,
+    const double *p, double clower, double cupper, double trunk_c, double trunk_cr, double trunk_cr2,
+    double trunk_clim, double wlim, double chnge, double cnst, double fpc_9, int force,
+    const MozymePairTablesC *tables, double *dxyz, double *ms_out, int *cpu_pairs_out) {
+  if (nent <= 0 || np <= 0 || (nitems > 0 && !item_off)) return 1;
+  std::vector<int> row_start(static_cast<size_t>(nent) + 1, 0);
+  PairGradExt ext;
+  ext.pair_w = item_w;
+  ext.np = np;
+  ext.pa = nullptr;
+  ext.pb = nullptr;
+  ext.periodic = 1;
+  ext.clower = clower;
+  ext.cupper = cupper;
+  ext.trunk_c = trunk_c;
+  ext.trunk_cr = trunk_cr;
+  ext.trunk_cr2 = trunk_cr2;
+  ext.trunk_clim = trunk_clim;
+  ext.wlim = wlim;
+  ext.sparse = true;
+  return pair_gradient_launch(nent, 1, nitems, item_i, item_j, item_off, row_start.data(), diag_off,
                               iorbs, nat, coord, p, 0, 1, 0.0, 0.0, chnge, cnst, fpc_9, force, tables,
                               dxyz, ms_out, cpu_pairs_out, &ext);
 }
@@ -1498,7 +1533,8 @@ __global__ void solrot_wk_kernel(SolrotArgs a) {
 // exchange image).  w and wk are written only at the pair segments.
 // w / wk (n2elec) are built in full-size device buffers when they fit
 // (MOPAC_GPU_W_RESIDENT=0: never) and offered to the device Fock build
-// (periodic_fock.cu), which then need not upload the host copies.  Returns 0 on
+// (periodic_fock.cu), which then need not upload the host copies; allow_resident = 0
+// (periodic MOZYME, whose pairs are a subset in its own w layout) only fills the host copies.  Returns 0 on
 // success, 1 on bad arguments, 2 on CUDA failure, 3 if some pair failed on the
 // device.
 extern "C" void mopac_cuda_conv_fock_offer_w(double *w, double *wk, long long n2elec, int host_current);
@@ -1509,7 +1545,8 @@ extern "C" int mopac_cuda_solrot_pairs(
     const int *pair_kb, const int *pair_first, const int *pair_self, const double *pair_xi,
     const double *pbest_w1, const int *pbest_img, const double *pair_sw, int nitems, const int *item_pair,
     const int *item_img, const double *item_xj, const double *item_xjuc, const MozymePairTablesC *tables,
-    double *w, double *wk, double *di, double *e1b, double *e2a, double *enuc, int *win_out, double *ms_out) {
+    double *w, double *wk, double *di, double *e1b, double *e2a, double *enuc, int *win_out, double *ms_out,
+    int allow_resident) {
   if (npairs <= 0 || n2elec <= 0 || nitems < 0 || !tables || !w || !wk || !pair_sw || !di || !e1b || !e2a ||
       !enuc || !win_out) {
     return 1;
@@ -1522,7 +1559,8 @@ extern "C" int mopac_cuda_solrot_pairs(
   bool resident = false;
   {
     const char *env = std::getenv("MOPAC_GPU_W_RESIDENT");
-    if (!(env && *env == '0')) {
+    // allow_resident = 0 (MOZYME): the host w / wk are always filled, nothing is offered to the Fock build
+    if (allow_resident && !(env && *env == '0')) {
       mopac_cuda_conv_fock_drop_w();
       const size_t bytes = static_cast<size_t>(n2elec) * sizeof(double);
       size_t free_b = 0, total_b = 0;

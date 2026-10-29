@@ -27,7 +27,8 @@ subroutine hcore_for_MOZYME ()
     iorbs, jopt, mode, numred, refnuc
   use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
   use mozyme_gpu_gradient, only : mozyme_gpu_hcore_enabled, mozyme_gpu_hcore_check_enabled, &
-    mozyme_gpu_hcore_run, mozyme_gpu_device_pair
+    mozyme_gpu_hcore_run, mozyme_gpu_device_pair, mozyme_gpu_pbc_solrot_run
+  use iso_c_binding, only : c_long_long
   implicit none
   double precision :: hcore_timer
   ! True when every atom pair is evaluated on the device (block pairs and
@@ -39,6 +40,12 @@ subroutine hcore_for_MOZYME ()
   ! the difference.
   logical :: gpu_block_pairs, gpu_point_pairs, gpu_check, gpu_verbose
   double precision, allocatable :: h_ref(:)
+  ! Solids (id /= 0, mode 0): the block pairs (h1elec over the images, solrot) are recorded by the
+  ! loop, which leaves their w / wk segments, and done on the device after it (pbc_pairs_finish).
+  logical :: gpu_pbc_pairs
+  integer :: n_pbc
+  integer, allocatable :: pbc_i(:), pbc_j(:)
+  integer(c_long_long), allocatable :: pbc_woff(:)
   double precision :: gpu_enuc, gpu_ms, enuc_ref, h_diff
   integer :: gpu_code, gpu_pairs, gpu_d_pairs, env_stat
   character(len=8) :: env_dbg
@@ -145,6 +152,9 @@ subroutine hcore_for_MOZYME ()
   gpu_point_pairs = gpu_block_pairs .and. semidr
   gpu_check = gpu_block_pairs .and. mozyme_gpu_hcore_check_enabled()
   gpu_all_pairs = gpu_point_pairs
+  gpu_pbc_pairs = (id /= 0 .and. mode == 0 .and. .not. fldon .and. mozyme_gpu_hcore_enabled())
+  n_pbc = 0
+  if (gpu_pbc_pairs) allocate(pbc_i(4*numat), pbc_j(4*numat), pbc_woff(4*numat))
   if (gpu_all_pairs) then
     do i = 1, numat
       if (.not. mozyme_gpu_device_pair(iorbs(i), iorbs(i))) then
@@ -333,7 +343,12 @@ subroutine hcore_for_MOZYME ()
         !   Solid-state system
         !
         if (ijbo(i, j) >= 0) then
-          if (calcij) then
+          if (calcij .and. gpu_pbc_pairs .and. pbc_atom(ni) .and. pbc_atom(nj)) then
+            call pbc_record(i, j, kr)
+            kr = kr + ((natorb(ni)*(natorb(ni) + 1))/2)*((natorb(nj)*(natorb(nj) + 1))/2)
+            e1b(1:45) = 0.d0
+            e2a(1:45) = 0.d0
+          else if (calcij) then
             di = 0.D0
             do ii = -l1u, l1u
               do jj = -l2u, l2u
@@ -452,6 +467,11 @@ subroutine hcore_for_MOZYME ()
     end if
   end do
   call mozyme_section_timer_end('hcore_pair_loop', hcore_timer)
+  if (n_pbc > 0) then
+    call mozyme_section_timer_begin('hcore_gpu_pbc_pairs', hcore_timer)
+    call pbc_pairs_finish()
+    call mozyme_section_timer_end('hcore_gpu_pbc_pairs', hcore_timer)
+  end if
   if (gpu_block_pairs) then
     env_dbg = ' '
     call get_environment_variable('MOPAC_GPU_DEBUG', env_dbg, status=env_stat)
@@ -532,6 +552,135 @@ subroutine hcore_for_MOZYME ()
     end if
   end if
 contains
+
+  logical function pbc_atom(nz)
+    integer, intent(in) :: nz
+    pbc_atom = (natorb(nz) == 1 .or. natorb(nz) == 4 .or. natorb(nz) == 9)
+  end function pbc_atom
+
+  ! A block pair of a solid left to pbc_pairs_finish: its integrals start at w(kr1).
+  subroutine pbc_record(ia, ja, kr1)
+    integer, intent(in) :: ia, ja, kr1
+    integer, allocatable :: ti(:)
+    integer(c_long_long), allocatable :: tw(:)
+    if (n_pbc == size(pbc_i)) then
+      allocate(ti(2*n_pbc))
+      ti(1:n_pbc) = pbc_i(1:n_pbc)
+      call move_alloc(ti, pbc_i)
+      allocate(ti(2*n_pbc))
+      ti(1:n_pbc) = pbc_j(1:n_pbc)
+      call move_alloc(ti, pbc_j)
+      allocate(tw(2*n_pbc))
+      tw(1:n_pbc) = pbc_woff(1:n_pbc)
+      call move_alloc(tw, pbc_woff)
+    end if
+    n_pbc = n_pbc + 1
+    pbc_i(n_pbc) = ia
+    pbc_j(n_pbc) = ja
+    pbc_woff(n_pbc) = int(kr1 - 1, kind=c_long_long)
+  end subroutine pbc_record
+
+  ! The block pairs recorded by the loop (solids): h1elec summed over the images into the
+  ! off-diagonal block, solrot's w / wk at the recorded offsets, e1b / e2a into the diagonal
+  ! blocks and enuc, on the device (MOPAC_GPU_HCORE_CHECK=1: also on the CPU, which is kept,
+  ! and the differences reported), else on the CPU as the loop would have done them.
+  subroutine pbc_pairs_finish()
+    double precision, allocatable :: gdi(:,:), ge1b(:,:), ge2a(:,:), genuc(:)
+    integer :: p, code, nitems, kb, ia, ja, kk, ll, mm1
+    double precision :: ms, dmax_h, dmax_w, dmax_wk, dmax_e, dmax_en
+    logical :: check, verbose
+    character(len=8) :: dbg
+    integer :: dst
+    call mozyme_gpu_pbc_solrot_run(n_pbc, pbc_i(1:n_pbc), pbc_j(1:n_pbc), pbc_woff(1:n_pbc), gdi, ge1b, ge2a, &
+      genuc, code, ms, nitems)
+    check = (code == 0) .and. mozyme_gpu_hcore_check_enabled()
+    dbg = ' '
+    call get_environment_variable('MOPAC_GPU_DEBUG', dbg, status=dst)
+    verbose = (dst == 0 .and. len_trim(dbg) > 0 .and. dbg(1:1) /= '0')
+    dmax_h = 0.d0
+    dmax_w = 0.d0
+    dmax_wk = 0.d0
+    dmax_e = 0.d0
+    dmax_en = 0.d0
+    do p = 1, n_pbc
+      ia = pbc_i(p)
+      ja = pbc_j(p)
+      if (code == 0 .and. .not. check) then
+        di = reshape(gdi(:, p), [9, 9])
+        e1b = ge1b(:, p)
+        e2a = ge2a(:, p)
+        enuc = genuc(p)
+      else
+        di = 0.d0
+        do ii = -l1u, l1u
+          do jj = -l2u, l2u
+            do k = -l3u, l3u
+              xj = coord(:,ja) + tvec(:,1)*ii + tvec(:,2)*jj + tvec(:,3)*k
+              call h1elec (nat(ia), nat(ja), coord(1,ia), xj, dibits)
+              di = di + dibits
+            end do
+          end do
+        end do
+        kk = int(pbc_woff(p)) + 1
+        ll = kk
+        call solrot (nat(ia), nat(ja), coord(1,ia), coord(1,ja), wjd, wkd, ll, e1b, e2a, enuc, kimg)
+        kb = ll - kk
+        if (check) then
+          dibits = reshape(gdi(:, p), [9, 9])
+          dmax_h = max(dmax_h, maxval(abs(di(:iorbs(ia), :iorbs(ja)) - dibits(:iorbs(ia), :iorbs(ja)))))
+          dmax_w = max(dmax_w, maxval(abs(w(kk:ll - 1) - wjd(:kb))))
+          dmax_wk = max(dmax_wk, maxval(abs(wk(kk:ll - 1) - wkd(:kb))))
+          mm1 = (iorbs(ia)*(iorbs(ia) + 1))/2
+          dmax_e = max(dmax_e, maxval(abs(e1b(:mm1) - ge1b(:mm1, p))))
+          mm1 = (iorbs(ja)*(iorbs(ja) + 1))/2
+          dmax_e = max(dmax_e, maxval(abs(e2a(:mm1) - ge2a(:mm1, p))))
+          dmax_en = max(dmax_en, abs(enuc - genuc(p)))
+        end if
+        w(kk:ll - 1) = wjd(:kb)
+        wk(kk:ll - 1) = wkd(:kb)
+      end if
+      half = 1.d0
+      if (ia == ja) half = 0.5d0
+      ii = ijbo (ia, ja)
+      if (ia == ja) then
+        do i1 = 1, iorbs(ia)
+          do j1 = 1, i1
+            ii = ii + 1
+            h(ii) = h(ii) + di(i1, j1)
+          end do
+        end do
+      else
+        do i1 = 1, iorbs(ia)
+          do j1 = 1, iorbs(ja)
+            ii = ii + 1
+            h(ii) = h(ii) + di(i1, j1)
+          end do
+        end do
+      end if
+      enuclr = enuclr + enuc
+      ii = ijbo (ia, ia)
+      do i1 = 1, (iorbs(ia)*(iorbs(ia)+1)) / 2
+        h(ii + i1) = h(ii + i1) + e1b(i1) * half
+      end do
+      ii = ijbo (ja, ja)
+      do i1 = 1, (iorbs(ja)*(iorbs(ja)+1)) / 2
+        h(ii + i1) = h(ii + i1) + e2a(i1) * half
+      end do
+    end do
+    if (check) then
+      write (iw, '(1x,a,i0,a,i0,a,f10.3,a,5es12.4,a)') '[MOZYME GPU hcore] check pbc pairs=', n_pbc, ' items=', &
+        nitems, ' ms=', ms, ' max_abs h w wk e1b/e2a enuc=', dmax_h, dmax_w, dmax_wk, dmax_e, dmax_en, &
+        ' (CPU kept)'
+      call flush(iw)
+    else if (verbose) then
+      if (code == 0) then
+        write (iw, '(1x,a,i0,a,i0,a,f10.3)') '[MOZYME GPU hcore] pbc pairs=', n_pbc, ' items=', nitems, ' ms=', ms
+      else
+        write (iw, '(1x,a,i0)') '[MOZYME GPU hcore] pbc fallback_cpu code=', code
+      end if
+      call flush(iw)
+    end if
+  end subroutine pbc_pairs_finish
 
   ! CPU reference / fallback for the device block pairs skipped in the main loop
   ! (mode == 0, id == 0): h1elec into the off-diagonal block, rotate's e1b/e2a
