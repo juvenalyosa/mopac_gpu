@@ -40,6 +40,7 @@ import mozyme_parallel_force as pf  # noqa: E402
 GRAD_RE = re.compile(r"GRADIENTS:KCAL/MOL/ANGSTROM\[\d+\]=\s*(.*?)(?=\n\s*[A-Z_]+[:=\[])", re.S)
 HEAT_RE = re.compile(r"FINAL HEAT OF FORMATION =\s*([-0-9.]+)")
 STATUS_RE = re.compile(r"\[MOZYME GPU SCF\] status=(\S+) reason=")
+DEBUG_ENV = {"MOPAC_GPU_DEBUG": "1"}  # prints the [MOZYME GPU SCF] status lines STATUS_RE reads
 TIME_RE = re.compile(r"TOTAL JOB TIME:\s*([0-9.]+)")
 
 
@@ -87,7 +88,7 @@ def mopac_run(mopac: Path, run_dir: Path, keywords: str, geometry: Path, name: s
     (run_dir / f"{name}.mop").write_text(f'{keywords} GEO_DAT="{geometry.name}"\nreference check\n\n')
     env = os.environ.copy()
     env.pop("MOPAC_NOGPU", None)
-    env["MOPAC_GPU_DEBUG"] = "1"  # the [MOZYME GPU SCF] status lines parsed below
+    env.update(DEBUG_ENV)
     t0 = time.perf_counter()
     proc = subprocess.run([str(mopac), f"{name}.mop"], cwd=run_dir, env=env, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True)
@@ -175,7 +176,7 @@ def main() -> int:
         with mem:
             t0 = time.perf_counter()
             out, tim = pf.parallel_force(mopac, geo, c["keywords"], a.workers,
-                                         work / f"chignolin_force_w{a.workers}")
+                                         work / f"chignolin_force_w{a.workers}", env_extra=DEBUG_ENV)
             wall = time.perf_counter() - t0
         text = out.read_text(errors="ignore")
         agg = {"resident": 0, "fallback": 0, "gpu_errors": 0, "failed": False}
@@ -243,7 +244,7 @@ def main() -> int:
         regions = [f"A{3 + 7 * k}" for k in range(a.concurrent)]
         dirs = []
         procs = []
-        env = os.environ.copy()
+        env = dict(os.environ, **DEBUG_ENV)
         env.pop("MOPAC_NOGPU", None)
         with mem:
             t0 = time.perf_counter()
@@ -279,7 +280,8 @@ def main() -> int:
         keys = "PM7 MOZYME MOZYME_MINBLK=16 PULAY SHIFT=-50 ITRY=200 GEO-OK THERMO(298) LET"
         with mem:
             t0 = time.perf_counter()
-            out, tim = pf.parallel_force(mopac, geo, keys, a.large_workers, work / f"crambin_force_w{a.large_workers}")
+            out, tim = pf.parallel_force(mopac, geo, keys, a.large_workers, work / f"crambin_force_w{a.large_workers}",
+                                         env_extra=DEBUG_ENV)
             wall = time.perf_counter() - t0
         t = th.thermo(out.read_text(errors="ignore"), 298.0)
         tot = {"resident": 0, "fallback": 0, "gpu_errors": 0}
