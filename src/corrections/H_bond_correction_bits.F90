@@ -479,8 +479,10 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
     use molkst_C, only : id, l1u, l2u, l3u, temp_1, temp_2, temp_3
     implicit none
       integer :: a,  b
-      integer :: ik, jk, kl
-      double precision :: coord1(3), sum
+      integer :: ik, jk, kl, k, lo(3), hi(3), lu(3), n0(3)
+      double precision :: coord1(3), sum, d(3), f(3), rad
+      double precision, save :: tvec_rv(3,3) = 0.d0, rv(3,3) = 0.d0, rv_norm(3) = 0.d0
+      integer, save :: id_rv = -1
       if (id == 0) then
         temp_1 = coord(1, a)-coord(1, b)
         temp_2 = coord(2, a)-coord(2, b)
@@ -488,10 +490,46 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
         distance = sqrt(temp_1**2 + temp_2**2 + temp_3**2)
         Vab(:) = coord(:, a) - coord(:, b)
       else
+!
+!  Only the cells that can hold the nearest image are searched: with r_k the dual vectors of the
+!  translation vectors and f_k = r_k.(coord(a) - coord(b)), an image (i_1, i_2, i_3) is at least
+!  |f_k + i_k|/|r_k| away, so none beyond |f_k + i_k| = D |r_k| beats the image at distance D
+!  nearest to the fractional offset.  The loop order and arithmetic are those of the full search
+!  over -l1u..l1u (etc.), so the result, ties included, is the same.
+!
+        if (id /= id_rv .or. any(tvec /= tvec_rv)) call set_rv()
+        lu = (/l1u, l2u, l3u/)
+        d = coord(:, a) - coord(:, b)
+        do k = 1, 3
+          if (k <= id) then
+            f(k) = rv(1, k)*d(1) + rv(2, k)*d(2) + rv(3, k)*d(3)
+            n0(k) = max(-lu(k), min(lu(k), -nint(f(k))))
+          else
+            f(k) = 0.d0
+            n0(k) = 0
+          end if
+        end do
+        coord1(:) = coord(:, a) + tvec(:, 1)*n0(1) + tvec(:, 2)*n0(2) + tvec(:, 3)*n0(3)
+        sum = sqrt((coord1(1)-coord(1, b))**2 + (coord1(2)-coord(2, b))**2 + (coord1(3)-coord(3, b))**2)
+        do k = 1, 3
+          if (k <= id) then
+            rad = sum*rv_norm(k)*(1.d0 + 1.d-10) + 1.d-10
+            lo(k) = max(-lu(k), ceiling(-f(k) - rad))
+            hi(k) = min(lu(k), floor(-f(k) + rad))
+          else
+            lo(k) = -lu(k)
+            hi(k) = lu(k)
+          end if
+          if (lo(k) > hi(k)) then
+            lo = -lu
+            hi = lu
+            exit
+          end if
+        end do
         distance = 1.d6
-        do ik = -l1u, l1u
-          do jk = -l2u, l2u
-            do kl = -l3u, l3u
+        do ik = lo(1), hi(1)
+          do jk = lo(2), hi(2)
+            do kl = lo(3), hi(3)
               coord1(:) = coord(:, a) + tvec(:, 1)*ik + tvec(:, 2)*jk + tvec(:, 3)*kl
               sum =  (coord1(1)-coord(1, b))**2 &
                    + (coord1(2)-coord(2, b))**2 &
@@ -511,6 +549,36 @@ subroutine find_H__Y_bonds(acc_a, nacc_a, acc_b, nacc_b, bonding_a_h, nb_a_h, hb
         end do
         distance = sqrt(distance)
       end if
+  contains
+    ! Dual vectors r_k of the id translation vectors (r_k.tvec(:, j) = delta_kj, in their span).
+    subroutine set_rv()
+      double precision :: g11, g12, g22, det, c(3)
+      rv = 0.d0
+      if (id == 1) then
+        rv(:, 1) = tvec(:, 1)/(tvec(1, 1)**2 + tvec(2, 1)**2 + tvec(3, 1)**2)
+      else if (id == 2) then
+        g11 = dot_product(tvec(:, 1), tvec(:, 1))
+        g12 = dot_product(tvec(:, 1), tvec(:, 2))
+        g22 = dot_product(tvec(:, 2), tvec(:, 2))
+        det = g11*g22 - g12**2
+        rv(:, 1) = (g22*tvec(:, 1) - g12*tvec(:, 2))/det
+        rv(:, 2) = (g11*tvec(:, 2) - g12*tvec(:, 1))/det
+      else
+        c = (/tvec(2, 2)*tvec(3, 3) - tvec(3, 2)*tvec(2, 3), tvec(3, 2)*tvec(1, 3) - tvec(1, 2)*tvec(3, 3), &
+              tvec(1, 2)*tvec(2, 3) - tvec(2, 2)*tvec(1, 3)/)
+        det = dot_product(tvec(:, 1), c)
+        rv(:, 1) = c/det
+        rv(:, 2) = (/tvec(2, 3)*tvec(3, 1) - tvec(3, 3)*tvec(2, 1), tvec(3, 3)*tvec(1, 1) - tvec(1, 3)*tvec(3, 1), &
+                     tvec(1, 3)*tvec(2, 1) - tvec(2, 3)*tvec(1, 1)/)/det
+        rv(:, 3) = (/tvec(2, 1)*tvec(3, 2) - tvec(3, 1)*tvec(2, 2), tvec(3, 1)*tvec(1, 2) - tvec(1, 1)*tvec(3, 2), &
+                     tvec(1, 1)*tvec(2, 2) - tvec(2, 1)*tvec(1, 2)/)/det
+      end if
+      do k = 1, 3
+        rv_norm(k) = sqrt(rv(1, k)**2 + rv(2, k)**2 + rv(3, k)**2)
+      end do
+      tvec_rv = tvec
+      id_rv = id
+    end subroutine set_rv
   end function distance
   double precision function angle(a, b, c)
     use common_arrays_C, only: coord
