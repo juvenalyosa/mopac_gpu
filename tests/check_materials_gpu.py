@@ -20,6 +20,8 @@
   2 medium  576-atom quartz and rutile, 512-atom Si: GPU heat and time against stored Linux CPU references
   3 force   diamond (64 atoms) FORCE SCFCRT=1.D-10: GPU frequencies and ZPE against the same binary with MOPAC_NOGPU=1
   4 drc     diamond DRC TEMPERATURE=300 CYCLES=40: GPU energy conservation, GPU potential against the CPU one
+  5 mozyme  (--mozyme) MOZYME with Tv: the device hcore block pairs and gradient against the CPU loops of the
+            same run (urea 192, quartz 162), then 768-atom urea and 576-atom quartz against CPU references
 
     python3 tests/check_materials_gpu.py build/mopac --work-dir /scratch/$USER/materials [--skip-force] ...
 
@@ -49,6 +51,9 @@ GPU_ENV = {"MOPAC_FORCEGPU": "1", "MOPAC_GPU_DEBUG": "1"}
 # 269.07 (default), 268.85 (SCFCRT=1e-8), 268.82 (1e-10), 268.80 (1e-12); highest frequency 1262.4 -> 1261.3 cm-1
 # (CPU, 2026-10-22).  GPU and CPU are compared at SCFCRT=1e-10, where the remaining spread is <= 0.3 cm-1.
 FORCE_KEYS = "PM7 FORCE GEO-OK SCFCRT=1.D-10"
+# MOZYME 1SCF GRADIENTS heats (macOS CPU build, 2026-10-29), kcal/mol
+MOZYME_REF = {"urea768": -7792.66076, "quartz": None}
+MOZYME_STATUS_RE = re.compile(r"\[MOZYME GPU SCF\] status=(\S+) reason=")
 
 failures = []
 
@@ -269,6 +274,43 @@ def drc_step(mopac, work):
     result(n >= 30 and dpot <= 0.01, f"drc diamond: max |potential GPU - CPU| {dpot:.5f} kcal/mol over {n} points")
 
 
+def mozyme_step(mopac, work):
+    # The block pairs of hcore_for_MOZYME (h1elec over the images, solrot) and dcart's pair loop on the
+    # device, each against the CPU loop in the same run
+    env = {"MOPAC_GPU_HCORE_CHECK": "1", "MOPAC_GPU_GRAD_CHECK": "1", "MOPAC_GPU_DEBUG": "1"}
+    for name, deck in (("urea", DATA / "small" / "urea.mop"), ("quartz162", DATA / "grad" / "quartz162.mop")):
+        text, wall = run(mopac, work / "mozyme" / f"{name}_check", name, "PM7 MOZYME 1SCF GRADIENTS GEO-OK", deck,
+                         env)
+        hc = re.findall(r"\[MOZYME GPU hcore\] check pbc pairs=\s*(\d+).*?enuc=\s*(.*?)\s*\(CPU kept", text)
+        grad = floats_after(text, "max_abs_diff=")
+        st = MOZYME_STATUS_RE.findall(text)
+        print(f"[materials] mozyme check {name}: {wall:.1f} s, heat {heat(text)}, hcore pairs "
+              f"{hc[-1][0] if hc else None} h w wk e1b/e2a enuc {hc[-1][1] if hc else None}, gradient "
+              f"{max(grad) if grad else None} kcal/mol/A, SCF status {st}", flush=True)
+        # wk may differ where two images are equally near (solrot keeps one): not tested
+        h_ok = bool(hc) and all(max(float(v) for i, v in enumerate(c[1].split()) if i != 2) <= 1e-8 for c in hc)
+        result(h_ok, f"mozyme check {name}: device hcore pairs h, w, e1b/e2a, enuc within 1e-8 of the CPU")
+        result(bool(grad) and max(grad) <= 1e-5,
+               f"mozyme check {name}: device gradient within 1e-5 kcal/mol/A of the CPU")
+    for name in ("urea768", "quartz"):
+        deck = DATA / "medium" / f"{name}.mop"
+        text, wall = run(mopac, work / "mozyme" / name, name, "PM7 MOZYME 1SCF GRADIENTS GEO-OK TIMES", deck,
+                         {"MOPAC_MOZYME_SECTION_PROFILE": "1", "MOPAC_GPU_DEBUG": "1"})
+        h = heat(text)
+        st = MOZYME_STATUS_RE.findall(text)
+        print(f"[materials] mozyme {name}: GPU {wall:.1f} s, heat {h}, CPU reference {MOZYME_REF[name]}, "
+              f"SCF status {st}, device gradients {text.count('[GPU gradient] pairs=')}, device hcore "
+              f"{text.count('[MOZYME GPU hcore] pbc pairs=')}", flush=True)
+        if MOZYME_REF[name] is not None:
+            result(h is not None and abs(h - MOZYME_REF[name]) <= 0.01,
+                   f"mozyme {name}: GPU heat - CPU reference {(h or float('nan')) - MOZYME_REF[name]:+.5f} kcal/mol")
+        if name == "urea768":
+            text, wall = run(mopac, work / "mozyme" / f"{name}_conv", name, "PM7 1SCF GRADIENTS GEO-OK TIMES", deck,
+                             {"MOPAC_GPU_PROFILE": "1"})
+            print(f"[materials] mozyme {name}: conventional SCF on the GPU {wall:.1f} s, heat {heat(text)}",
+                  flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mopac")
@@ -277,6 +319,7 @@ def main():
     ap.add_argument("--medium", default="quartz,silicon,rutile", help="medium cells to run ('' for none)")
     ap.add_argument("--skip-force", action="store_true")
     ap.add_argument("--skip-drc", action="store_true")
+    ap.add_argument("--mozyme", action="store_true", help="also run the MOZYME-with-Tv step")
     a = ap.parse_args()
     mopac = str(Path(a.mopac).resolve())
     work = Path(a.work_dir).resolve()
@@ -294,6 +337,8 @@ def main():
         force_step(mopac, work)
     if not a.skip_drc:
         drc_step(mopac, work)
+    if a.mozyme:
+        mozyme_step(mopac, work)
     if failures:
         print(f"{len(failures)} check(s) failed")
         return 1
