@@ -179,6 +179,64 @@ __device__ __forceinline__ double diatomic_energy_uhf(int n1, int n2, const doub
   return ee + enuc;
 }
 
+// The same energy without building f: the energy is linear in f, so the two-electron part is
+//   sum over w(ij,kl) of aa bb [P(ij) P(kl) - (Pa(ik) Pa(jl) + Pa(il) Pa(jk) + Pb(ik) Pb(jl)
+//                                  + Pb(il) Pb(jk)) / 2]
+// (aa, bb = 1 on the diagonal, 2 off it; Pa = Pb = P/2 for RHF), and the one-electron part
+// helect(P, h, h).  One pass over w with no read-modify-write of f.  padi / pbdi: UHF alpha / beta
+// diatomic densities, nullptr for RHF.  h: scratch of >= linear entries.
+template <class W>
+__device__ __forceinline__ double diatomic_energy_direct(int n1, int n2, const double *smat, const double *e_at1,
+                                                         const double *e_at2, W w, double enuc, const double *pdi,
+                                                         const double *padi, const double *pbdi, double *h,
+                                                         bool exchange = true) {
+  const int n = n1 + n2;
+  diatomic_h(n1, n2, smat, e_at1, e_at2, h);
+  double e1 = 0.0;
+  {
+    int k = 0;
+    for (int i = 1; i <= n; ++i) {
+      for (int j = 1; j < i; ++j, ++k) e1 += 2.0 * pdi[k] * h[k];
+      e1 += pdi[k] * h[k];
+      ++k;
+    }
+  }
+  double e2 = 0.0;
+  int kk = 0;
+  for (int i = n1 + 1; i <= n; ++i) {
+    const int ka = tri1(i);
+    for (int j = n1 + 1; j <= i; ++j) {
+      const int kb = tri1(j);
+      const int ij = ka + j;
+      const double aa = (i == j) ? 1.0 : 2.0;
+      const double pij = pdi[ij - 1];
+      for (int k = 1; k <= n1; ++k) {
+        const int kc = tri1(k);
+        const int ik = ka + k;
+        const int jk = kb + k;
+        for (int l = 1; l <= k; ++l) {
+          const int il = ka + l;
+          const int jl = kb + l;
+          const int kl = kc + l;
+          const double ab = aa * ((k == l) ? 1.0 : 2.0);
+          const double wv = w[kk++];
+          double t = pij * pdi[kl - 1];
+          if (exchange) {
+            if (padi) {
+              t -= 0.5 * (padi[ik - 1] * padi[jl - 1] + padi[il - 1] * padi[jk - 1] + pbdi[ik - 1] * pbdi[jl - 1] +
+                          pbdi[il - 1] * pbdi[jk - 1]);
+            } else {
+              t -= 0.25 * (pdi[ik - 1] * pdi[jl - 1] + pdi[il - 1] * pdi[jk - 1]);
+            }
+          }
+          e2 += wv * ab * t;
+        }
+      }
+    }
+  }
+  return e1 + e2 + enuc;
+}
+
 __device__ __forceinline__ double diatomic_energy_sp(int n1, int n2,
                                                      const double *smat,
                                                      const double *e_at1,
