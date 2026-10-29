@@ -547,6 +547,7 @@ contains
       end if
       if (block_failures) blocked_nscf = nscf
       call trace_status(iw, trace, status, scf_failure_status())
+      call trace_lmo_extent(iw, nocc, nvir, trace)
       call destroy_scf_context()
       call trace_end(iw, trace, handled, start_time, &
         scf_failure_message('reason='//trim(run_fallback_reason(code, &
@@ -2120,6 +2121,58 @@ contains
     end if
     if (emit_message .or. trace) call flush(iw)
   end subroutine trace_end
+
+#ifdef GPU
+  ! The device DIAGG kernels hold one LMO in shared memory (at most 1024
+  ! atoms and 2048 coefficients).  Dense covalent solids (quartz 576: about
+  ! 2700 coefficients per virtual LMO) grow past that, and the SCF continues
+  ! on the CPU; say so instead of leaving only the stage mask.
+  subroutine trace_lmo_extent(iw, nocc, nvir, force)
+    use MOZYME_C, only: icocc, icvir, iorbs, ncf, nce, nncf, nnce
+    implicit none
+    integer, intent(in) :: iw, nocc, nvir
+    logical, intent(in) :: force
+    integer, parameter :: device_atoms = 1024, device_coeffs = 2048
+    integer :: i, k, n, occ_atoms, occ_coeffs, vir_atoms, vir_coeffs
+    logical :: too_large
+
+    occ_atoms = 0
+    occ_coeffs = 0
+    vir_atoms = 0
+    vir_coeffs = 0
+    if (allocated(ncf) .and. allocated(nncf) .and. allocated(icocc)) then
+      do i = 1, nocc
+        n = 0
+        do k = nncf(i) + 1, nncf(i) + ncf(i)
+          n = n + iorbs(icocc(k))
+        end do
+        occ_atoms = max(occ_atoms, ncf(i))
+        occ_coeffs = max(occ_coeffs, n)
+      end do
+    end if
+    if (allocated(nce) .and. allocated(nnce) .and. allocated(icvir)) then
+      do i = 1, nvir
+        n = 0
+        do k = nnce(i) + 1, nnce(i) + nce(i)
+          n = n + iorbs(icvir(k))
+        end do
+        vir_atoms = max(vir_atoms, nce(i))
+        vir_coeffs = max(vir_coeffs, n)
+      end do
+    end if
+    too_large = max(occ_atoms, vir_atoms) > device_atoms .or. &
+      max(occ_coeffs, vir_coeffs) > device_coeffs
+    if (.not. (force .or. too_large)) return
+    write(iw,'(1x,a,4(a,i0),2(a,i0))') '[MOZYME GPU SCF] lmo_extent', &
+      ' occ_max_atoms=', occ_atoms, ' occ_max_coeffs=', occ_coeffs, &
+      ' vir_max_atoms=', vir_atoms, ' vir_max_coeffs=', vir_coeffs, &
+      ' device_max_atoms=', device_atoms, ' device_max_coeffs=', device_coeffs
+    if (too_large) write(iw,'(1x,a)') '[MOZYME GPU SCF] LMOs larger than the '// &
+      'device DIAGG limit: the SCF continues on the CPU (for dense solids the '// &
+      'conventional SCF, without MOZYME, is faster)'
+    call flush(iw)
+  end subroutine trace_lmo_extent
+#endif
 
   character(len=32) function scf_failure_status()
     implicit none

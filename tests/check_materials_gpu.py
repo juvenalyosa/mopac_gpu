@@ -21,7 +21,7 @@
   3 force   diamond (64 atoms) FORCE SCFCRT=1.D-10: GPU frequencies and ZPE against the same binary with MOPAC_NOGPU=1
   4 drc     diamond DRC TEMPERATURE=300 CYCLES=40: GPU energy conservation, GPU potential against the CPU one
   5 mozyme  (--mozyme) MOZYME with Tv: the device hcore block pairs and gradient against the CPU loops of the
-            same run (urea 192, quartz 162), then 768-atom urea and 576-atom quartz against CPU references
+            same run (urea 192, quartz 162), then 768-atom urea against a CPU reference
 
     python3 tests/check_materials_gpu.py build/mopac --work-dir /scratch/$USER/materials [--skip-force] ...
 
@@ -51,8 +51,10 @@ GPU_ENV = {"MOPAC_FORCEGPU": "1", "MOPAC_GPU_DEBUG": "1"}
 # 269.07 (default), 268.85 (SCFCRT=1e-8), 268.82 (1e-10), 268.80 (1e-12); highest frequency 1262.4 -> 1261.3 cm-1
 # (CPU, 2026-10-22).  GPU and CPU are compared at SCFCRT=1e-10, where the remaining spread is <= 0.3 cm-1.
 FORCE_KEYS = "PM7 FORCE GEO-OK SCFCRT=1.D-10"
-# MOZYME 1SCF GRADIENTS heats (macOS CPU build, 2026-10-29), kcal/mol
-MOZYME_REF = {"urea768": -7792.66076, "quartz": -40392.81847}
+# MOZYME 1SCF GRADIENTS heats (macOS CPU build, 2026-10-29), kcal/mol.  Not run: quartz 576 (-40392.81847, 34 min
+# on the Mac), whose LMOs (~2700 coefficients) outgrow the device DIAGG limit of 2048, so its SCF runs on the CPU
+# (870 s on Colab, against 5.4 s for the conventional SCF on the GPU)
+MOZYME_REF = {"urea768": -7792.66076}
 MOZYME_STATUS_RE = re.compile(r"\[MOZYME GPU SCF\] status=(\S+) reason=")
 
 failures = []
@@ -292,7 +294,8 @@ def mozyme_step(mopac, work):
         result(h_ok, f"mozyme check {name}: device hcore pairs h, w, e1b/e2a, enuc within 1e-8 of the CPU")
         result(bool(grad) and max(grad) <= 1e-5,
                f"mozyme check {name}: device gradient within 1e-5 kcal/mol/A of the CPU")
-    for name in ("urea768", "quartz"):
+        result(bool(st) and all(s == "success" for s in st), f"mozyme check {name}: resident SCF on the device {st}")
+    for name in MOZYME_REF:
         deck = DATA / "medium" / f"{name}.mop"
         text, wall = run(mopac, work / "mozyme" / name, name, "PM7 MOZYME 1SCF GRADIENTS GEO-OK TIMES", deck,
                          {"MOPAC_MOZYME_SECTION_PROFILE": "1", "MOPAC_GPU_DEBUG": "1"})
@@ -301,9 +304,9 @@ def mozyme_step(mopac, work):
         print(f"[materials] mozyme {name}: GPU {wall:.1f} s, heat {h}, CPU reference {MOZYME_REF[name]}, "
               f"SCF status {st}, device gradients {text.count('[GPU gradient] pairs=')}, device hcore "
               f"{text.count('[MOZYME GPU hcore] pbc pairs=')}", flush=True)
-        if MOZYME_REF[name] is not None:
-            result(h is not None and abs(h - MOZYME_REF[name]) <= 0.01,
-                   f"mozyme {name}: GPU heat - CPU reference {(h or float('nan')) - MOZYME_REF[name]:+.5f} kcal/mol")
+        result(bool(st) and all(s == "success" for s in st), f"mozyme {name}: resident SCF on the device {st}")
+        result(h is not None and abs(h - MOZYME_REF[name]) <= 0.01,
+               f"mozyme {name}: GPU heat - CPU reference {(h or float('nan')) - MOZYME_REF[name]:+.5f} kcal/mol")
         if name == "urea768":
             text, wall = run(mopac, work / "mozyme" / f"{name}_conv", name, "PM7 1SCF GRADIENTS GEO-OK TIMES", deck,
                              {"MOPAC_GPU_PROFILE": "1"})
