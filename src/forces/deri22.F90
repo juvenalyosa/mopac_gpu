@@ -134,11 +134,14 @@
       end if
 !
 !     STEP 2 : DP= WORK * C'   WITH DP PACKED,CANONICAL.
+!     (FULL PRODUCT IN DPA, THEN PACKED.  WORK AND FOC2 MAY BE THE SAME
+!     ARRAY IN THE CALLER, SO NEITHER HOLDS IT.)
+      call mxmt (work, norbs, c, norbs, dpa, norbs)
       l = 0
       do i = 1, norbs
         do j = 1, i
           l = l + 1
-          dp(l) = ddot(norbs,work(i,1),norbs,c(j,1),norbs)
+          dp(l) = dpa(i + (j - 1)*norbs)
         end do
       end do
 !
@@ -154,11 +157,15 @@
 !
 !     DP(NORBS,NEND) = FOC2(NORBS,NORBS) * C(NORBS,NEND).
       nend = max(nopen,nelec + nmos)
-      l = 1
-      do i = 1, nend
-        call supdot (dp(l), foc2, c(1,i), norbs)
-        l = l + norbs
+      l = 0
+      do i = 1, norbs
+        do j = 1, i
+          l = l + 1
+          dpa(i + (j - 1)*norbs) = foc2(l)
+          dpa(j + (i - 1)*norbs) = foc2(l)
+        end do
       end do
+      call mxm (dpa, norbs, c, norbs, dp, nend)
 !     EXTRACT FCI
       l = 1
       nend = 0

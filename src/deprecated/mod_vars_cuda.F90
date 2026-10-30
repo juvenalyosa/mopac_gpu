@@ -14,7 +14,7 @@
 ! limitations under the License.
 
 module mod_vars_cuda
-  public :: lgpu, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu
+  public :: lgpu, gpu_device_usable, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu
   public :: mozyme_gpu_requested, mozyme_gpu_plan_ready, mozyme_gpu_enabled
   public :: mozyme_gpu_disable_reason, mozyme_fock1_batch_gpu, mozyme_fock2_4x1_batch_gpu
   public :: mozyme_resident_fock_gpu, mozyme_fock_gpu, mozyme_f2_gpu, mozyme_check_gpu
@@ -24,6 +24,10 @@ module mod_vars_cuda
 
   integer, parameter :: nthreads_gpu = 256, nblocks_gpu = 256
   logical :: lgpu = .false.
+  ! A usable GPU that the user did not turn off (NOGPU, MOPAC_NOGPU, MOPAC_GPU_SCFTASK=cpu),
+  ! whatever the system size: dense work whose size does not follow the number of atoms
+  ! (the C.I. matrix of MECI) may use it when lgpu is false.
+  logical :: gpu_device_usable = .false.
   ! GPU trace lines ('[MOZYME GPU ...]', '[STREAM] ...') in the output file:
   ! only with the keyword DEBUG or MOPAC_GPU_DEBUG set (set in run_mopac).
   logical :: gpu_trace = .false.

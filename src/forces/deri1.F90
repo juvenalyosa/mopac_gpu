@@ -13,7 +13,7 @@
 ! See the License for the specific language governing permissions and
 ! limitations under the License.
 
-      subroutine deri1(number, grad, f, minear, fd, scalar, work)
+      subroutine deri1(number, grad, f, minear, fd, scalar, work, mode, aorel, relax)
 !-----------------------------------------------
 !   M o d u l e s
 !-----------------------------------------------
@@ -32,6 +32,14 @@
       double precision  :: fd(mpack)
       double precision , intent(in) :: scalar(mpack)
       double precision, intent(out) :: work(norbs, norbs)
+      integer, intent(in) :: mode
+      double precision, intent(in) :: aorel(*)
+      double precision, intent(out) :: relax
+      integer, allocatable, save :: sidx(:), srow(:), scol(:)
+      integer :: nsp
+      logical, save :: sparse_check
+      character(len=8) :: env
+      integer :: env_stat
 !
       integer ::  icalcn, nati, natx, i, l, j, nend, loop, ninit, n1&
         , n2, lcut, k, ll, ncol
@@ -64,6 +72,11 @@
 !              PACKED, OFF-DIAGONAL BLOCKS ONLY.
 !     FD     : IDEM BUT UNSCALED, DIAGONAL BLOCKS, C.I-ACTIVE ONLY.
 !
+!   MODE 1 (Z-VECTOR, SEE DERI_ZVECTOR): F AND THE DIAGONAL BLOCKS OF FD
+!     ARE NOT FORMED; RELAX = SUM FMAT * AOREL IS THE RELAXATION PART OF
+!     THE DERIVATIVE (BEFORE FPC_9/NSTATE), AND FD HOLDS ONLY THE C.I-ACTIVE
+!     FOCK EIGENVALUE DERIVATIVES.  O(N**2) PER COORDINATE INSTEAD OF O(N**3).
+!
 !***********************************************************************
       data icalcn/ 0/
       n2 = 0
@@ -80,6 +93,8 @@
         allocate(fmat(i))
         const = fpc_9
         debug = index(keywrd,'DERI1') /= 0
+        call get_environment_variable('MOPAC_CI_SPARSE_CHECK', env, status=env_stat)
+        sparse_check = env_stat == 0 .and. trim(env) == '1'
         icalcn = numcal
       end if
       if (debug) call timer ('BEFORE DERI1')
@@ -103,6 +118,44 @@
 !     ------------------------------------------------
 !     STORED IN FMAT, DIVIDED BY STEP.
 !
+      relax = 0.D0
+      if (mode == 1) then
+!
+!   ONLY THE DIAGONAL BLOCKS OF EVERY ATOM AND THE BLOCKS (NATI, J) OF
+!   HMAT AND FMAT ARE NON-ZERO: COPY, CONTRACT AND REDUCE OVER THEM ONLY.
+!
+        call sparse_blocks()
+        do k = 1, nsp
+          fmat(sidx(k)) = hmat(sidx(k))
+        end do
+        call dfock2 (fmat, p, pa, wmat, numat, nfirst, nlast, nati)
+        sum = 0.D0
+        do k = 1, nsp
+          l = sidx(k)
+          if (srow(k) == scol(k)) then
+            sum = sum + 0.5D0*p(l)*(hmat(l) + fmat(l))
+          else
+            sum = sum + p(l)*(hmat(l) + fmat(l))
+          end if
+          relax = relax + fmat(l)*aorel(l)
+        end do
+        grad = (sum + enucl2)*step
+        relax = relax*step
+        do i = 1, nmos
+          ll = nelec + i
+          sum = 0.D0
+          do k = 1, nsp
+            if (srow(k) == scol(k)) then
+              sum = sum + fmat(sidx(k))*c(srow(k),ll)**2
+            else
+              sum = sum + 2.D0*fmat(sidx(k))*c(srow(k),ll)*c(scol(k),ll)
+            end if
+          end do
+          fd(i) = sum*step
+        end do
+        lcut = 1
+        if (sparse_check) call check_sparse()
+      else
       call dcopy (mpack, hmat, 1, fmat, 1)
       call dfock2 (fmat, p, pa, wmat, numat, nfirst, nlast, nati)
 !
@@ -195,6 +248,7 @@
         fd(l) = ddot(norbs,c(1,i),1,work(1,i),1)
         l = l + 1
       end do
+      end if
 !
 !     C.I-ACTIVE 2-ELECTRONS INTEGRALS DERIVATIVES. STORED IN XY.
 !   FMAT IS USED HERE AS SCRATCH SPACE
@@ -241,4 +295,76 @@
         call timer ('AFTER DERI1')
       end if
       return
+!
+      contains
+!
+!   PACKED INDICES OF THE NON-ZERO BLOCKS OF THE FOCK DERIVATIVE FOR ATOM
+!   NATI: THE DIAGONAL BLOCK OF EVERY ATOM, AND THE BLOCKS (NATI, J).
+!
+      subroutine sparse_blocks()
+        integer :: ii, mu, nu, ia, ib, ja, jb, n
+        n = 0
+        do ii = 1, numat
+          n = n + ((nlast(ii) - nfirst(ii) + 1)*(nlast(ii) - nfirst(ii) + 2))/2
+        end do
+        n = n + (nlast(nati) - nfirst(nati) + 1)*norbs
+        if (allocated(sidx)) then
+          if (size(sidx) < n) deallocate(sidx, srow, scol)
+        end if
+        if (.not. allocated(sidx)) allocate(sidx(n), srow(n), scol(n))
+        nsp = 0
+        ia = nfirst(nati)
+        ib = nlast(nati)
+        do ii = 1, numat
+          ja = nfirst(ii)
+          jb = nlast(ii)
+          do mu = ja, jb
+            do nu = ja, mu
+              call add(mu, nu)
+            end do
+          end do
+          if (ii == nati) cycle
+          do mu = ja, jb
+            do nu = ia, ib
+              call add(max(mu, nu), min(mu, nu))
+            end do
+          end do
+        end do
+      end subroutine sparse_blocks
+!
+      subroutine add(mu, nu)
+        integer, intent(in) :: mu, nu
+        nsp = nsp + 1
+        sidx(nsp) = (mu*(mu - 1))/2 + nu
+        srow(nsp) = mu
+        scol(nsp) = nu
+      end subroutine add
+!
+!   MOPAC_CI_SPARSE_CHECK=1: THE SAME QUANTITIES FROM THE FULL MATRICES,
+!   AND THE LARGEST ELEMENT OF FMAT OUTSIDE THE BLOCKS.
+!
+      subroutine check_sparse()
+        double precision, allocatable :: ff(:), wv(:)
+        double precision :: g2, r2, outside, d2
+        logical, allocatable :: inb(:)
+        allocate(ff(mpack), wv(norbs), inb(mpack))
+        call dcopy (mpack, hmat, 1, ff, 1)
+        call dfock2 (ff, p, pa, wmat, numat, nfirst, nlast, nati)
+        g2 = (helect(norbs,p,hmat,ff) + enucl2)*step
+        r2 = ddot(mpack, ff, 1, aorel, 1)*step
+        d2 = 0.D0
+        do i = 1, nmos
+          call supdot (wv, ff, c(1,nelec+i), norbs)
+          d2 = max(d2, abs(ddot(norbs, c(1,nelec+i), 1, wv, 1)*step - fd(i)))
+        end do
+        inb = .false.
+        inb(sidx(:nsp)) = .true.
+        outside = 0.D0
+        do i = 1, mpack
+          if (.not. inb(i)) outside = max(outside, abs(ff(i)))
+        end do
+        write(iw,'(a,i6,4(a,es10.3))') ' DERI1 SPARSE CHECK', number, '  GRAD', grad - g2, &
+          '  RELAX', relax - r2, '  EIG', d2, '  OUTSIDE', outside
+        deallocate(ff, wv, inb)
+      end subroutine check_sparse
       end subroutine deri1

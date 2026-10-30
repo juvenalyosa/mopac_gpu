@@ -28,6 +28,9 @@
       USE chanel_C, only : ir, iw
       use cosmo_C, only : iseps
       USE mndod_C, only : fx
+#ifdef GPU
+      use mod_vars_cuda, only : lgpu, gpu_device_usable
+#endif
       implicit none
 !
       integer , dimension(:), allocatable :: nfa
@@ -46,6 +49,11 @@
       double precision :: xx, x, gse, y, sum, summ
 !      double precision, allocatable :: overlap(:)
       double precision, external :: diagi, reada
+#ifdef GPU
+      logical :: lgpu_save
+      integer :: ci_gpu_min, env_ci_stat
+      character(len=16) :: env_ci
+#endif
       logical :: debug, large, prnt, lspin, lspin1, peci, first1, bigprt, sing, &
         doub, trip, quar, quin, sext, prnt2, geook, getmic, sept, octe, none, &
         cis, cisd, cisdt
@@ -633,7 +641,24 @@
       if (last == 3 .and. prnt2 .or. root_requested /= 1 .and. first1 .or. root_ir /= "XXXX") then
         labsiz = lab
       end if
+#ifdef GPU
+!
+!  The C.I. matrix does not grow with the number of atoms: diagonalize a large
+!  one on the GPU (eigenvectors_LAPACK, cuSOLVER from 400) even for a small
+!  molecule.  MOPAC_GPU_CI_EIGEN_MIN sets the size, 0 turns it off.
+!
+      lgpu_save = lgpu
+      if (.not. lgpu .and. gpu_device_usable) then
+        ci_gpu_min = 1000
+        call get_environment_variable('MOPAC_GPU_CI_EIGEN_MIN', env_ci, status=env_ci_stat)
+        if (env_ci_stat == 0) read(env_ci, *, iostat=env_ci_stat) ci_gpu_min
+        if (ci_gpu_min > 0 .and. lab >= ci_gpu_min) lgpu = .true.
+      end if
+#endif
       call rsp (cimat, lab, eig, conf)
+#ifdef GPU
+      lgpu = lgpu_save
+#endif
       if (bigprt .or. last > 0 .or. root_ir /= "XXXX") call symtrz (c(1,nelec+1), eig, 3, .TRUE.)
       if (bigprt) then
         write (iw, '(2/20X,''STATE VECTORS'',2/)')
