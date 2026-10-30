@@ -20,7 +20,7 @@ set(src_list
     dfield dfock2 xyzcry forsav deri22 anavib
     deri0 intfc dhcore dhc deri2 force dijkl1
     dijkl2 dernvo deri21 fmat frame deritr
-    mozyme_gpu_gradient
+    mozyme_gpu_gradient deri_zvector
    )
 #-----------------------------------------------
 # Add a list of source files to the target

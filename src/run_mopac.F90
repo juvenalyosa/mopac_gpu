@@ -69,7 +69,7 @@
 #endif
 #ifdef GPU
       use iso_c_binding
-     use mod_vars_cuda, only: lgpu, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu, &
+     use mod_vars_cuda, only: lgpu, gpu_device_usable, ngpus, gpu_id, mozyme_gpu, mozyme_gpu_min_block, mozyme_force_2gpu, &
      &                         mozyme_gpu_requested, mozyme_gpu_plan_ready, mozyme_gpu_enabled, &
      &                         mozyme_gpu_disable_reason, mozyme_fock1_batch_gpu, mozyme_fock2_4x1_batch_gpu, &
      &                         mozyme_resident_fock_gpu, &
@@ -557,6 +557,7 @@
 !  so do not use a GPU for small systems.  The lower limit, 100, is just a guess.
 !
         lgpu = (lgpu_ref .and. (natoms > 100 .or. strict_full_gpu_required))
+        gpu_device_usable = lgpu_ref
         ! Default: avoid GPU for very small systems unless strict resident SCF is requested.
         ! Optional overrides via environment variables (advanced users)
         call get_environment_variable('MOPAC_NOGPU', line, status=i)
@@ -574,6 +575,7 @@
                 goto 101
               end if
               lgpu = .false.
+              gpu_device_usable = .false.
             end select
           end if
         end if
@@ -603,6 +605,7 @@
               end if
               gpu_scf_task_mode = GPU_SCF_TASK_CPU
               lgpu = .false.
+              gpu_device_usable = .false.
             case('g','G')
               gpu_scf_task_mode = GPU_SCF_TASK_GPU
               lgpu = .true.

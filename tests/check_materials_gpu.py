@@ -22,6 +22,9 @@
   4 drc     diamond DRC TEMPERATURE=300 CYCLES=40: GPU energy conservation, GPU potential against the CPU one
   5 mozyme  (--mozyme) MOZYME with Tv: the device hcore block pairs and gradient against the CPU loops of the
             same run (urea 192, quartz 162), then 768-atom urea against a CPU reference
+  6 ci      (--ci) analytical C.I. gradients (half-electron, excited states): the one-solve Z-vector relaxation
+            against the per-coordinate DERI2 loop (benzene + water, GPU forced), and 140-atom chignolin doublet
+            RHF on the GPU against the CPU, C.I.=8 (4900 microstates, C.I. matrix diagonalized on the GPU)
 
     python3 tests/check_materials_gpu.py build/mopac --work-dir /scratch/$USER/materials [--skip-force] ...
 
@@ -314,6 +317,57 @@ def mozyme_step(mopac, work):
                   flush=True)
 
 
+GRAD_RE = re.compile(r"^\s+\d+\s+\d+\s+\w+\s+CARTESIAN [XYZ]\s+\S+\s+(\S+)\s+KCAL/ANGSTROM", re.M)
+CI_SMALL = (("s1", "PM7 1SCF GRADIENTS C.I.=2 ROOT=2 SINGLET"),
+            ("cation_ci3", "PM7 1SCF GRADIENTS CHARGE=1 DOUBLET RHF C.I.=3"),
+            ("triplet", "PM7 1SCF GRADIENTS TRIPLET OPEN(2,2)"))
+
+
+def deriv_wall(text):
+    m = re.findall(r"AFTER  DERIV .*WALL-CLOCK INTERVAL:\s*([\d.]+)", text)
+    return float(m[-1]) if m else None
+
+
+def ci_step(mopac, work):
+    # The relaxation of the analytical C.I. gradient (dernvo) solves one linear system for all coordinates
+    # (deri_zvector); MOPAC_CI_ZVECTOR=0 restores the per-coordinate DERI2 solves (converged to 1e-5 only)
+    deck = DATA / "molecules" / "benzene_water.mop"
+    for tag, keys in CI_SMALL:
+        tz, _ = run(mopac, work / "ci" / tag, "z", keys, deck, GPU_ENV)
+        to, _ = run(mopac, work / "ci" / tag, "deri2", keys, deck, dict(GPU_ENV, MOPAC_CI_ZVECTOR="0"))
+        gz = [float(x) for x in GRAD_RE.findall(tz)]
+        go = [float(x) for x in GRAD_RE.findall(to)]
+        d = max((abs(a - b) for a, b in zip(gz, go)), default=float("nan"))
+        print(f"[materials] ci {tag}: heat {heat(tz)} / {heat(to)}, max |grad Z-vector - DERI2| {d:.2e} "
+              f"kcal/mol/A over {len(gz)} / {len(go)}", flush=True)
+        result(len(gz) == len(go) == 45 and d <= 1e-3, f"ci {tag}: Z-vector gradient within 1e-3 of DERI2 ({d:.2e})")
+    deck = DATA / "molecules" / "chignolin.mop"
+    keys = "PM7 1SCF GRADIENTS CHARGE=3 DOUBLET RHF GEO-OK TIMES"
+    res = {}
+    for mode, env in (("gpu", GPU_ENV), ("cpu", {"MOPAC_NOGPU": "1"})):
+        text, wall = run(mopac, work / "ci" / "chignolin", mode, keys, deck, env)
+        res[mode] = (text, [float(x) for x in GRAD_RE.findall(text)])
+        print(f"[materials] ci chignolin {mode}: {wall:.1f} s, DERIV {deriv_wall(text)} s, heat {heat(text)}",
+              flush=True)
+    (tg, gg), (tc, gc) = res["gpu"], res["cpu"]
+    d = max((abs(a - b) for a, b in zip(gg, gc)), default=float("nan"))
+    hg, hc = heat(tg), heat(tc)
+    result(hg is not None and hc is not None and abs(hg - hc) <= 1e-3,
+           f"ci chignolin: heat GPU - CPU {(hg or float('nan')) - (hc or float('nan')):+.5f} kcal/mol")
+    result(len(gg) == len(gc) == 420 and d <= 0.01, f"ci chignolin: max |grad GPU - CPU| {d:.2e} kcal/mol/A")
+    # C.I.=8 singlet: 4900 microstates; MECI diagonalizes the C.I. matrix on the GPU (cuSOLVER) from 1000
+    # (MOPAC_GPU_CI_EIGEN_MIN) even for a 15-atom molecule, where lgpu is off
+    deck = DATA / "molecules" / "benzene_water.mop"
+    keys = "PM7 1SCF C.I.=8 ROOT=2 SINGLET"
+    res = {}
+    for mode, env in (("gpu", {"MOPAC_GPU_DEBUG": "1"}), ("cpu", {"MOPAC_NOGPU": "1"})):
+        text, wall = run(mopac, work / "ci" / "ci8", mode, keys, deck, env)
+        res[mode] = heat(text)
+        print(f"[materials] ci C.I.=8 {mode}: {wall:.1f} s, heat {res[mode]}", flush=True)
+    result(res["gpu"] is not None and res["cpu"] is not None and abs(res["gpu"] - res["cpu"]) <= 1e-4,
+           f"ci C.I.=8: heat GPU - CPU {(res['gpu'] or float('nan')) - (res['cpu'] or float('nan')):+.6f} kcal/mol")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mopac")
@@ -323,6 +377,7 @@ def main():
     ap.add_argument("--skip-force", action="store_true")
     ap.add_argument("--skip-drc", action="store_true")
     ap.add_argument("--mozyme", action="store_true", help="also run the MOZYME-with-Tv step")
+    ap.add_argument("--ci", action="store_true", help="also run the analytical C.I. gradient step")
     a = ap.parse_args()
     mopac = str(Path(a.mopac).resolve())
     work = Path(a.work_dir).resolve()
@@ -342,6 +397,8 @@ def main():
         drc_step(mopac, work)
     if a.mozyme:
         mozyme_step(mopac, work)
+    if a.ci:
+        ci_step(mopac, work)
     if failures:
         print(f"{len(failures)} check(s) failed")
         return 1

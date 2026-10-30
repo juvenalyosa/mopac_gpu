@@ -19,16 +19,17 @@
 !-----------------------------------------------
       USE molkst_C, only : numcal, numat, nopen, nclose, norbs, gnorm, &
       & fract, keywrd, mpack, moperr, lm61, n2elec
-      use meci_C, only : nbo, nmos, nelec, lab
+      use meci_C, only : nbo, nmos, nelec, lab, nstate
       use common_arrays_C, only : eigs, dxyz
       use chanel_C, only : iw
+      USE funcon_C, only : fpc_9
 !***********************************************************************
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
 !-----------------------------------------------
       implicit none
       double precision, dimension(:), allocatable  :: scalar, diag, fmooff, &
-      work
+      work, zvec, cvec, aorel
 !-----------------------------------------------
 !   L o c a l   V a r i a b l e s
 !-----------------------------------------------
@@ -37,9 +38,12 @@
       double precision, dimension(nmos*norbs + 1) :: fmoon
       double precision, dimension(3*numat) :: dxyzr
       double precision, dimension(nmos*norbs*20) :: eigbb
-      double precision :: sum, throld, sumx, sumy, sumz
-      logical :: debug, dcar, large, relaxd
-      character :: blank*60
+      double precision :: sum, throld, sumx, sumy, sumz, relax
+      logical :: debug, dcar, large, relaxd, zok
+      character :: blank*60, env*8
+      integer :: env_stat
+      integer(8) :: tick0, tick1, tick2, rate
+      double precision, external :: ddot
 
       save  debug, dcar, large,  minear, ninear, nvax, icalcn, &
       & diag, scalar, fmooff
@@ -134,6 +138,30 @@
 !        SCALING ROW FACTORS TO SPEED CV OF RELAXATION PROCEDURE.
       call deri0 (eigs, norbs, scalar, diag, fract, nbo)
 !
+!   Z-VECTOR: ONE RELAXATION SOLVE FOR ALL THE COORDINATES INSTEAD OF ONE
+!   PER COORDINATE IN DERI2 (MOPAC_CI_ZVECTOR=0: THE DERI2 LOOP).
+!
+      zok = .false.
+      call get_environment_variable('MOPAC_CI_ZVECTOR', env, status=env_stat)
+      if (env_stat /= 0 .or. trim(env) /= '0') then
+        allocate(zvec(minear), cvec(ninear), aorel(mpack))
+        call system_clock(tick0, rate)
+        call deri_zvector(minear, ninear, scalar, diag, zvec, cvec, aorel, zok)
+        if (moperr) goto 99
+      end if
+      if (zok) then
+        call system_clock(tick1)
+        do i = 1, nvax
+          call deri1 (i, dxyz(i), fmooff, minear, fmoon, scalar, work, 1, aorel, relax)
+          dxyz(i) = dxyz(i) + relax*fpc_9/nstate
+        end do
+        call system_clock(tick2)
+        if (index(keywrd, ' DERI2') /= 0 .or. index(keywrd, 'DERNVO') /= 0) &
+          write(iw, '(a,f10.3,a,f10.3,a,i6,a)') ' DERNVO: Z-VECTOR', dble(tick1 - tick0)/rate, &
+          ' S, DERI1 LOOP', dble(tick2 - tick1)/rate, ' S (', nvax, ' COORDINATES)'
+        goto 99
+      end if
+!
 !   BECAUSE DERI2 IS CPU INTENSIVE, AND THE CONTRIBUTION TO THE
 !   DERIVATIVE DUE TO RELAXATION OF THE ELECTRON CLOUD IS RELATIVELY
 !   INSENSITIVE TO CHANGES IN GEOMETRY, WHERE POSSIBLE ONLY CALCULATE
@@ -168,7 +196,7 @@
 !   CONTENTS OF F-MO-ON:  CLOSED-CLOSED, OPEN-OPEN AND VIRTUAL-VIRTUAL
 !   OVER M.O. INDICES
 !
-        call deri1 (i, dxyz(i), fmooff(j), minear, fmoon(k), scalar, work)
+        call deri1 (i, dxyz(i), fmooff(j), minear, fmoon(k), scalar, work, 0, fmooff, relax)
       end do
       if (debug) then
         if (ifirst==1 .and. large) then
@@ -283,6 +311,9 @@
         write (iw, *)
       end if
   99  continue
+      if(allocated(zvec))   deallocate(zvec)
+      if(allocated(cvec))   deallocate(cvec)
+      if(allocated(aorel))  deallocate(aorel)
       if(allocated(scalar)) deallocate(scalar)
       if(allocated(diag))   deallocate(diag)
       if(allocated(fmooff)) deallocate(fmooff)
