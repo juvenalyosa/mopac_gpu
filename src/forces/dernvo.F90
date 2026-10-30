@@ -23,6 +23,9 @@
       use common_arrays_C, only : eigs, dxyz
       use chanel_C, only : iw
       USE funcon_C, only : fpc_9
+#ifdef GPU
+      use mod_vars_cuda, only : lgpu
+#endif
 !***********************************************************************
 !-----------------------------------------------
 !   I n t e r f a c e   B l o c k s
@@ -43,6 +46,7 @@
       character :: blank*60, env*8
       integer :: env_stat
       integer(8) :: tick0, tick1, tick2, rate
+      logical :: lgpu_save, host_blas
       double precision, external :: ddot
 
       save  debug, dcar, large,  minear, ninear, nvax, icalcn, &
@@ -142,6 +146,7 @@
 !   PER COORDINATE IN DERI2 (MOPAC_CI_ZVECTOR=0: THE DERI2 LOOP).
 !
       zok = .false.
+      host_blas = .false.
       call get_environment_variable('MOPAC_CI_ZVECTOR', env, status=env_stat)
       if (env_stat /= 0 .or. trim(env) /= '0') then
         allocate(zvec(minear), cvec(ninear), aorel(mpack))
@@ -161,6 +166,16 @@
           ' S, DERI1 LOOP', dble(tick2 - tick1)/rate, ' S (', nvax, ' COORDINATES)'
         goto 99
       end if
+!
+!   The per-coordinate DERI2 loop runs with host BLAS: with the GPU forced on
+!   (A100, 15-atom molecule) its gradients were wrong by up to 5000 kcal/mol/A,
+!   while the Z-vector path with the same DERI22 on the GPU matches the CPU.
+!
+#ifdef GPU
+      lgpu_save = lgpu
+      lgpu = .false.
+      host_blas = .true.
+#endif
 !
 !   BECAUSE DERI2 IS CPU INTENSIVE, AND THE CONTRIBUTION TO THE
 !   DERIVATIVE DUE TO RELAXATION OF THE ELECTRON CLOUD IS RELATIVELY
@@ -311,6 +326,9 @@
         write (iw, *)
       end if
   99  continue
+#ifdef GPU
+      if (host_blas) lgpu = lgpu_save
+#endif
       if(allocated(zvec))   deallocate(zvec)
       if(allocated(cvec))   deallocate(cvec)
       if(allocated(aorel))  deallocate(aorel)
