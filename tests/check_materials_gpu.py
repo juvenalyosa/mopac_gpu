@@ -376,7 +376,9 @@ SMALL_CELLS = ("diamond", "quartz", "rutile", "silicon", "urea", "zno", "mgo_wat
 
 def smear_step(mopac, work, medium):
     # SMEAR=0.1 in the insulators: -TS ~ 0, so the heat must be that of the default SCF if both reach the same
-    # state (mgo_water does not: 3 kcal/mol higher, gap 2.0 vs 2.8 eV, Mac CPU 2026-10-31)
+    # state.  mgo_water is printed only: SMEAR ends 3 kcal/mol above the CPU default (gap 2.0 vs 2.8 eV), and with
+    # the GPU forced the default SCF uses the pseudo-diagonalization, which does not converge for that slab
+    # (1998 iterations, A100 2026-10-31; known, docs/GPU_GUIDE.md MOPAC_PDIAG)
     for name in SMALL_CELLS + tuple(medium):
         deck = DATA / ("medium" if name in medium else "small") / f"{name}.mop"
         res = {}
