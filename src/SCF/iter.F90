@@ -71,6 +71,7 @@
       logical :: pd_on
       integer :: pd_start, pd_every, pd_last_full, pd_rotations
       double precision :: pd_xmax, pd_gmax, pd_glast, pd_grow
+      double precision :: smear_kt, smear_mts, smear_ef   ! SMEAR: kT (eV), -TS (eV), Fermi level (eV)
       double precision :: enrgy, sellim, summ, eold_alpha, eold_beta, ofract, sum1, sum2, diff, eold, escf, titer
       double precision, dimension(norbs) :: theta
       ! Hybrid SCF controls (EDIIS->CDIIS), damping and adaptive shift
@@ -104,7 +105,8 @@
         shfmax, capps, ten, tenold, incitr, irrr, plchek, timitr, &
         scorr, shfto, shftbo, titer0, jalp, ialp, jbet, ibet, enrgy, &
         iopc_calcp, solid_shift, hybrid_enable, adaptive_shift_on, damp_enable, &
-        pd_on, pd_start, pd_every, pd_xmax, pd_grow, pulay_after, pulay_kw
+        pd_on, pd_start, pd_every, pd_xmax, pd_grow, pulay_after, pulay_kw, &
+        smear_kt, smear_mts, smear_ef
       data icalcn/ 0/
       data debug/ .FALSE./
       data prtfok/ .FALSE./
@@ -272,7 +274,34 @@
 !  both end in a state with a 0.1 eV gap 164 kcal/mol too high, 20 eV + damping in the insulating
 !  one (gap 7 eV); 162 atoms 288 / 60 / 26 iterations, 80 eV stops 0.008 kcal/mol short.
 !
-        if (index(keywrd,' SHIFT') /= 0) then
+!
+!  SMEAR=kT (eV; SMEAR alone: 0.1 eV): Fermi-Dirac occupations of the RHF levels and the Mermin
+!  free energy E - TS, for metals and small gaps.  The level shift would move the virtual levels
+!  that the occupations depend on, so it is off, and so is the pseudo-diagonalization (no
+!  eigenvalues).  Pulay's converger is on from the start: without it (CNVG alone) the SCF
+!  oscillates.  PM7, SMEAR=0.1: urea crystal 192 atoms 8 iterations (default SCF 45), Li 54
+!  12, graphene 6x6 23 (SMEAR=0.3: 24); Anderson mixing of the densities took 76-93 and
+!  ended higher in graphene.
+!
+        smear_kt = 0.d0
+        smear_mts = 0.d0
+        smear_ef = 0.d0
+        if (index(keywrd,' SMEAR') /= 0) then
+          smear_kt = 0.1d0
+          if (index(keywrd,' SMEAR=') /= 0) smear_kt = reada(keywrd, index(keywrd,' SMEAR='))
+          if (uhf .or. nopen /= nclose) then
+            write (iw, '(/10x,a)') 'SMEAR IS FOR CLOSED-SHELL RHF ONLY; IT IS IGNORED'
+            smear_kt = 0.d0
+          else if (smear_kt <= 0.d0) then
+            smear_kt = 0.d0
+          else
+            write (iw, '(/10x,a,f8.4,a)') 'FERMI-DIRAC OCCUPATIONS, kT =', smear_kt, ' EV (NO LEVEL SHIFT)'
+            bshift = 0.d0
+          end if
+        end if
+        if (smear_kt > 0.d0) then
+          solid_shift = 0.d0
+        else if (index(keywrd,' SHIFT') /= 0) then
           solid_shift = bshift
         else
           solid_shift = -80.D0
@@ -285,7 +314,7 @@
         if (Abs(bshift) > 1.d-20) ten = bshift
         if (index(keywrd,' ITRY') /= 0) itrmax = nint(reada(keywrd,index(keywrd,' ITRY')))
         ci = index(keywrd,' MICROS') + index(keywrd,' C.I.') /= 0 .and. .not. method_indo
-        okpuly = index(keywrd,' PULAY') /= 0
+        okpuly = index(keywrd,' PULAY') /= 0 .or. smear_kt > 0.d0
         pulay_kw = okpuly
 !
 !  Solids: Pulay's converger once an SCF has taken MOPAC_SOLID_PULAY_AFTER iterations (default 50,
@@ -1089,6 +1118,7 @@
       else
         if (bshift /= 0.D0) scorr = shift*(nopen - nclose)*enrgy*0.25D0*(fract*(2.D0 - fract))
       end if
+      if (smear_kt > 0.d0) ee = ee + smear_mts   ! Mermin free energy E - TS
       escf = (ee + enuclr)*enrgy + atheat + scorr
       getout = .FALSE.
   410 continue
@@ -1380,7 +1410,17 @@
             call cnvg (pa, pold, pold2,  i, pl)
           end if
         else
-          if (halfe) then
+          if (smear_kt > 0.d0) then
+#ifdef GPU
+            if (have_device_eigvecs) call eigenvectors_CUDA_fetch(c, norbs)
+            call fetch_packed_density_if_needed(p, mpack, need_fetch_p, 'p', niter)
+#endif
+            call fermi_density(c, eigs, norbs, na2el, smear_kt, p, smear_mts, smear_ef)
+#ifdef GPU
+            if (resident_scf) call mopac_cuda_update_density_from_host(mpack, p)
+            if (resident_scf) need_fetch_p = .false.
+#endif
+          else if (halfe) then
             call densit (c, norbs, norbs, na2el, 2.d0, na1el, fract, p, 1)
 #ifdef GPU
             if (resident_scf) call mopac_cuda_update_density_from_host(mpack, p)
@@ -1631,6 +1671,12 @@
         ee = ee*2.D0
       end if
       if (capps) ee = ee + capcor(nat,nfirst,nlast,p,h)
+      if (smear_kt > 0.d0) then
+        ee = ee + smear_mts   ! Mermin free energy E - TS
+        if (last == 1 .or. prtpl .or. debug) write (iw, '(/10x,a,f10.4,a,f12.6,a,/10x,a,f14.6,a)') &
+          'FERMI LEVEL =', smear_ef, ' EV,  -TS =', smear_mts*enrgy, ' KCAL/MOL', &
+          'E(kT -> 0) ~ E - TS/2: FREE ENERGY +', -0.5d0*smear_mts*enrgy, ' KCAL/MOL'
+      end if
       if (timitr) call timer ('BEFORE FINAL DIAG')
       if (nscf==0 .or. last==1 .or. ci .or. halfe) then
 !
@@ -1687,7 +1733,8 @@
 !  occupied-virtual coupling grew by more than a factor MOPAC_PDIAG_GROW (default 4).
 !
         logical function pdiag_step()
-          pdiag_step = pd_on .and. .not. (uhf .or. halfe .or. ci) .and. niter > pd_start .and. &
+          pdiag_step = pd_on .and. .not. (uhf .or. halfe .or. ci) .and. smear_kt == 0.d0 .and. &
+            niter > pd_start .and. &
             pd_last_full > 0 .and. niter - pd_last_full < pd_every
         end function pdiag_step
 

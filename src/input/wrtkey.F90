@@ -2304,6 +2304,14 @@ subroutine wrtwor (allkey)
 10940 format (" *  SHIFT      - A DAMPING FACTOR OF", f8.2, " DEFINED")
     write (iw, 10940) reada (keywrd, Index (keywrd, " SHIFT"))
   end if
+  if (myword(allkey, " SMEAR")) then
+    if (index(keywrd, " SMEAR=") /= 0) then
+      write (iw, '(" *  SMEAR=     - FERMI-DIRAC OCCUPATIONS, kT =", f8.4, " EV")') &
+        reada (keywrd, index(keywrd, " SMEAR="))
+    else
+      write (iw, '(" *  SMEAR      - FERMI-DIRAC OCCUPATIONS, kT = 0.1 EV")')
+    end if
+  end if
   if (myword(allkey, " FILL")) then
 10950 format (" *  FILL=      - IN RHF CLOSED SHELL, FORCE M.O.", i3, &
    & " TO BE FILLED")

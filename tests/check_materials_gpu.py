@@ -25,6 +25,9 @@
   6 ci      (--ci) analytical C.I. gradients (half-electron, excited states): the one-solve Z-vector relaxation
             against the per-coordinate DERI2 loop (benzene + water, GPU forced), and 140-atom chignolin doublet
             RHF on the GPU against the CPU, C.I.=8 (4900 microstates, C.I. matrix diagonalized on the GPU)
+  7 smear   (--smear) SMEAR (Fermi-Dirac occupations, Pulay's converger, no level shift): the small cells and the
+            medium cells at kT = 0.1 eV against the default SCF (same state expected in the insulators), graphene
+            6x6 at kT = 0.3 eV on the GPU against the CPU
 
     python3 tests/check_materials_gpu.py build/mopac --work-dir /scratch/$USER/materials [--skip-force] ...
 
@@ -368,6 +371,43 @@ def ci_step(mopac, work):
            f"ci C.I.=8: heat GPU - CPU {(res['gpu'] or float('nan')) - (res['cpu'] or float('nan')):+.6f} kcal/mol")
 
 
+SMALL_CELLS = ("diamond", "quartz", "rutile", "silicon", "urea", "zno", "mgo_water")
+
+
+def smear_step(mopac, work, medium):
+    # SMEAR=0.1 in the insulators: -TS ~ 0, so the heat must be that of the default SCF if both reach the same
+    # state.  mgo_water is printed only: SMEAR ends 3 kcal/mol above the CPU default (gap 2.0 vs 2.8 eV), and with
+    # the GPU forced the default SCF uses the pseudo-diagonalization, which does not converge for that slab
+    # (1998 iterations, A100 2026-10-31; known, docs/GPU_GUIDE.md MOPAC_PDIAG)
+    for name in SMALL_CELLS + tuple(medium):
+        deck = DATA / ("medium" if name in medium else "small") / f"{name}.mop"
+        res = {}
+        for mode, keys in (("default", "PM7 1SCF GEO-OK PL TIMES"), ("smear", "PM7 1SCF GEO-OK PL TIMES SMEAR=0.1")):
+            text, wall = run(mopac, work / "smear" / name, mode, keys, deck, GPU_ENV)
+            res[mode] = (heat(text), len(re.findall(r"^\s*ITERATION\s+\d+", text, re.M)), wall)
+        (hd, nd, wd), (hs, ns, ws) = res["default"], res["smear"]
+        dh = (hs or float("nan")) - (hd or float("nan"))
+        print(f"[materials] smear {name}: default {nd} iterations {wd:.1f} s heat {hd}, SMEAR=0.1 {ns} iterations "
+              f"{ws:.1f} s heat {hs} ({dh:+.5f})", flush=True)
+        if name != "mgo_water":
+            result(abs(dh) <= 0.01, f"smear {name}: SMEAR=0.1 heat - default heat {dh:+.5f} kcal/mol")
+    deck = DATA / "small" / "graphene.mop"
+    keys = "PM7 1SCF GRADIENTS GEO-OK SMEAR=0.3"
+    res = {}
+    for mode, env in (("gpu", GPU_ENV), ("cpu", {"MOPAC_NOGPU": "1"})):
+        text, wall = run(mopac, work / "smear" / "graphene", mode, keys, deck, env)
+        mts = re.findall(r"-TS =\s*(-?[\d.]+)", text)
+        res[mode] = (heat(text), [float(x) for x in GRAD_RE.findall(text)])
+        print(f"[materials] smear graphene {mode}: {wall:.1f} s, heat {res[mode][0]}, -TS {mts[-1] if mts else None}",
+              flush=True)
+    (hg, gg), (hc, gc) = res["gpu"], res["cpu"]
+    d = max((abs(a - b) for a, b in zip(gg, gc)), default=float("nan"))
+    result(hg is not None and hc is not None and abs(hg - hc) <= 1e-3,
+           f"smear graphene: heat GPU - CPU {(hg or float('nan')) - (hc or float('nan')):+.5f} kcal/mol")
+    # 72 atoms and 2 Tv: 222 components
+    result(len(gg) == len(gc) == 222 and d <= 0.01, f"smear graphene: max |grad GPU - CPU| {d:.2e} kcal/mol/A")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mopac")
@@ -378,6 +418,7 @@ def main():
     ap.add_argument("--skip-drc", action="store_true")
     ap.add_argument("--mozyme", action="store_true", help="also run the MOZYME-with-Tv step")
     ap.add_argument("--ci", action="store_true", help="also run the analytical C.I. gradient step")
+    ap.add_argument("--smear", action="store_true", help="also run the SMEAR step (with the --medium cells)")
     a = ap.parse_args()
     mopac = str(Path(a.mopac).resolve())
     work = Path(a.work_dir).resolve()
@@ -399,6 +440,8 @@ def main():
         mozyme_step(mopac, work)
     if a.ci:
         ci_step(mopac, work)
+    if a.smear:
+        smear_step(mopac, work, [m for m in a.medium.split(",") if m])
     if failures:
         print(f"{len(failures)} check(s) failed")
         return 1
