@@ -7168,6 +7168,106 @@ void mopac_cuda_fetch_eigenvectors(int n, double *A, int lda) {
   mz_add_section_ms("scf_eigvec_d2h", mz_host_ms_since(t0));
 }
 
+// --- SMEAR and Pulay helpers (src/SCF/fermi_density.F90, src/SCF/pulay.F90) ---
+__global__ void unpack_lower_packed_kernel(const double *fp, double *F, int n);
+// Packed index k (MOPAC lower triangle row-wise = LAPACK 'U' packed column-wise) -> (i <= j), 0-based.
+__device__ inline void packed_ij(size_t k, size_t *i, size_t *j) {
+  size_t c = (size_t)((sqrt(8.0 * (double)k + 1.0) - 1.0) * 0.5);
+  while (c * (c + 1) / 2 > k) --c;
+  while ((c + 1) * (c + 2) / 2 <= k) ++c;
+  *j = c;
+  *i = k - c * (c + 1) / 2;
+}
+
+// out(k) = G(i,j) - G(j,i), i <= j: the packed commutator of sym_commute in pulay.F90 when G = P F
+__global__ void commutator_pack_kernel(const double *G, double *out, int n) {
+  const size_t k = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+  if (k >= (size_t)n * (size_t)(n + 1) / 2) return;
+  size_t i, j;
+  packed_ij(k, &i, &j);
+  out[k] = G[i + j * (size_t)n] - G[j + i * (size_t)n];
+}
+
+// out(k) = C(i,j), i <= j (upper triangle of a symmetric matrix)
+__global__ void upper_pack_kernel(const double *C, double *out, int n) {
+  const size_t k = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+  if (k >= (size_t)n * (size_t)(n + 1) / 2) return;
+  size_t i, j;
+  packed_ij(k, &i, &j);
+  out[k] = C[i + j * (size_t)n];
+}
+
+// W(:, a) = s(a) V(:, a), a < m
+__global__ void scale_columns_kernel(const double *V, const double *s, double *W, int n, int m) {
+  const size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= (size_t)n * (size_t)m) return;
+  W[idx] = V[idx] * s[idx / (size_t)n];
+}
+
+// Pulay residual: cp = packed (P F - F P) from packed F and P (n orbitals).  Returns 1 on success.
+extern "C" int mopac_cuda_commutator_packed(int n, const double *fp, const double *pp, double *cp) {
+  if (!g_blas) create_handle();
+  if (!g_blas || n <= 0) return 0;
+  const size_t nn = (size_t)n * (size_t)n;
+  const size_t npack = (size_t)n * (size_t)(n + 1) / 2;
+  static DevBuf<double> d_fp, d_pp, d_F, d_P, d_G;
+  bool ok = d_fp.ensure(npack * sizeof(double)) && d_pp.ensure(npack * sizeof(double)) &&
+            d_F.ensure(nn * sizeof(double)) && d_P.ensure(nn * sizeof(double)) && d_G.ensure(nn * sizeof(double));
+  if (!ok) return 0;
+  const auto t0 = std::chrono::steady_clock::now();
+  ok = report_cuda_error("commutator sync", cudaStreamSynchronize(g_stream)) &&
+       mopac_pinned_h2d(d_fp.ptr, fp, npack * sizeof(double)) == 1 &&
+       mopac_pinned_h2d(d_pp.ptr, pp, npack * sizeof(double)) == 1 &&
+       report_cublas_error("commutator cublasSetStream", cublasSetStream(g_blas, g_stream));
+  if (!ok) return 0;
+  const unsigned gn = (unsigned)((nn + 255) / 256), gp = (unsigned)((npack + 255) / 256);
+  unpack_lower_packed_kernel<<<gn, 256, 0, g_stream>>>(d_fp.ptr, d_F.ptr, n);
+  unpack_lower_packed_kernel<<<gn, 256, 0, g_stream>>>(d_pp.ptr, d_P.ptr, n);
+  const double one = 1.0, zero = 0.0;
+  ok = report_cublas_error("commutator P F", cublasDgemm(g_blas, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &one, d_P.ptr, n,
+                                                          d_F.ptr, n, &zero, d_G.ptr, n));
+  if (!ok) return 0;
+  commutator_pack_kernel<<<gp, 256, 0, g_stream>>>(d_G.ptr, d_fp.ptr, n);
+  ok = report_cuda_error("commutator kernels", cudaGetLastError()) &&
+       report_cuda_error("commutator sync", cudaStreamSynchronize(g_stream)) &&
+       mopac_pinned_d2h(cp, d_fp.ptr, npack * sizeof(double)) == 1;
+  mz_add_section_ms("scf_pulay_commutator", mz_host_ms_since(t0));
+  return ok ? 1 : 0;
+}
+
+// SMEAR density p = sum_{a<m} s(a)^2 V(:,a) V(:,a)^T from the eigenvectors of the last keep diagonalization,
+// packed into pp (host).  s = sqrt of the Fermi-Dirac occupations.  Returns 1 on success.
+extern "C" int mopac_cuda_fermi_density_packed(int n, int m, const double *s, double *pp) {
+  if (!g_blas) create_handle();
+  if (!g_blas || !g_have_device_eigvecs || n != g_device_eigvecs_n || m <= 0 || m > n) return 0;
+  const size_t nn = (size_t)n * (size_t)n;
+  const size_t npack = (size_t)n * (size_t)(n + 1) / 2;
+  static DevBuf<double> d_s, d_W, d_C, d_pp;
+  bool ok = d_s.ensure((size_t)m * sizeof(double)) && d_W.ensure((size_t)n * m * sizeof(double)) &&
+            d_C.ensure(nn * sizeof(double)) && d_pp.ensure(npack * sizeof(double));
+  if (!ok) return 0;
+  const auto t0 = std::chrono::steady_clock::now();
+  ok = report_cublas_error("fermi cublasSetStream", cublasSetStream(g_blas, g_stream)) &&
+       report_cuda_error("fermi s host->device",
+                         cudaMemcpyAsync(d_s.ptr, s, (size_t)m * sizeof(double), cudaMemcpyHostToDevice, g_stream));
+  if (!ok) return 0;
+  scale_columns_kernel<<<(unsigned)(((size_t)n * m + 255) / 256), 256, 0, g_stream>>>(g_dsyevd_A.ptr, d_s.ptr,
+                                                                                      d_W.ptr, n, m);
+  const double one = 1.0, zero = 0.0;
+  ok = report_cublas_error("fermi dsyrk", cublasDsyrk(g_blas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N, n, m, &one,
+                                                      d_W.ptr, n, &zero, d_C.ptr, n));
+  if (!ok) return 0;
+  upper_pack_kernel<<<(unsigned)((npack + 255) / 256), 256, 0, g_stream>>>(d_C.ptr, d_pp.ptr, n);
+  ok = report_cuda_error("fermi kernels", cudaGetLastError()) &&
+       report_cuda_error("fermi sync", cudaStreamSynchronize(g_stream)) &&
+       mopac_pinned_d2h(pp, d_pp.ptr, npack * sizeof(double)) == 1;
+  // the density caches of density_for_GPU do not hold this density
+  g_density_full_valid = false;
+  invalidate_packed_density();
+  mz_add_section_ms("scf_fermi_density", mz_host_ms_since(t0));
+  return ok ? 1 : 0;
+}
+
 // --- Pseudo-diagonalization of the device eigenvectors (src/SCF/pseudo_diag_gemm.F90) ---
 // Packed lower triangle (row-wise: (i, j <= i) at i(i-1)/2 + j, 1-based) to a full symmetric matrix.
 __global__ void unpack_lower_packed_kernel(const double *fp, double *F, int n) {
