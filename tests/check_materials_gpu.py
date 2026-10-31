@@ -28,6 +28,8 @@
   7 smear   (--smear) SMEAR (Fermi-Dirac occupations, Pulay's converger, no level shift): the small cells and the
             medium cells at kT = 0.1 eV against the default SCF (same state expected in the insulators), graphene
             6x6 at kT = 0.3 eV on the GPU against the CPU
+  8 pulay   (--solid-pulay) MOPAC_SOLID_SCF=pulay (no level shift, Pulay from the start) against the default
+            SCF of solids: the --medium cells and rutile 162 on the GPU (iterations, time, heat, gap)
 
     python3 tests/check_materials_gpu.py build/mopac --work-dir /scratch/$USER/materials [--skip-force] ...
 
@@ -408,6 +410,28 @@ def smear_step(mopac, work, medium):
     result(len(gg) == len(gc) == 222 and d <= 0.01, f"smear graphene: max |grad GPU - CPU| {d:.2e} kcal/mol/A")
 
 
+def gap(text):
+    m = re.findall(r"HOMO LUMO ENERGIES \(EV\) =\s+(-?[\d.]+)\s+(-?[\d.]+)", text)
+    return float(m[-1][1]) - float(m[-1][0]) if m else None
+
+
+def solid_pulay_step(mopac, work, medium):
+    # Mac CPU 2026-10-31: same state as the default in the small insulators and rutile / quartz 162, si144, in
+    # 7-8 iterations instead of 15-45; MgO + water ends 23 kcal/mol higher, graphene in another minimum
+    cells = [("grad", "rutile162")] + [("medium", m) for m in medium]
+    for sub, name in cells:
+        deck = DATA / sub / f"{name}.mop"
+        res = {}
+        for mode, env in (("default", {"MOPAC_GPU_DEBUG": "1"}), ("pulay", {"MOPAC_GPU_DEBUG": "1", "MOPAC_SOLID_SCF": "pulay"})):
+            text, wall = run(mopac, work / "solid_pulay" / name, mode, "PM7 1SCF GEO-OK PL", deck, env)
+            res[mode] = (heat(text), len(re.findall(r"^\s*ITERATION\s+\d+", text, re.M)), wall, gap(text))
+        (hd, nd, wd, gd), (hp, np_, wp, gp) = res["default"], res["pulay"]
+        dh = (hp or float("nan")) - (hd or float("nan"))
+        print(f"[materials] solid-pulay {name}: default {nd} iterations {wd:.1f} s heat {hd} gap {gd}, pulay {np_} "
+              f"iterations {wp:.1f} s heat {hp} gap {gp} ({dh:+.5f})", flush=True)
+        result(abs(dh) <= 0.01, f"solid-pulay {name}: heat pulay - default {dh:+.5f} kcal/mol")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mopac")
@@ -419,6 +443,7 @@ def main():
     ap.add_argument("--mozyme", action="store_true", help="also run the MOZYME-with-Tv step")
     ap.add_argument("--ci", action="store_true", help="also run the analytical C.I. gradient step")
     ap.add_argument("--smear", action="store_true", help="also run the SMEAR step (with the --medium cells)")
+    ap.add_argument("--solid-pulay", action="store_true", help="also compare MOPAC_SOLID_SCF=pulay with the default SCF")
     a = ap.parse_args()
     mopac = str(Path(a.mopac).resolve())
     work = Path(a.work_dir).resolve()
@@ -442,6 +467,8 @@ def main():
         ci_step(mopac, work)
     if a.smear:
         smear_step(mopac, work, [m for m in a.medium.split(",") if m])
+    if a.solid_pulay:
+        solid_pulay_step(mopac, work, [m for m in a.medium.split(",") if m])
     if failures:
         print(f"{len(failures)} check(s) failed")
         return 1

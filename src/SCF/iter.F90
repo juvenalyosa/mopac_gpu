@@ -72,6 +72,7 @@
       integer :: pd_start, pd_every, pd_last_full, pd_rotations
       double precision :: pd_xmax, pd_gmax, pd_glast, pd_grow
       double precision :: smear_kt, smear_mts, smear_ef   ! SMEAR: kT (eV), -TS (eV), Fermi level (eV)
+      logical :: solid_pulay   ! MOPAC_SOLID_SCF=pulay: solids without level shift, Pulay from the start
       double precision :: enrgy, sellim, summ, eold_alpha, eold_beta, ofract, sum1, sum2, diff, eold, escf, titer
       double precision, dimension(norbs) :: theta
       ! Hybrid SCF controls (EDIIS->CDIIS), damping and adaptive shift
@@ -106,7 +107,7 @@
         scorr, shfto, shftbo, titer0, jalp, ialp, jbet, ibet, enrgy, &
         iopc_calcp, solid_shift, hybrid_enable, adaptive_shift_on, damp_enable, &
         pd_on, pd_start, pd_every, pd_xmax, pd_grow, pulay_after, pulay_kw, &
-        smear_kt, smear_mts, smear_ef
+        smear_kt, smear_mts, smear_ef, solid_pulay
       data icalcn/ 0/
       data debug/ .FALSE./
       data prtfok/ .FALSE./
@@ -299,8 +300,19 @@
             bshift = 0.d0
           end if
         end if
-        if (smear_kt > 0.d0) then
+!
+!  MOPAC_SOLID_SCF=pulay (experimental): a solid without SHIFT or SMEAR is converged as SMEAR
+!  converges it, with integer occupations: no level shift, no damped start, Pulay's converger
+!  from the first iteration.
+!
+        solid_pulay = .false.
+        if (id /= 0 .and. smear_kt == 0.d0 .and. index(keywrd,' SHIFT') == 0) then
+          call get_environment_variable('MOPAC_SOLID_SCF', line, status=i)
+          if (i == 0) solid_pulay = (trim(adjustl(line)) == 'pulay')
+        end if
+        if (smear_kt > 0.d0 .or. solid_pulay) then
           solid_shift = 0.d0
+          if (solid_pulay) bshift = 0.d0
         else if (index(keywrd,' SHIFT') /= 0) then
           solid_shift = bshift
         else
@@ -314,7 +326,7 @@
         if (Abs(bshift) > 1.d-20) ten = bshift
         if (index(keywrd,' ITRY') /= 0) itrmax = nint(reada(keywrd,index(keywrd,' ITRY')))
         ci = index(keywrd,' MICROS') + index(keywrd,' C.I.') /= 0 .and. .not. method_indo
-        okpuly = index(keywrd,' PULAY') /= 0 .or. smear_kt > 0.d0
+        okpuly = index(keywrd,' PULAY') /= 0 .or. smear_kt > 0.d0 .or. solid_pulay
         pulay_kw = okpuly
 !
 !  Solids: Pulay's converger once an SCF has taken MOPAC_SOLID_PULAY_AFTER iterations (default 50,
