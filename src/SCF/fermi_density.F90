@@ -87,3 +87,4 @@ subroutine fermi_density(c, eigs, norbs, nocc, kt, p, mts, efermi)
   end do
   deallocate(cs, full)
 end subroutine fermi_density
+

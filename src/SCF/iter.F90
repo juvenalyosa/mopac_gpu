@@ -277,7 +277,11 @@
 !
 !  SMEAR=kT (eV; SMEAR alone: 0.1 eV): Fermi-Dirac occupations of the RHF levels and the Mermin
 !  free energy E - TS, for metals and small gaps.  The level shift would move the virtual levels
-!  that the occupations depend on, so it is off; the damped mixing of solids stays.
+!  that the occupations depend on, so it is off, and so is the pseudo-diagonalization (no
+!  eigenvalues).  Pulay's converger is on from the start: without it (CNVG alone) the SCF
+!  oscillates.  PM7, SMEAR=0.1: urea crystal 192 atoms 8 iterations (default SCF 45), Li 54
+!  12, graphene 6x6 23 (SMEAR=0.3: 24); Anderson mixing of the densities took 76-93 and
+!  ended higher in graphene.
 !
         smear_kt = 0.d0
         smear_mts = 0.d0
@@ -297,10 +301,6 @@
         end if
         if (smear_kt > 0.d0) then
           solid_shift = 0.d0
-          if (id /= 0 .and. index(keywrd,' SHIFT') == 0) then
-            hybrid_enable = .true.
-            damp_enable = .true.
-          end if
         else if (index(keywrd,' SHIFT') /= 0) then
           solid_shift = bshift
         else
@@ -314,7 +314,7 @@
         if (Abs(bshift) > 1.d-20) ten = bshift
         if (index(keywrd,' ITRY') /= 0) itrmax = nint(reada(keywrd,index(keywrd,' ITRY')))
         ci = index(keywrd,' MICROS') + index(keywrd,' C.I.') /= 0 .and. .not. method_indo
-        okpuly = index(keywrd,' PULAY') /= 0
+        okpuly = index(keywrd,' PULAY') /= 0 .or. smear_kt > 0.d0
         pulay_kw = okpuly
 !
 !  Solids: Pulay's converger once an SCF has taken MOPAC_SOLID_PULAY_AFTER iterations (default 50,
@@ -1413,6 +1413,7 @@
           if (smear_kt > 0.d0) then
 #ifdef GPU
             if (have_device_eigvecs) call eigenvectors_CUDA_fetch(c, norbs)
+            call fetch_packed_density_if_needed(p, mpack, need_fetch_p, 'p', niter)
 #endif
             call fermi_density(c, eigs, norbs, na2el, smear_kt, p, smear_mts, smear_ef)
 #ifdef GPU
@@ -1732,7 +1733,8 @@
 !  occupied-virtual coupling grew by more than a factor MOPAC_PDIAG_GROW (default 4).
 !
         logical function pdiag_step()
-          pdiag_step = pd_on .and. .not. (uhf .or. halfe .or. ci) .and. niter > pd_start .and. &
+          pdiag_step = pd_on .and. .not. (uhf .or. halfe .or. ci) .and. smear_kt == 0.d0 .and. &
+            niter > pd_start .and. &
             pd_last_full > 0 .and. niter - pd_last_full < pd_every
         end function pdiag_step
 
