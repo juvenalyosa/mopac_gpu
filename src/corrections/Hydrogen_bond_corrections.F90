@@ -301,12 +301,22 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
 !
 !   Local variables
 !
-  integer :: i, j, i1, k, l, m, m0, m1, bondlist(10,3), nrbondsc
+  integer :: i, j, i1, k, l, m, m0, m1, bondlist(10,3), nrbondsc, cur_atom
   double precision :: xa_dist, xb_dist, xh_dist, xc_dist, sum, sum1, old_dist
   double precision, external :: distance, bonding
   logical :: hbs1_ok, hbs2_ok, use_nbr
+!
+!  Solids: the atoms bonded to each atom (distance < bonding, ascending), found by one scan
+!  of all atoms the first time the atom is needed in this call.  Each search below then
+!  visits those atoms only, in the same order, so the result is that of the full scan
+!  (urea crystal, 768 atoms: the full scans with periodic distances took 1.5 s per call).
+!  nbc = -1: not scanned yet; -2: more than max_bc bonded atoms, scan all atoms.
+!
+  integer, parameter :: max_bc = 24
+  integer, allocatable :: nbc(:), bc(:,:)
   hbs1_ok = .false.
   hbs2_ok = .false.
+  cur_atom = 0
 !
 !  The covalent-bond searches below visit either all atoms (1..numat) or, for isolated
 !  molecules with neighbour lists available, only the atoms within hb_nbr_rcut of the
@@ -314,6 +324,10 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
 !  larger than any bonding(j, x) in the molecule, so both paths give the same bondlist.
 !
   use_nbr = (id == 0 .and. hb_nbr_ready .and. hb_nbr_rcut > 0.d0)
+  if (id /= 0) then
+    allocate(nbc(numat), bc(max_bc, numat))
+    nbc = -1
+  end if
 !
 !  Identify atoms associated with the hydrogen bonds
 !
@@ -593,9 +607,32 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
       implicit none
       integer, intent(in) :: atom
       integer, intent(out) :: first, last
+      integer :: jj, n
+      cur_atom = 0
       if (use_nbr .and. atom >= 1 .and. atom <= numat) then
         first = hb_nbr_start(atom)
         last = hb_nbr_start(atom + 1) - 1
+      else if (allocated(nbc) .and. atom >= 1 .and. atom <= numat) then
+        if (nbc(atom) == -1) then
+          n = 0
+          do jj = 1, numat
+            if (jj == atom) cycle
+            if (distance(jj, atom) < bonding(jj, atom, covrad)) then
+              n = n + 1
+              if (n <= max_bc) bc(n, atom) = jj
+            end if
+          end do
+          nbc(atom) = n
+          if (n > max_bc) nbc(atom) = -2
+        end if
+        if (nbc(atom) >= 0) then
+          cur_atom = atom
+          first = 1
+          last = nbc(atom)
+        else
+          first = 1
+          last = numat
+        end if
       else
         first = 1
         last = numat
@@ -606,6 +643,8 @@ double precision function Hydrogen_bond_corrections(l_grad, prt)
       integer, intent(in) :: m
       if (use_nbr) then
         nbr_atom = hb_nbr_list(m)
+      else if (cur_atom > 0) then
+        nbr_atom = bc(m, cur_atom)
       else
         nbr_atom = m
       end if
