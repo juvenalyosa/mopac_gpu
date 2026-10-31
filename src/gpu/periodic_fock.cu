@@ -169,6 +169,12 @@ __global__ void fock2_self_kernel(FockArgs a) {
   }
 }
 
+// p = 0.5 ptot on the device (RHF: the host p is exactly half of ptot, so this is exact)
+__global__ void half_density_kernel(const double *ptot, double *p, long long n) {
+  const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) p[i] = 0.5 * ptot[i];
+}
+
 // Device copies kept between calls.
 struct Cache {
   long long gen = -1;
@@ -304,8 +310,19 @@ extern "C" int mopac_cuda_conv_fock2(long long mpack, long long n2elec, int npai
   }
   const size_t bytes = static_cast<size_t>(mpack) * sizeof(double);
   const auto th0 = Clock::now();
-  if (mopac_pinned_h2d(c.ptot, ptot, bytes) != 1 || mopac_pinned_h2d(c.p, p, bytes) != 1 ||
-      mopac_pinned_h2d(c.f, f, bytes) != 1) {
+  // RHF: p is exactly ptot / 2; then only ptot goes up and p is made on the device (a third
+  // less upload; A100, 576-atom cells: ~0.5 s of h2d per SCF)
+  bool half = true;
+  for (long long i = 0; i < mpack; ++i) {
+    if (p[i] != 0.5 * ptot[i]) {
+      half = false;
+      break;
+    }
+  }
+  if (mopac_pinned_h2d(c.ptot, ptot, bytes) != 1 || mopac_pinned_h2d(c.f, f, bytes) != 1) return 2;
+  if (half) {
+    half_density_kernel<<<(unsigned)((mpack + 255) / 256), 256>>>(c.ptot, c.p, mpack);
+  } else if (mopac_pinned_h2d(c.p, p, bytes) != 1) {
     return 2;
   }
   const auto th1 = Clock::now();
