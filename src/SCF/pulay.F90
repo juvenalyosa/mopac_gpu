@@ -233,7 +233,8 @@
           call mult_symm_AB(spack, tmp2, 1.d0, n, linear, tmp1, 0.d0, iopc_sel)
           fppf(lbase+1:lbase+linear) = fppf(lbase+1:lbase+linear) - tmp1(:linear)
           deallocate(spack, tmp1, tmp2, stat=i)
-        else
+        else if (.not. (use_gpu_diis .and. &
+            mopac_cuda_commutator_packed(int(n, c_int), f, p, fppf(lbase+1)) == 1_c_int)) then
           call unpack_matrix(p, pulay_work1, n)
           call unpack_matrix(f, pulay_work2, n)
           call sym_commute(pulay_work1, pulay_work2, pulay_work3, n)

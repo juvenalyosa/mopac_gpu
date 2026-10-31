@@ -26,6 +26,12 @@ subroutine fermi_density(c, eigs, norbs, nocc, kt, p, mts, efermi)
 !  occupations (two spin orbitals per level, g = f/2):  -TS = 2 kT sum_i [g ln g + (1-g) ln(1-g)].
 !  The Mermin free energy E[p] - TS is variational in p, so the usual gradient applies.
 !
+#ifdef GPU
+  use iso_c_binding, only : c_int
+  use mod_vars_cuda, only : lgpu
+  use gpu_diag_state, only : have_device_eigvecs, gpu_diag_matches
+  use gpu_diis_interfaces, only : mopac_cuda_fermi_density_packed
+#endif
   implicit none
   integer, intent(in) :: norbs, nocc
   double precision, intent(in) :: c(norbs, norbs), eigs(norbs), kt
@@ -70,6 +76,16 @@ subroutine fermi_density(c, eigs, norbs, nocc, kt, p, mts, efermi)
     if (1.d0 - g > 1.d-300 .and. g > 0.d0) mts = mts + 2.d0*kt*(1.d0 - g)*log(1.d0 - g)
     if (f(i) > 1.d-14) m = i
   end do
+#ifdef GPU
+!
+!  On the device when it holds these eigenvectors (DSYRK there, the packed density copied back)
+!
+  if (lgpu .and. m > 0 .and. have_device_eigvecs) then
+    if (gpu_diag_matches(c, norbs)) then
+      if (mopac_cuda_fermi_density_packed(int(norbs, c_int), int(m, c_int), sqrt(f(1:m)), p) == 1_c_int) return
+    end if
+  end if
+#endif
 !
 !  p = cs cs^T, cs(:, i) = sqrt(f_i) c(:, i)
 !

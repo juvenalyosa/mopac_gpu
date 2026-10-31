@@ -45,5 +45,21 @@ module gpu_diis_interfaces
 
     subroutine mopac_cuda_diis_release() bind(C,name='mopac_cuda_diis_release')
     end subroutine mopac_cuda_diis_release
+
+    ! cp = packed (P F - F P) on the device (pulay.F90 sym_commute); 1 on success
+    integer(c_int) function mopac_cuda_commutator_packed(n, fp, pp, cp) bind(C,name='mopac_cuda_commutator_packed')
+      import :: c_int, c_double
+      integer(c_int), value :: n
+      real(c_double), intent(in) :: fp(*), pp(*)
+      real(c_double) :: cp(*)
+    end function mopac_cuda_commutator_packed
+
+    ! SMEAR: pp = packed sum_a s(a)**2 V(:,a) V(:,a)^T from the device eigenvectors; 1 on success
+    integer(c_int) function mopac_cuda_fermi_density_packed(n, m, s, pp) bind(C,name='mopac_cuda_fermi_density_packed')
+      import :: c_int, c_double
+      integer(c_int), value :: n, m
+      real(c_double), intent(in) :: s(*)
+      real(c_double) :: pp(*)
+    end function mopac_cuda_fermi_density_packed
   end interface
 end module gpu_diis_interfaces
