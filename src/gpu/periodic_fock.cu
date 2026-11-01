@@ -319,10 +319,33 @@ extern "C" int mopac_cuda_conv_fock2(long long mpack, long long n2elec, int npai
       break;
     }
   }
-  if (mopac_pinned_h2d(c.ptot, ptot, bytes) != 1 || mopac_pinned_h2d(c.f, f, bytes) != 1) return 2;
+  // Sub-timers of conv_fock_h2d (A100: the upload time did not drop with a third fewer bytes):
+  // the half test, device work still queued before the copies, then the copies themselves.
+  const auto thc = Clock::now();
+  add_section(half ? "conv_fock_h2d_check_half" : "conv_fock_h2d_check_full", th0, thc);
+  if (cudaDeviceSynchronize() != cudaSuccess) {
+    cudaGetLastError();
+    return 2;
+  }
+  const auto thw = Clock::now();
+  add_section("conv_fock_h2d_wait", thc, thw);
+  // MOPAC_GPU_FOCK_H2D_DIRECT=1: plain pageable cudaMemcpy instead of the pinned staging (timing test)
+  static const bool direct = [] {
+    const char *e = std::getenv("MOPAC_GPU_FOCK_H2D_DIRECT");
+    return e && e[0] == '1';
+  }();
+  auto h2d = [&](double *dst, const double *src) {
+    if (!direct) return mopac_pinned_h2d(dst, src, bytes) == 1;
+    return cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+  };
+  if (!h2d(c.ptot, ptot)) return 2;
+  const auto thp = Clock::now();
+  add_section("conv_fock_h2d_ptot", thw, thp);
+  if (!h2d(c.f, f)) return 2;
+  add_section("conv_fock_h2d_f", thp, Clock::now());
   if (half) {
     half_density_kernel<<<(unsigned)((mpack + 255) / 256), 256>>>(c.ptot, c.p, mpack);
-  } else if (mopac_pinned_h2d(c.p, p, bytes) != 1) {
+  } else if (!h2d(c.p, p)) {
     return 2;
   }
   const auto th1 = Clock::now();
