@@ -1,4 +1,4 @@
-# Barranquilla MOPAC — MOZYME on the GPU
+# Barranquilla MOPAC — MOZYME and solids on the GPU
 
 <img src="logo/barranquilla_logo.png" alt="Barranquilla MOPAC Logo" style="max-width: 100%; width: 720px; height: auto;" />
 
@@ -7,6 +7,11 @@ method (proteins, DNA/RNA, large complexes) running on an NVIDIA GPU. The self-c
 the one-electron matrix, the gradient and the dispersion and hydrogen-bond corrections all run on
 the device, and the electronic state stays on the GPU between geometry steps. You do not change
 your input: any `MOZYME` job on a capable GPU uses it automatically.
+
+The **conventional SCF** runs on the GPU too, for **solids** (translation vectors `Tv`: crystals,
+slabs, polymers) and for molecules of 300 orbitals or more: one-electron matrix, Fock matrix, the
+pseudo-diagonalization between full diagonalizations, and the gradient, RHF and UHF, with COSMO,
+`FORCE`, `DRC`, Fermi smearing (`SMEAR`) and analytical C.I. gradients.
 
 It also adds **molecular dynamics at a temperature** (NVE and NVT with the Bussi thermostat) and an
 **input chemistry check** that stops broken PDB-derived inputs before they waste hours of SCF.
@@ -33,6 +38,23 @@ Energies agree with the CPU within 0.05 kcal/mol (details in [Accuracy](#7-accur
 column is a single core because MOZYME has no multi-threading; a many-core CPU node would
 narrow the gap to roughly 5–10×.
 
+**Solids and the conventional SCF** (PM7; the supercells are `1SCF GRADIENTS`). One A100 against the same program on a 4-vCPU
+Linux machine, or on the Colab host CPUs (same binary with `MOPAC_NOGPU=1`):
+
+| Job | Atoms | CPU | GPU (A100) | Speed-up |
+|---|---:|---:|---:|---:|
+| α-quartz SiO₂ supercell | 576 | 240 s ¹ | 5.3 s | **45×** |
+| Silicon supercell | 512 | 809 s ¹ | 8.4 s | **96×** |
+| Rutile TiO₂ supercell | 576 | 1 224 s ¹ | 5.5 s | **220×** ¹ |
+| Urea crystal, MOZYME with `Tv` | 768 | — | 6.9 s (conventional SCF 4.9 s) | |
+| Diamond, `FORCE` (Γ-point vibrations, 126 modes) | 64 | 682 s ² | 87 s | **7.8×** |
+| Diamond, `DRC TEMPERATURE=300`, 40 points | 64 | 156 s ² | 7.2 s | **22×** |
+| Crambin, conventional RHF / COSMO (`EPS=78.4`) | 642 | 5.0 / 5.5 s ² | 3.4 / 4.5 s | |
+
+¹ 4-vCPU reference measured with the earlier SCF of solids (80 eV level shift): quartz 35, silicon 35
+and rutile 245 iterations, against 26, 20 and 27 now, so part of the rutile gain is the SCF itself (the
+same gain applies on the CPU). ² Colab host CPUs, all threads, measured in the same session.
+
 ---
 
 ## Contents
@@ -58,6 +80,7 @@ and run the cells in order (the build takes about 10 minutes):
 | Notebook | What it does |
 |---|---|
 | [`colab/mozyme_md_colab.ipynb`](https://colab.research.google.com/github/juvenalyosa/mopac_gpu/blob/main/colab/mozyme_md_colab.ipynb) | Downloads a PDB, prepares it (hydrogens, chemistry check), optimizes it, runs NVT and NVE dynamics, plots temperature and energies, animates the trajectory. |
+| [`colab/materials_gpu_a100_colab.ipynb`](https://colab.research.google.com/github/juvenalyosa/mopac_gpu/blob/main/colab/materials_gpu_a100_colab.ipynb) | Solids: device hcore, Fock and gradient against the CPU, the 512-576-atom cells, `FORCE`, `DRC`, MOZYME with `Tv`, `SMEAR`, C.I. gradients and the test suite; options at the top of the notebook. |
 | [`colab/mozyme_diagg_profile_colab.ipynb`](https://colab.research.google.com/github/juvenalyosa/mopac_gpu/blob/main/colab/mozyme_diagg_profile_colab.ipynb) | Benchmarks and validation: CPU-vs-GPU timings, the acceptance test, all semiempirical methods, the published-benchmark table, long optimizations and dynamics. |
 
 ---
@@ -225,6 +248,9 @@ listed in the output header like every other keyword.
 - `TRUST`: trust-region L-BFGS geometry optimizer, recommended for MOZYME (the line searches of the default
   L-BFGS-B fail on the noise of the MOZYME SCF; with `TRUST` the radius follows the directional derivative
   and no step is ever undone, so the LMOs of the last SCF stay valid).
+- `SMEAR=kT` (eV; `SMEAR` alone: 0.1): Fermi–Dirac occupations for metals and small-gap solids
+  (closed-shell RHF). The heat is the Mermin free energy E − TS; the output also prints E(kT → 0).
+  See `docs/BACKGROUND.md`.
 - `MM_CHARGES="file"`: QM/MM electrostatic embedding in MM point charges (x y z q per line); the OpenMM
   driver passes them through the API instead (`mozyme_qmmm_init/step/finalize` in `include/mopac.h`).
 
@@ -476,7 +502,30 @@ grep "FINAL HEAT OF FORMATION" job.out
 
 or, inside the input, add `NOGPU` to the keyword line.
 
-### 6.13 The whole workflow from a PDB code (Python)
+### 6.13 A solid
+
+A crystal is an ordinary MOPAC input with three translation vectors (`Tv`, in Å) after the atoms of
+the cell; the GPU is used above 100 atoms (`MOPAC_FORCEGPU=1` for smaller cells). Complete cells are
+in `tests/data/materials/` (`small/`, 64-162 atoms; `medium/`, 512-768 atoms):
+
+```
+PM7 1SCF GRADIENTS GEO-OK
+quartz 576 atoms
+
+Si     2.309045 1     0.000000 1     3.603333 1
+...
+O      8.159577 1    16.405392 1    20.976264 1
+Tv    19.664000 0     0.000000 0     0.000000 0
+Tv    -9.832000 0    17.029524 0     0.000000 0
+Tv     0.000000 0     0.000000 0    21.620000 0
+```
+
+Use `PRECISE` for cell optimizations (central differences in the gradient; see [Accuracy](#7-accuracy)),
+`FORCE` for Γ-point vibrations (the cell is held fixed), `DRC TEMPERATURE=300` for dynamics and
+`SMEAR=0.1` for a metal or a small-gap cell. MOZYME with `Tv` suits molecular crystals; for dense
+covalent solids (oxides, silicon) leave `MOZYME` out.
+
+### 6.14 The whole workflow from a PDB code (Python)
 
 `scripts/mozyme_md_workflow.py` chains preparation, optimization, NVT and NVE:
 
@@ -532,6 +581,22 @@ A100:
 | Crambin after 100 GPU optimization cycles, same geometry | 0.004 kcal/mol |
 | Dynamics, crambin, 19.5 fs: largest integration ERROR | GPU 0.24, CPU 0.40 kcal/mol |
 
+**Solids and the conventional SCF** (A100, `tests/check_materials_gpu.py`, the device paths
+compared with the CPU loops in the same run):
+
+| Check | GPU − CPU |
+|---|---|
+| One-electron matrix, Fock matrix (Si 144, quartz 162, rutile 162, crambin) | ≤ 2·10⁻¹² / ≤ 3·10⁻⁹ eV |
+| Gradient, RHF and UHF (same cells, crambin doublet) | ≤ 9·10⁻⁷ kcal/mol/Å |
+| Heats of the 512-576-atom cells against the 4-vCPU reference | −0.002, +0.0005, −0.007 kcal/mol |
+| Diamond `FORCE`: frequencies, ZPE | ≤ 0.07 cm⁻¹, +0.005 kcal/mol |
+| Diamond `DRC`, 40 points: potential energy | ≤ 0.0001 kcal/mol |
+| COSMO charges (crambin) | 1·10⁻¹³ relative |
+
+The default MOPAC gradient uses one-sided differences for the pair derivatives: about 0.05
+kcal/mol/Å from the exact derivative of the energy, in molecules and solids, CPU and GPU alike, as in
+upstream MOPAC. `PRECISE` (and `FORCE`) switch to central differences (≤ 0.005).
+
 Optimization and dynamics trajectories themselves diverge between CPU and GPU (the tiny SCF
 differences are amplified, as in any chaotic dynamics); compare energies at the same geometry, or
 statistical averages.
@@ -547,14 +612,26 @@ statistical averages.
   2.5 hours.
 - **NVE after NVT** restarts from the last NVT geometry with fresh velocities at the same
   temperature: MOPAC cannot read velocities together with a PDB geometry.
-- **Runs on the CPU instead of the GPU:** periodic systems, pKa calculations, and the programming
-  interface (`libmopac` API) except the MOZYME QM/MM session (`mozyme_qmmm_*`, QM regions above
+- **Runs on the CPU instead of the GPU:** the Fock matrix of conventional-SCF molecules under 300
+  orbitals, pKa calculations, and the programming interface (`libmopac` API) except the MOZYME QM/MM session (`mozyme_qmmm_*`, QM regions above
   100 atoms). COSMO implicit water does run on the GPU (crambin: 2.1 s vs 33 s on the
   CPU, energies within 0.002 kcal/mol).
 - **Reproducibility.** GPU runs are not bit-reproducible; `SEED` fixes the random numbers but not
   the order of the parallel rotations.
 - **Inputs.** Hydrogens are required; broken crystal fragments are refused (see the chemistry
   check).
+- **Solids, known limits.**
+  - MOZYME with `Tv` in dense covalent solids: the localized orbitals spread over most of the cell
+    (quartz 576: ~480 atoms each), beyond the device limit (2048 coefficients per orbital), and the
+    SCF finishes on the CPU (870 s against 5.3 s for the conventional SCF on the GPU). The output
+    says so (`lmo_extent`); use the conventional SCF there.
+  - Several RHF solutions: some cells have more than one SCF solution (Li 54 atoms: the default SCF
+    ends at 1898.11 kcal/mol, a solution at 1885.15 exists; graphene). Compare heats and HOMO–LUMO gaps when in doubt.
+  - Aluminium with PM7 (Al 108) does not converge, with or without `SMEAR`.
+  - The pseudo-diagonalization can stall in very hard SCFs (an MgO slab with water when forced on);
+    `MOPAC_PDIAG=0` turns it off.
+  - The half-electron SCF of large open-shell proteins (C.I. on a crambin doublet) needs hundreds of
+    iterations.
 
 ---
 
@@ -567,13 +644,17 @@ statistical averages.
 | `src/MOZYME/mozyme_gpu_*.F90`, `iter_for_MOZYME.F90` | Fortran side of the GPU SCF |
 | `src/reactions/drc.F90`, `drc_ensemble.F90` | Dynamics; `TEMPERATURE=`, `BUSSI=`, `SEED=` |
 | `src/chemistry/input_chemistry_check.F90` | Input chemistry check |
+| `src/gpu/periodic_fock.cu`, `gpu_conv_fock.F90`, `grad_kernels.cu`, `src/SCF/pseudo_diag_gemm.F90` | Conventional SCF on the GPU: Fock matrix of solids and large molecules, gradient kernels, pseudo-diagonalization |
+| `src/forces/deri_zvector.F90` | Analytical C.I. gradients (Z-vector) |
+| `tests/check_materials_gpu.py`, `tests/data/materials/` | Solids check (GPU vs CPU) and its cells |
 | `tests/check_mozyme_gpu_tolerance.py` | Acceptance test (CPU vs GPU, gradient, fallback, `NOGPU`) |
 | `tests/check_mozyme_gpu_production.py` | Long optimization and dynamics check |
 | `scripts/published_benchmark.py`, `scripts/check_mozyme_gpu_methods.py` | Benchmark table, all methods |
 | `scripts/mozyme_md_workflow.py` | PDB → optimization → NVT → NVE |
 | `benchmarks/publication_inputs/` | The benchmark proteins, hydrogenated, and their input files |
 | `docs/MOZYME_GPU_USER_GUIDE.md` | Full user guide with all measurements |
-| `docs/BACKGROUND.md` | Theory, earlier GPU work (conventional SCF, HMTR optimizer) |
+| `docs/GPU_GUIDE.md` | Build, runtime switches and measurements of every GPU path, solids included |
+| `docs/BACKGROUND.md` | Theory (`SMEAR`, gradient accuracy), earlier GPU work (HMTR optimizer) |
 
 Everything else is standard MOPAC; its manual at [openmopac.net](http://openmopac.net) describes all
 other keywords.
