@@ -50,6 +50,7 @@
            GPU_SCF_FLAG_USE_DIIS, GPU_SCF_FLAG_RHF, GPU_SCF_FLAG_UHF, GPU_SCF_FLAG_DEBUG
       use gpu_scf_interfaces, only: gpu_scf_run, gpu_scf_last_error
       use gpu_scf_stream_driver, only: gpu_scf_stream_fock
+      use gpu_conv_fock, only: conv_fock_p_half
 #endif
       use mozyme_section_timers, only: mozyme_section_timer_begin, mozyme_section_timer_end
       implicit none
@@ -73,6 +74,7 @@
       double precision :: pd_xmax, pd_gmax, pd_glast, pd_grow
       double precision :: smear_kt, smear_mts, smear_ef   ! SMEAR: kT (eV), -TS (eV), Fermi level (eV)
       logical :: solid_pulay   ! MOPAC_SOLID_SCF=pulay: solids without level shift, Pulay from the start
+      logical :: p_half        ! RHF: pa is exactly p*0.5 (the device Fock then uploads p only)
       double precision :: enrgy, sellim, summ, eold_alpha, eold_beta, ofract, sum1, sum2, diff, eold, escf, titer
       double precision, dimension(norbs) :: theta
       ! Hybrid SCF controls (EDIIS->CDIIS), damping and adaptive shift
@@ -141,6 +143,7 @@
       sellim = 0.d0
       opendd = .false.
       glow = .FALSE.
+      p_half = .false.
 #ifdef GPU
       fock_dev = c_null_ptr
       density_dev = c_null_ptr
@@ -492,6 +495,7 @@
 
         call dcopy(mpack, pa, 1, pb, 1)
         forall (i=1:mpack) p(i) = 2.d0*pa(i)
+        p_half = .true.
 
 !          pb(:mpack) = pa(:mpack)
 !          p(:mpack) = 2.D0*pa(:mpack)
@@ -878,7 +882,13 @@
   320 continue
       if (timitr) call timer ('BEFORE FOCKS')
       if (id /= 0) then
+#ifdef GPU
+        conv_fock_p_half = p_half .and. .not. uhf
+#endif
         call fock2 (f, p, pa, w, w, wk, numat, nfirst, nlast, 2)
+#ifdef GPU
+        conv_fock_p_half = .false.
+#endif
 #ifdef GPU
         if (resident_scf) then
           fock_dev = mopac_cuda_get_fock_device_ptr()
@@ -971,7 +981,13 @@
           call addfck (f,p)
         end if
       else
+#ifdef GPU
+        conv_fock_p_half = p_half .and. .not. uhf
+#endif
         call fock2 (f, p, pa, w, w, w, numat, nfirst, nlast, 2)
+#ifdef GPU
+        conv_fock_p_half = .false.
+#endif
 #ifdef GPU
         if (resident_scf) then
           fock_dev = mopac_cuda_get_fock_device_ptr()
@@ -1650,6 +1666,7 @@
            pb(i) = pa(i)
         end do
 !$omp end parallel do
+        p_half = .true.
       end if
       if (debug) then
         call chrge (p, q)

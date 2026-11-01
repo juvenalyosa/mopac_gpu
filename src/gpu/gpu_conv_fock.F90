@@ -28,9 +28,12 @@ module gpu_conv_fock
   implicit none
   private
   public :: gpu_conv_fock2, gpu_conv_fock2_check_finish, conv_w_generation, gpu_conv_fock_confirm_w, &
-    gpu_conv_w_ensure_host
+    gpu_conv_w_ensure_host, conv_fock_p_half
 
   integer, save :: conv_w_generation = 0
+  ! Set by iter around its fock2 calls when p (the alpha density) is exactly ptot/2 (RHF, after
+  ! pa = p*0.5): the device Fock then uploads ptot only and halves it on the device.
+  logical, save :: conv_fock_p_half = .false.
 
   integer(c_int), allocatable, save :: pia(:), pib(:), pja(:), pjb(:), sia(:), sib(:)
   integer(c_long_long), allocatable, save :: poff(:), soff(:)
@@ -42,11 +45,11 @@ module gpu_conv_fock
 
   interface
     function mopac_cuda_conv_fock2(mpack_c, n2elec_c, npairs_c, pair_ia, pair_ib, pair_ja, pair_jb, &
-        pair_off, nself_c, self_ia, self_ib, self_off, w, wk, gen, ptot, p, f, ms) &
+        pair_off, nself_c, self_ia, self_ib, self_off, w, wk, gen, ptot, p, p_half, f, ms) &
         bind(C, name='mopac_cuda_conv_fock2') result(rc)
       import :: c_int, c_long_long, c_double
       integer(c_long_long), value :: mpack_c, n2elec_c, gen
-      integer(c_int), value :: npairs_c, nself_c
+      integer(c_int), value :: npairs_c, nself_c, p_half
       integer(c_int) :: pair_ia(*), pair_ib(*), pair_ja(*), pair_jb(*), self_ia(*), self_ib(*)
       integer(c_long_long) :: pair_off(*), self_off(*)
       real(c_double) :: w(*), wk(*), ptot(*), p(*), f(*)
@@ -153,7 +156,7 @@ contains
     double precision :: ms, t_section
     integer :: ii, ia, ib, ilim, kk, mol_min, st
     character(len=16) :: v
-    integer(c_int) :: rc
+    integer(c_int) :: rc, half_c
     logical :: check
     done = .false.
     if (.not. lgpu .or. mozyme .or. numat < 1) return
@@ -169,6 +172,8 @@ contains
       if (norbs < mol_min) return
     end if
     check = env_on('MOPAC_GPU_FOCK_CHECK')
+    half_c = 0
+    if (conv_fock_p_half) half_c = 1
     call build_tables(numat, nfirst, nlast)
     if (check) then
       if (allocated(f_dev)) deallocate(f_dev)
@@ -179,11 +184,11 @@ contains
     if (check) then
       rc = mopac_cuda_conv_fock2(int(mpack, c_long_long), int(n2elec, c_long_long), int(npairs, c_int), &
         pia, pib, pja, pjb, poff, int(nself, c_int), sia, sib, soff, w, wk, &
-        int(conv_w_generation, c_long_long), ptot, p, f_dev, ms)
+        int(conv_w_generation, c_long_long), ptot, p, half_c, f_dev, ms)
     else
       rc = mopac_cuda_conv_fock2(int(mpack, c_long_long), int(n2elec, c_long_long), int(npairs, c_int), &
         pia, pib, pja, pjb, poff, int(nself, c_int), sia, sib, soff, w, wk, &
-        int(conv_w_generation, c_long_long), ptot, p, f, ms)
+        int(conv_w_generation, c_long_long), ptot, p, half_c, f, ms)
     end if
     if (rc /= 0) then
       if (gpu_trace) write(iw, '(1x,a,i0)') '[GPU Fock] device failure, CPU used, code=', rc
