@@ -656,16 +656,21 @@ def exp_solids_drc(b: Bench) -> None:
 
 
 def exp_conv_mol(b: Bench) -> None:
+    # SCFCRT=1.D-6: with the default criterion the SCF of the graphene flake stops early enough for its
+    # gradient to depend on the path (max. 1.3 kcal/(mol A) between full diagonalizations and the GPU's
+    # pseudo-diagonalization, also on the CPU; 0.06 with SCFCRT=1.D-6), which would hide the GPU - CPU
+    # difference this compares
     exp, rows, comp = "conv_mol", [], []
     crambin = MAT / "molecules" / "crambin.mop"
-    plan = [("crambin_rhf", mat_deck(crambin, "PM7 1SCF GRADIENTS GEO-OK CHARGE=-1 AUX TIMES"), "Crambin, RHF"),
-            ("crambin_uhf", mat_deck(crambin, "PM7 UHF 1SCF GRADIENTS GEO-OK CHARGE=0 AUX TIMES"), "Crambin, UHF doublet"),
-            ("crambin_cosmo", mat_deck(crambin, "PM7 1SCF GRADIENTS GEO-OK CHARGE=-1 EPS=78.4 AUX TIMES"),
+    tight = "SCFCRT=1.D-6 AUX TIMES"
+    plan = [("crambin_rhf", mat_deck(crambin, f"PM7 1SCF GRADIENTS GEO-OK CHARGE=-1 {tight}"), "Crambin, RHF"),
+            ("crambin_uhf", mat_deck(crambin, f"PM7 UHF 1SCF GRADIENTS GEO-OK CHARGE=0 {tight}"), "Crambin, UHF doublet"),
+            ("crambin_cosmo", mat_deck(crambin, f"PM7 1SCF GRADIENTS GEO-OK CHARGE=-1 EPS=78.4 {tight}"),
              "Crambin, COSMO"),
-            ("graphene_flake", with_keywords(deck_text("material_graphene_nanoflake_c192h38")[0], "GRADIENTS AUX TIMES"),
+            ("graphene_flake", with_keywords(deck_text("material_graphene_nanoflake_c192h38")[0], f"GRADIENTS {tight}"),
              "Graphene flake C$_{192}$H$_{38}$"),
             ("chignolin_ci", mat_deck(MAT / "molecules" / "chignolin.mop",
-                                      "PM7 1SCF GRADIENTS CHARGE=3 DOUBLET RHF GEO-OK AUX TIMES"),
+                                      f"PM7 1SCF GRADIENTS CHARGE=3 DOUBLET RHF GEO-OK {tight}"),
              "Chignolin, half-electron C.I. gradient")]
     if b.a.quick:
         plan = plan[3:4]
