@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import platform
@@ -206,7 +207,10 @@ class Bench:
         """Run one MOPAC deck (text) in its own directory; returns the parsed result (cached in result.json)."""
         d = self.runs / exp / case / (mode + (f"_r{rep}" if rep else ""))
         res_file = d / "result.json"
-        if res_file.exists():
+        mop = d / f"{name}.mop"
+        # reuse a finished run only if it had exactly this input (a --quick run in the same directory
+        # must not stand in for the full one)
+        if res_file.exists() and mop.exists() and mop.read_text() == deck:
             try:
                 return json.loads(res_file.read_text())
             except json.JSONDecodeError:
@@ -454,7 +458,9 @@ def restart_1scf(b: Bench, exp: str, case: str, from_mode: str, stem: str) -> li
         return []
     text, files = deck_text(stem)
     kw = re.sub(r"(?i)(^|\s)(CYCLES\s*=\s*\S+|GRADIENTS)(?=\s|$)", " ", text.splitlines()[0])
-    deck = re.sub(r"\s+", " ", kw).strip() + " 1SCF RESTART\nfinal geometry of the %s optimization\n\n" % from_mode
+    digest = hashlib.sha1(res.read_bytes()).hexdigest()[:12]   # a new optimization invalidates the cached 1SCF
+    deck = re.sub(r"\s+", " ", kw).strip() + \
+        f" 1SCF RESTART\nfinal geometry of the {from_mode} optimization (restart file {digest})\n\n"
     out = []
     for mode in ("cpu", "gpu"):
         d = f"{case}_final_{from_mode}"
@@ -521,6 +527,9 @@ def exp_thermo(b: Bench) -> None:
     exp = "thermo"
     work = b.runs / exp / "reference_check"
     summary = work / "summary.json"
+    opts = f"workers={b.a.force_workers} quick={b.a.quick}"
+    if summary.exists() and (work / "options.txt").exists() and (work / "options.txt").read_text() != opts:
+        shutil.rmtree(work)
     if not summary.exists():
         work.parent.mkdir(parents=True, exist_ok=True)
         cmd = [sys.executable, str(REPO / "tests" / "check_mozyme_gpu_reference.py"), str(b.mopac), "--data", str(REF),
@@ -530,6 +539,7 @@ def exp_thermo(b: Bench) -> None:
         say("  " + " ".join(cmd))
         with open(b.runs / exp / "reference_check.log", "w") as fh:
             subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, check=False)
+        (work / "options.txt").write_text(opts)
     ref = json.loads((REF / "reference.json").read_text())
     s = json.loads(summary.read_text()) if summary.exists() else {}
     rows, freqs = [], []
@@ -687,7 +697,9 @@ def qmmm_run(b: Bench, exp: str, case: str, mode: str, pdb: Path, opts: str, ste
              mm_ps: float = 10.0) -> dict:
     d = b.path(exp, case, mode)
     res = d / "result.json"
-    if res.exists():
+    cmd = (f"{sys.executable} -u {REPO / 'scripts' / 'qmmm' / 'run_qmmm_md.py'} {pdb} --libmopac {b.a.libmopac} "
+           f"{opts} --platform {b.a.openmm_platform} --steps {steps} --nve {nve} --mm-equil-ps {mm_ps}")
+    if res.exists() and (d / "cmd.txt").exists() and (d / "cmd.txt").read_text() == cmd:
         return json.loads(res.read_text())
     if mode == "cpu" and b.a.no_cpu:
         return {}
@@ -697,9 +709,8 @@ def qmmm_run(b: Bench, exp: str, case: str, mode: str, pdb: Path, opts: str, ste
     if d.exists():
         shutil.rmtree(d)
     d.mkdir(parents=True)
+    (d / "cmd.txt").write_text(cmd)
     env = b.env_for(mode, 1 if mode == "cpu" else None, False, None)
-    cmd = (f"{sys.executable} -u {REPO / 'scripts' / 'qmmm' / 'run_qmmm_md.py'} {pdb} --libmopac {b.a.libmopac} "
-           f"{opts} --platform {b.a.openmm_platform} --steps {steps} --nve {nve} --mm-equil-ps {mm_ps}")
     say(f"  [{exp}/{case}] {mode}: {cmd}")
     t0 = time.perf_counter()
     with open(d / "log.txt", "w") as fh:
