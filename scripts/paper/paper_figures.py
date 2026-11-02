@@ -481,6 +481,9 @@ def fig_freq(o: Out) -> None:
 
 def fig_qmmm(o: Out) -> None:
     q, nve, cut = o.csv("qmmm"), o.csv("qmmm_nve"), o.csv("qmmm_enzyme_cutoff")
+    if q is not None:
+        q = q[q["s_per_step"].notna()] if "s_per_step" in q else None
+        q = q if q is not None and len(q) else None
     panels = [x for x in (q, nve, cut) if x is not None]
     if not panels:
         return

@@ -22,10 +22,17 @@ except ImportError:                    # pragma: no cover
 
 
 def gpu_available():
-    """True when CuPy is installed and sees a CUDA device"""
+    """True when CuPy is installed, sees a CUDA device and can compile a kernel and run a 3-D FFT (a CuPy
+    built for another CUDA than the one installed, e.g. cupy-cuda12x on CUDA 13 without its pip toolkit,
+    imports and counts devices but fails at the first kernel or cuFFT call)"""
     try:
         import cupy
-        return cupy.cuda.runtime.getDeviceCount() > 0
+        import cupyx.scipy.fft
+        if cupy.cuda.runtime.getDeviceCount() < 1:
+            return False
+        x = cupy.ElementwiseKernel("float64 a", "float64 b", "b = 2.0 * a", "qmmm_pme_probe")(cupy.ones(8))
+        y = cupyx.scipy.fft.ifftn(cupyx.scipy.fft.rfftn(cupy.ones((4, 4, 4))), axes=(0, 1))
+        return float(x.sum()) == 16.0 and y.shape == (4, 4, 3)
     except Exception:
         return False
 

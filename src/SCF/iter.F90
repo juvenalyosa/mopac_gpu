@@ -69,9 +69,9 @@
       logical :: pulay_kw
       double precision :: shift, shiftb, shfmax, ten, tenold, plchek, scorr, shfto, shftbo, titer0, solid_shift
       ! MOPAC_PDIAG: rotations by pseudo_diag_gemm between full diagonalizations
-      logical :: pd_on
+      logical :: pd_on, pd_ready
       integer :: pd_start, pd_every, pd_last_full, pd_rotations
-      double precision :: pd_xmax, pd_gmax, pd_glast, pd_grow
+      double precision :: pd_xmax, pd_gmax, pd_glast, pd_grow, pd_pl
       double precision :: smear_kt, smear_mts, smear_ef   ! SMEAR: kT (eV), -TS (eV), Fermi level (eV)
       logical :: solid_pulay   ! MOPAC_SOLID_SCF=pulay: solids without level shift, Pulay from the start
       logical :: p_half        ! RHF: pa is exactly p*0.5 (the device Fock then uploads p only)
@@ -108,7 +108,7 @@
         shfmax, capps, ten, tenold, incitr, irrr, plchek, timitr, &
         scorr, shfto, shftbo, titer0, jalp, ialp, jbet, ibet, enrgy, &
         iopc_calcp, solid_shift, hybrid_enable, adaptive_shift_on, damp_enable, &
-        pd_on, pd_start, pd_every, pd_xmax, pd_grow, pulay_after, pulay_kw, &
+        pd_on, pd_start, pd_every, pd_xmax, pd_grow, pd_pl, pulay_after, pulay_kw, &
         smear_kt, smear_mts, smear_ef, solid_pulay
       data icalcn/ 0/
       data debug/ .FALSE./
@@ -233,6 +233,15 @@
         pd_every = 16
         pd_xmax = 0.2d0
         pd_grow = 4.d0
+        ! without a constant level shift (molecules; solids with SHIFT=0, SMEAR or MOPAC_SOLID_SCF=pulay)
+        ! rotations only once the density change has dropped below pd_pl: a rotation step assumes a
+        ! small occupied-virtual coupling, and from a density far from convergence it can steer the
+        ! SCF into another solution (C192H38 graphene flake, PM7: 2509.09 instead of 2492.93 kcal/mol
+        ! with rotations from iteration 4, PL ~1.9; 2498.39 with PL < 0.5; no convergence with 0.2).
+        ! The default solid SCF (20 eV shift, damped start) rotates from iteration 4: same states as
+        ! without rotations in every cell tested, and gating it would cost ~11 more full
+        ! diagonalizations in quartz and rutile.
+        pd_pl = 5.d-2
         call get_environment_variable('MOPAC_PDIAG', line, status=i)
         if (i == 0 .and. len_trim(line) > 0) pd_on = (trim(adjustl(line)) == '1')
         call get_environment_variable('MOPAC_PDIAG_START', line, status=i)
@@ -243,6 +252,8 @@
         if (i == 0) read (line, *, iostat=j) pd_xmax
         call get_environment_variable('MOPAC_PDIAG_GROW', line, status=i)
         if (i == 0) read (line, *, iostat=j) pd_grow
+        call get_environment_variable('MOPAC_PDIAG_PL', line, status=i)
+        if (i == 0) read (line, *, iostat=j) pd_pl
         if (index(keywrd,' EDIIS') /= 0) then
           hybrid_enable = .true.
           adaptive_shift_on = .true.
@@ -694,6 +705,7 @@
       pd_last_full = 0
       pd_glast = huge(1.d0)
       pd_rotations = 0
+      pd_ready = .false.
       frst = .TRUE.
       ! Print SCF hybrid profile once per calculation
       if (nscf == 0 .and. debug) then
@@ -1759,10 +1771,14 @@
 !  occupied and virtual vectors with pseudo_diag_gemm (level-3 BLAS) instead of diagonalizing.
 !  A full diagonalization is done for the first MOPAC_PDIAG_START iterations (default 3), every
 !  MOPAC_PDIAG_EVERY iterations (default 16), and after a rotation step in which the
-!  occupied-virtual coupling grew by more than a factor MOPAC_PDIAG_GROW (default 4).
+!  occupied-virtual coupling grew by more than a factor MOPAC_PDIAG_GROW (default 4).  Without the
+!  constant level shift of solids, no rotation before the density change PL has once dropped below
+!  MOPAC_PDIAG_PL (default 0.05).
 !
         logical function pdiag_step()
-          pdiag_step = pd_on .and. .not. (uhf .or. halfe .or. ci) .and. smear_kt == 0.d0 .and. &
+          ! the default SCF of solids (constant level shift, damped start) rotates from the start
+          if (niter > 1 .and. (pl < pd_pl .or. (id /= 0 .and. abs(solid_shift) > 1.d-10))) pd_ready = .true.
+          pdiag_step = pd_on .and. pd_ready .and. .not. (uhf .or. halfe .or. ci) .and. smear_kt == 0.d0 .and. &
             niter > pd_start .and. &
             pd_last_full > 0 .and. niter - pd_last_full < pd_every
         end function pdiag_step

@@ -408,7 +408,9 @@ def exp_mozyme_grad(b: Bench) -> None:
     cases = PROTEINS[:1] if b.a.quick else [p for p in PROTEINS if p[0] in ("crambin", "dna", "ubiquitin", "barnase")]
     for case, stem, label, kind in cases:
         text, files = deck_text(stem)
-        text = with_keywords(text, "GRADIENTS AUX", drop=("NEWPDB", "PDB"))
+        # tight SCF (as the stored references): the default criterion leaves ~0.1 kcal/(mol A) of SCF noise in
+        # the gradient of either run, which would hide the GPU - CPU difference itself
+        text = with_keywords(text, "GRADIENTS AUX SCFCRT=1.D-6 THRESH=1.D-15", drop=("NEWPDB", "PDB"))
         rows += b.timed(exp, case, text, files, cpu_threads=1, want_grad=True, meta={"label": label, "kind": kind})
         gc, gg = b.grad(exp, case, "cpu"), b.grad(exp, case, "gpu")
         if gc and gg and len(gc) == len(gg):
