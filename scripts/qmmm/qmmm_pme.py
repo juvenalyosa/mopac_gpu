@@ -21,20 +21,33 @@ except ImportError:                    # pragma: no cover
     _FFT_KW = {}
 
 
+_gpu_ok = None
+
+
 def gpu_available():
-    """True when CuPy is installed, sees a CUDA device and can compile a kernel and run a 3-D FFT (a CuPy
-    built for another CUDA than the one installed, e.g. cupy-cuda12x on CUDA 13 without its pip toolkit,
-    imports and counts devices but fails at the first kernel or cuFFT call)"""
-    try:
-        import cupy
-        import cupyx.scipy.fft
-        if cupy.cuda.runtime.getDeviceCount() < 1:
-            return False
-        x = cupy.ElementwiseKernel("float64 a", "float64 b", "b = 2.0 * a", "qmmm_pme_probe")(cupy.ones(8))
-        y = cupyx.scipy.fft.ifftn(cupyx.scipy.fft.rfftn(cupy.ones((4, 4, 4))), axes=(0, 1))
-        return float(x.sum()) == 16.0 and y.shape == (4, 4, 3)
-    except Exception:
-        return False
+    """True when CuPy is installed, sees a CUDA device and runs a small PME grid to the same potentials and
+    gradients as NumPy.  A CuPy that does not match the CUDA installed (cupy-cuda12x on CUDA 13, or two CuPy
+    packages at once) imports and counts devices but can fail at the first kernel it compiles, so every
+    operation the grid uses (bincount, padding, FFTs, the gather kernel) is tried once here."""
+    global _gpu_ok
+    if _gpu_ok is None:
+        try:
+            import cupy
+            if cupy.cuda.runtime.getDeviceCount() < 1:
+                raise RuntimeError("no CUDA device")
+            rng = np.random.default_rng(1)
+            box = np.array([12.0, 13.0, 14.0])
+            x, q, y = rng.random((20, 3)) * box, rng.standard_normal(20), rng.random((3, 3)) * box
+            out = []
+            for gpu in (False, True):
+                grid = PMEGrid(box, 0.3, gpu=gpu)
+                phi = grid.potential(Stencil(grid, x), q)
+                st = Stencil(grid, y)
+                out.append(np.concatenate([grid.value(st, phi), grid.gradient(st, phi).ravel()]))
+            _gpu_ok = bool(np.allclose(out[0], out[1], rtol=1e-8, atol=1e-10))
+        except Exception:
+            _gpu_ok = False
+    return _gpu_ok
 
 
 def bspline(w, n):

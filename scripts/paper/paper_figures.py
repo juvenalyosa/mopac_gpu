@@ -356,7 +356,9 @@ def fig_md(o: Out) -> None:
                  "GPU s/step": f"{gp['s_per_step'].iloc[0]:.3f}" if len(gp) else "--"}
             if len(c) and len(gp):
                 r["Speed-up"] = f"{c['s_per_step'].iloc[0] / gp['s_per_step'].iloc[0]:.0f}"
-            r["max |error| (kcal/mol)"] = f"{gp['max_abs_error'].iloc[0]:.3f}" if len(gp) else "--"
+            for mode, d in (("CPU", c), ("GPU", gp)):
+                ok = len(d) and "max_abs_error" in d and pd.notna(d["max_abs_error"].iloc[0])
+                r[f"{mode} max |error| (kcal/mol)"] = f"{d['max_abs_error'].iloc[0]:.3f}" if ok else "--"
             rows.append(r)
     if rows:
         o.table("table_dynamics", pd.DataFrame(rows), "Molecular dynamics (DRC, 0.1--0.5 fs steps).",
