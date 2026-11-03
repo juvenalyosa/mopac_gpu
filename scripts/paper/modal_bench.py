@@ -10,9 +10,10 @@ The image builds this fork (GPU, OpenBLAS, the commit of origin/BRANCH at launch
 tables); a run whose input is unchanged is read back, so launching the same name again resumes, and each experiment
 group is committed to the volume when it finishes.
 
-CPU reference: 12 cores are reserved and the all-core CPU runs use as many threads as the container has CPUs
-(its affinity mask; a 6-core reservation showed 6, so 12 threads would have oversubscribed it); MOZYME CPU runs use
-one thread.  env.json records the count.  The GPU is an A100 40 GB (--gpu A100-80GB to change).
+CPU reference: 12 cores are reserved and the all-core CPU runs use 12 threads; MOZYME CPU runs use one thread.  The
+container's affinity mask is larger than the reservation (28 CPUs with cpu=12: Modal lets a container burst 16 cores
+above its request when the host is idle), so a thread count taken from it would make the CPU times depend on the
+load of the host.  Modal sets OMP_NUM_THREADS to the reservation, which is what nproc reports.  The GPU is an A100 40 GB (--gpu A100-80GB to change).
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ REPO_URL = "https://github.com/juvenalyosa/mopac_gpu.git"
 BRANCH = os.environ.get("MOPAC_BENCH_BRANCH", "paper-bench")
 UPSTREAM_URL = "https://github.com/openmopac/mopac.git"
 UPSTREAM_COMMIT = "78dc4572"
-CPU_CORES = 12           # Modal's cpu= (the container then sees this many CPUs)
+CPU_CORES = 12           # Modal's cpu= and the thread count of the all-core CPU runs
 GPU = os.environ.get("MOPAC_BENCH_GPU", "A100-40GB")
 
 
@@ -86,11 +87,13 @@ def bench(name: str, repeats: int = 3, quick: bool = False, groups: str = "") ->
     out.mkdir(parents=True, exist_ok=True)
     lib = sorted(glob.glob("/opt/build/libmopac.so*"))[0]
     _sh("nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader; nproc; "
-        "cat /sys/fs/cgroup/cpu.max 2>/dev/null; git -C /opt/mopac_gpu log -1 --format='%h %ad %s' --date=short")
+        "cat /sys/fs/cgroup/cpu.max 2>/dev/null; grep -m4 -E 'vendor_id|model name|cpu family|^model' /proc/cpuinfo; "
+        "git -C /opt/mopac_gpu log -1 --format='%h %ad %s' --date=short")
     _sh(f"cd {src}/scripts/qmmm && python -c \"from qmmm_pme import gpu_available; "
         f"print('QM-PME grid on the GPU (CuPy):', gpu_available())\"")
-    threads = len(os.sched_getaffinity(0))
-    print(f"CPUs visible to the container: {threads}", flush=True)
+    threads = CPU_CORES
+    print(f"CPU threads {threads}; affinity mask {len(os.sched_getaffinity(0))} CPUs; "
+          f"OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS')}", flush=True)
     base = (f"python -u {src}/scripts/paper/paper_bench.py --mopac /opt/build/mopac --libmopac {lib} --out {out} "
             f"--repeats {repeats} --cpus {threads} --upstream-mopac /opt/build_upstream/mopac"
             + (" --quick" if quick else ""))
