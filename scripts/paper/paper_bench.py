@@ -31,6 +31,9 @@ Experiments (--exp):
   conv_mol      conventional SCF of molecules: crambin RHF / UHF / COSMO, graphene flake, chignolin C.I.
   qmmm          OpenMM + MOPAC QM/MM MD: QM regions of 16-1231 atoms in water, MOPAC on the GPU and the CPU
   qmmm_enzyme   trypsin-BPTI (2PTC): cut-off vs QM-PME, time per step and the cut-off test
+  mozyme_threads  MOZYME on the CPU with 1, 4 and all threads (is the one-thread reference fair?)
+  upstream      MOPAC 23.1.2 (--upstream-mopac) against the CPU path of this fork: heats, gradients, iterations, time
+  qmmm_pme_check  QM-MM PME against a direct Ewald sum (tests/check_qmmm_pme_ewald.py)
 """
 from __future__ import annotations
 
@@ -192,7 +195,7 @@ class Bench:
             env.pop(k, None)
         n = str(threads or self.ncpu)
         env.update(OMP_NUM_THREADS=n, OPENBLAS_NUM_THREADS=n, MKL_NUM_THREADS=n)
-        if mode == "cpu":
+        if mode != "gpu":
             env["MOPAC_NOGPU"] = "1"
         else:
             env["MOPAC_GPU_DEBUG"] = "1"
@@ -203,8 +206,9 @@ class Bench:
 
     def run(self, exp: str, case: str, mode: str, deck: str, files=(), rep: int = 0, threads: int | None = None,
             force_gpu: bool = False, extra_env: dict | None = None, timeout: float | None = None,
-            want_grad: bool = False, meta: dict | None = None, name: str = "job") -> dict:
-        """Run one MOPAC deck (text) in its own directory; returns the parsed result (cached in result.json)."""
+            want_grad: bool = False, meta: dict | None = None, name: str = "job", binary: Path | None = None) -> dict:
+        """Run one MOPAC deck (text) in its own directory; returns the parsed result (cached in result.json).
+        binary: another MOPAC executable (default --mopac); every mode but gpu runs on the CPU."""
         d = self.runs / exp / case / (mode + (f"_r{rep}" if rep else ""))
         res_file = d / "result.json"
         mop = d / f"{name}.mop"
@@ -215,7 +219,7 @@ class Bench:
                 return json.loads(res_file.read_text())
             except json.JSONDecodeError:
                 pass
-        if mode == "cpu" and self.a.no_cpu:
+        if mode != "gpu" and self.a.no_cpu:
             return {}
         if d.exists():
             shutil.rmtree(d)
@@ -230,7 +234,7 @@ class Bench:
         with mem, open(d / f"{name}.stdout", "w") as fh:
             t0 = time.perf_counter()
             try:
-                rc = subprocess.run([str(self.mopac), f"{name}.mop"], cwd=d, env=env, stdout=fh,
+                rc = subprocess.run([str(binary or self.mopac), f"{name}.mop"], cwd=d, env=env, stdout=fh,
                                     stderr=subprocess.STDOUT, timeout=timeout or self.a.timeout).returncode
             except subprocess.TimeoutExpired:
                 rc = 124
@@ -807,11 +811,132 @@ def exp_qmmm_enzyme(b: Bench) -> None:
     b.write_csv("qmmm_enzyme_distances", dist)
 
 
+def exp_mozyme_threads(b: Bench) -> None:
+    """MOZYME 1SCF on the CPU with 1, 4 and all threads: is the one-thread CPU reference of mozyme_sp fair?
+    (The MOZYME code has no OpenMP; BLAS calls could still use threads.)"""
+    exp, rows = "mozyme_threads", []
+    cases = PROTEINS[:1] if b.a.quick else [p for p in PROTEINS if p[0] in ("crambin", "ubiquitin", "adk")]
+    for case, stem, label, kind in cases:
+        text, files = deck_text(stem)
+        for n in sorted({1, 4, b.ncpu}):
+            rows.append(b.run(exp, f"{case}_t{n}", "cpu", text, files, threads=n,
+                              meta={"system": case, "label": label, "threads_requested": n}))
+    b.write_csv(exp, rows)
+
+
+def upstream_deck(text: str) -> str:
+    """The deck without the keywords that only this fork knows (they act on the GPU path only)."""
+    lines = text.split("\n", 1)
+    kw = re.sub(r"(?i)(^|\s)(MOZYME_GPU|MOZYME_MINBLK=\S+)(?=\s|$)", " ", lines[0])
+    return re.sub(r"\s+", " ", kw).strip() + ("\n" + lines[1] if len(lines) > 1 else "\n")
+
+
+def upstream_rows(b: Bench, exp: str, case: str, kind: str, label: str, res: dict) -> list[dict]:
+    """One row per fork mode: heat, gradient, iterations and time against the upstream run of the same deck."""
+    out, ru = [], res.get("upstream") or {}
+    gu = b.grad(exp, case, "upstream")
+    for m, r in res.items():
+        if m == "upstream" or not r:
+            continue
+        g = b.grad(exp, case, m)
+        hu, hm = ru.get("heat"), r.get("heat")
+        row = {"case": case, "kind": kind, "label": label, "mode": m, "heat_upstream": hu, "heat": hm,
+               "dheat": (hm - hu) if hu is not None and hm is not None else None,
+               "upstream_failed": bool(ru.get("scf_failed")) or hu is None, "failed": bool(r.get("scf_failed")) or hm is None,
+               "grad_max_abs": None, "grad_rms": None,
+               "iter_upstream": ru.get("scf_iterations"), "iter": r.get("scf_iterations"),
+               "wall_upstream": ru.get("wall_s"), "wall": r.get("wall_s")}
+        if g and gu and len(g) == len(gu):
+            dg = [x - y for x, y in zip(g, gu)]
+            row["grad_max_abs"] = max(abs(x) for x in dg)
+            row["grad_rms"] = (sum(x * x for x in dg) / len(dg)) ** 0.5
+        out.append(row)
+    return out
+
+
+def exp_upstream(b: Bench) -> None:
+    """MOPAC 23.1.2 (commit 78dc4572, the base of the fork; CPU build, --upstream-mopac) against the CPU path of
+    this fork, same decks and threads: heats, gradients, SCF iterations and times.  Solids also with SHIFT=80 in
+    the fork (the original level shift, without the damped start), which isolates the new solid-state SCF."""
+    exp, rows, comp = "upstream", [], []
+    if not b.a.upstream_mopac:
+        say("  upstream: no --upstream-mopac given, skipped")
+        return
+    up = Path(b.a.upstream_mopac).resolve()
+    tight = "SCFCRT=1.D-6 THRESH=1.D-15"
+    plan = []   # (case, kind, deck, files, threads, label, solid)
+    mozyme = PROTEINS[:1] if b.a.quick else [p for p in PROTEINS if p[0] in ("crambin", "dna", "ubiquitin", "adk")]
+    for case, stem, label, _ in mozyme:
+        text, files = deck_text(stem)
+        plan.append((case, "MOZYME 1SCF", upstream_deck(text), files, 1, label, False))
+    if not b.a.quick:
+        text, files = deck_text("protein_crambin_1crn")
+        plan.append(("crambin_grad", "MOZYME 1SCF GRADIENTS",
+                     upstream_deck(with_keywords(text, f"GRADIENTS AUX {tight}", drop=("NEWPDB", "PDB"))), files, 1,
+                     "Crambin (1CRN)", False))
+        plan.append(("graphene_flake", "conventional 1SCF GRADIENTS",
+                     with_keywords(deck_text("material_graphene_nanoflake_c192h38")[0], "GRADIENTS SCFCRT=1.D-6 AUX TIMES"),
+                     [], None, "Graphene flake C$_{192}$H$_{38}$", False))
+    kw = "PM7 1SCF GRADIENTS GEO-OK AUX TIMES"
+    solids = [(f"si{8 * n ** 3}", silicon_supercell(n)[0], "Silicon") for n in ((2,) if b.a.quick else (2, 3))]
+    if not b.a.quick:
+        solids += [(c, mat_deck(MAT / r, kw), lab) for c, r, lab, _ in SOLID_CELLS
+                   if c in ("diamond", "graphene", "mgo_water", "zno", "quartz162", "rutile162", "urea192")]
+    for case, text, label in solids:
+        plan.append((case, "solid 1SCF GRADIENTS", text, [], None, label, True))
+    for case, kind, deck, files, threads, label, solid in plan:
+        modes = [("upstream", deck, up), ("fork", deck, None)]
+        if solid:
+            modes.append(("fork_shift80", with_keywords(deck, "SHIFT=80"), None))
+        res = {}
+        for mode, d, binary in modes:
+            r = b.run(exp, case, mode, d, files, threads=threads, binary=binary, want_grad=True,
+                      meta={"system": case, "kind": kind, "label": label})
+            res[mode] = r
+            rows.append(r)
+        comp += upstream_rows(b, exp, case, kind, label, res)
+    # same heat, different gradient (the PM7 H-bond gradient was fixed in the fork): central differences of the
+    # heat decide which gradient is right (chignolin, conventional SCF converged to 1e-8)
+    case, pdb = "chignolin_fd", REF / "1UAO_opt.pdb"
+    kw = "PM7 1SCF PULAY GEO-OK SCFCRT=1.D-8"
+    deck = f'{kw} GRADIENTS AUX GEO_DAT="{pdb.name}"\nchignolin (1UAO), conventional SCF\n\n'
+    res = {}
+    for mode, binary in (("upstream", up), ("fork", None)):
+        res[mode] = b.run(exp, case, mode, deck, [pdb], binary=binary, want_grad=True,
+                          meta={"system": case, "kind": "conventional 1SCF GRADIENTS", "label": "Chignolin (1UAO)"})
+        rows.append(res[mode])
+    comp += upstream_rows(b, exp, case, "conventional 1SCF GRADIENTS", "Chignolin (1UAO)", res)
+    fd_csv = b.data / "upstream_fd.csv"
+    fa, fb = b.path(exp, case, "fork") / "job.aux", b.path(exp, case, "upstream") / "job.aux"
+    if fa.exists() and fb.exists() and not b.a.quick:
+        cmd = [sys.executable, str(REPO / "scripts" / "paper" / "fd_gradient.py"), "--mopac", str(b.mopac),
+               "--pdb", str(pdb), "--keywords", kw, "--aux", str(fa), "--compare-aux", str(fb), "--label-a", "fork",
+               "--label-b", "upstream", "--n", "8", "--work", str(b.runs / exp / case / "fd"), "--csv", str(fd_csv)]
+        say("  " + " ".join(cmd))
+        subprocess.run(cmd, check=False)
+    b.write_csv(exp, rows)
+    b.write_csv("upstream_compare", comp)
+
+
+def exp_qmmm_pme_check(b: Bench) -> None:
+    """tests/check_qmmm_pme_ewald.py: the QM-MM PME against a direct Ewald sum, rock salt and finite differences."""
+    exp = "qmmm_pme_check"
+    d = b.runs / exp
+    d.mkdir(parents=True, exist_ok=True)
+    cmd = [sys.executable, str(REPO / "tests" / "check_qmmm_pme_ewald.py"), "--csv", str(b.data / "qmmm_pme_check.csv"),
+           "--gpu"]
+    say("  " + " ".join(cmd))
+    with open(d / "log.txt", "w") as fh:
+        rc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, check=False).returncode
+    say(f"  -> data/qmmm_pme_check.csv (rc {rc})")
+
+
 EXPERIMENTS = {
     "env": exp_env, "mozyme_sp": exp_mozyme_sp, "mozyme_grad": exp_mozyme_grad, "methods": exp_methods,
     "cosmo": exp_cosmo, "opt": exp_opt, "md": exp_md, "thermo": exp_thermo, "solids": exp_solids,
     "solids_profile": exp_solids_profile, "solids_force": exp_solids_force, "solids_drc": exp_solids_drc,
     "conv_mol": exp_conv_mol, "qmmm": exp_qmmm, "qmmm_enzyme": exp_qmmm_enzyme,
+    "mozyme_threads": exp_mozyme_threads, "upstream": exp_upstream, "qmmm_pme_check": exp_qmmm_pme_check,
 }
 
 
@@ -828,6 +953,7 @@ def main() -> int:
     ap.add_argument("--solids-cpu-max-atoms", type=int, default=800, help="conventional-SCF CPU runs up to this size")
     ap.add_argument("--si-sizes", default="2,3,4,5,6", help="Si supercells n x n x n conventional cells (8 n^3 atoms)")
     ap.add_argument("--cpu-long", action="store_true", help="also the 1AKE optimization on the CPU (hours)")
+    ap.add_argument("--upstream-mopac", default="", help="MOPAC 23.1.2 executable (CPU build) for the upstream experiment")
     ap.add_argument("--md-rows", type=int, default=40, help="DRC rows of the crambin NVE run (0.5 fs each)")
     ap.add_argument("--force-workers", type=int, default=4, help="GPU processes of the chignolin FORCE")
     ap.add_argument("--qmmm-large", action="store_true", help="also the whole ubiquitin as QM region")

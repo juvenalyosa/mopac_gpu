@@ -535,6 +535,54 @@ def fig_qmmm(o: Out) -> None:
             "0.5 fs steps, Langevin NVT; NVE: linear-fit slope of the total energy.")
 
 
+def tables_controls(o: Out) -> None:
+    """Controls asked for by the review: CPU threads of MOZYME, MOPAC 23.1.2 against the fork's CPU path (with
+    central differences where the gradients differ), and the QM-MM PME against a direct Ewald sum."""
+    th = o.csv("mozyme_threads")
+    if th is not None:
+        rows = []
+        for system, g in th.groupby("system", sort=False):
+            t1 = g.loc[g["threads"] == g["threads"].min(), "wall_s"].iloc[0]
+            for _, r in g.sort_values("threads").iterrows():
+                rows.append({"System": r["label"], "Threads": int(r["threads"]), "CPU (s)": f"{r['wall_s']:.1f}",
+                             "vs 1 thread": f"{t1 / r['wall_s']:.2f}", "$H_f$ (kcal/mol)": f"{r['heat']:.5f}"})
+        o.table("table_mozyme_threads", pd.DataFrame(rows), "MOZYME 1SCF on the CPU with 1 to all threads.",
+                "Same executable with MOPAC\\_NOGPU=1; OMP\\_NUM\\_THREADS and OPENBLAS\\_NUM\\_THREADS set to the count.")
+        o.summary.append("- MOZYME CPU threads: " + "; ".join(
+            f"{r['System']} {r['Threads']} thr {r['CPU (s)']} s" for r in rows))
+    up = o.csv("upstream_compare")
+    if up is not None:
+        rows = []
+        for _, r in up.iterrows():
+            rows.append({"System": r["label"], "Calculation": r["kind"], "Fork run": str(r["mode"]).replace("_", " "),
+                         "$H_f$ 23.1.2": "failed" if r.get("upstream_failed") is True else f"{r['heat_upstream']:.5f}",
+                         "$H_f$ fork": "failed" if r.get("failed") is True else f"{r['heat']:.5f}",
+                         "max $|\\Delta g|$": fmt_e(r["grad_max_abs"]) if pd.notna(r.get("grad_max_abs")) else "--",
+                         "SCF it. (23.1.2 / fork)": (f"{int(r['iter_upstream'])} / {int(r['iter'])}"
+                                                    if pd.notna(r.get("iter_upstream")) and pd.notna(r.get("iter")) else "--"),
+                         "CPU s (23.1.2 / fork)": f"{r['wall_upstream']:.1f} / {r['wall']:.1f}"})
+        o.table("table_upstream", pd.DataFrame(rows), "MOPAC 23.1.2 (commit 78dc4572) against the CPU path of the fork.",
+                "Same decks, threads and machine. Gradients in kcal/(mol \\AA). fork shift80: the original 80 eV level "
+                "shift of solids, without the damped start.")
+    fd = o.csv("upstream_fd")
+    if fd is not None:
+        df = pd.DataFrame({"Atom": fd["name"], "Coord.": fd["axis"], "Central diff.": fd["fd"].map("{:.3f}".format),
+                           "Fork": fd["fork"].map("{:.3f}".format), "23.1.2": fd["upstream"].map("{:.3f}".format)})
+        o.table("table_upstream_fd", df, "Chignolin, PM7 gradient (kcal/(mol \\AA)) of the coordinates where MOPAC 23.1.2 "
+                "and the fork differ most, against central differences of the heat.",
+                "Conventional SCF, SCFCRT=1.D-8; step 0.005 \\AA; both programs give the same heat.")
+        o.summary.append(f"- Gradient vs central differences (chignolin, {len(fd)} coords): max |fork - FD| "
+                         f"{(fd['fork'] - fd['fd']).abs().max():.3f}, max |23.1.2 - FD| {(fd['upstream'] - fd['fd']).abs().max():.3f}")
+    pme = o.csv("qmmm_pme_check")
+    if pme is not None:
+        df = pd.DataFrame({"Check": pme["check"].str.replace("_", " "), "Value": pme["value"].map(fmt_e),
+                           "Tolerance": pme["tolerance"].map(fmt_e), "Unit": pme["unit"],
+                           "Pass": pme["pass"].map(lambda v: "yes" if str(v) == "True" else "NO")})
+        o.table("table_qmmm_pme_check", df, "QM--MM PME against a direct Ewald sum, the rock-salt Madelung constant "
+                "and finite differences.", "tests/check\\_qmmm\\_pme\\_ewald.py.")
+        o.summary.append(f"- QM-MM PME checks: {int((pme['pass'].astype(str) == 'True').sum())} of {len(pme)} pass")
+
+
 def write_summary(o: Out) -> None:
     env = o.root / "env.json"
     head = ["# Benchmark summary", ""]
@@ -552,7 +600,8 @@ def main() -> int:
         print(__doc__)
         return 1
     o = Out(Path(sys.argv[1]))
-    for f in (fig_mozyme_scaling, fig_accuracy, fig_opt, fig_md, fig_solids, fig_profile, fig_freq, fig_qmmm):
+    for f in (fig_mozyme_scaling, fig_accuracy, fig_opt, fig_md, fig_solids, fig_profile, fig_freq, fig_qmmm,
+              tables_controls):
         try:
             f(o)
         except Exception as exc:  # noqa: BLE001  (one broken figure must not stop the others)
