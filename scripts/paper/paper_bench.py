@@ -179,6 +179,21 @@ def stage_times(text: str) -> dict:
 
 # ----------------------------------------------------------------------------------------------- runner
 
+def cpu_limit() -> int:
+    """CPUs this process may use: the cgroup quota, else the affinity mask, else os.cpu_count() (which in a
+    container is the host's count)."""
+    try:
+        q, p = Path("/sys/fs/cgroup/cpu.max").read_text().split()[:2]
+        if q != "max":
+            return max(1, round(int(q) / int(p)))
+    except (OSError, ValueError):
+        pass
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
+
+
 class Bench:
     def __init__(self, a: argparse.Namespace) -> None:
         self.a = a
@@ -187,7 +202,7 @@ class Bench:
         self.runs = self.out / "runs"
         self.data = self.out / "data"
         self.data.mkdir(parents=True, exist_ok=True)
-        self.ncpu = os.cpu_count() or 1
+        self.ncpu = a.cpus or cpu_limit()
 
     def env_for(self, mode: str, threads: int | None, force_gpu: bool, extra: dict | None) -> dict:
         env = os.environ.copy()
@@ -376,7 +391,8 @@ def exp_env(b: Bench) -> None:
                   "--format=csv,noheader"),
         "cuda": sh("nvcc --version | tail -2 | head -1"),
         "cpu_model": sh("lscpu | grep 'Model name' | sed 's/.*: *//'") or platform.processor(),
-        "cpu_count": os.cpu_count(),
+        "cpu_count": b.ncpu,
+        "cpu_host_count": os.cpu_count(),
         "memory": sh("free -g | awk '/Mem:/ {print $2 \" GB\"}'"),
         "os": platform.platform(),
         "python": sys.version.split()[0],
@@ -953,6 +969,7 @@ def main() -> int:
     ap.add_argument("--solids-cpu-max-atoms", type=int, default=800, help="conventional-SCF CPU runs up to this size")
     ap.add_argument("--si-sizes", default="2,3,4,5,6", help="Si supercells n x n x n conventional cells (8 n^3 atoms)")
     ap.add_argument("--cpu-long", action="store_true", help="also the 1AKE optimization on the CPU (hours)")
+    ap.add_argument("--cpus", type=int, default=0, help="threads of the all-core CPU runs (default: the CPU quota)")
     ap.add_argument("--upstream-mopac", default="", help="MOPAC 23.1.2 executable (CPU build) for the upstream experiment")
     ap.add_argument("--md-rows", type=int, default=40, help="DRC rows of the crambin NVE run (0.5 fs each)")
     ap.add_argument("--force-workers", type=int, default=4, help="GPU processes of the chignolin FORCE")
