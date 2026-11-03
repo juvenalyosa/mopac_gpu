@@ -390,7 +390,8 @@ def exp_env(b: Bench) -> None:
         "gpu": sh("nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap,clocks.max.sm "
                   "--format=csv,noheader"),
         "cuda": sh("nvcc --version | tail -2 | head -1"),
-        "cpu_model": sh("lscpu | grep 'Model name' | sed 's/.*: *//'") or platform.processor(),
+        "cpu_model": (sh("lscpu | grep 'Model name' | sed 's/.*: *//'")
+                      or sh("grep -m1 'model name' /proc/cpuinfo | sed 's/.*: *//'") or platform.processor()),
         "cpu_count": b.ncpu,
         "cpu_host_count": os.cpu_count(),
         "memory": sh("free -g | awk '/Mem:/ {print $2 \" GB\"}'"),
@@ -687,7 +688,10 @@ def exp_conv_mol(b: Bench) -> None:
             ("crambin_uhf", mat_deck(crambin, f"PM7 UHF 1SCF GRADIENTS GEO-OK CHARGE=0 {tight}"), "Crambin, UHF doublet"),
             ("crambin_cosmo", mat_deck(crambin, f"PM7 1SCF GRADIENTS GEO-OK CHARGE=-1 EPS=78.4 {tight}"),
              "Crambin, COSMO"),
-            ("graphene_flake", with_keywords(deck_text("material_graphene_nanoflake_c192h38")[0], f"GRADIENTS {tight}"),
+            # 1.D-8: at 1.D-6 the gradients of repeated GPU runs of this SCF still differ by ~0.01 and GPU vs CPU by
+            # 0.2 kcal/(mol A) (Modal A100), SCF noise of a difficult SCF rather than the device code
+            ("graphene_flake", with_keywords(deck_text("material_graphene_nanoflake_c192h38")[0],
+                                             "GRADIENTS SCFCRT=1.D-8 AUX TIMES"),
              "Graphene flake C$_{192}$H$_{38}$"),
             ("chignolin_ci", mat_deck(MAT / "molecules" / "chignolin.mop",
                                       f"PM7 1SCF GRADIENTS CHARGE=3 DOUBLET RHF GEO-OK {tight}"),

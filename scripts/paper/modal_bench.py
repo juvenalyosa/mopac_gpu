@@ -10,9 +10,9 @@ The image builds this fork (GPU, OpenBLAS, the commit of origin/BRANCH at launch
 tables); a run whose input is unchanged is read back, so launching the same name again resumes, and each experiment
 group is committed to the volume when it finishes.
 
-CPU reference: 6 physical cores are reserved (12 vCPUs, as the Colab runtime) and the all-core CPU runs use 12
-threads (--cpus 12); MOZYME CPU runs use one thread.  A container may burst above its reservation, so the CPU times
-are those of 12 threads with at least 6 reserved cores.  The GPU is an A100 40 GB (--gpu A100-80GB to change).
+CPU reference: 12 cores are reserved and the all-core CPU runs use as many threads as the container has CPUs
+(its affinity mask; a 6-core reservation showed 6, so 12 threads would have oversubscribed it); MOZYME CPU runs use
+one thread.  env.json records the count.  The GPU is an A100 40 GB (--gpu A100-80GB to change).
 """
 
 from __future__ import annotations
@@ -27,8 +27,7 @@ REPO_URL = "https://github.com/juvenalyosa/mopac_gpu.git"
 BRANCH = os.environ.get("MOPAC_BENCH_BRANCH", "paper-bench")
 UPSTREAM_URL = "https://github.com/openmopac/mopac.git"
 UPSTREAM_COMMIT = "78dc4572"
-CPU_CORES = 6            # physical cores (Modal); 12 vCPUs
-THREADS = 12
+CPU_CORES = 12           # Modal's cpu= (the container then sees this many CPUs)
 GPU = os.environ.get("MOPAC_BENCH_GPU", "A100-40GB")
 
 
@@ -90,8 +89,10 @@ def bench(name: str, repeats: int = 3, quick: bool = False, groups: str = "") ->
         "cat /sys/fs/cgroup/cpu.max 2>/dev/null; git -C /opt/mopac_gpu log -1 --format='%h %ad %s' --date=short")
     _sh(f"cd {src}/scripts/qmmm && python -c \"from qmmm_pme import gpu_available; "
         f"print('QM-PME grid on the GPU (CuPy):', gpu_available())\"")
+    threads = len(os.sched_getaffinity(0))
+    print(f"CPUs visible to the container: {threads}", flush=True)
     base = (f"python -u {src}/scripts/paper/paper_bench.py --mopac /opt/build/mopac --libmopac {lib} --out {out} "
-            f"--repeats {repeats} --cpus {THREADS} --upstream-mopac /opt/build_upstream/mopac"
+            f"--repeats {repeats} --cpus {threads} --upstream-mopac /opt/build_upstream/mopac"
             + (" --quick" if quick else ""))
     for g in (groups.split(";") if groups else GROUPS):
         _sh(f"{base} --exp {g}")
