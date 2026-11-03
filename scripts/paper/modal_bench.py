@@ -82,6 +82,16 @@ def _sh(cmd: str) -> int:
 
 @app.function(gpu=GPU, cpu=CPU_CORES, memory=49152, timeout=24 * 3600, volumes={str(RESULTS): volume})
 def bench(name: str, repeats: int = 3, quick: bool = False, groups: str = "") -> str:
+    return _bench(name, repeats, quick, groups)
+
+
+@app.function(cpu=CPU_CORES, memory=32768, timeout=24 * 3600, volumes={str(RESULTS): volume})
+def bench_cpu(name: str, repeats: int = 3, quick: bool = False, groups: str = "") -> str:
+    """The CPU-only groups (the controls) without paying for an idle GPU."""
+    return _bench(name, repeats, quick, groups)
+
+
+def _bench(name: str, repeats: int, quick: bool, groups: str) -> str:
     import glob
     src, out = Path("/opt/mopac_gpu"), RESULTS / name
     out.mkdir(parents=True, exist_ok=True)
@@ -135,6 +145,14 @@ def package(name: str) -> bytes:
 def main(name: str = "a100_modal", repeats: int = 3, quick: bool = False, groups: str = ""):
     print(f"commit {COMMIT} ({BRANCH}), GPU {GPU}, results volume mopac-paper-bench/{name}")
     print(bench.remote(name, repeats, quick, groups))
+    fetch_zip(name)
+
+
+@app.local_entrypoint()
+def main_cpu(name: str = "a100_modal", repeats: int = 3, quick: bool = False,
+             groups: str = "mozyme_threads,upstream,qmmm_pme_check"):
+    print(f"commit {COMMIT} ({BRANCH}), CPU only, results volume mopac-paper-bench/{name}")
+    print(bench_cpu.remote(name, repeats, quick, groups))
     fetch_zip(name)
 
 
