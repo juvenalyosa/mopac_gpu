@@ -69,9 +69,9 @@
       logical :: pulay_kw
       double precision :: shift, shiftb, shfmax, ten, tenold, plchek, scorr, shfto, shftbo, titer0, solid_shift
       ! MOPAC_PDIAG: rotations by pseudo_diag_gemm between full diagonalizations
-      logical :: pd_on, pd_ready
-      integer :: pd_start, pd_every, pd_last_full, pd_rotations
-      double precision :: pd_xmax, pd_gmax, pd_glast, pd_grow, pd_pl
+      logical :: pd_on, pd_ready, pd_off, pd_damped
+      integer :: pd_start, pd_every, pd_last_full, pd_rotations, pd_fails
+      double precision :: pd_xmax, pd_gmax, pd_glast, pd_grow, pd_pl, pd_plmin
       double precision :: smear_kt, smear_mts, smear_ef   ! SMEAR: kT (eV), -TS (eV), Fermi level (eV)
       logical :: solid_pulay   ! MOPAC_SOLID_SCF=pulay: solids without level shift, Pulay from the start
       logical :: p_half        ! RHF: pa is exactly p*0.5 (the device Fock then uploads p only)
@@ -706,6 +706,10 @@
       pd_glast = huge(1.d0)
       pd_rotations = 0
       pd_ready = .false.
+      pd_off = .false.
+      pd_damped = .false.
+      pd_fails = 0
+      pd_plmin = huge(1.d0)
       frst = .TRUE.
       ! Print SCF hybrid profile once per calculation
       if (nscf == 0 .and. debug) then
@@ -1773,14 +1777,34 @@
 !  MOPAC_PDIAG_EVERY iterations (default 16), and after a rotation step in which the
 !  occupied-virtual coupling grew by more than a factor MOPAC_PDIAG_GROW (default 4).  Without the
 !  constant level shift of solids, no rotation before the density change PL has once dropped below
-!  MOPAC_PDIAG_PL (default 0.05).
+!  MOPAC_PDIAG_PL (default 0.05).  Rotations that let PL grow four-fold over its lowest value since
+!  the last full diagonalization end with a full diagonalization; after two such stretches the SCF
+!  goes on with full diagonalizations only.
 !
         logical function pdiag_step()
+          logical :: damped
           ! the default SCF of solids (constant level shift, damped start) rotates from the start
           if (niter > 1 .and. (pl < pd_pl .or. (id /= 0 .and. abs(solid_shift) > 1.d-10))) pd_ready = .true.
-          pdiag_step = pd_on .and. pd_ready .and. .not. (uhf .or. halfe .or. ci) .and. smear_kt == 0.d0 .and. &
-            niter > pd_start .and. &
+          pdiag_step = pd_on .and. pd_ready .and. .not. pd_off .and. .not. (uhf .or. halfe .or. ci) .and. &
+            smear_kt == 0.d0 .and. niter > pd_start .and. &
             pd_last_full > 0 .and. niter - pd_last_full < pd_every
+          ! PL jumps when the damped start ends; that is not a failure of the rotations
+          damped = hybrid_enable .and. damp_enable .and. .not. hybrid_allow_cdiis
+          if (damped .or. pd_damped) pd_plmin = huge(1.d0)
+          pd_damped = damped
+          ! a rotation stretch that lets PL grow is steering the SCF away (PM7 Si512 with atoms displaced
+          ! by 0.01 A: PL 0.017 -> 0.08 within one stretch, no convergence in 2000 iterations, against 23
+          ! iterations with full diagonalizations only)
+          if (pdiag_step .and. pd_glast < huge(1.d0) .and. pl > 4.d0*pd_plmin) then
+            pd_fails = pd_fails + 1
+            pd_off = pd_fails >= 2
+            pdiag_step = .false.
+          end if
+          if (pdiag_step) then
+            pd_plmin = min(pd_plmin, pl)
+          else
+            pd_plmin = pl
+          end if
         end function pdiag_step
 
         subroutine pdiag_rotate()

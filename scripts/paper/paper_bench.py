@@ -250,7 +250,9 @@ class Bench:
             t0 = time.perf_counter()
             try:
                 rc = subprocess.run([str(binary or self.mopac), f"{name}.mop"], cwd=d, env=env, stdout=fh,
-                                    stderr=subprocess.STDOUT, timeout=timeout or self.a.timeout).returncode
+                                    stderr=subprocess.STDOUT,
+                                    timeout=timeout or (self.a.gpu_timeout if mode == "gpu" else self.a.timeout)
+                                    ).returncode
             except subprocess.TimeoutExpired:
                 rc = 124
             wall = time.perf_counter() - t0
@@ -324,6 +326,8 @@ class Bench:
             for k in range(1, max(1, self.a.repeats) + 1):
                 rows.append(self.run(exp, case, "gpu", deck, files, rep=0 if k == 1 else k, force_gpu=force_gpu,
                                      want_grad=want_grad and k == 1, meta=meta, extra_env=extra_env))
+                if rows[-1].get("rc") == 124:   # a run that hit the time limit is not repeated
+                    break
         return rows
 
 
@@ -981,6 +985,9 @@ def main() -> int:
     ap.add_argument("--enzyme-steps", type=int, default=2000)
     ap.add_argument("--openmm-platform", default="CUDA")
     ap.add_argument("--timeout", type=float, default=6 * 3600)
+    # the longest GPU run of the A100 benchmarks takes ~7 min; a GPU run that lasts an hour is stuck
+    # (PM7 Si512 with displaced atoms ran 6 h without SCF convergence before the PDIAG safeguard)
+    ap.add_argument("--gpu-timeout", type=float, default=3600)
     a = ap.parse_args()
     a.si_sizes = tuple(int(x) for x in a.si_sizes.split(",") if x.strip())
     if a.libmopac:
