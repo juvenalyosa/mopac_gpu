@@ -233,14 +233,14 @@
         pd_every = 16
         pd_xmax = 0.2d0
         pd_grow = 4.d0
-        ! without a constant level shift (molecules; solids with SHIFT=0, SMEAR or MOPAC_SOLID_SCF=pulay)
         ! rotations only once the density change has dropped below pd_pl: a rotation step assumes a
         ! small occupied-virtual coupling, and from a density far from convergence it can steer the
         ! SCF into another solution (C192H38 graphene flake, PM7: 2509.09 instead of 2492.93 kcal/mol
         ! with rotations from iteration 4, PL ~1.9; 2498.39 with PL < 0.5; no convergence with 0.2).
-        ! The default solid SCF (20 eV shift, damped start) rotates from iteration 4: same states as
-        ! without rotations in every cell tested, and gating it would cost ~11 more full
-        ! diagonalizations in quartz and rutile.
+        ! Solids too, although their default SCF (20 eV shift, damped start) once rotated from
+        ! iteration 4: graphene (2D, PM7) then reached 261.46 instead of 244.82 kcal/mol, and the
+        ! MgO slab with water crept 1300-2000 iterations (190 without rotations); with the gate both
+        ! match the SCF without rotations, and quartz, rutile and urea take 1-3 more iterations.
         pd_pl = 5.d-2
         call get_environment_variable('MOPAC_PDIAG', line, status=i)
         if (i == 0 .and. len_trim(line) > 0) pd_on = (trim(adjustl(line)) == '1')
@@ -1775,16 +1775,14 @@
 !  occupied and virtual vectors with pseudo_diag_gemm (level-3 BLAS) instead of diagonalizing.
 !  A full diagonalization is done for the first MOPAC_PDIAG_START iterations (default 3), every
 !  MOPAC_PDIAG_EVERY iterations (default 16), and after a rotation step in which the
-!  occupied-virtual coupling grew by more than a factor MOPAC_PDIAG_GROW (default 4).  Without the
-!  constant level shift of solids, no rotation before the density change PL has once dropped below
-!  MOPAC_PDIAG_PL (default 0.05).  Rotations that let PL grow four-fold over its lowest value since
+!  occupied-virtual coupling grew by more than a factor MOPAC_PDIAG_GROW (default 4).  No rotation
+!  before the density change PL has once dropped below MOPAC_PDIAG_PL (default 0.05).  Rotations that let PL grow four-fold over its lowest value since
 !  the last full diagonalization end with a full diagonalization; after two such stretches the SCF
 !  goes on with full diagonalizations only.
 !
         logical function pdiag_step()
           logical :: damped
-          ! the default SCF of solids (constant level shift, damped start) rotates from the start
-          if (niter > 1 .and. (pl < pd_pl .or. (id /= 0 .and. abs(solid_shift) > 1.d-10))) pd_ready = .true.
+          if (niter > 1 .and. pl < pd_pl) pd_ready = .true.
           pdiag_step = pd_on .and. pd_ready .and. .not. pd_off .and. .not. (uhf .or. halfe .or. ci) .and. &
             smear_kt == 0.d0 .and. niter > pd_start .and. &
             pd_last_full > 0 .and. niter - pd_last_full < pd_every

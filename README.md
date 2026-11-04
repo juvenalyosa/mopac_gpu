@@ -628,8 +628,9 @@ statistical averages.
   - Several RHF solutions: some cells have more than one SCF solution (Li 54 atoms: the default SCF
     ends at 1898.11 kcal/mol, a solution at 1885.15 exists; graphene). Compare heats and HOMO–LUMO gaps when in doubt.
   - Aluminium with PM7 (Al 108) does not converge, with or without `SMEAR`.
-  - The pseudo-diagonalization can stall in very hard SCFs (an MgO slab with water when forced on);
-    `MOPAC_PDIAG=0` turns it off.
+  - The pseudo-diagonalization starts only once the density change PL is below 0.05; in the test
+    cells it then reaches the same states as full diagonalizations, but a hard SCF could still be
+    steered elsewhere: compare with `MOPAC_PDIAG=0`, which turns it off.
   - The half-electron SCF of large open-shell proteins (C.I. on a crambin doublet) needs hundreds of
     iterations.
 
