@@ -6024,20 +6024,23 @@ __global__ void mozyme_density_index_fill_kernel(
 }
 
 // Block per atom: sort its (lmo, coef) segment by LMO so intersections and
-// summation order are deterministic.
+// summation order are deterministic.  Dynamic shared memory of `capacity`
+// keys (a power of two): an atom lies in at most nclose occupied LMOs, and
+// with THRESH=1.D-15 large LMOs put more than 1024 on some atoms (barnase:
+// ~700 atoms per LMO, ~475 LMOs per atom on average).
 __global__ void __launch_bounds__(kDiaggBlockThreads)
 mozyme_density_index_sort_kernel(int numat, const int *atom_offsets,
                                  int *list_lmo, int *list_coef,
-                                 int *ok_out,
+                                 int *ok_out, int capacity,
                                  const int *resident_control_ints) {
-  __shared__ unsigned long long s_keys[kDensityIndexMaxPerAtom];
+  extern __shared__ unsigned long long s_keys[];
   if (resident_control_terminal(resident_control_ints)) return;
   const int atom = blockIdx.x;
   if (atom >= numat) return;
   const int begin = atom_offsets[atom];
   const int count = atom_offsets[atom + 1] - begin;
   if (count <= 1) return;
-  if (count > kDensityIndexMaxPerAtom) {
+  if (count > capacity) {
     if (threadIdx.x == 0) atomicExch(ok_out, 0);
     return;
   }
@@ -9714,6 +9717,39 @@ bool diagg1_dynamic_shared_ok(int occ_words, std::size_t *bytes_out) {
   return true;
 }
 
+// Keys of the density index sort: the next power of two >= nclose (at least
+// kDensityIndexMaxPerAtom), capped by the device's opt-in shared memory;
+// atoms with more LMOs than the capacity still fail the stage (ok = 0).
+bool density_sort_shared(int nclose, int *capacity_out, std::size_t *bytes_out) {
+  static int max_optin = -1;
+  static std::size_t attr_set_bytes = 0;
+  if (max_optin < 0) {
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess ||
+        cudaDeviceGetAttribute(&max_optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device) != cudaSuccess) {
+      cudaGetLastError();
+      max_optin = 48 * 1024;
+    }
+  }
+  int capacity = kDensityIndexMaxPerAtom;
+  while (capacity < nclose &&
+         sizeof(unsigned long long) * static_cast<std::size_t>(capacity) * 2 <= static_cast<std::size_t>(max_optin)) {
+    capacity <<= 1;
+  }
+  const std::size_t bytes = sizeof(unsigned long long) * static_cast<std::size_t>(capacity);
+  if (bytes > 48u * 1024u && bytes > attr_set_bytes) {
+    if (cudaFuncSetAttribute(mozyme_density_index_sort_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             static_cast<int>(bytes)) != cudaSuccess) {
+      cudaGetLastError();
+      return false;
+    }
+    attr_set_bytes = bytes;
+  }
+  *capacity_out = capacity;
+  *bytes_out = bytes;
+  return true;
+}
+
 bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
   if (!wall_ms || !ctx.device.uploaded || !ctx.state.use_nijbo ||
       !ctx.device.eimp_p.ptr) {
@@ -10231,10 +10267,13 @@ bool compute_density_on_gpu_impl(MozymeScfContext &ctx, int nclose, int mode,
           dev.density_entry_orb.ptr, dev.density_cursor.ptr,
           dev.density_list_lmo.ptr, dev.density_list_coef.ptr,
           dev.resident_control_ints.ptr);
-      mozyme_density_index_sort_kernel<<<numat, kThreads>>>(
+      int sort_capacity = 0;
+      std::size_t sort_bytes = 0;
+      if (!density_sort_shared(nclose, &sort_capacity, &sort_bytes)) break;
+      mozyme_density_index_sort_kernel<<<numat, kThreads, sort_bytes>>>(
           numat, dev.density_atom_offsets.ptr, dev.density_list_lmo.ptr,
           dev.density_list_coef.ptr, dev.density_updates.ptr + 1,
-          dev.resident_control_ints.ptr);
+          sort_capacity, dev.resident_control_ints.ptr);
       split_resident_stage_profile(ctx, "resident density_index stop event");
       const int pair_blocks =
           (dev.density_pair_count * 32 + kThreads - 1) / kThreads;
