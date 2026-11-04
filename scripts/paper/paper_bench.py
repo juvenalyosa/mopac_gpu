@@ -787,13 +787,15 @@ def exp_qmmm(b: Bench) -> None:
     exp, rows, nve = "qmmm", [], []
     q = b.a.quick
     chig, cram = REF / "1UAO_opt.pdb", REF / "1CRN_opt.pdb"
+    # QM-PME needs a box of at least 2 (QM radius + 13 A): chignolin R 10.6 A -> 47.2 A (padding 2.2: 44.0),
+    # crambin R 16.5-16.9 A -> 59.8 A (padding 1.8: 51.6); 0.1 nm of padding adds 2 A
     plan = [  # (case, label, pdb, options, GPU steps, GPU NVE steps, CPU steps)
         ("tyr_sc", "Tyr side chain (chignolin)", chig, "--qm-residues 2 --qm-sidechain --padding 1.8",
          20 if q else 1000, 0 if q else 400, 0),
-        ("chignolin", "Chignolin", chig, "--qm-residues 1,2,3,4,5,6,7,8,9,10 --padding 2.2 --ron 6 --roff 8",
+        ("chignolin", "Chignolin", chig, "--qm-residues 1,2,3,4,5,6,7,8,9,10 --padding 2.5 --ron 6 --roff 8",
          400, 400, 40),
         ("crambin", "Crambin", cram, "--qm-residues " + ",".join(map(str, range(1, 47))) +
-         " --padding 1.8 --ron 6 --roff 8", 100, 200, 10),
+         " --padding 2.3 --ron 6 --roff 8", 100, 200, 10),
     ]
     if b.a.qmmm_large:
         plan.append(("ubiquitin", "Ubiquitin", get_pdb("1UBQ", b.runs / exp / "_pdb"),
