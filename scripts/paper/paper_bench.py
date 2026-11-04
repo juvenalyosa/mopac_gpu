@@ -24,7 +24,7 @@ Experiments (--exp):
   opt           crambin optimization (100 cycles) CPU and GPU, 1AKE (50 cycles) GPU; heats at the same geometry
   md            crambin NVE CPU and GPU, crambin NVT and 1AKE NVE on the GPU
   thermo        chignolin FORCE and crambin FORCETS on the GPU against the stored CPU references
-  solids        conventional SCF of solids: Si supercells 64-1728 atoms and 9 other cells, 1SCF GRADIENTS
+  solids        conventional SCF of solids: Si supercells 64-1000 atoms and 10 other cells, 1SCF GRADIENTS
   solids_profile  where the time of a 512-768-atom cell goes (MOPAC_GPU_PROFILE stage timers)
   solids_force  diamond FORCE (Gamma-point vibrations) CPU and GPU
   solids_drc    diamond DRC TEMPERATURE=300 CPU and GPU
@@ -993,7 +993,8 @@ def main() -> int:
     ap.add_argument("--no-cpu", action="store_true", help="skip every CPU run (GPU only)")
     ap.add_argument("--cpu-max-atoms", type=int, default=7000, help="MOZYME CPU runs up to this size")
     ap.add_argument("--solids-cpu-max-atoms", type=int, default=800, help="conventional-SCF CPU runs up to this size")
-    ap.add_argument("--si-sizes", default="2,3,4,5,6", help="Si supercells n x n x n conventional cells (8 n^3 atoms)")
+    ap.add_argument("--si-sizes", default="2,3,4,5", help="Si supercells n x n x n conventional cells (8 n^3 atoms); "
+                    "n = 6 (1728 atoms, 3.0e9 two-electron integrals) is beyond the conventional SCF limit of 2**31 - 1")
     ap.add_argument("--cpu-long", action="store_true", help="also the 1AKE optimization on the CPU (hours)")
     ap.add_argument("--cpus", type=int, default=0, help="threads of the all-core CPU runs (default: the CPU quota)")
     ap.add_argument("--upstream-mopac", default="", help="MOPAC 23.1.2 executable (CPU build) for the upstream experiment")

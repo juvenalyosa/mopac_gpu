@@ -25,7 +25,7 @@ GPU runs. The list of experiments and their options is in `paper_bench.py --help
 | `opt` | crambin 100 L-BFGS cycles (CPU, GPU), 1AKE 50 cycles (GPU) | time per cycle, energy path, heat at the same final geometry |
 | `md` | crambin NVE (CPU, GPU), crambin NVT and 1AKE NVE (GPU) | time per step, energy conservation, temperature |
 | `thermo` | chignolin FORCE (parallel GPU processes), crambin FORCETS | frequencies, ZPE against stored CPU references |
-| `solids` | Si supercells 64–1728 atoms and 10 cells, PM7 1SCF GRADIENTS | time (all CPU cores vs GPU), heat, gradient |
+| `solids` | Si supercells 64–1000 atoms and 10 cells, PM7 1SCF GRADIENTS | time (all CPU cores vs GPU), heat, gradient |
 | `solids_profile` | 512–768-atom cells with `MOPAC_GPU_PROFILE=1` | time per stage |
 | `solids_force`, `solids_drc` | diamond FORCE and DRC | frequencies, energy conservation |
 | `conv_mol` | crambin RHF / UHF / COSMO, graphene flake, chignolin C.I. | time, heat, gradient |

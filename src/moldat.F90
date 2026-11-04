@@ -68,7 +68,7 @@ subroutine moldat(mode)
         k, k1, j, ielec, ndoubl, ne, nupp, &
         ndown, l, iminr, jminr, icount, &
         ireal, jreal, ni, n1, n4, n9
-      integer(8) :: n2elec8
+      integer(8) :: n2elec8, m1, m4, m9
       double precision :: elecs,  c(1), yy, w, sum, rmin   ! c(1) is for a dummy call
       logical :: debug, exci, sing, doub, trip, quar, quin, sext, sept, &
         octe, none, birad, halfe, odd, opend
@@ -288,14 +288,21 @@ subroutine moldat(mode)
         end if
       end do
       ispd = n9
+!
+!  In 64-bit integers: with default integers 2025*(n9*(n9 + 1))/2 alone overflows from 1030 atoms
+!  with d orbitals (1728 Si atoms gave 881,073,962 instead of 3,028,557,610, too small an array w)
+!
+      m1 = n1
+      m4 = n4
+      m9 = n9
       if (id == 0) then
-        n2elec8 = (n4*(n4 - 1))/2
-        n2elec8 = 100*n2elec8 + 2025*n9 + 100*n4 + n1 + 2025*(n9*(n9 - 1))/2 + 450*n9*n4 + 45*n9*n1 + &
-     &  10*n4*n1 + (n1*(n1 - 1))/2 + 10
+        n2elec8 = (m4*(m4 - 1))/2
+        n2elec8 = 100*n2elec8 + 2025*m9 + 100*m4 + m1 + 2025*(m9*(m9 - 1))/2 + 450*m9*m4 + 45*m9*m1 + &
+     &  10*m4*m1 + (m1*(m1 - 1))/2 + 10
       else
-        n2elec8 = (n4*(n4 + 1))/2
-        n2elec8 = 100*n2elec8 + 2025*n9 + 100*n4 + n1 + 2025*(n9*(n9 + 1))/2 + 450*n9*n4 + 45*n9*n1 + &
-     &  10*n4*n1 + (n1*(n1 + 1))/2 + 10
+        n2elec8 = (m4*(m4 + 1))/2
+        n2elec8 = 100*n2elec8 + 2025*m9 + 100*m4 + m1 + 2025*(m9*(m9 + 1))/2 + 450*m9*m4 + 45*m9*m1 + &
+     &  10*m4*m1 + (m1*(m1 + 1))/2 + 10
       end if
       if (.not. mozyme .and. n2elec8 > 2147483647) then
         if (Index (keywrd, " RESEQ") + Index (keywrd, " SITE=") + index(keywrd, " ADD-H") == 0) then
