@@ -452,18 +452,34 @@ def exp_mozyme_grad(b: Bench) -> None:
 
 
 def exp_methods(b: Bench) -> None:
-    exp, rows = "methods", []
-    methods = ("AM1", "PM7") if b.a.quick else METHODS
+    exp, rows, tight = "methods", [], []
+    methods =("AM1", "PM7") if b.a.quick else METHODS
     systems = [("crambin", "protein_crambin_1crn")] + ([] if b.a.quick else [("dna", "dna_dodecamer_1bna")])
     for case, stem in systems:
         text, files = deck_text(stem)
         for m in methods:
             t = text.split("\n", 1)
             t = m + " " + t[0].split(" ", 1)[1] + "\n" + t[1]
+            pair = {}
             for mode in ("cpu", "gpu"):
-                rows.append(b.run(exp, f"{case}_{m}", mode, t, files, threads=1 if mode == "cpu" else None,
-                                  meta={"system": case, "method": m}))
+                pair[mode] = b.run(exp, f"{case}_{m}", mode, t, files, threads=1 if mode == "cpu" else None,
+                                   meta={"system": case, "method": m})
+                rows.append(pair[mode])
+            # GPU and CPU apart by more than 0.1 kcal/mol at the default criterion: which one is converged?
+            # (crambin PM6: CPU -2501.53, GPU -2502.03, CPU with SCFCRT=1.D-5 THRESH=1.D-15 -2502.04456)
+            try:
+                hc, hg = float(pair["cpu"].get("heat")), float(pair["gpu"].get("heat"))
+            except (TypeError, ValueError):
+                continue
+            if abs(hg - hc) > 0.1:
+                r = b.run(exp, f"{case}_{m}_tight", "cpu", with_keywords(t, "SCFCRT=1.D-5 THRESH=1.D-15 ITRY=500",
+                          drop=("ITRY=200",)), files, threads=1, meta={"system": case, "method": m})
+                ht = r.get("heat")
+                tight.append({"case": f"{case}_{m}", "system": case, "method": m, "heat_cpu": hc, "heat_gpu": hg,
+                              "heat_tight_cpu": ht, "d_cpu": hc - float(ht) if ht else None,
+                              "d_gpu": hg - float(ht) if ht else None})
     b.write_csv(exp, rows)
+    b.write_csv("methods_tight", tight)
 
 
 def exp_cosmo(b: Bench) -> None:

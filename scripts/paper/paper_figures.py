@@ -264,6 +264,11 @@ def fig_accuracy(o: Out) -> None:
     if grads:
         o.summary.append(f"- Gradients GPU - CPU: largest component difference {max(g[2] for g in grads):.2e} "
                          f"kcal/(mol A) over {len(grads)} systems.")
+    tight = o.csv("methods_tight")
+    if tight is not None:
+        for _, r in tight.iterrows():
+            o.summary.append(f"- Methods, GPU and CPU > 0.1 kcal/mol apart: {r['case']} CPU {r['d_cpu']:+.4f}, "
+                             f"GPU {r['d_gpu']:+.4f} kcal/mol from a CPU SCF with SCFCRT=1.D-5 THRESH=1.D-15")
 
 
 def fig_opt(o: Out) -> None:
