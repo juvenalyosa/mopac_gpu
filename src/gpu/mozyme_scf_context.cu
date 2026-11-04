@@ -9132,6 +9132,57 @@ bool compute_eimp_probe_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
   return ok;
 }
 
+// MOPAC_GPU_DEBUG=1: when a resident iteration fails a stage, check the LMO index arrays that the density
+// stage reads (mozyme_density_index_count_kernel) and print which condition broke (diagnostic only).
+void debug_lmo_storage_after_stage_failure(MozymeScfContext &ctx) {
+  static const bool enabled = env_enabled("MOPAC_GPU_DEBUG");
+  if (!enabled) return;
+  auto &dev = ctx.device;
+  const int nocc = ctx.config.noccupied, nvir = ctx.config.nvirtual, numat = ctx.config.natoms;
+  auto fetch = [](const DeviceBuffer<int> &b, std::size_t n, std::vector<int> &h) -> bool {
+    if (!b.ptr || b.count < n) return false;
+    h.resize(n);
+    return n == 0 || cudaMemcpy(h.data(), b.ptr, n * sizeof(int), cudaMemcpyDeviceToHost) == cudaSuccess;
+  };
+  auto check = [&](const char *side, int nmos, int idim, const DeviceBuffer<int> &cnt,
+                   const DeviceBuffer<int> &off, const DeviceBuffer<int> &atoms) {
+    std::vector<int> c, o, a;
+    if (cudaDeviceSynchronize() != cudaSuccess || !fetch(cnt, nmos, c) || !fetch(off, nmos, o) ||
+        !fetch(atoms, static_cast<std::size_t>(idim), a)) {
+      std::fprintf(stdout, "[MOZYME GPU debug] %s: cannot read the LMO index arrays\n", side);
+      return;
+    }
+    int past_end = 0, overlap = 0, bad_atom = 0, negative = 0, first_bad = -1, max_n = 0;
+    long long used = 0;
+    for (int i = 0; i < nmos; ++i) {
+      max_n = std::max(max_n, c[i]);
+      used += c[i] > 0 ? c[i] : 0;
+      if (c[i] < 0 || o[i] < 0) { ++negative; if (first_bad < 0) first_bad = i; continue; }
+      if (o[i] + c[i] > idim) { ++past_end; if (first_bad < 0) first_bad = i; continue; }
+      if (i + 1 < nmos && o[i + 1] >= 0 && o[i] < o[i + 1] && o[i] + c[i] > o[i + 1]) {
+        ++overlap; if (first_bad < 0) first_bad = i;
+      }
+      for (int e = 0; e < c[i]; ++e) {
+        const int at = a[o[i] + e];
+        if (at < 1 || at > numat) { ++bad_atom; if (first_bad < 0) first_bad = i; break; }
+      }
+    }
+    std::fprintf(stdout, "[MOZYME GPU debug] %s LMOs=%d dim=%d used=%lld max_atoms=%d negative=%d "
+                 "past_end=%d overlap_next=%d bad_atom=%d first_bad=%d", side, nmos, idim, used, max_n,
+                 negative, past_end, overlap, bad_atom, first_bad);
+    if (first_bad >= 0)
+      std::fprintf(stdout, " (n=%d offset=%d next_offset=%d)", c[first_bad], o[first_bad],
+                   first_bad + 1 < nmos ? o[first_bad + 1] : -1);
+    std::fprintf(stdout, "\n");
+  };
+  check("occupied", nocc, ctx.state.icocc_dim, dev.ncf, dev.nncf, dev.icocc);
+  check("virtual", nvir, ctx.state.icvir_dim, dev.nce, dev.nnce, dev.icvir);
+  std::vector<int> du;
+  if (fetch(dev.density_updates, 3, du))
+    std::fprintf(stdout, "[MOZYME GPU debug] density_updates terms=%d ok=%d expected=%d\n", du[0], du[1], du[2]);
+  std::fflush(stdout);
+}
+
 // MOPAC_MOZYME_DIAGG_DEBUG=1: synchronize after each DIAGG kernel group and
 // report progress/errors on stderr (diagnostic only; adds host syncs).
 bool diagg_debug_enabled() {
@@ -12960,6 +13011,7 @@ extern "C" int mopac_cuda_mozyme_scf_run(void *context,
               hand_back_to_host(!strict_proof);
             }
           } else if (return_decision == ResidentReturnDecision::StageFailed) {
+            debug_lmo_storage_after_stage_failure(*ctx);
             if (publish_strict_stage_status_or_not_ready()) {
               final_code = kMozymeScfUnsupported;
               status->ready = 0;
