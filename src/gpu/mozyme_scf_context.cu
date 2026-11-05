@@ -3161,7 +3161,7 @@ __host__ __device__ inline std::size_t diagg1_spill_dbl_per_slot(int atoms) {
 }
 constexpr int kDiagg1CacheCap = 512;   // cached (j, value) entries per virtual
 constexpr int kDiagg1SpillMaxAtoms = 4096;  // atoms of an LMO plus its shell in a spill slot
-constexpr int kDiagg1SpillMaxSlots = 256;   // spill slots per diagg1 launch
+constexpr int kDiagg1SpillMaxSlots = 8192;  // spill slots per diagg1 launch (at most nvir)
 
 // ---- diagg1 candidate index -------------------------------------------------
 // Block per atom: number of atoms b with nijbo(a, b) >= 0 (self included).
@@ -3446,16 +3446,67 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   }
   __syncthreads();
   const int span = s_span;
-  if (s_fail || span <= 0 || span > kDiaggMaxLmoCoeffs || loopi < 0 ||
-      loopi + span > a.cvir_dim) {
+  if (s_fail || span <= 0 || loopi < 0 || loopi + span > a.cvir_dim) {
     if (tid == 0) atomicExch(a.work_ints + kDiaggWorkIntError, 1);
     return;
   }
 
+  // Tables of the LMO and its shell: the shared ones, or a global spill slot
+  // (see DiaggVirtualArgs::spill_*) when they do not fit: from the start when
+  // the LMO alone has more coefficients than s_ws (barnase with
+  // THRESH=1.D-15), else when its shell is added (below).
+  int *t_atoms = s_atoms;
+  int *t_off = s_off;
+  int *t_map = s_map;
+  double *t_ws = s_ws;
+  double *t_aov = s_aov;
+  int t_cap = kDiaggMaxLmoAtoms;
+  int t_bits = kDiaggHashBits;
+  int t_coeffs = kDiaggMaxLmoCoeffs;
+  bool spilled = false;
+  // even mode: the count pass builds the tables (the fill pass may replay the
+  // cache); odd mode: only the fill pass
+  const bool count_here = even_mode ? !a.fill : (a.fill != 0);
+  // Takes a spill slot (block-uniform result) and points the tables at it.
+  auto take_spill = [&]() -> bool {
+    if (!(a.spill_ints && a.spill_dbl && a.spill_next)) return false;
+    if (tid == 0) {
+      const int slot = atomicAdd(a.spill_next, 1);
+      s_slot = slot < a.spill_slots ? slot : -1;
+    }
+    __syncthreads();
+    if (s_slot < 0) return false;
+    if (tid == 0 && count_here) atomicAdd(a.work_ints + kDiaggWorkIntShellSpill, 1);
+    int *si = a.spill_ints + static_cast<std::size_t>(s_slot) *
+                                 diagg1_spill_ints_per_slot(a.spill_atoms, a.spill_bits);
+    double *sd = a.spill_dbl + static_cast<std::size_t>(s_slot) *
+                                   diagg1_spill_dbl_per_slot(a.spill_atoms);
+    t_cap = a.spill_atoms;
+    t_bits = a.spill_bits;
+    t_coeffs = 9 * a.spill_atoms;
+    t_atoms = si;
+    t_off = si + t_cap;
+    t_map = si + 2 * t_cap;
+    t_ws = sd;
+    t_aov = sd + 9 * static_cast<std::size_t>(t_cap);
+    spilled = true;
+    return true;
+  };
+  if (span > kDiaggMaxLmoCoeffs) {
+    if (!take_spill() || nce_i > t_cap || span > t_coeffs) {
+      if (tid == 0) atomicExch(a.work_ints + kDiaggWorkIntError, 1);
+      return;
+    }
+    for (int e = tid; e < nce_i; e += blockDim.x) {
+      t_atoms[e] = s_atoms[e];
+      t_off[e] = s_off[e];
+    }
+  }
+
   // atom -> entry table for the membership lookups.
-  for (int q = tid; q < kDiaggHashSlots; q += blockDim.x) s_map[q] = -1;
+  for (int q = tid; q < (1 << t_bits); q += blockDim.x) t_map[q] = -1;
   __syncthreads();
-  for (int e = tid; e < nce_i; e += blockDim.x) lmo_hash_insert(s_map, s_atoms, e);
+  for (int e = tid; e < nce_i; e += blockDim.x) lmo_hash_insert(t_map, t_atoms, e, t_bits);
   __syncthreads();
 
   // ws = F . c_vir restricted to the LMO's atom blocks: one thread per atom
@@ -3523,7 +3574,7 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
     const int offj = s_off[jj];
 #pragma unroll
     for (int jx = 0; jx < 9; ++jx) {
-      if (jx < nj) s_ws[offj + jx] = w[jx];
+      if (jx < nj) t_ws[offj + jx] = w[jx];
     }
   }
   __syncthreads();
@@ -3539,21 +3590,10 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   // without these atoms it would depend on whether a boundary atom happened to
   // be in the LMO, which changes when diagg2 adds the atom and tidy removes it
   // again, and the SCF would cycle without converging.  If the shell does not
-  // fit the shared tables, the LMO moves to a global spill slot (see
-  // DiaggVirtualArgs::spill_*); only if that fails too is it done without its
-  // shell (kDiaggWorkIntShellOverflow counts them).
-  int *t_atoms = s_atoms;
-  int *t_off = s_off;
-  int *t_map = s_map;
-  double *t_ws = s_ws;
-  double *t_aov = s_aov;
-  int t_cap = kDiaggMaxLmoAtoms;
-  int t_bits = kDiaggHashBits;
-  int t_coeffs = kDiaggMaxLmoCoeffs;
-  // even mode: the count pass builds the tables (the fill pass may replay the
-  // cache); odd mode: only the fill pass
-  const bool count_here = even_mode ? !a.fill : (a.fill != 0);
-  for (int attempt = 0;; ++attempt) {
+  // fit the shared tables, the LMO moves to a global spill slot; only if that
+  // fails too is it done without its shell (kDiaggWorkIntShellOverflow counts
+  // them).
+  for (;;) {
     if (tid == 0) {
       s_nent = nce_i;
       s_shell_bad = 0;
@@ -3617,37 +3657,17 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
     __syncthreads();
     if (!s_shell_bad && s_span_shell <= t_coeffs) break;
     // Does not fit: a spill slot (once), else back to the LMO's own atoms.
-    if (attempt == 0 && a.spill_ints && a.spill_dbl && a.spill_next) {
-      if (tid == 0) {
-        const int slot = atomicAdd(a.spill_next, 1);
-        s_slot = slot < a.spill_slots ? slot : -1;
+    if (!spilled && take_spill()) {
+      for (int e = tid; e < nce_i; e += blockDim.x) {
+        t_atoms[e] = s_atoms[e];
+        t_off[e] = s_off[e];
       }
+      for (int k = tid; k < span; k += blockDim.x) t_ws[k] = s_ws[k];
+      for (int q = tid; q < (1 << t_bits); q += blockDim.x) t_map[q] = -1;
       __syncthreads();
-      if (s_slot >= 0) {
-        if (tid == 0 && count_here) atomicAdd(a.work_ints + kDiaggWorkIntShellSpill, 1);
-        int *si = a.spill_ints + static_cast<std::size_t>(s_slot) *
-                                     diagg1_spill_ints_per_slot(a.spill_atoms, a.spill_bits);
-        double *sd = a.spill_dbl + static_cast<std::size_t>(s_slot) *
-                                       diagg1_spill_dbl_per_slot(a.spill_atoms);
-        t_cap = a.spill_atoms;
-        t_bits = a.spill_bits;
-        t_coeffs = 9 * a.spill_atoms;
-        t_atoms = si;
-        t_off = si + t_cap;
-        t_map = si + 2 * t_cap;
-        t_ws = sd;
-        t_aov = sd + 9 * static_cast<std::size_t>(t_cap);
-        for (int e = tid; e < nce_i; e += blockDim.x) {
-          t_atoms[e] = s_atoms[e];
-          t_off[e] = s_off[e];
-        }
-        for (int k = tid; k < span; k += blockDim.x) t_ws[k] = s_ws[k];
-        for (int q = tid; q < (1 << t_bits); q += blockDim.x) t_map[q] = -1;
-        __syncthreads();
-        for (int e = tid; e < nce_i; e += blockDim.x) lmo_hash_insert(t_map, t_atoms, e, t_bits);
-        __syncthreads();
-        continue;
-      }
+      for (int e = tid; e < nce_i; e += blockDim.x) lmo_hash_insert(t_map, t_atoms, e, t_bits);
+      __syncthreads();
+      continue;
     }
     if (tid == 0) {
       if (count_here) atomicAdd(a.work_ints + kDiaggWorkIntShellOverflow, 1);
@@ -4714,7 +4734,9 @@ __device__ void block_rotate_pair_indexed(const DiaggRotateArgs &a, int ij, int 
       __syncthreads();
       return;
     }
-    if (ncei0 + n_new_vir > kDiaggMaxLmoAtoms || mle0 + orb_new_vir > kDiaggMaxLmoCoeffs) {
+    // atoms: the block's lists; coefficients: diagg1 takes an LMO with more
+    // than kDiaggMaxLmoCoeffs to a spill slot
+    if (ncei0 + n_new_vir > kDiaggMaxLmoAtoms || mle0 + orb_new_vir > 9 * kDiaggMaxLmoAtoms) {
       error = 1;
       __syncthreads();
       block_map_clear(jmap, jlist, ncfj0);
