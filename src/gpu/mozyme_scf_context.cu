@@ -1664,6 +1664,12 @@ struct MozymeScfDeviceState {
   DeviceBuffer<int> diagg1_cache_j;
   DeviceBuffer<double> diagg1_cache_v;
   DeviceBuffer<double> diagg1_cache_meta;
+  DeviceBuffer<int> diagg1_spill_ints;    // diagg1 spill slots (see DiaggVirtualArgs)
+  DeviceBuffer<double> diagg1_spill_dbl;
+  DeviceBuffer<int> diagg1_spill_next;
+  int diagg1_spill_slots = 0;
+  int diagg1_spill_atoms = 0;
+  int diagg1_spill_bits = 0;
   DeviceBuffer<int> diagg_pair_state;
   DeviceBuffer<unsigned long long> diagg_vclaim;
   DeviceBuffer<unsigned long long> diagg_oclaim;
@@ -2791,7 +2797,8 @@ constexpr int kDiaggWorkIntNbrOverflow = 5;  // atom neighbour list capacity exc
 constexpr int kDiaggNbrPerAtomCap = 512;      // neighbour list capacity per atom
 constexpr int kDiaggMaxCandidates = 1024;     // diagg1 candidate list per virtual (shared memory)
 constexpr int kDiaggWorkIntShellOverflow = 8;  // virtual LMOs whose outside-atom shell did not fit (diagg1)
-constexpr int kDiaggWorkIntCount = 9;
+constexpr int kDiaggWorkIntShellSpill = 9;     // virtual LMOs done in a global spill slot (diagg1)
+constexpr int kDiaggWorkIntCount = 10;
 constexpr int kDiaggWorkDoubleSumt = 0;
 constexpr int kDiaggWorkDoubleTiny = 1;
 constexpr int kDiaggWorkDoubleCount = 4;
@@ -2949,41 +2956,49 @@ __device__ inline int find_lmo_entry(const unsigned long long *keys, int count,
 // 2 * kDiaggMaxLmoAtoms keeps the load factor <= 0.5; multiplicative hashing
 // spreads the index-clustered atoms of one LMO.  Duplicate atoms keep the
 // first inserted entry (the CPU dense map cannot tell them apart either).
+// `bits`: table of 2^bits slots (kDiaggHashBits in shared memory; the global
+// spill tables of diagg1 are larger).
 constexpr int kDiaggHashBits = 11;
 constexpr int kDiaggHashSlots = 1 << kDiaggHashBits;
-__device__ __forceinline__ int lmo_hash_slot(int atom) {
+__device__ __forceinline__ int lmo_hash_slot(int atom, int bits) {
   return static_cast<int>((static_cast<unsigned>(atom) * 0x9E3779B1u) >>
-                          (32 - kDiaggHashBits));
+                          (32 - bits));
 }
 // Inserts entry e (atom s_atoms[e]) into `table` (slots hold -1 when free).
-__device__ __forceinline__ void lmo_hash_insert(int *table, const int *atoms, int e) {
-  int slot = lmo_hash_slot(atoms[e]);
-  for (int probe = 0; probe < kDiaggHashSlots; ++probe) {
+__device__ __forceinline__ void lmo_hash_insert(int *table, const int *atoms, int e,
+                                                int bits = kDiaggHashBits) {
+  const int mask = (1 << bits) - 1;
+  int slot = lmo_hash_slot(atoms[e], bits);
+  for (int probe = 0; probe <= mask; ++probe) {
     const int prev = atomicCAS(table + slot, -1, e);
     if (prev == -1 || atoms[prev] == atoms[e]) return;
-    slot = (slot + 1) & (kDiaggHashSlots - 1);
+    slot = (slot + 1) & mask;
   }
 }
 // As lmo_hash_insert, for entries added concurrently: 1 when entry e was
 // inserted, 0 when its atom was already in the table (or the table is full).
-__device__ __forceinline__ int lmo_hash_insert_new(int *table, const int *atoms, int e) {
-  int slot = lmo_hash_slot(atoms[e]);
-  for (int probe = 0; probe < kDiaggHashSlots; ++probe) {
+__device__ __forceinline__ int lmo_hash_insert_new(int *table, const int *atoms, int e,
+                                                   int bits = kDiaggHashBits) {
+  const int mask = (1 << bits) - 1;
+  int slot = lmo_hash_slot(atoms[e], bits);
+  for (int probe = 0; probe <= mask; ++probe) {
     const int prev = atomicCAS(table + slot, -1, e);
     if (prev == -1) return 1;
     if (atoms[prev] == atoms[e]) return 0;
-    slot = (slot + 1) & (kDiaggHashSlots - 1);
+    slot = (slot + 1) & mask;
   }
   return 0;
 }
 // Entry index of `atom` or -1.
-__device__ __forceinline__ int lmo_hash_find(const int *table, const int *atoms, int atom) {
-  int slot = lmo_hash_slot(atom);
-  for (int probe = 0; probe < kDiaggHashSlots; ++probe) {
+__device__ __forceinline__ int lmo_hash_find(const int *table, const int *atoms, int atom,
+                                             int bits = kDiaggHashBits) {
+  const int mask = (1 << bits) - 1;
+  int slot = lmo_hash_slot(atom, bits);
+  for (int probe = 0; probe <= mask; ++probe) {
     const int e = table[slot];
     if (e < 0) return -1;
     if (atoms[e] == atom) return e;
-    slot = (slot + 1) & (kDiaggHashSlots - 1);
+    slot = (slot + 1) & mask;
   }
   return -1;
 }
@@ -3123,8 +3138,30 @@ struct DiaggVirtualArgs {
   double *cache_v = nullptr;
   double *cache_meta = nullptr;
   int cache_cap = 0;
+  // Spill tables in global memory for the virtual LMOs whose atoms plus shell
+  // do not fit the shared ones (late in a tight SCF the shell grows: ubiquitin
+  // with SCFCRT=1.D-6 THRESH=1.D-15 reaches ~900 atoms, 2251 coefficients).
+  // A block takes slot atomicAdd(spill_next, 1) < spill_slots (spill_next is
+  // zeroed before each launch); each slot holds spill_atoms entries: atoms, off
+  // and a 2^spill_bits hash table (ints), ws (9 per entry) and aov (doubles).
+  // nullptr = off: such an LMO is done without its shell, and counted.
+  int *spill_ints = nullptr;
+  double *spill_dbl = nullptr;
+  int *spill_next = nullptr;
+  int spill_slots = 0;
+  int spill_atoms = 0;
+  int spill_bits = 0;
 };
+
+__host__ __device__ inline std::size_t diagg1_spill_ints_per_slot(int atoms, int bits) {
+  return 2 * static_cast<std::size_t>(atoms) + (static_cast<std::size_t>(1) << bits);
+}
+__host__ __device__ inline std::size_t diagg1_spill_dbl_per_slot(int atoms) {
+  return 10 * static_cast<std::size_t>(atoms);
+}
 constexpr int kDiagg1CacheCap = 512;   // cached (j, value) entries per virtual
+constexpr int kDiagg1SpillMaxAtoms = 4096;  // atoms of an LMO plus its shell in a spill slot
+constexpr int kDiagg1SpillMaxSlots = 256;   // spill slots per diagg1 launch
 
 // ---- diagg1 candidate index -------------------------------------------------
 // Block per atom: number of atoms b with nijbo(a, b) >= 0 (self included).
@@ -3229,7 +3266,7 @@ __global__ void mozyme_occ_head_fill_kernel(int nocc, int numat, int icocc_dim,
 __device__ __forceinline__ bool diagg1_candidate(const DiaggVirtualArgs &a, int j,
                                                  int i1, int i2, double flim,
                                                  double cutoff, double oldlim,
-                                                 const int *s_map,
+                                                 const int *s_map, int map_bits,
                                                  const int *s_atoms, const double *s_aov,
                                                  const int *s_off, const double *s_ws,
                                                  double &sumt_local, double &tiny_local,
@@ -3260,7 +3297,7 @@ __device__ __forceinline__ bool diagg1_candidate(const DiaggVirtualArgs &a, int 
   for (int kk = 0; kk < ncf_j; ++kk) {
     const int k1 = a.icocc[jbase + kk];
     const int norb = a.iorbs[k1 - 1];
-    const int e = lmo_hash_find(s_map, s_atoms, k1);
+    const int e = lmo_hash_find(s_map, s_atoms, k1, map_bits);
     if (e < 0 || a.aocc[jbase + kk] * s_aov[e] < cutoff) {
       kl += norb;
       continue;
@@ -3302,6 +3339,7 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   __shared__ int s_nent;
   __shared__ int s_shell_bad;
   __shared__ int s_span_shell;
+  __shared__ int s_slot;
 
   if (resident_control_terminal(a.resident_control_ints)) return;
   const int i = blockIdx.x + 1;
@@ -3495,86 +3533,135 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   }
 
   // Shell (CPU: diagg1_ws): the atoms outside the LMO that have a significant
-  // Fock block with one of its atoms, as entries nce_i .. s_nent-1 of the same
+  // Fock block with one of its atoms, as entries nce_i .. nent-1 of the same
   // tables (a hole, atom 0, where two threads added the same atom).  The
   // occupied - virtual interaction runs over every atom of the occupied LMO;
   // without these atoms it would depend on whether a boundary atom happened to
   // be in the LMO, which changes when diagg2 adds the atom and tidy removes it
   // again, and the SCF would cycle without converging.  If the shell does not
-  // fit, this LMO is done without it (kDiaggWorkIntShellOverflow counts them).
-  if (tid == 0) {
-    s_nent = nce_i;
-    s_shell_bad = 0;
-  }
-  __syncthreads();
-  {
-    const bool have_nbr = a.nbr_start && a.nbr_list &&
-                          a.work_ints[kDiaggWorkIntNbrOverflow] == 0;
-    for (int kk = tid; kk < nce_i; kk += blockDim.x) {
-      const int k1 = s_atoms[kk];
-      const double av = a.avir_entry[ibase + kk];
-      const int b0 = have_nbr ? a.nbr_start[k1 - 1] : 1;
-      const int b1 = have_nbr ? a.nbr_start[k1] : a.numat + 1;
-      for (int idx = b0; idx < b1; ++idx) {
-        const int b = have_nbr ? a.nbr_list[idx] : idx;
-        if (b == k1 || b < 1 || b > a.numat) continue;
-        // An atom without orbitals (sparkle) has an empty block whose nijbo
-        // is the address of the next block (fillij), as in diagg1_neighbours.
-        if (a.iorbs[b - 1] < 1) continue;
-        const int kj = mozyme_nijbo_at(a.nijbo, a.numat, k1, b);
-        if (kj < 0 || !(av * a.p[kj] > cutoff)) continue;
-        if (lmo_hash_find(s_map, s_atoms, b) >= 0) continue;
-        const int e = atomicAdd(&s_nent, 1);
-        if (e >= kDiaggMaxLmoAtoms) {
-          s_shell_bad = 1;
-          break;
+  // fit the shared tables, the LMO moves to a global spill slot (see
+  // DiaggVirtualArgs::spill_*); only if that fails too is it done without its
+  // shell (kDiaggWorkIntShellOverflow counts them).
+  int *t_atoms = s_atoms;
+  int *t_off = s_off;
+  int *t_map = s_map;
+  double *t_ws = s_ws;
+  double *t_aov = s_aov;
+  int t_cap = kDiaggMaxLmoAtoms;
+  int t_bits = kDiaggHashBits;
+  int t_coeffs = kDiaggMaxLmoCoeffs;
+  // even mode: the count pass builds the tables (the fill pass may replay the
+  // cache); odd mode: only the fill pass
+  const bool count_here = even_mode ? !a.fill : (a.fill != 0);
+  for (int attempt = 0;; ++attempt) {
+    if (tid == 0) {
+      s_nent = nce_i;
+      s_shell_bad = 0;
+    }
+    __syncthreads();
+    {
+      const bool have_nbr = a.nbr_start && a.nbr_list &&
+                            a.work_ints[kDiaggWorkIntNbrOverflow] == 0;
+      for (int kk = tid; kk < nce_i; kk += blockDim.x) {
+        const int k1 = t_atoms[kk];
+        const double av = a.avir_entry[ibase + kk];
+        const int b0 = have_nbr ? a.nbr_start[k1 - 1] : 1;
+        const int b1 = have_nbr ? a.nbr_start[k1] : a.numat + 1;
+        for (int idx = b0; idx < b1; ++idx) {
+          const int b = have_nbr ? a.nbr_list[idx] : idx;
+          if (b == k1 || b < 1 || b > a.numat) continue;
+          // An atom without orbitals (sparkle) has an empty block whose nijbo
+          // is the address of the next block (fillij), as in diagg1_neighbours.
+          if (a.iorbs[b - 1] < 1) continue;
+          const int kj = mozyme_nijbo_at(a.nijbo, a.numat, k1, b);
+          if (kj < 0 || !(av * a.p[kj] > cutoff)) continue;
+          if (lmo_hash_find(t_map, t_atoms, b, t_bits) >= 0) continue;
+          const int e = atomicAdd(&s_nent, 1);
+          if (e >= t_cap) {
+            s_shell_bad = 1;
+            break;
+          }
+          t_atoms[e] = b;
+          __threadfence_block();
+          if (!lmo_hash_insert_new(t_map, t_atoms, e, t_bits)) t_atoms[e] = 0;
         }
-        s_atoms[e] = b;
-        __threadfence_block();
-        if (!lmo_hash_insert_new(s_map, s_atoms, e)) s_atoms[e] = 0;
       }
     }
-  }
-  __syncthreads();
-  {
-    const int nent = min(s_nent, kDiaggMaxLmoAtoms);
-    int local[4];
-    int local_sum = 0;
-    for (int q = 0; q < 4; ++q) {
-      const int e = nce_i + tid * 4 + q;
-      int norb = 0;
-      if (e < nent && s_atoms[e] > 0) norb = a.iorbs[s_atoms[e] - 1];
-      local[q] = norb;
-      local_sum += norb;
-    }
-    int total = 0;
-    int prefix = block_exclusive_scan_int(local_sum, s_warp, &total);
-    for (int q = 0; q < 4; ++q) {
-      const int e = nce_i + tid * 4 + q;
-      if (e < nent) s_off[e] = span + prefix;
-      prefix += local[q];
-    }
-    if (tid == 0) {
-      s_span_shell = span + total;
-      if (nce_i + 4 * static_cast<int>(blockDim.x) < nent) s_shell_bad = 1;
-    }
-  }
-  __syncthreads();
-  if (s_shell_bad || s_span_shell > kDiaggMaxLmoCoeffs) {
-    // Does not fit: back to the LMO's own atoms.
     __syncthreads();
+    {
+      // orbital offsets of the shell entries, after the LMO's own span
+      const int nent = min(s_nent, t_cap);
+      int running = 0;
+      for (int base = nce_i; base < nent; base += 4 * static_cast<int>(blockDim.x)) {
+        int local[4];
+        int local_sum = 0;
+        for (int q = 0; q < 4; ++q) {
+          const int e = base + tid * 4 + q;
+          int norb = 0;
+          if (e < nent && t_atoms[e] > 0) norb = a.iorbs[t_atoms[e] - 1];
+          local[q] = norb;
+          local_sum += norb;
+        }
+        int total = 0;
+        int prefix = block_exclusive_scan_int(local_sum, s_warp, &total);
+        for (int q = 0; q < 4; ++q) {
+          const int e = base + tid * 4 + q;
+          if (e < nent) t_off[e] = span + running + prefix;
+          prefix += local[q];
+        }
+        running += total;
+        __syncthreads();
+      }
+      if (tid == 0) s_span_shell = span + running;
+    }
+    __syncthreads();
+    if (!s_shell_bad && s_span_shell <= t_coeffs) break;
+    // Does not fit: a spill slot (once), else back to the LMO's own atoms.
+    if (attempt == 0 && a.spill_ints && a.spill_dbl && a.spill_next) {
+      if (tid == 0) {
+        const int slot = atomicAdd(a.spill_next, 1);
+        s_slot = slot < a.spill_slots ? slot : -1;
+      }
+      __syncthreads();
+      if (s_slot >= 0) {
+        if (tid == 0 && count_here) atomicAdd(a.work_ints + kDiaggWorkIntShellSpill, 1);
+        int *si = a.spill_ints + static_cast<std::size_t>(s_slot) *
+                                     diagg1_spill_ints_per_slot(a.spill_atoms, a.spill_bits);
+        double *sd = a.spill_dbl + static_cast<std::size_t>(s_slot) *
+                                       diagg1_spill_dbl_per_slot(a.spill_atoms);
+        t_cap = a.spill_atoms;
+        t_bits = a.spill_bits;
+        t_coeffs = 9 * a.spill_atoms;
+        t_atoms = si;
+        t_off = si + t_cap;
+        t_map = si + 2 * t_cap;
+        t_ws = sd;
+        t_aov = sd + 9 * static_cast<std::size_t>(t_cap);
+        for (int e = tid; e < nce_i; e += blockDim.x) {
+          t_atoms[e] = s_atoms[e];
+          t_off[e] = s_off[e];
+        }
+        for (int k = tid; k < span; k += blockDim.x) t_ws[k] = s_ws[k];
+        for (int q = tid; q < (1 << t_bits); q += blockDim.x) t_map[q] = -1;
+        __syncthreads();
+        for (int e = tid; e < nce_i; e += blockDim.x) lmo_hash_insert(t_map, t_atoms, e, t_bits);
+        __syncthreads();
+        continue;
+      }
+    }
     if (tid == 0) {
-      if (a.fill) atomicAdd(a.work_ints + kDiaggWorkIntShellOverflow, 1);
+      if (count_here) atomicAdd(a.work_ints + kDiaggWorkIntShellOverflow, 1);
       s_nent = nce_i;
     }
-    for (int q = tid; q < kDiaggHashSlots; q += blockDim.x) s_map[q] = -1;
+    for (int q = tid; q < (1 << t_bits); q += blockDim.x) t_map[q] = -1;
     __syncthreads();
-    for (int e = tid; e < nce_i; e += blockDim.x) lmo_hash_insert(s_map, s_atoms, e);
+    for (int e = tid; e < nce_i; e += blockDim.x) lmo_hash_insert(t_map, t_atoms, e, t_bits);
+    __syncthreads();
+    break;
   }
-  __syncthreads();
-  const int nent = s_nent;
+  const int nent = min(s_nent, t_cap);
   for (int e = nce_i + tid; e < nent; e += blockDim.x) {
-    const int j1 = s_atoms[e];
+    const int j1 = t_atoms[e];
     if (j1 < 1) continue;
     const int nj = a.iorbs[j1 - 1];
     if (nj < 1 || nj > 9) {
@@ -3585,7 +3672,7 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
 #pragma unroll
     for (int q = 0; q < 9; ++q) w[q] = 0.0;
     for (int kk = 0; kk < nce_i; ++kk) {
-      const int k1 = s_atoms[kk];
+      const int k1 = t_atoms[kk];
       const int kj = mozyme_nijbo_at(a.nijbo, a.numat, k1, j1);
       if (kj < 0) continue;
       if (!(a.avir_entry[ibase + kk] * a.p[kj] > cutoff)) continue;
@@ -3595,7 +3682,7 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
         break;
       }
       const double *fb = a.fao + kj;
-      const double *cv = a.cvir + loopi + s_off[kk];
+      const double *cv = a.cvir + loopi + t_off[kk];
       if (k1 > j1) {
         for (int i4 = 0; i4 < nk; ++i4) {
           const double c = cv[i4];
@@ -3617,10 +3704,10 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
         }
       }
     }
-    const int offj = s_off[e];
+    const int offj = t_off[e];
 #pragma unroll
     for (int jx = 0; jx < 9; ++jx) {
-      if (jx < nj) s_ws[offj + jx] = w[jx];
+      if (jx < nj) t_ws[offj + jx] = w[jx];
     }
   }
   __syncthreads();
@@ -3632,18 +3719,18 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   // aov per entry (shell included) and the virtual energy level.
   double eig_part = 0.0;
   for (int e = tid; e < nent; e += blockDim.x) {
-    if (s_atoms[e] < 1) {
-      s_aov[e] = 0.0;
+    if (t_atoms[e] < 1) {
+      t_aov[e] = 0.0;
       continue;
     }
-    const int norb = a.iorbs[s_atoms[e] - 1];
-    const int off = s_off[e];
+    const int norb = a.iorbs[t_atoms[e] - 1];
+    const int off = t_off[e];
     double sum = 0.0;
-    for (int k = 0; k < norb; ++k) sum += s_ws[off + k] * s_ws[off + k];
-    s_aov[e] = sum;
+    for (int k = 0; k < norb; ++k) sum += t_ws[off + k] * t_ws[off + k];
+    t_aov[e] = sum;
     if (e < nce_i && sum * a.avir_entry[ibase + e] > cutoff) {
       for (int k = 0; k < norb; ++k) {
-        eig_part += s_ws[off + k] * a.cvir[loopi + off + k];
+        eig_part += t_ws[off + k] * a.cvir[loopi + off + k];
       }
     }
   }
@@ -3729,9 +3816,9 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
         if (c < ncand) {
           j = cand_ok ? s_cand[c] : c + 1;
           if (j >= 1 && j <= a.nocc) {
-            emit = diagg1_candidate(a, j, i1, i2, flim, cutoff, oldlim, s_map, s_atoms,
-                                    s_aov, s_off, s_ws, sumt_local, tiny_local, value,
-                                    &s_fail) ? 1 : 0;
+            emit = diagg1_candidate(a, j, i1, i2, flim, cutoff, oldlim, t_map, t_bits,
+                                    t_atoms, t_aov, t_off, t_ws, sumt_local, tiny_local,
+                                    value, &s_fail) ? 1 : 0;
           }
         }
         int chunk_total = 0;
@@ -3760,9 +3847,9 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
       int emit = 0;
       double value = 0.0;
       if (j <= a.nocc) {
-        emit = diagg1_candidate(a, j, i1, i2, flim, cutoff, oldlim, s_map, s_atoms,
-                                s_aov, s_off, s_ws, sumt_local, tiny_local, value,
-                                &s_fail) ? 1 : 0;
+        emit = diagg1_candidate(a, j, i1, i2, flim, cutoff, oldlim, t_map, t_bits,
+                                t_atoms, t_aov, t_off, t_ws, sumt_local, tiny_local,
+                                value, &s_fail) ? 1 : 0;
       }
       int chunk_total = 0;
       const int rank = block_exclusive_scan_int(emit, s_warp, &chunk_total);
@@ -3828,18 +3915,18 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
       for (int kk = 0; kk < ncf_j; ++kk) {
         const int k1 = a.icocc[jbase + kk];
         const int norb = a.iorbs[k1 - 1];
-        const int e = lmo_hash_find(s_map, s_atoms, k1);
-        if (e < 0 || s_aov[e] * a.aocc[jbase + kk] < cutoff) {
+        const int e = lmo_hash_find(t_map, t_atoms, k1, t_bits);
+        if (e < 0 || t_aov[e] * a.aocc[jbase + kk] < cutoff) {
           kl += norb;
           continue;
         }
-        const int off = s_off[e];
+        const int off = t_off[e];
         const int cbase = loopj + kl;
         if (cbase < 0 || cbase + norb > a.cocc_dim) {
           s_fail = 1;
           break;
         }
-        for (int k = 0; k < norb; ++k) sum += s_ws[off + k] * a.cocc[cbase + k];
+        for (int k = 0; k < norb; ++k) sum += t_ws[off + k] * a.cocc[cbase + k];
         kl += norb;
       }
       sumt_local += fabs(sum);
@@ -5364,10 +5451,12 @@ __global__ void mozyme_diagg2_trace_kernel(const int *work_ints, const int *nij,
     rot = 1.0e-3 * static_cast<double>(timers[kDiaggTimerRotate]) / max(grid, 1);
   }
   printf(" [MOZYME GPU SCF trace] diagg2 staged=%d nij=%d rotated=%d max_chain=%d "
-         "lock_spins=%d nrej=%d lpt=%d grid=%d span_us=%.1f wait_us=%.1f rotate_us=%.1f\n",
+         "lock_spins=%d nrej=%d lpt=%d grid=%d span_us=%.1f wait_us=%.1f rotate_us=%.1f "
+         "shell_spill=%d shell_overflow=%d\n",
          staged, *nij, work_ints[kDiaggWorkIntRotated],
          work_ints[kDiaggWorkIntMaxChain], work_ints[kDiaggWorkIntLockSpins],
-         nrej ? *nrej : -1, lpt, grid, span, wait, rot);
+         nrej ? *nrej : -1, lpt, grid, span, wait, rot,
+         work_ints[kDiaggWorkIntShellSpill], work_ints[kDiaggWorkIntShellOverflow]);
 }
 
 // ---- addhb: hydrogen-bond pair discovery ----------------------------------
@@ -9001,6 +9090,40 @@ bool upload_registered_state(MozymeScfContext &ctx) {
     if (!dev.diagg1_cache_j.resize(nvir_count * kDiagg1CacheCap)) return false;
     if (!dev.diagg1_cache_v.resize(nvir_count * kDiagg1CacheCap)) return false;
     if (!dev.diagg1_cache_meta.resize(nvir_count * 3)) return false;
+    // diagg1 spill slots: best effort, at most a quarter of the free device
+    // memory; without them an LMO whose shell does not fit the shared tables
+    // is done without it, as before (counted in the trace).
+    if (!dev.diagg1_spill_next.resize(1)) return false;
+    {
+      const int atoms = std::max(1, std::min(numat, kDiagg1SpillMaxAtoms));
+      int bits = 1;
+      while ((1 << bits) < 2 * atoms) ++bits;
+      if (dev.diagg1_spill_slots == 0 || dev.diagg1_spill_atoms != atoms) {
+        const std::size_t ints = diagg1_spill_ints_per_slot(atoms, bits);
+        const std::size_t dbls = diagg1_spill_dbl_per_slot(atoms);
+        const std::size_t per_slot = ints * sizeof(int) + dbls * sizeof(double);
+        dev.diagg1_spill_ints.reset();
+        dev.diagg1_spill_dbl.reset();
+        dev.diagg1_spill_slots = 0;
+        std::size_t free_b = 0, total_b = 0;
+        if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) {
+          free_b = 0;
+          cudaGetLastError();
+        }
+        std::size_t slots = std::min<std::size_t>(nvir_count, kDiagg1SpillMaxSlots);
+        while (slots > 0 && slots * per_slot > free_b / 4) slots /= 2;
+        if (slots > 0 && dev.diagg1_spill_ints.resize(slots * ints) &&
+            dev.diagg1_spill_dbl.resize(slots * dbls)) {
+          dev.diagg1_spill_slots = static_cast<int>(slots);
+          dev.diagg1_spill_atoms = atoms;
+          dev.diagg1_spill_bits = bits;
+        } else {
+          dev.diagg1_spill_ints.reset();
+          dev.diagg1_spill_dbl.reset();
+          cudaGetLastError();
+        }
+      }
+    }
     if (!dev.diagg_offsets.resize(nvir_count + 1)) return false;
     if (!dev.diagg_pair_state.resize(fmo_count)) return false;
     if (!dev.diagg_vclaim.resize(nvir_count)) return false;
@@ -9919,13 +10042,23 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
     va.cache_cap = (va.cache_n && va.cache_j && va.cache_v && va.cache_meta &&
                     dev.diagg1_cache_j.count >= static_cast<std::size_t>(nvir) * kDiagg1CacheCap)
                        ? kDiagg1CacheCap : 0;
+    if (dev.diagg1_spill_slots > 0 && dev.diagg1_spill_next.ptr) {
+      va.spill_ints = dev.diagg1_spill_ints.ptr;
+      va.spill_dbl = dev.diagg1_spill_dbl.ptr;
+      va.spill_next = dev.diagg1_spill_next.ptr;
+      va.spill_slots = dev.diagg1_spill_slots;
+      va.spill_atoms = dev.diagg1_spill_atoms;
+      va.spill_bits = dev.diagg1_spill_bits;
+    }
     va.fill = 0;
+    if (va.spill_next) cudaMemsetAsync(va.spill_next, 0, sizeof(int));
     mozyme_diagg1_virtual_kernel<<<nvir, kDiaggBlockThreads, dyn_shared>>>(va);
     split_resident_stage_profile(ctx, "resident diagg1_count stop event");
     mozyme_exclusive_scan_kernel<<<1, 1024>>>(
         nvir, nullptr, dev.diagg_counts.ptr, dev.diagg_offsets.ptr,
         dev.resident_control_ints.ptr);
     va.fill = 1;
+    if (va.spill_next) cudaMemsetAsync(va.spill_next, 0, sizeof(int));
     mozyme_diagg1_virtual_kernel<<<nvir, kDiaggBlockThreads, dyn_shared>>>(va);
     if (!cuda_context_ok(cudaGetLastError(),
                          "resident diagg1 virtual kernels")) break;
