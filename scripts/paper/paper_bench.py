@@ -61,6 +61,9 @@ HEAT_RE = re.compile(r"FINAL HEAT OF FORMATION\s*=\s*([-+0-9.EeDd]+)")
 JOB_RE = re.compile(r"TOTAL JOB TIME:\s*([0-9.]+)\s*SECONDS")
 ATOMS_RE = re.compile(r"Empirical Formula:.*?=\s*(\d+)\s+atoms")
 STATUS_RE = re.compile(r"\[MOZYME GPU SCF\] status=(\S+) reason=\S+.*?iterations=(\d+)")
+# every resident SCF that did not complete on the GPU writes this line, with or without an iteration count
+# (a setup failure has none: STATUS_RE alone counted those runs as neither resident nor fallback)
+FALLBACK_RE = re.compile(r"\[MOZYME GPU SCF\] status=(?!success\b|resident_step\b)\S+ (reason=\S+(?: detail=\S+)?)")
 ITER_RE = re.compile(r"TIME FOR ITERATION:")
 GNORM_RE = re.compile(r"GRADIENT NORM\s*=\s*([0-9.]+)")
 AUX_GRAD_RE = re.compile(r"GRADIENTS:KCAL/MOL/ANGSTROM\[\d+\]=\s*(.*?)(?=\n\s*[A-Z_]+[:=\[])", re.S)
@@ -267,7 +270,8 @@ class Bench:
             "gnorm": fnum(last(GNORM_RE, text)),
             "scf_iterations": (sum(int(i) for _, i in statuses) if statuses else (len(ITER_RE.findall(text)) or None)),
             "gpu_scf_resident": sum(1 for s, _ in statuses if s == "success"),
-            "gpu_scf_fallback": sum(1 for s, _ in statuses if s != "success"),
+            "gpu_scf_fallback": len(FALLBACK_RE.findall(text + "\n" + stdout)),
+            "gpu_scf_reasons": ";".join(sorted(set(FALLBACK_RE.findall(text + "\n" + stdout)))),
             "gpu_device_grad": text.count("[GPU gradient] pairs="),
             "gpu_device_fock": text.count("[GPU Fock] pairs="),
             "gpu_errors": (text + stdout).count("[GPU ERROR]"),
@@ -759,11 +763,18 @@ def qmmm_run(b: Bench, exp: str, case: str, mode: str, pdb: Path, opts: str, ste
         shutil.rmtree(d)
     d.mkdir(parents=True)
     (d / "cmd.txt").write_text(cmd)
-    env = b.env_for(mode, 1 if mode == "cpu" else None, False, None)
+    # MOPAC's output of the API calls (MOPAC_API_OUTPUT) goes to local disk, not to Drive; its end is kept
+    # next to the log when the run fails
+    api_out = Path("/tmp") / f"mopac_api_{exp}_{case}_{mode}.out"
+    env = b.env_for(mode, 1 if mode == "cpu" else None, False, {"MOPAC_API_OUTPUT": str(api_out)})
     say(f"  [{exp}/{case}] {mode}: {cmd}")
     t0 = time.perf_counter()
     with open(d / "log.txt", "w") as fh:
         rc = subprocess.run(cmd, shell=True, cwd=d, env=env, stdout=fh, stderr=subprocess.STDOUT).returncode
+    if rc != 0 and api_out.exists():
+        lines = api_out.read_text(errors="ignore").splitlines()
+        (d / "mopac_api_tail.out").write_text("\n".join(lines[-600:]) + "\n")
+    api_out.unlink(missing_ok=True)
     text = (d / "log.txt").read_text(errors="ignore")
     r = {"exp": exp, "case": case, "mode": mode, "rc": rc, "total_s": round(time.perf_counter() - t0, 1)}
     if (m := QMMM_LINE["system"].search(text)):
@@ -803,15 +814,15 @@ def exp_qmmm(b: Bench) -> None:
     exp, rows, nve = "qmmm", [], []
     q = b.a.quick
     chig, cram = REF / "1UAO_opt.pdb", REF / "1CRN_opt.pdb"
-    # QM-PME needs a box of at least 2 (QM radius + 13 A): chignolin R 10.6 A -> 47.2 A (padding 2.2: 44.0),
-    # crambin R 16.5-16.9 A -> 59.8 A (padding 1.8: 51.6); 0.1 nm of padding adds 2 A
+    # QM-PME needs a box of at least 2 (QM radius + 13 A): chignolin R 10.6 A -> 47.2 A (padding 2.5: 50.0),
+    # crambin R 16.3-16.9 A -> 59.8 A (padding 1.8: 51.6, 2.3: 56.6, both too small; 3.0: ~63.6)
     plan = [  # (case, label, pdb, options, GPU steps, GPU NVE steps, CPU steps)
         ("tyr_sc", "Tyr side chain (chignolin)", chig, "--qm-residues 2 --qm-sidechain --padding 1.8",
          20 if q else 1000, 0 if q else 400, 0),
         ("chignolin", "Chignolin", chig, "--qm-residues 1,2,3,4,5,6,7,8,9,10 --padding 2.5 --ron 6 --roff 8",
          400, 400, 40),
         ("crambin", "Crambin", cram, "--qm-residues " + ",".join(map(str, range(1, 47))) +
-         " --padding 2.3 --ron 6 --roff 8", 100, 200, 10),
+         " --padding 3.0 --ron 6 --roff 8", 100, 200, 10),
     ]
     if b.a.qmmm_large:
         plan.append(("ubiquitin", "Ubiquitin", get_pdb("1UBQ", b.runs / exp / "_pdb"),

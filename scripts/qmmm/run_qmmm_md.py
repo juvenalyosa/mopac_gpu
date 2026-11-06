@@ -91,6 +91,7 @@ def main():
     ap.add_argument("--snapshots", type=int, default=5, help="snapshots of the cut-off test")
     ap.add_argument("--no-pme", action="store_true", help="no long-range QM-MM electrostatics (cut-off only)")
     ap.add_argument("--pme-cpu", action="store_true", help="PME grid on the CPU even when CuPy sees a GPU")
+    ap.add_argument("--seed", type=int, default=1, help="random seed of the Langevin integrators (0: OpenMM picks one)")
     a = ap.parse_args()
 
     plat = mm.Platform.getPlatformByName(a.platform)
@@ -120,8 +121,9 @@ def main():
 
     # MM equilibration
     t0 = time.perf_counter()
-    sim = app.Simulation(top, make_system(), mm.LangevinMiddleIntegrator(a.temperature * u.kelvin,
-                         1 / u.picosecond, 2 * u.femtoseconds), plat)
+    integ = mm.LangevinMiddleIntegrator(a.temperature * u.kelvin, 1 / u.picosecond, 2 * u.femtoseconds)
+    integ.setRandomNumberSeed(a.seed)
+    sim = app.Simulation(top, make_system(), integ, plat)
     sim.context.setPositions(pos)
     sim.minimizeEnergy()
     sim.context.setVelocitiesToTemperature(a.temperature * u.kelvin, 1)
@@ -150,11 +152,18 @@ def main():
           f"QM-MM electrostatics: {lr}", flush=True)
 
     integ = mm.LangevinMiddleIntegrator(a.temperature * u.kelvin, 1 / u.picosecond, a.dt * u.femtoseconds)
+    integ.setRandomNumberSeed(a.seed)
     sim = app.Simulation(top, system, integ, plat)
     sim.context.setPositions(st.getPositions())
     sim.context.setVelocities(st.getVelocities())
     sim.reporters.append(app.PDBReporter("qmmm_traj.pdb", max(1, a.steps // 10)))
-    sim.step(2)   # first SCF from the Lewis structure
+    try:
+        sim.step(2)   # first SCF from the Lewis structure
+    except Exception:
+        # keep the structure the QM/MM step failed on, so that it can be rerun on its own
+        with open("failed_start.pdb", "w") as fh:
+            app.PDBFile.writeFile(top, st.getPositions(), fh, keepIds=True)
+        raise
     pairs = [(find_atom(top, p.split("-")[0]), find_atom(top, p.split("-")[1]), p)
              for p in a.distances.split(",") if p.strip()]
     nsnap = max(1, a.snapshots) if a.cutoff_test else 0
