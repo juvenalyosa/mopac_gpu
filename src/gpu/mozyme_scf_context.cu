@@ -2407,16 +2407,22 @@ __global__ void mozyme_update_status_finalize_kernel(int *status,
   if (threadIdx.x != 0 || blockIdx.x != 0) return;
   if (!status) return;
   if (resident_control_terminal(resident_control_ints)) return;
-  const int actual = status[0];
+  // The counts are atomicAdd sums and wrap modulo 2^32: the density of the
+  // 21156-atom water cluster updates ~2.149e9 elements, past 2^31 - 1, so
+  // "no work" is a zero count, not a count <= 0 (that test failed the
+  // resident density stage whenever the sum crossed 2^31).  Equality of
+  // actual and expected still holds modulo 2^32.
+  const unsigned actual = static_cast<unsigned>(status[0]);
   const int ok = status[1];
-  const int expected = status[2];
-  if (expected < 0) {
+  const int expected_slot = status[2];
+  const unsigned expected = static_cast<unsigned>(expected_slot);
+  if (expected_slot == -1) {
     // expected count not computed (non-strict path): only the ok flag and
     // the presence of work are checked.
-    if (ok != 1 || (require_work && actual <= 0)) status[1] = 0;
+    if (ok != 1 || (require_work && actual == 0u)) status[1] = 0;
     return;
   }
-  if (ok != 1 || actual != expected || (require_work && expected <= 0)) {
+  if (ok != 1 || actual != expected || (require_work && expected == 0u)) {
     status[1] = 0;
   }
 }
@@ -9327,7 +9333,8 @@ void debug_lmo_storage_after_stage_failure(MozymeScfContext &ctx) {
   check("virtual", nvir, ctx.state.icvir_dim, dev.nce, dev.nnce, dev.icvir);
   std::vector<int> du;
   if (fetch(dev.density_updates, 3, du))
-    std::fprintf(stdout, "[MOZYME GPU debug] density_updates terms=%d ok=%d expected=%d\n", du[0], du[1], du[2]);
+    std::fprintf(stdout, "[MOZYME GPU debug] density_updates terms=%u (mod 2^32) ok=%d expected=%d\n",
+                 static_cast<unsigned>(du[0]), du[1], du[2]);
   std::fflush(stdout);
 }
 
