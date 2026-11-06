@@ -48,7 +48,7 @@ submodule (mopac_api:mopac_api_operations) mopac_api_initialize
     nvar, & ! number of coordinates to be optimized
     numcal, job_no, step_num, & ! MOPAC's persistent state variables
     moperr, & ! error status
-    isok, MM_corrections, pdb_label, l_normal_html, lxfac, &
+    isok, MM_corrections, pdb_label, maxtxt, l_normal_html, lxfac, &
     nscf, na1, norbs, no_pKa, id, iflepo, nelecs, ndep, &
     escf, gnorm, E_disp, E_hb, E_hh, sz, ss2, step, density, press, stress, voigt, &
     sparkle, &  ! logical flag for the presence of sparkles
@@ -254,6 +254,7 @@ contains
     isok = .true.
     MM_corrections = .false.
     pdb_label = .false.
+    maxtxt = 0 ! no atom labels
     l_normal_html = .true.
     lxfac = .false.
     nscf = 0

@@ -105,6 +105,11 @@
         allocate(nbonds(n), ibonds(15,n), na_store(n), l_atom(n))
         na = 0
         na_store = 0
+!  Blank labels: the API sets no labels, and CHKLEW reads a "+" or "-" in txtatm as an explicit charge,
+!  so stale heap contents gave MOZYME QM/MM sessions random ions ("COMPUTED CHARGE ON SYSTEM: +2" for a
+!  neutral Tyr side chain, then CHECK failed)
+        txtatm = " "
+        txtatm1 = " "
         nfirst = -9999
         nlast = -9999
         nbonds = 0
