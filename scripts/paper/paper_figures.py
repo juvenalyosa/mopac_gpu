@@ -70,10 +70,12 @@ class Out:
         df.to_csv(self.tab / f"{name}.csv", index=False)
         cols = "l" + "r" * (len(df.columns) - 1)
         lines = [r"\begin{table}[t]", r"\centering", r"\small", f"\\caption{{{caption}}}", f"\\label{{tab:{name}}}",
+                 # wide tables shrink to the text width (needs \\usepackage{adjustbox})
+                 r"\begin{adjustbox}{max width=\linewidth}",
                  f"\\begin{{tabular}}{{{cols}}}", r"\toprule", " & ".join(df.columns) + r" \\", r"\midrule"]
         for _, row in df.iterrows():
             lines.append(" & ".join("--" if (isinstance(v, float) and math.isnan(v)) else str(v) for v in row) + r" \\")
-        lines += [r"\bottomrule", r"\end{tabular}"]
+        lines += [r"\bottomrule", r"\end{tabular}", r"\end{adjustbox}"]
         if notes:
             lines.append(f"\\par\\smallskip\\footnotesize {notes}")
         lines.append(r"\end{table}")
