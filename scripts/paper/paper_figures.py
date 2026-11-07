@@ -503,10 +503,17 @@ def fig_qmmm(o: Out) -> None:
     k = 0
     if q is not None:
         ax = axes[0, k]
+        # QM regions of <= 100 atoms (link atoms included) run MOPAC on the CPU even in the GPU mode
+        # (mozyme_qmmm_init); there only OpenMM and the PME grid use the GPU
+        small = (q["qm_atoms"] + q.get("link_atoms", 0).fillna(0)) <= 100
         for mode in ("cpu", "gpu"):
-            g = q[q["mode"] == mode].sort_values("qm_atoms")
+            g = q[(q["mode"] == mode) & ~small].sort_values("qm_atoms")
             if len(g):
                 ax.plot(g["qm_atoms"], g["s_per_step"], label=f"MOPAC on the {mode.upper()}", **MK[mode])
+        g = q[(q["mode"] == "gpu") & small]
+        if len(g):
+            ax.plot(g["qm_atoms"], g["s_per_step"], ls="none", color=CPU, marker="D", mfc="white", mew=0.9,
+                    label="$\\leq$100 QM atoms: MOPAC on the CPU,\nMM and PME on the GPU")
         for _, r in q[q["mode"] == "gpu"].iterrows():
             ax.annotate(f"{r['label']}\n{r['ps_per_day']:.0f} ps/day", (r["qm_atoms"], r["s_per_step"]),
                         textcoords="offset points", xytext=(5, 2), va="bottom", fontsize=6, color=INK2)
