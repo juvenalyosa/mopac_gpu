@@ -345,9 +345,11 @@ def fig_md(o: Out) -> None:
         k += 1
     if tmp is not None:
         ax = axes[0, k]
-        for system, g in tmp.groupby("system"):
-            ax.plot(g["fs"], g["T"], color=GPU, label=f"{system}, T")
+        # only the thermostatted run (the NVE runs also print temperatures); one mode per line
+        for (system, mode), g in tmp[tmp["system"].str.contains("nvt")].groupby(["system", "mode"]):
+            ax.plot(g["fs"], g["T"], color=MK[mode]["color"], label=f"{system.split('_')[0]}, T ({mode.upper()})")
             ax.plot(g["fs"], g["T_mean"], color=INK2, lw=0.8, label="running mean")
+        ax.axhline(300, color=INK2, lw=0.6, ls=(0, (3, 2)))
         ax.set(xlabel="Time (fs)", ylabel="Temperature (K)")
         ax.set_title(f"{chr(97 + k)}  NVT, Bussi thermostat (GPU)")
         ax.legend()
