@@ -210,13 +210,16 @@ def fig_accuracy(o: Out) -> None:
         for (sysname, meth), g in m.groupby(["system", "method"], sort=False):
             c, gp = g[g["mode"] == "cpu"]["heat"], g[g["mode"] == "gpu"]["heat"]
             if len(c) and len(gp):
-                rows.append(("Methods (MOZYME)", f"{meth}, {sysname}", gp.iloc[0] - c.iloc[0]))
+                rows.append(("Methods (MOZYME)", f"{meth}, {'DNA' if sysname == 'dna' else sysname}",
+                             gp.iloc[0] - c.iloc[0]))
     grads = []
     for name, group in (("mozyme_grad_compare", "MOZYME"), ("solids_grad_compare", "Solids"),
                         ("conv_mol_grad_compare", "Conventional")):
         df = o.csv(name)
         if df is not None:
-            grads += [(group, str(r["label"]), r["max_abs"], r["rms"]) for _, r in df.iterrows()]
+            # n = gradient components: the atom count tells the supercells of one solid apart
+            grads += [(group, str(r["label"]) + (f" ({int(r['n']) // 3})" if group == "Solids" else ""),
+                       r["max_abs"], r["rms"]) for _, r in df.iterrows()]
     if not rows and not grads:
         return
     fig, axes = plt.subplots(1, 2, figsize=(DOUBLE, max(2.6, 0.13 * max(len(rows), len(grads)) + 0.8)),
@@ -225,7 +228,7 @@ def fig_accuracy(o: Out) -> None:
     for ax, data, xlabel, tol, title in (
             (axes[0], [(g, l, abs(v)) for g, l, v in rows], "|$\\Delta H_f$| GPU $-$ CPU (kcal/mol)", 0.05,
              "a  Heats of formation"),
-            (axes[1], [(g, l, mx) for g, l, mx, _ in grads], "max |$\\Delta g$| GPU $-$ CPU (kcal mol$^{-1}$ Å$^{-1}$)",
+            (axes[1], [(g, l, mx) for g, l, mx, _ in grads], "max |$\\Delta g$| GPU $-$ CPU\n(kcal mol$^{-1}$ Å$^{-1}$)",
              0.01, "b  Gradients")):
         if not data:
             ax.set_visible(False)
@@ -483,7 +486,9 @@ def fig_freq(o: Out) -> None:
     if th is not None:
         o.table("table_thermo", th.rename(columns={"system": "Run", "gpu_s": "GPU (s)", "cpu_ref_s": "CPU ref. (s)"}),
                 "MOZYME FORCE / FORCETS on the GPU against stored CPU references.",
-                "CPU references: Apple M-series, stored in tests/data/mozyme\\_gpu\\_reference/reference.json.")
+                "CPU references stored in tests/data/mozyme\\_gpu\\_reference/reference.json, computed on "
+                "laptop CPUs (FORCE and FORCETS: Intel Core i7-8850H), not on the benchmark machine: "
+                "the times are not a speed-up.")
 
 
 def fig_qmmm(o: Out) -> None:
@@ -504,7 +509,7 @@ def fig_qmmm(o: Out) -> None:
                 ax.plot(g["qm_atoms"], g["s_per_step"], label=f"MOPAC on the {mode.upper()}", **MK[mode])
         for _, r in q[q["mode"] == "gpu"].iterrows():
             ax.annotate(f"{r['label']}\n{r['ps_per_day']:.0f} ps/day", (r["qm_atoms"], r["s_per_step"]),
-                        textcoords="offset points", xytext=(4, -10), fontsize=6, color=INK2)
+                        textcoords="offset points", xytext=(5, 2), va="bottom", fontsize=6, color=INK2)
         ax.set(xscale="log", yscale="log", xlabel="QM atoms", ylabel="Wall time per MD step (s)")
         ax.set_title(f"{chr(97 + k)}  QM/MM MD (OpenMM + MOPAC)")
         ax.legend(loc="upper left")
@@ -512,7 +517,8 @@ def fig_qmmm(o: Out) -> None:
     if nve is not None:
         ax = axes[0, k]
         for i, (case, g) in enumerate(nve.groupby("case", sort=False)):
-            ax.plot(g["fs"], g["E_kj"] - g["E_kj"].iloc[0], color=STACK[i], lw=0.9, label=case)
+            name = q[q["case"] == case]["label"].iloc[0] if q is not None and (q["case"] == case).any() else case
+            ax.plot(g["fs"], g["E_kj"] - g["E_kj"].iloc[0], color=STACK[i], lw=0.9, label=name)
         ax.set(xlabel="Time (fs)", ylabel="$E_{tot} - E_{tot}(0)$ (kJ/mol)")
         ax.set_title(f"{chr(97 + k)}  NVE energy conservation")
         ax.legend()
