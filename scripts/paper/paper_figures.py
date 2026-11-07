@@ -545,14 +545,20 @@ def fig_qmmm(o: Out) -> None:
     o.save(fig, "fig_qmmm")
     if q is not None:
         tab = q.sort_values(["qm_atoms", "mode"])
+        small_t = (tab["qm_atoms"] + tab.get("link_atoms", 0).fillna(0)) <= 100
+        nve_d = tab.get("nve_drift_kj", pd.Series(index=tab.index, dtype=float))
+        nve_r = tab.get("nve_rms_dev_kj", pd.Series(index=tab.index, dtype=float))
         o.table("table_qmmm", pd.DataFrame({
             "QM region": tab["label"], "QM atoms": tab["qm_atoms"], "Total atoms": tab["total_atoms"],
-            "MOPAC on": tab["mode"].str.upper(), "s/step": tab["s_per_step"].map(lambda x: f"{x:.3f}"),
+            "MOPAC on": [("CPU$^a$" if sm else m.upper()) for sm, m in zip(small_t, tab["mode"])],
+            "s/step": tab["s_per_step"].map(lambda x: f"{x:.3f}"),
             "ps/day": tab["ps_per_day"].map(lambda x: f"{x:.1f}"),
-            "NVE drift (kJ/mol/ps)": tab.get("nve_slope_kj_ps", pd.Series(dtype=float)).map(
-                lambda x: "--" if x != x else f"{x:.1f}")}),
+            "NVE $\\Delta E$ (kJ/mol)": nve_d.map(lambda x: "--" if x != x else f"{x:+.1f}"),
+            "NVE rms (kJ/mol)": nve_r.map(lambda x: "--" if x != x else f"{x:.1f}")}),
             "QM/MM molecular dynamics: OpenMM (CUDA) with MOPAC/MOZYME (PM7) for the QM region, TIP3P water.",
-            "0.5 fs steps, Langevin NVT; NVE: linear-fit slope of the total energy.")
+            "0.5 fs steps, Langevin NVT. NVE: 400 velocity-Verlet steps (0.2 ps) after the NVT run; change of the "
+            "total energy and rms deviation from a linear fit. $^a$QM regions of up to 100 atoms (link atoms "
+            "included) run MOPAC on the CPU in the GPU mode; OpenMM and the PME grid use the GPU.")
 
 
 def tables_controls(o: Out) -> None:
