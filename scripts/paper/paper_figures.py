@@ -363,7 +363,9 @@ def fig_md(o: Out) -> None:
             continue
         for case, g in df.groupby("case", sort=False):
             c, gp = g[g["mode"] == "cpu"], g[g["mode"] == "gpu"]
-            r = {"Run": case, "Steps": int(gp["steps"].iloc[0]) if len(gp) and "steps" in gp else "--",
+            names = {"crambin_nve": "Crambin NVE (MOZYME)", "crambin_nvt": "Crambin NVT, Bussi (MOZYME)",
+                     "adk_nve": "Adenylate kinase NVE (MOZYME)", "diamond": "Diamond NVE (solid)"}
+            r = {"Run": names.get(case, case.replace("_", " ")), "Steps": int(gp["steps"].iloc[0]) if len(gp) and "steps" in gp else "--",
                  "CPU s/step": f"{c['s_per_step'].iloc[0]:.2f}" if len(c) else "--",
                  "GPU s/step": f"{gp['s_per_step'].iloc[0]:.3f}" if len(gp) else "--"}
             if len(c) and len(gp):
@@ -488,11 +490,20 @@ def fig_freq(o: Out) -> None:
     o.save(fig, "fig_frequencies")
     th = o.csv("thermo")
     if th is not None:
-        o.table("table_thermo", th.rename(columns={"system": "Run", "gpu_s": "GPU (s)", "cpu_ref_s": "CPU ref. (s)"}),
-                "MOZYME FORCE / FORCETS on the GPU against stored CPU references.",
+        tt = pd.DataFrame({
+            "Run": th["system"],
+            "GPU (s)": th["gpu_s"].map(lambda x: f"{x:.1f}"),
+            "CPU ref. (s)": th["cpu_ref_s"].map(lambda x: f"{x:.1f}"),
+            "rms $\\Delta\\nu$ (cm$^{-1}$)": th["rms_cm1"].map(lambda x: "--" if x != x else f"{x:.3f}"),
+            "$\\Delta$ZPE (kcal/mol)": th["dzpe"].map(lambda x: "--" if x != x else f"{x:+.4f}"),
+            "$\\Delta H_f$ (kcal/mol)": th["dheat"].map(lambda x: "--" if x != x else f"{x:+.5f}"),
+            "max $|\\Delta g|$": th["grad_norm_diff"].map(lambda x: "--" if x != x else f"{x:.4f}")})
+        o.table("table_thermo", tt,
+                "MOZYME FORCE / FORCETS and gradients on the GPU against stored CPU references.",
                 "CPU references stored in tests/data/mozyme\\_gpu\\_reference/reference.json, computed on "
                 "laptop CPUs (FORCE and FORCETS: Intel Core i7-8850H), not on the benchmark machine: "
-                "the times are not a speed-up.")
+                "the times are not a speed-up. rms $\\Delta\\nu$: frequencies of at least 100 cm$^{-1}$ for "
+                "FORCE. Gradients in kcal/(mol \\AA).")
 
 
 def fig_qmmm(o: Out) -> None:
