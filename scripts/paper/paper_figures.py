@@ -100,11 +100,20 @@ def timing(df: pd.DataFrame, key: str = "case") -> pd.DataFrame:
         row["gpu_max"] = gp_ok["wall_s"].max() if len(gp_ok) else np.nan
         row["cpu_heat"] = c["heat"].iloc[0] if len(c) else np.nan
         first = gp[gp["rep"] == 0] if "rep" in gp else gp
+        # GPU - CPU heat: the GPU run farthest from the CPU result (the conservative choice), and the spread
+        # of the GPU runs; the first run alone hid run-to-run differences of up to 0.08 kcal/mol
+        gh = gp["heat"].dropna() if "heat" in gp else pd.Series(dtype=float)
         row["gpu_heat"] = first["heat"].iloc[0] if len(first) else np.nan
-        row["dheat"] = row["gpu_heat"] - row["cpu_heat"]
+        if len(gh) and np.isfinite(row["cpu_heat"]):
+            d = gh - row["cpu_heat"]
+            row["dheat"] = d.loc[d.abs().idxmax()]
+            row["dheat_spread"] = gh.max() - gh.min()
+        else:
+            row["dheat"], row["dheat_spread"] = np.nan, np.nan
         row["speedup"] = row["cpu_s"] / row["gpu_s"] if row["gpu_s"] else np.nan
         row["gpu_mem_mib"] = gp["gpu_mem_mib"].max() if "gpu_mem_mib" in gp else np.nan
         row["scf_iterations"] = first["scf_iterations"].iloc[0] if "scf_iterations" in first and len(first) else np.nan
+        row["scf_iterations_cpu"] = c["scf_iterations"].iloc[0] if "scf_iterations" in c and len(c) else np.nan
         row["fallback"] = gp["gpu_scf_fallback"].sum() if "gpu_scf_fallback" in gp else 0
         out.append(row)
     return pd.DataFrame(out)
@@ -119,7 +128,12 @@ def fmt_s(x: float) -> str:
 def fmt_e(x: float) -> str:
     if x is None or (isinstance(x, float) and math.isnan(x)):
         return "--"
-    return f"{x:+.4f}" if abs(x) >= 1e-4 else f"{x:+.1e}"
+    return "0.0000" if abs(x) < 5e-5 else f"{x:+.4f}"
+
+
+def fmt_x(x: float) -> str:
+    """speed-up: one decimal below 10"""
+    return "--" if x is None or math.isnan(x) else (f"{x:.1f}" if x < 10 else f"{x:.0f}")
 
 
 def loglog_fit(x, y) -> float | None:
@@ -153,12 +167,14 @@ def fig_mozyme_scaling(o: Out) -> None:
         a.errorbar(sel["atoms"], sel["gpu_s"], yerr=errbars(sel), ls="none", ecolor=GPU, elinewidth=0.8, capsize=0,
                    label=f"GPU ({kind}s)", **dict(MK["gpu"], mfc=GPU if filled else "white",
                                                     mec=GPU if not filled else "white"))
-    for mode, col, ys in (("GPU", GPU, t["gpu_s"]), ("CPU", CPU, t["cpu_s"])):
-        p = loglog_fit(t["atoms"], ys)
+    # both fits over the same systems (those with a CPU time), drawn over the fitted range only
+    tf = t[t["cpu_s"].notna() & t["gpu_s"].notna()]
+    for mode, col, ys in (("GPU", GPU, tf["gpu_s"]), ("CPU", CPU, tf["cpu_s"])):
+        p = loglog_fit(tf["atoms"], ys)
         if p:
-            xx = np.array([t["atoms"].min(), t["atoms"].max()])
+            xx = np.array([tf["atoms"].min(), tf["atoms"].max()])
             ok = ys.notna() & (ys > 0)
-            c0 = np.exp(np.mean(np.log(ys[ok]) - p * np.log(t["atoms"][ok])))
+            c0 = np.exp(np.mean(np.log(ys[ok]) - p * np.log(tf["atoms"][ok])))
             a.plot(xx, c0 * xx ** p, color=col, lw=0.8, alpha=0.6, zorder=1)
             a.text(xx[-1], c0 * xx[-1] ** p, f"  {mode} $\\propto N^{{{p:.2f}}}$", color=INK2, fontsize=7,
                    va="center")
@@ -182,12 +198,14 @@ def fig_mozyme_scaling(o: Out) -> None:
 
     tab = pd.DataFrame({
         "System": t["label"], "Atoms": t["atoms"].astype(int), "CPU (s)": t["cpu_s"].map(fmt_s),
-        "GPU (s)": t["gpu_s"].map(fmt_s), "Speed-up": t["speedup"].map(lambda x: "--" if math.isnan(x) else f"{x:.0f}"),
+        "GPU (s)": t["gpu_s"].map(fmt_s), "Speed-up": t["speedup"].map(fmt_x),
         "$\\Delta H_f$ (kcal/mol)": t["dheat"].map(fmt_e),
-        "GPU mem. (GB)": (t["gpu_mem_mib"] / 1024).map(lambda x: "--" if math.isnan(x) else f"{x:.1f}")})
-    o.table("table_mozyme_sp", tab, "MOZYME single points (PM7 1SCF): one CPU core against one GPU.",
-            "GPU: median of the repetitions. $\\Delta H_f$: GPU $-$ CPU heat of formation. GPU memory: peak of the "
-            "whole device.")
+        "GPU spread (kcal/mol)": t["dheat_spread"].map(lambda x: "--" if x != x else f"{x:.4f}"),
+        "GPU mem. (GiB)": (t["gpu_mem_mib"] / 1024).map(lambda x: "--" if math.isnan(x) else f"{x:.1f}")})
+    o.table("table_mozyme_sp", tab, "MOZYME single points (PM7 1SCF): one CPU core against the GPU.",
+            "Three GPU runs per system; GPU time: median. $\\Delta H_f$: GPU $-$ CPU heat of formation for the GPU run "
+            "farthest from the CPU result; GPU spread: largest minus smallest GPU heat. The MOZYME CPU code uses one "
+            "core; the GPU runs use up to 12 host threads. GPU memory: largest device-memory reading of the runs.")
     if len(both):
         o.summary.append(f"- MOZYME 1SCF: speed-up {both['speedup'].min():.0f}-{both['speedup'].max():.0f}x over one "
                          f"CPU core ({len(both)} systems, {int(both['atoms'].min())}-{int(both['atoms'].max())} atoms); "
@@ -219,9 +237,11 @@ def fig_accuracy(o: Out) -> None:
                         ("conv_mol_grad_compare", "Conventional")):
         df = o.csv(name)
         if df is not None:
-            # n = gradient components: the atom count tells the supercells of one solid apart
-            grads += [(group, str(r["label"]) + (f" ({int(r['n']) // 3})" if group == "Solids" else ""),
-                       r["max_abs"], r["rms"]) for _, r in df.iterrows()]
+            # the atom count tells the supercells of one solid apart (n also counts lattice-vector components)
+            sol = o.csv("solids")
+            atoms = sol.groupby("case")["atoms"].max().to_dict() if sol is not None and "atoms" in sol else {}
+            grads += [(group, str(r["label"]) + (f" ({int(atoms[r['case']])})" if group == "Solids" and r["case"] in atoms
+                                                 else ""), r["max_abs"], r["rms"]) for _, r in df.iterrows()]
     if not rows and not grads:
         return
     fig, axes = plt.subplots(1, 2, figsize=(DOUBLE, max(2.6, 0.13 * max(len(rows), len(grads)) + 0.8)),
@@ -375,7 +395,7 @@ def fig_md(o: Out) -> None:
                 r[f"{mode} max |error| (kcal/mol)"] = f"{d['max_abs_error'].iloc[0]:.3f}" if ok else "--"
             rows.append(r)
     if rows:
-        o.table("table_dynamics", pd.DataFrame(rows), "Molecular dynamics (DRC, 0.1--0.5 fs steps).",
+        o.table("table_dynamics", pd.DataFrame(rows), "Molecular dynamics (DRC, 0.1-fs steps; energies printed every 0.5 fs).",
                 "Error: MOPAC's integration error of the total energy (energy given to the bath excluded).")
 
 
@@ -407,7 +427,7 @@ def fig_solids(o: Out) -> None:
         y = np.arange(len(both))
         b.barh(y, both["speedup"], height=0.6, color=GPU)
         for yi, v in zip(y, both["speedup"]):
-            b.text(v, yi, f" {v:.0f}$\\times$", va="center", fontsize=6.5, color=INK)
+            b.text(v, yi, f" {fmt_x(v)}$\\times$", va="center", fontsize=6.5, color=INK)
         b.set_yticks(y, lab, fontsize=6.5)
         b.set_xlabel("Speed-up, GPU vs CPU (same binary)")
         b.set_title("b  Solids, 1SCF GRADIENTS")
@@ -416,12 +436,14 @@ def fig_solids(o: Out) -> None:
     tab = t.sort_values(["series", "atoms"])
     o.table("table_solids", pd.DataFrame({
         "Cell": [f"{r['label']}" for _, r in tab.iterrows()], "Atoms": tab["atoms"].map(lambda x: int(x) if x == x else "--"),
-        "SCF it.": tab["scf_iterations"].map(lambda x: int(x) if x == x else "--"),
+        "SCF it. CPU / GPU": [f"{int(a)} / {int(b)}" if a == a and b == b else (f"-- / {int(b)}" if b == b else "--")
+                              for a, b in zip(tab["scf_iterations_cpu"], tab["scf_iterations"])],
         "CPU (s)": tab["cpu_s"].map(fmt_s), "GPU (s)": tab["gpu_s"].map(fmt_s),
-        "Speed-up": tab["speedup"].map(lambda x: "--" if math.isnan(x) else f"{x:.0f}"),
-        "$\\Delta H_f$": tab["dheat"].map(fmt_e)}),
-        "Conventional SCF of solids (PM7, 1SCF GRADIENTS, $\\Gamma$ point): CPU (all cores) against the GPU.",
-        "Cells under 100 atoms use the GPU with MOPAC\\_FORCEGPU=1.")
+        "Speed-up": tab["speedup"].map(fmt_x),
+        "$\\Delta H_f$ (kcal/mol)": tab["dheat"].map(fmt_e)}),
+        "Conventional SCF of solids (PM7, 1SCF GRADIENTS, $\\Gamma$ point): CPU (12 threads) against the GPU.",
+        "Three GPU runs per cell; GPU time: median. $\\Delta H_f$: GPU $-$ CPU for the GPU run farthest from the CPU "
+        "result. Times include writing the AUX file. Cells under 100 atoms use the GPU with MOPAC\\_FORCEGPU=1.")
     if len(both):
         o.summary.append(f"- Solids (conventional SCF): speed-up {both['speedup'].min():.0f}-{both['speedup'].max():.0f}x "
                          f"against all CPU cores; max |dHf| {both['dheat'].abs().max():.4f} kcal/mol.")
@@ -497,13 +519,13 @@ def fig_freq(o: Out) -> None:
             "rms $\\Delta\\nu$ (cm$^{-1}$)": th["rms_cm1"].map(lambda x: "--" if x != x else f"{x:.3f}"),
             "$\\Delta$ZPE (kcal/mol)": th["dzpe"].map(lambda x: "--" if x != x else f"{x:+.4f}"),
             "$\\Delta H_f$ (kcal/mol)": th["dheat"].map(lambda x: "--" if x != x else f"{x:+.5f}"),
-            "max $|\\Delta g|$": th["grad_norm_diff"].map(lambda x: "--" if x != x else f"{x:.4f}")})
+            "$|\\Delta |g||$": th["grad_norm_diff"].map(lambda x: "--" if x != x else f"{x:.4f}")})
         o.table("table_thermo", tt,
                 "MOZYME FORCE / FORCETS and gradients on the GPU against stored CPU references.",
                 "CPU references stored in tests/data/mozyme\\_gpu\\_reference/reference.json, computed on "
                 "laptop CPUs (FORCE and FORCETS: Intel Core i7-8850H), not on the benchmark machine: "
                 "the times are not a speed-up. rms $\\Delta\\nu$: frequencies of at least 100 cm$^{-1}$ for "
-                "FORCE. Gradients in kcal/(mol \\AA).")
+                "FORCE. $|\\Delta |g||$: difference of the gradient norms, kcal/(mol \\AA).")
 
 
 def fig_qmmm(o: Out) -> None:
