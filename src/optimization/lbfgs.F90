@@ -463,7 +463,7 @@ contains
 !  for a stationary point of a later FORCE, optimize again from the result.
 !
       integer, parameter :: mmem = 12
-      double precision, parameter :: erise = 1.d0, rmin = 1.d-4
+      double precision, parameter :: erise = 1.d0, rmin = 1.d-4, kstiff = 1.d3   ! kcal/(mol A^2)
       double precision, allocatable :: sm(:,:), ym(:,:), rho(:), alp(:), dir(:), x0(:), g0(:)
       integer :: kmem, head, jj, k, nrej, it
       double precision :: radius, e0, dmax, sy, yy, gam, bet, gd
@@ -524,6 +524,10 @@ contains
           kmem = 0
           dir = -g0
         end if
+!       Without curvature pairs the step is -g / KSTIFF (a Newton step for a stiff bond) before
+!       the trust radius applies: -g scaled to the radius alone moved every coordinate of an
+!       optimized chignolin (GNORM 7.6) by up to 0.05 A and raised the heat by 47 kcal/mol
+        if (kmem == 0) dir = dir / kstiff
 !
 !  Scale to the trust radius (largest coordinate change)
 !
