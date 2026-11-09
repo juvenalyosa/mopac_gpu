@@ -83,6 +83,9 @@ repeat them.
 
 ---
 
+**[Wiki: 64 worked examples](https://github.com/juvenalyosa/mopac_gpu/wiki)**, most of them with the new keywords
+(dynamics, `TRUST`, `SWIG`, `SMEAR`, solids, QM/MM), plus a keyword reference and troubleshooting.
+
 ## Contents
 
 1. [Try it in Google Colab](#1-try-it-in-google-colab)
