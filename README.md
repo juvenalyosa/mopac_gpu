@@ -1,6 +1,11 @@
-# Barranquilla MOPAC — MOZYME, solids and QM/MM on the GPU
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="logo/barranquilla_mopac_logo_dark.svg">
+    <img src="logo/barranquilla_mopac_logo.svg" alt="Barranquilla MOPAC GPU" width="520">
+  </picture>
+</p>
 
-<img src="logo/barranquilla_logo.png" alt="Barranquilla MOPAC Logo" style="max-width: 100%; width: 720px; height: auto;" />
+# Barranquilla MOPAC — MOZYME, solids and QM/MM on the GPU
 
 Barranquilla MOPAC is [MOPAC](https://github.com/openmopac/mopac) with its linear-scaling **MOZYME**
 method (proteins, DNA/RNA, large complexes) running on an NVIDIA GPU. The self-consistent field,
@@ -821,8 +826,9 @@ other keywords.
 
 ## 12. Citing and license
 
-This fork is based on MOPAC (Stewart Computational Chemistry / Virginia Tech, Apache License 2.0;
-see `LICENSE` and `NOTICE`). Please cite MOPAC as described in `CITATION.cff`
+Barranquilla MOPAC is an independent derivative of MOPAC; it is not affiliated with or endorsed by
+MolSSI or Virginia Tech. It is based on MOPAC (Stewart Computational Chemistry / Virginia Tech, Apache
+License 2.0; see `LICENSE` and `NOTICE`). Please cite MOPAC as described in `CITATION.cff`
 (doi: [10.5281/zenodo.6511958](https://doi.org/10.5281/zenodo.6511958)), for the thermostat
 G. Bussi, D. Donadio and M. Parrinello, *J. Chem. Phys.* **126**, 014101 (2007), and for QM/MM
 OpenMM (P. Eastman et al., *J. Phys. Chem. B* **128**, 109–116 (2024), doi:
