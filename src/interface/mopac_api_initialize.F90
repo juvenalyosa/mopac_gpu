@@ -323,8 +323,9 @@ contains
     do i = 57,71
       if (zs(i) < 0.1d0) tore(i) = 3.d0
     end do
-    ! set the spin multiplicity
-    nelectron = sum(tore(nat(:numat)))
+    ! set the spin multiplicity (the parity of the electron count includes the charge: without it every
+    ! system of odd charge was given the wrong MS and stopped, e.g. a QM region of charge +1)
+    nelectron = nint(sum(tore(nat(:numat)))) - system%charge
     write(num2str,'(f6.1)') system%spin + mod(nelectron,2)*0.5d0
     keywrd = trim(keywrd) // " MS=" // adjustl(num2str)
     ! initialization steps performed by moldat
