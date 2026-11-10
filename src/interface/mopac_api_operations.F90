@@ -235,6 +235,14 @@ contains
     logical :: applied
     character(len=16) :: env
     integer :: env_len, env_stat
+    integer(c_int) :: code
+    interface
+      function mopac_setenv_default(name, value) bind(C, name='mopac_setenv_default') result(code)
+        import :: c_int, c_char
+        character(kind=c_char), intent(in) :: name(*), value(*)
+        integer(c_int) :: code
+      end function mopac_setenv_default
+    end interface
 #endif
     keywrd = " MOZYME 1SCF ALLBONDS GRADIENTS HB-SMOOTH"
     ! a tight SCF (MD forces) needs smaller LMO cut-offs: without them the SCF stops at its noise floor
@@ -254,6 +262,10 @@ contains
 #ifdef GPU
     if (.not. moperr .and. lgpu) then
       call mozyme_gpu_apply_default_environment(7, applied)
+      ! one process steps the same QM region many times: keep the sp pair kernels' stack limit between calls
+      ! (putting it back after every call made the driver re-grow it each step: 12.5 vs 2.0 ms per gradient
+      ! with 10 QM atoms on an L4)
+      code = mopac_setenv_default('MOPAC_GPU_STACK_RESTORE'//c_null_char, 'd'//c_null_char)
       mozyme_gpu_requested = .true.
       mozyme_gpu = .true.
       mozyme_resident_fock_gpu = .true.
