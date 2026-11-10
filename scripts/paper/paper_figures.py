@@ -301,24 +301,55 @@ def fig_opt(o: Out) -> None:
     if cy is None:
         return
     systems = list(dict.fromkeys(cy["system"]))
-    fig, axes = plt.subplots(len(systems), 3, figsize=(DOUBLE, 2.3 * len(systems)), squeeze=False, layout="constrained")
+    names = {"crambin": "Crambin", "adk": "Adenylate kinase"}
+    runs = o.csv("opt")
+    fig = plt.figure(figsize=(DOUBLE, 2.45 * len(systems)), layout="constrained")
+    # one row per system, named in a row heading; the panel titles name only the quantity
+    rows = fig.subfigures(len(systems), 1, squeeze=False)[:, 0]
+    axes = np.array([r.subplots(1, 3) for r in rows])
     for i, s in enumerate(systems):
         g = cy[cy["system"] == s]
+        atoms = runs[runs["case"] == s]["atoms"].iloc[0] if runs is not None and (runs["case"] == s).any() else None
         hmin = g["heat"].min()
-        for mode in ("cpu", "gpu"):
+        modes = [m for m in ("cpu", "gpu") if (g["mode"] == m).any()]
+        for mode in modes:
             h = g[g["mode"] == mode]
-            if not len(h):
-                continue
-            kw = dict(color=MK[mode]["color"], label=mode.upper())
+            thr = runs[(runs["case"] == s) & (runs["mode"] == mode)]["threads"] if runs is not None else []
+            lab = "CPU, 1 core" if mode == "cpu" and len(thr) and thr.iloc[0] == 1 else mode.upper()
+            kw = dict(color=MK[mode]["color"], label=lab)
             axes[i, 0].plot(h["cycle"], h["heat"] - hmin, **kw)
             axes[i, 1].plot(h["cycle"], h["grad"], **kw)
             axes[i, 2].plot(h["cycle"], h["cycle_s"].cumsum() / 60.0, **kw)
         axes[i, 0].set(yscale="symlog", xlabel="Cycle", ylabel="$H_f - H_{f,\\min}$ (kcal/mol)")
         axes[i, 1].set(yscale="log", xlabel="Cycle", ylabel="Gradient norm (kcal mol$^{-1}$ Å$^{-1}$)")
-        axes[i, 2].set(xlabel="Cycle", ylabel="Elapsed (min)")
-        for j, t in enumerate(("Energy", "Gradient", "Cost")):
-            axes[i, j].set_title(f"{chr(97 + 3 * i + j)}  {s}: {t.lower()}")
-        axes[i, 0].legend()
+        axes[i, 2].set(xlabel="Cycle", ylabel="Elapsed time (min)")
+        for j, t in enumerate(("Heat of formation", "Gradient norm", "Elapsed time")):
+            axes[i, j].set_title(f"{chr(97 + 3 * i + j)}  {t}")
+        ncyc = int(g["cycle"].max())
+        how = " and ".join(("CPU" if m == "cpu" else "GPU") for m in modes) if len(modes) > 1 else "GPU only"
+        rows[i].suptitle(f"{names.get(s, s)}" + (f", {int(atoms)} atoms" if atoms else "") + f": {ncyc} cycles, {how}",
+                         x=0.0, ha="left", fontsize=8.5, fontweight="normal", color=INK2)
+        if "log" == axes[i, 1].get_yscale():
+            lo, hi = g["grad"].min(), g["grad"].max()
+            if hi / lo < 30:  # less than ~1.5 decades: 1-2-5 ticks with plain numbers instead of one power of ten
+                d = 10.0 ** np.floor(np.log10(lo))
+                ticks = [m * d * 10 ** k for k in range(3) for m in (1, 2, 5) if lo <= m * d * 10 ** k <= hi * 1.05]
+                axes[i, 1].yaxis.set_major_locator(matplotlib.ticker.FixedLocator(ticks))
+                axes[i, 1].yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+                axes[i, 1].yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+        if modes == ["gpu"]:
+            # the optimization itself was not run on the CPU; the measured CPU reference is one 1SCF at the final
+            # geometry (the heat comparison of the table), drawn as a level
+            f = runs[(runs["case"] == f"{s}_final_gpu") & (runs["mode"] == "cpu")] if runs is not None else []
+            ax = axes[i, 2]
+            if len(f):
+                m = f["wall_s"].iloc[0] / 60.0
+                cores = f"{int(f['threads'].iloc[0])} core" + ("s" if f["threads"].iloc[0] > 1 else "")
+                ax.axhline(m, color=CPU, lw=1.0, ls=(0, (4, 2)), label=f"CPU, {cores}: one 1SCF\nat the final geometry")
+                ax.set_ylim(0, m * 1.15)
+                ax.legend(loc="center right")
+        else:
+            axes[i, 0].legend(loc="upper right")
         for ax in axes[i]:
             ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
     o.save(fig, "fig_optimization")
@@ -352,7 +383,7 @@ def fig_md(o: Out) -> None:
         return
     fig, axes = plt.subplots(1, len(panels), figsize=(DOUBLE if len(panels) > 1 else SINGLE, 2.4), squeeze=False, layout="constrained")
     k = 0
-    for data, system, title in ((md, "crambin_nve", "crambin NVE (MOZYME)"), (sd, "diamond", "diamond NVE (solid)")):
+    for data, system, title in ((md, "crambin_nve", "Crambin, NVE (MOZYME)"), (sd, "diamond", "Diamond, NVE (solid)")):
         if data is None or system not in set(data["system"]):
             continue
         ax = axes[0, k]
@@ -369,12 +400,13 @@ def fig_md(o: Out) -> None:
         ax = axes[0, k]
         # only the thermostatted run (the NVE runs also print temperatures); one mode per line
         for (system, mode), g in tmp[tmp["system"].str.contains("nvt")].groupby(["system", "mode"]):
-            ax.plot(g["fs"], g["T"], color=MK[mode]["color"], label=f"{system.split('_')[0]}, T ({mode.upper()})")
+            ax.plot(g["fs"], g["T"], color=MK[mode]["color"], label=f"T ({mode.upper()})")
             ax.plot(g["fs"], g["T_mean"], color=INK2, lw=0.8, label="running mean")
-        ax.axhline(300, color=INK2, lw=0.6, ls=(0, (3, 2)))
+        ax.axhline(300, color=INK2, lw=0.6, ls=(0, (3, 2)), label="target, 300 K")
         ax.set(xlabel="Time (fs)", ylabel="Temperature (K)")
-        ax.set_title(f"{chr(97 + k)}  NVT, Bussi thermostat (GPU)")
-        ax.legend()
+        ax.set_ylim(100, 320)
+        ax.set_title(f"{chr(97 + k)}  Crambin, NVT, Bussi (GPU)")
+        ax.legend(loc="lower right")
     o.save(fig, "fig_dynamics")
     rows = []
     for name in ("md", "solids_drc"):
@@ -409,18 +441,17 @@ def fig_solids(o: Out) -> None:
     fig, (a, b) = plt.subplots(1, 2, figsize=(DOUBLE, 2.7), gridspec_kw={"width_ratios": [1, 1.2]}, layout="constrained")
     if len(si):
         c = si[si["cpu_s"].notna()]
-        a.plot(c["atoms"], c["cpu_s"], label=f"CPU, {int(df[df['mode'] == 'cpu']['threads'].max())} threads"
-               if (df["mode"] == "cpu").any() else "CPU", **MK["cpu"])
-        a.errorbar(si["atoms"], si["gpu_s"], yerr=errbars(si), ecolor=GPU, elinewidth=0.8, label="GPU", **MK["gpu"])
-        for mode, ys in (("GPU", si["gpu_s"]), ("CPU", si["cpu_s"])):
-            p = loglog_fit(si["atoms"], ys)
-            if p:
-                ok = ys.notna()
-                a.annotate(f"{mode} $\\propto N^{{{p:.1f}}}$", (si["atoms"][ok].iloc[-1], ys[ok].iloc[-1]),
-                           textcoords="offset points", xytext=(-4, 6), ha="right", fontsize=7, color=INK2)
+        # the fitted exponent goes into the legend, so no label sits on the lines
+        fit = {m: loglog_fit(si["atoms"], ys) for m, ys in (("gpu", si["gpu_s"]), ("cpu", si["cpu_s"]))}
+        exp = {m: (f", $\\propto N^{{{p:.1f}}}$" if p else "") for m, p in fit.items()}
+        a.plot(c["atoms"], c["cpu_s"], label=(f"CPU, {int(df[df['mode'] == 'cpu']['threads'].max())} threads"
+               if (df["mode"] == "cpu").any() else "CPU") + exp["cpu"], **MK["cpu"])
+        a.errorbar(si["atoms"], si["gpu_s"], yerr=errbars(si), ecolor=GPU, elinewidth=0.8, label="GPU" + exp["gpu"],
+                   **MK["gpu"])
         a.set(xscale="log", yscale="log", xlabel="Atoms", ylabel="Wall time, 1SCF GRADIENTS (s)")
         a.set_title("a  Silicon supercells (PM7)")
         a.legend(loc="upper left")
+        a.margins(x=0.08, y=0.12)
     both = t[t["cpu_s"].notna() & t["gpu_s"].notna()].sort_values("atoms")
     if len(both):
         lab = [f"{r['label']} ({int(r['atoms'])})" for _, r in both.iterrows()]
@@ -429,6 +460,7 @@ def fig_solids(o: Out) -> None:
         for yi, v in zip(y, both["speedup"]):
             b.text(v, yi, f" {fmt_x(v)}$\\times$", va="center", fontsize=6.5, color=INK)
         b.set_yticks(y, lab, fontsize=6.5)
+        b.set_xlim(0, both["speedup"].max() * 1.13)
         b.set_xlabel("Speed-up, GPU vs CPU (same binary)")
         b.set_title("b  Solids, 1SCF GRADIENTS")
         b.grid(axis="y", visible=False)
@@ -536,7 +568,9 @@ def fig_qmmm(o: Out) -> None:
     panels = [x for x in (q, nve, cut) if x is not None]
     if not panels:
         return
-    fig, axes = plt.subplots(1, len(panels), figsize=(DOUBLE if len(panels) > 1 else SINGLE, 2.6), squeeze=False, layout="constrained")
+    fig, axes = plt.subplots(1, len(panels), figsize=(DOUBLE if len(panels) > 1 else SINGLE, 3.0), squeeze=False, layout="constrained")
+    # legends sit under their panels, so that no legend or label covers a curve
+    below = dict(loc="upper center", bbox_to_anchor=(0.5, -0.24), ncol=1, handlelength=1.8)
     k = 0
     if q is not None:
         ax = axes[0, k]
@@ -550,33 +584,39 @@ def fig_qmmm(o: Out) -> None:
         g = q[(q["mode"] == "gpu") & small]
         if len(g):
             ax.plot(g["qm_atoms"], g["s_per_step"], ls="none", color=CPU, marker="D", mfc="white", mew=0.9,
-                    label="$\\leq$100 QM atoms: MOPAC on the CPU,\nMM and PME on the GPU")
+                    label="$\\leq$100 QM atoms: MOPAC on the CPU,\nOpenMM and PME on the GPU")
+        # direct labels below and to the right of the GPU-mode points, clear of the lines (which rise to the right)
         for _, r in q[q["mode"] == "gpu"].iterrows():
-            ax.annotate(f"{r['label']}\n{r['ps_per_day']:.0f} ps/day", (r["qm_atoms"], r["s_per_step"]),
-                        textcoords="offset points", xytext=(5, 2), va="bottom", fontsize=6, color=INK2)
+            ax.annotate(f"{r['label'].split(' (')[0]}\n{r['ps_per_day']:.0f} ps/day", (r["qm_atoms"], r["s_per_step"]),
+                        textcoords="offset points", xytext=(5, -4), ha="left", va="top", fontsize=6, color=INK2,
+                        linespacing=1.1)
         ax.set(xscale="log", yscale="log", xlabel="QM atoms", ylabel="Wall time per MD step (s)")
-        ax.set_title(f"{chr(97 + k)}  QM/MM MD (OpenMM + MOPAC)")
-        ax.legend(loc="upper left")
+        lo, hi = q["qm_atoms"].min(), q["qm_atoms"].max()
+        ax.set_xlim(lo / 1.6, hi * 5.5)
+        ax.set_ylim(q["s_per_step"].min() / 4, q["s_per_step"].max() * 2)
+        ax.set_title(f"{chr(97 + k)}  QM/MM step time")
+        ax.legend(**below)
         k += 1
     if nve is not None:
         ax = axes[0, k]
         for i, (case, g) in enumerate(nve.groupby("case", sort=False)):
             name = q[q["case"] == case]["label"].iloc[0] if q is not None and (q["case"] == case).any() else case
             ax.plot(g["fs"], g["E_kj"] - g["E_kj"].iloc[0], color=STACK[i], lw=0.9, label=name)
+        ax.axhline(0, color=INK2, lw=0.5, zorder=0)
         ax.set(xlabel="Time (fs)", ylabel="$E_{tot} - E_{tot}(0)$ (kJ/mol)")
-        ax.set_title(f"{chr(97 + k)}  NVE energy conservation")
-        ax.legend()
+        ax.set_title(f"{chr(97 + k)}  NVE total energy")
+        ax.legend(**below)
         k += 1
     if cut is not None:
         ax = axes[0, k]
         for i, (meth, g) in enumerate(cut.groupby("method", sort=False)):
             g = g.sort_values("roff")
             ax.plot(g["roff"], g["rms_err"], marker="os"[i % 2], mec="white", mew=0.6, color=(CPU, GPU)[i % 2],
-                    label="QM-PME" if meth == "PME" else "cut-off only")
-        ax.set(xlabel="QM-MM cut-off (Å)", ylabel="RMS force error (kJ mol$^{-1}$ nm$^{-1}$)")
+                    label="QM–MM PME" if meth == "PME" else "cut-off only")
+        ax.set(xlabel="QM–MM cut-off (Å)", ylabel="RMS force error (kJ mol$^{-1}$ nm$^{-1}$)")
         ax.set_ylim(bottom=0)
-        ax.set_title(f"{chr(97 + k)}  Trypsin-BPTI: long-range part")
-        ax.legend()
+        ax.set_title(f"{chr(97 + k)}  Trypsin–BPTI, QM forces")
+        ax.legend(**below)
     o.save(fig, "fig_qmmm")
     if q is not None:
         tab = q.sort_values(["qm_atoms", "mode"])
