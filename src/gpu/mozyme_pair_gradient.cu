@@ -990,10 +990,20 @@ bool any_d_atom(int numat, const int *iorbs) {
   return false;
 }
 
+// MOPAC_GPU_STACK_RESTORE=d: put the limit back only when d kernels were launched (the sp kernels then keep the
+// stack the driver gave them instead of re-growing it on every call); unset: after every launch.
+bool stack_restore_d_only() {
+  const char *v = std::getenv("MOPAC_GPU_STACK_RESTORE");
+  return v && (v[0] == 'd' || v[0] == 'D');
+}
+
 struct StackLimitRestore {
   size_t saved = 0;
   bool have = false;
-  StackLimitRestore() { have = cudaDeviceGetLimit(&saved, cudaLimitStackSize) == cudaSuccess; }
+  explicit StackLimitRestore(bool d_launched = true) {
+    if (!d_launched && stack_restore_d_only()) return;
+    have = cudaDeviceGetLimit(&saved, cudaLimitStackSize) == cudaSuccess;
+  }
   // Call after the kernels have completed (finish_launch synchronises).
   void restore() {
     if (!have) return;
@@ -1182,7 +1192,7 @@ int pair_gradient_launch(
   // (the charges only feed the MOZYME point-charge pairs)
   if (!ext) mozyme_atom_charge_kernel<<<(numat + 255) / 256, 256>>>(a, d_q.ptr);
   const bool launch_d = d_on_device && any_d_atom(numat, iorbs);
-  StackLimitRestore stack_limit;
+  StackLimitRestore stack_limit(launch_d);
   if (npairs > 0) {
     const int grid = (npairs + kPairThreads - 1) / kPairThreads;
     mozyme_pair_gradient_kernel<false><<<grid, kPairThreads>>>(a);
@@ -1604,7 +1614,7 @@ extern "C" int mopac_cuda_solrot_pairs(
   if (!d_scratch.alloc(static_cast<size_t>(dg.blocks) * kPairThreadsD * kPairScratchD)) return 2;
   DeviceArray<int> d_status;
   if (!d_status.alloc(1) || cudaMemset(d_status.ptr, 0, sizeof(int)) != cudaSuccess) return 2;
-  StackLimitRestore stack_limit;
+  StackLimitRestore stack_limit(any_d);
   const bool prof = any_d && dprof_begin();
   int code = 0;
   int p0 = 0;
@@ -1860,7 +1870,7 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
   a.enuc = d_enuc.ptr;
 
   const bool launch_d = d_on_device && any_d_atom(numat, iorbs);
-  StackLimitRestore stack_limit;
+  StackLimitRestore stack_limit(launch_d);
   if (npairs > 0) {
     const int grid = (npairs + kPairThreads - 1) / kPairThreads;
     mozyme_hcore_pairs_kernel<false><<<grid, kPairThreads>>>(a);
