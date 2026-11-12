@@ -17,7 +17,10 @@ with --qm-sidechain).  Waters, ions and other non-protein residues of the PDB fi
 the mean, smallest and largest distance during the QM/MM run.  --cutoff-test 8,12,16 recomputes the QM/MM
 forces on snapshots with these roff (ron = roff - 2), with and without the long-range part (PME), and
 compares them with PME at the largest roff.  --no-pme: cut-off QM-MM electrostatics only; --pme-cpu: the
-PME grid on the CPU (NumPy) even when CuPy sees a GPU.
+PME grid on the CPU (NumPy) even when CuPy sees a GPU.  --mm-only runs the same system with the QM residues
+left in the force field (an NVE reference for the MM part).  --nve-every N reads the total energy every N
+NVE steps (each reading evaluates all forces, the QM/MM force included, once more).  --nve-traj N writes
+every N NVE steps a frame of the protein (heavy atoms, plus every atom of the QM residues) to nve_traj.pdb.
 """
 
 import argparse
@@ -84,6 +87,9 @@ def main():
     ap.add_argument("--platform", default="CUDA")
     ap.add_argument("--tolerance", type=float, default=0.01)
     ap.add_argument("--nve", type=int, default=0, help="steps of an NVE check at the end")
+    ap.add_argument("--nve-every", type=int, default=1, help="read the total energy every N NVE steps")
+    ap.add_argument("--nve-traj", type=int, default=0, help="protein frame to nve_traj.pdb every N NVE steps")
+    ap.add_argument("--mm-only", action="store_true", help="no QM region: the QM residues stay in the force field")
     ap.add_argument("--mm-equil-ps", type=float, default=20.0)
     ap.add_argument("--variants", default="", help="protonation states, e.g. E:57=HID,E:102=ASP")
     ap.add_argument("--distances", default="", help="atom pairs to follow, e.g. E:195:OG-I:15:C")
@@ -144,12 +150,16 @@ def main():
     qcharge = a.qm_charge
     if qcharge is None:
         qcharge = int(round(sum(nb.getParticleParameters(i)[0].value_in_unit(u.elementary_charge) for i in qm)))
-    qmmm = add_qmmm(system, top, st.getPositions(), qm, qcharge, a.libmopac, ron=a.ron, roff=a.roff,
-                    tolerance=a.tolerance, pme=False if a.no_pme else None,
-                    pme_gpu=False if a.pme_cpu else None)
-    lr = "none (cut-off)" if not qmmm.region.pme else "PME on the GPU" if qmmm.region.pme_gpu else "PME"
-    print(f"QM region: {len(qm)} atoms + {len(qmmm.region.links)} link atoms, charge {qcharge}; long-range "
-          f"QM-MM electrostatics: {lr}", flush=True)
+    if a.mm_only:
+        qmmm = None
+        print(f"MM only: the {len(qm)} atoms of the QM residues stay in the force field", flush=True)
+    else:
+        qmmm = add_qmmm(system, top, st.getPositions(), qm, qcharge, a.libmopac, ron=a.ron, roff=a.roff,
+                        tolerance=a.tolerance, pme=False if a.no_pme else None,
+                        pme_gpu=False if a.pme_cpu else None)
+        lr = "none (cut-off)" if not qmmm.region.pme else "PME on the GPU" if qmmm.region.pme_gpu else "PME"
+        print(f"QM region: {len(qm)} atoms + {len(qmmm.region.links)} link atoms, charge {qcharge}; long-range "
+              f"QM-MM electrostatics: {lr}", flush=True)
 
     integ = mm.LangevinMiddleIntegrator(a.temperature * u.kelvin, 1 / u.picosecond, a.dt * u.femtoseconds)
     integ.setRandomNumberSeed(a.seed)
@@ -185,14 +195,15 @@ def main():
                 snaps.append(st2)
     t = time.perf_counter() - t0
     print(f"QM/MM NVT: {a.steps} steps x {a.dt} fs in {t:.1f} s = {t / a.steps:.3f} s/step, "
-          f"{a.steps * a.dt / 1000 / (t / 86400):.2f} ps/day; MM charges seen {qmmm.last['n_mm']}", flush=True)
+          f"{a.steps * a.dt / 1000 / (t / 86400):.2f} ps/day; MM charges seen "
+          f"{qmmm.last['n_mm'] if qmmm else 0}", flush=True)
 
     for (i, j, name), d in zip(pairs, dist):
         d = np.array(d)
         print(f"distance {name}: mean {d.mean():.2f} A, min {d.min():.2f}, max {d.max():.2f}, last {d[-1]:.2f}",
               flush=True)
 
-    if snaps:
+    if snaps and qmmm:
         cuts = sorted(float(c) for c in a.cutoff_test.split(","))
         ron0, roff0, pme0 = qmmm.region.ron, qmmm.region.roff, qmmm.region.pme
         idx = np.array(qmmm.region.qm_atoms)
@@ -227,19 +238,44 @@ def main():
         ctx.setPositions(st.getPositions())
         ctx.setVelocities(st.getVelocities())
         e = []
-        for _ in range(a.nve):
-            s = ctx.getState(getEnergy=True)
-            e.append((s.getPotentialEnergy() + s.getKineticEnergy()).value_in_unit(u.kilojoule_per_mole))
+        every = max(1, a.nve_every)
+        traj = None
+        if a.nve_traj > 0:
+            qset = set(qm)
+            keep = [x.index for x in top.atoms() if x.residue.name in PROTEIN and
+                    (x.index in qset or x.element is None or x.element.symbol != "H")]
+            sub = app.Modeller(top, st.getPositions())
+            sub.delete([x for x in sub.topology.atoms() if x.index not in set(keep)])
+            traj = open("nve_traj.pdb", "w")
+            app.PDBFile.writeHeader(sub.topology, traj)
+            nframe = 0
+        t0 = time.perf_counter()
+        for k in range(a.nve):
+            if traj and k % a.nve_traj == 0:
+                x = ctx.getState(getPositions=True).getPositions(asNumpy=True)[keep]
+                app.PDBFile.writeModel(sub.topology, x, traj, modelIndex=nframe, keepIds=True)
+                nframe += 1
+            if k % every == 0:
+                s = ctx.getState(getEnergy=True)
+                e.append((s.getPotentialEnergy() + s.getKineticEnergy()).value_in_unit(u.kilojoule_per_mole))
             integ2.step(1)
+        t = time.perf_counter() - t0
+        if traj:
+            app.PDBFile.writeFooter(sub.topology, traj)
+            traj.close()
+            print(f"NVE trajectory: {nframe} frames of {len(keep)} atoms in nve_traj.pdb", flush=True)
         e = np.array(e)
         de = np.diff(e)
-        slope = np.polyfit(np.arange(a.nve) * a.dt / 1000.0, e, 1)[0]
+        x = np.arange(len(e))
+        fit = np.polyfit(x, e, 1)
+        slope = fit[0] / (every * a.dt / 1000.0)
         print(f"NVE check {a.nve} steps: drift {e[-1] - e[0]:.2f} kJ/mol, slope of a linear fit {slope:.1f} "
               f"kJ/mol/ps, largest step {np.max(np.abs(de)):.2f}, rms step {np.sqrt(np.mean(de ** 2)):.3f}, "
-              f"rms deviation from the fit {np.std(e - np.polyval(np.polyfit(np.arange(a.nve), e, 1), np.arange(a.nve))):.2f}",
-              flush=True)
+              f"rms deviation from the fit {np.std(e - np.polyval(fit, x)):.2f}", flush=True)
+        print(f"NVE: energy every {every} steps, {t:.1f} s = {t / a.nve:.3f} s/step", flush=True)
         np.savetxt("nve_energy.txt", e, fmt="%.4f")
-    qmmm.close()
+    if qmmm:
+        qmmm.close()
 
 
 if __name__ == "__main__":
