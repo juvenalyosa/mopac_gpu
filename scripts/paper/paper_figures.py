@@ -632,8 +632,9 @@ def fig_qmmm(o: Out) -> None:
             "NVE rms (kJ/mol)": nve_r.map(lambda x: "--" if x != x else f"{x:.1f}")}),
             "QM/MM molecular dynamics: OpenMM (CUDA) with MOPAC/MOZYME (PM7) for the QM region, TIP3P water.",
             "0.5 fs steps, Langevin NVT. NVE: 400 velocity-Verlet steps (0.2 ps) after the NVT run; change of the "
-            "total energy and rms deviation from a linear fit. $^a$QM regions of up to 100 atoms (link atoms "
-            "included) run MOPAC on the CPU in the GPU mode; OpenMM and the PME grid use the GPU.")
+            "total energy and rms deviation from a linear fit. $^a$In the benchmarked version, QM regions of up to "
+            "100 atoms (link atoms included) ran MOPAC on the CPU in the GPU mode; OpenMM and the PME grid used the "
+            "GPU. The current code uses the GPU above 20 atoms (see text).")
 
 
 def tables_controls(o: Out) -> None:
