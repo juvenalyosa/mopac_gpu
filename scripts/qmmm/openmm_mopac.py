@@ -184,21 +184,28 @@ class MopacQMMMForce:
             xq = np.vstack([xq, xl])
         return xq
 
+    @staticmethod
+    def _image(d, box):
+        """minimum image of the difference vectors d (n, 3); the rows of box are the box vectors"""
+        if not np.any(box - np.diag(np.diag(box))):
+            L = np.diag(box)
+            return d - L * np.round(d / L)
+        d = d.copy()
+        for k in (2, 1, 0):
+            d -= np.outer(np.round(d[:, k] / box[k, k]), box[k])
+        return d
+
     def compute(self, state):
         pos = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer) * 10.0   # A
         n = pos.shape[0]
         box = None
         if self.region.periodic:
             box = state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(unit.nanometer) * 10.0
-            # positions may be wrapped: make the QM region (and its link partners) whole
-            pos = pos.copy()
-            ref = pos[self.qm_idx[0]]
+            # positions may be wrapped: make the QM region (and its link partners) whole (pos is a new array)
+            ref = pos[self.qm_idx[0]].copy()
             for idx in (self.qm_idx, self.link_m):
                 if len(idx):
-                    d = pos[idx] - ref
-                    for k in (2, 1, 0):
-                        d -= np.outer(np.round(d[:, k] / box[k, k]), box[k])
-                    pos[idx] = ref + d
+                    pos[idx] = ref + self._image(pos[idx] - ref, box)
         xq = self._qm_coords(pos)
         # MM charges, minimum image around the QM centroid
         mm_idx = self.mm_idx_all
@@ -216,15 +223,9 @@ class MopacQMMMForce:
             # whole groups: the first charge of each group nearest to the QM centroid, the other charges of
             # the group nearest to it (imaging every atom separately split waters at half a box, and the
             # switching factor of the split group jumped)
-            ref = xm[self.group_first]
-            d = ref - c
-            for k in (2, 1, 0):
-                d -= np.outer(np.round(d[:, k] / box[k, k]), box[k])
-            ref = c + d
-            d = xm - ref[self.group_of]
-            for k in (2, 1, 0):
-                d -= np.outer(np.round(d[:, k] / box[k, k]), box[k])
-            xm = ref[self.group_of] + d
+            ref = c + self._image(xm[self.group_first] - c, box)
+            ref = ref[self.group_of]
+            xm = ref + self._image(xm - ref, box)
         # group centres and their smooth-minimum distance to the QM atoms (real QM atoms only)
         ng = len(self.group_ids)
         cg = np.stack([np.bincount(self.group_of, xm[:, k], minlength=ng) for k in range(3)], axis=1)
@@ -261,7 +262,7 @@ class MopacQMMMForce:
         forces = np.zeros((n, 3))
         nq = len(self.qm_idx)
         if self.region.pme:
-            forces[mm_idx] -= g_all * GRAD_KCAL_A_TO_KJ_NM
+            forces[mm_idx] = g_all * -GRAD_KCAL_A_TO_KJ_NM
         forces[self.qm_idx] -= gq[:nq] * GRAD_KCAL_A_TO_KJ_NM
         if len(self.link_q):
             fl = -gq[nq:] * GRAD_KCAL_A_TO_KJ_NM

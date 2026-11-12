@@ -78,11 +78,26 @@ python scripts/qmmm/run_qmmm_md.py protein.pdb --libmopac build/libmopac.so --qm
   constant (net-charge background), so absolute energies of runs with and without PME differ; only
   differences and forces compare.
 - One QM region per process; do not run two MOPAC sessions in the same directory.
-- Energy conservation (NVE, chignolin in water, 0.5 fs, 100 fs): the total energy fluctuates by a few kJ/mol
-  as with pure MM and does not drift (-0.5 kJ/mol per 100 fs at `tolerance=0.01`, 0.0 at 0.001). Every
-  step converges the SCF to `tolerance`; before 2026-10-14 the SCF of a step could stop early (a rapid exit
-  meant for geometry optimization, when the heat is far from the lowest heat so far), the forces were not
-  the derivatives of the energy and the total energy fell by ~30 kJ/mol per 100 fs.
+- Energy conservation depends on `tolerance`: an SCF converged only to the tolerance gives forces that are
+  not exactly the derivatives of the energy, and the total energy falls. NVE with velocity Verlet, 1 fs,
+  5 ps after 400 steps of NVT (`scripts/qmmm/nve_drift.py`), trypsin-BPTI below (46 790 atoms), A100,
+  OpenMM in mixed precision; slope of a linear fit ± standard error from ten block means, one run each:
+
+  | `tolerance` | total energy, kJ/mol/ps | part from the QM/MM force | s per step (NVT) |
+  |---|---:|---:|---:|
+  | MM only (20 ps) | -0.06 ± 0.12 | - | - |
+  | 0.01 | -4.4 ± 0.8 | -5.5 ± 0.3 | 0.059 |
+  | 0.001 | -0.6 ± 0.6 | +0.8 ± 0.2 | 0.076 |
+  | 0.0001 | +0.3 ± 0.6 | -0.3 ± 0.2 | 0.096 |
+
+  The QM/MM part is the energy of the QM/MM force plus the work it did along the path (zero for an exact
+  gradient); in this run it was estimated after excluding the 40 of 500 readings where OpenMM had moved
+  molecules by a box vector, which `nve_drift.py` now handles. OpenMM's single precision on CUDA, its
+  default, drifts by itself: +11.1 ± 0.4 kJ/mol/ps for the same system with MM only (mixed -0.06, double
+  -0.12), so `run_qmmm_md.py` uses mixed on CUDA (`--precision`); the QM/MM step took the same time in
+  both. With single precision and 0.01 the two drifts partly cancel (+5.7 ± 0.8 in total). Every step
+  converges the SCF to `tolerance`; before 2026-10-14 the SCF of a step could stop early (a rapid exit
+  meant for geometry optimization), and the total energy fell by ~30 kJ/mol per 100 fs.
 
 ## Speed
 
@@ -106,6 +121,12 @@ after every call the pair kernels put the CUDA stack limit back, and the next ca
 again (~90 ms per step on an A100). Since commit `52c7f964` the QM/MM session keeps it between steps
 (`MOPAC_GPU_STACK_RESTORE=d`, set unless already defined; `=all` restores after every call), which holds
 ~1.2 GB more device memory on an A100. A T4 is weak in double precision; an A100 should be several times faster (README, "Which GPU?").
+
+Trypsin-BPTI (below; 59 QM atoms with the link atoms), Colab A100 40 GB, MOPAC and QM-PME on the GPU,
+0.5 fs, `tolerance=0.01`: 0.063 s per step (680 ps/day) at commit `a6a4992e`, 0.127 s before it. That
+commit moved the real-space sums of QM-PME into CUDA kernels (0.105 s per step with them in NumPy) and
+spread the QM-MM loops of MOPAC over the CPU threads with OpenMP. Of the 0.063 s, MOPAC takes 0.035 s
+(the SCF ~0.030 s, 13 iterations on average), the rest of the Python force 0.021 s and OpenMM, with the transfer of positions and forces, 0.008 s.
 
 ## Example: trypsin with BPTI
 

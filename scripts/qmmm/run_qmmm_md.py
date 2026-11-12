@@ -3,7 +3,7 @@
 
     python run_qmmm_md.py protein.pdb --libmopac /path/libmopac.so --qm-residues 2 \
         [--qm-sidechain] [--qm-charge 0] [--padding 1.6] [--ron 8 --roff 10] \
-        [--steps 200] [--dt 0.5] [--temperature 300] [--platform CUDA] [--nve 0]
+        [--steps 200] [--dt 0.5] [--temperature 300] [--platform CUDA] [--precision single|mixed|double] [--nve 0]
 
 Prepares the system with OpenMM (hydrogens, amber14 + TIP3P, a water box with `padding` nm, ions), relaxes
 and equilibrates it with MM only (minimization + 20 ps NVT, 2 fs), then turns the selected residues (whole,
@@ -85,6 +85,8 @@ def main():
     ap.add_argument("--dt", type=float, default=0.5)
     ap.add_argument("--temperature", type=float, default=300.0)
     ap.add_argument("--platform", default="CUDA")
+    ap.add_argument("--precision", default="", help="CUDA/OpenCL: single, mixed or double; default mixed on CUDA "
+                    "(single drifts in NVE), the platform's own on OpenCL (Apple GPUs have only single)")
     ap.add_argument("--tolerance", type=float, default=0.01)
     ap.add_argument("--nve", type=int, default=0, help="steps of an NVE check at the end")
     ap.add_argument("--nve-every", type=int, default=1, help="read the total energy every N NVE steps")
@@ -101,6 +103,8 @@ def main():
     a = ap.parse_args()
 
     plat = mm.Platform.getPlatformByName(a.platform)
+    prec = a.precision or ("mixed" if a.platform == "CUDA" else "")
+    props = {"Precision": prec} if a.platform in ("CUDA", "OpenCL") and prec else {}
     pdb = app.PDBFile(a.pdb)
     ff = app.ForceField("amber14-all.xml", "amber14/tip3p.xml")
     mod = app.Modeller(pdb.topology, pdb.positions)
@@ -129,7 +133,7 @@ def main():
     t0 = time.perf_counter()
     integ = mm.LangevinMiddleIntegrator(a.temperature * u.kelvin, 1 / u.picosecond, 2 * u.femtoseconds)
     integ.setRandomNumberSeed(a.seed)
-    sim = app.Simulation(top, make_system(), integ, plat)
+    sim = app.Simulation(top, make_system(), integ, plat, props)
     sim.context.setPositions(pos)
     sim.minimizeEnergy()
     sim.context.setVelocitiesToTemperature(a.temperature * u.kelvin, 1)
@@ -163,7 +167,7 @@ def main():
 
     integ = mm.LangevinMiddleIntegrator(a.temperature * u.kelvin, 1 / u.picosecond, a.dt * u.femtoseconds)
     integ.setRandomNumberSeed(a.seed)
-    sim = app.Simulation(top, system, integ, plat)
+    sim = app.Simulation(top, system, integ, plat, props)
     sim.context.setPositions(st.getPositions())
     sim.context.setVelocities(st.getVelocities())
     sim.reporters.append(app.PDBReporter("qmmm_traj.pdb", max(1, a.steps // 10)))
@@ -234,7 +238,7 @@ def main():
     if a.nve > 0:
         st = sim.context.getState(getPositions=True, getVelocities=True)
         integ2 = mm.VerletIntegrator(a.dt * u.femtoseconds)
-        ctx = mm.Context(system, integ2, plat)
+        ctx = mm.Context(system, integ2, plat, props)
         ctx.setPositions(st.getPositions())
         ctx.setVelocities(st.getVelocities())
         e = []

@@ -119,7 +119,12 @@ class Recorder:
             if np.array_equal(x, self.x):
                 self.same += 1       # a second call at the same positions: keep the first
                 return
-            self.w += 0.5 * float(np.sum((self.f + f) * (x - self.x)))
+            # OpenMM may wrap the positions it hands to a PythonForce into another box (CUDA and OpenCL: every
+            # 250 steps); no atom moves half a box in one step
+            dx = x - self.x
+            box = np.diag(state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(u.nanometer))
+            dx -= box * np.round(dx / box)
+            self.w += 0.5 * float(np.sum((self.f + f) * dx))
         self.x, self.f, self.e = x, f, e
 
 
