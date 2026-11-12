@@ -35,7 +35,8 @@ What add_qmmm does to the MM system:
     variational and the forces are exact; near charges act through the QM integrals with weight S and
     through Q_A with weight 1 - S, and the result hardly depends on ron and roff.  The interactions of the
     QM region with its own periodic images are left out.  The PME grid runs on the GPU when CuPy is
-    installed (pme_gpu).
+    installed (pme_gpu), together with the real-space sums (qmmm_pme.FarFieldGPU; QMMM_FAR_FIELD=numpy keeps
+    the real-space sums in NumPy, as before 2026-11).
 
 Units at the interface: OpenMM nm, kJ/mol; MOPAC Angstrom, kcal/mol.  The QM energy is the PM7 heat of
 formation of the QM region (+ link atoms) in the field of the MM charges, so the total potential energy is
@@ -56,8 +57,7 @@ import openmm.unit as unit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mopac_qmmm_api import QMSession  # noqa: E402
-from qmmm_pme import PMEGrid, Stencil, gpu_available  # noqa: E402
-from scipy.special import erfc  # noqa: E402
+from qmmm_pme import FarFieldGPU, FarFieldNumPy, PMEGrid, fused_far_field_available, gpu_available  # noqa: E402
 
 KCAL_TO_KJ = 4.184
 # Coulomb constant, kcal A/(mol e^2) (OpenMM's ONE_4PI_EPS0)
@@ -174,6 +174,8 @@ class MopacQMMMForce:
         self.calls = 0
         self.last = {}
         self.grid = None
+        self.far = None
+        self.qm_all = region.mm_charges[self.mm_idx_all]
 
     def _qm_coords(self, pos_a):
         xq = pos_a[self.qm_idx]
@@ -225,8 +227,7 @@ class MopacQMMMForce:
             xm = ref[self.group_of] + d
         # group centres and their smooth-minimum distance to the QM atoms (real QM atoms only)
         ng = len(self.group_ids)
-        cg = np.zeros((ng, 3))
-        np.add.at(cg, self.group_of, xm)
+        cg = np.stack([np.bincount(self.group_of, xm[:, k], minlength=ng) for k in range(3)], axis=1)
         cg /= self.group_size[:, None]
         xr = xq[:len(self.qm_idx)]
         rmax = np.max(np.linalg.norm(xr - c, axis=1)) + self.region.roff + 3.0
@@ -284,64 +285,24 @@ class MopacQMMMForce:
         return heat * KCAL_TO_KJ, forces
 
     def _pme_far_potential(self, xq, xm, xs, qs, box, c):
-        """phi_far at the QM atoms (kcal/(mol e)) and what its gradient needs"""
+        """phi_far at the QM atoms (kcal/(mol e)), qmmm_pme.FarFieldNumPy / FarFieldGPU"""
         reg = self.region
         if box is None or np.any(np.abs(box - np.diag(np.diag(box))) > 1e-9):
             raise ValueError("QM/MM PME: needs an orthorhombic periodic box")
         L = np.diag(box).copy()
         if self.grid is None or not self.grid.matches(L, reg.pme_alpha, reg.pme_spacing, reg.pme_order, reg.pme_gpu):
             self.grid = PMEGrid(L, reg.pme_alpha, reg.pme_spacing, reg.pme_order, reg.pme_gpu)
-        g, a = self.grid, reg.pme_alpha
-        qm_all = reg.mm_charges[self.mm_idx_all]
-        st_mm = Stencil(g, xm)
-        phi_mm = g.potential(st_mm, qm_all)
-        st_q = Stencil(g, xq)
-        # real space: every MM charge within pme_cutoff of a QM atom (minimum image of each atom)
-        d = xm - c
-        d -= L * np.round(d / L)
-        span = np.max(np.linalg.norm(xq - c, axis=1))
-        near = np.nonzero(np.linalg.norm(d, axis=1) < span + reg.pme_cutoff)[0]
-        rv = (c + d[near])[None, :, :] - xq[:, None, :]            # QM atom -> MM charge
-        r = np.sqrt(np.einsum('ijk,ijk->ij', rv, rv))
-        pa, pj = np.nonzero(r < reg.pme_cutoff)                     # pairs inside the cut-off
-        rv, r = rv[pa, pj], r[pa, pj]
-        ec = erfc(a * r)
-        qn = qm_all[near[pj]]
-        phi_real = np.bincount(pa, qn * ec / r, minlength=len(xq))
-        # bare Coulomb potential of the charges MOPAC sees (switched)
-        rb = xs[None, :, :] - xq[:, None, :]
-        rbn = np.linalg.norm(rb, axis=2)
-        phi_bare = (qs[None, :] / rbn).sum(axis=1)
-        background = -np.pi * qm_all.sum() / (g.V * a * a)
-        phi = COULOMB * (phi_real + g.value(st_q, phi_mm) + background - phi_bare)
-        return dict(phi=phi, st_mm=st_mm, st_q=st_q, phi_mm=phi_mm, pa=pa, pj=near[pj], rv=rv, r=r, ec=ec, qn=qn,
-                    rb=rb, rbn=rbn, qm_all=qm_all)
+            fused = reg.pme_gpu and reg.pme_order == 4 and os.environ.get("QMMM_FAR_FIELD", "") != "numpy"
+            if fused and not fused_far_field_available():
+                print("QM/MM PME: the fused GPU kernels failed their check; real-space sums in NumPy", flush=True)
+                fused = False
+            self.far = (FarFieldGPU if fused else FarFieldNumPy)(self.grid, reg.pme_alpha, reg.pme_cutoff)
+        return dict(phi=self.far.potential(xq, xm, self.qm_all, xs, qs, c, L))
 
     def _pme_far_gradient(self, far, xq, xs, qs, gq, gm, pot):
         """Add the gradient of E_far (kcal/(mol A)) to gq (QM atoms) and gm (switched charges, at fixed
         weights), dE_far/dq_eff to pot; returns the gradient on all MM charges from the Ewald part"""
-        g, a = self.grid, self.region.pme_alpha
-        Q = self.session.qm_charges
-        qm_all = far["qm_all"]
-        # reciprocal space
-        gq += COULOMB * Q[:, None] * g.gradient(far["st_q"], far["phi_mm"])
-        psi = g.potential(far["st_q"], Q)
-        g_all = COULOMB * qm_all[:, None] * g.gradient(far["st_mm"], psi)
-        # real space: E = C Q_A q_j erfc(a r)/r
-        r, rv, pa = far["r"], far["rv"], far["pa"]
-        dfdr = -2.0 * a / np.sqrt(np.pi) * np.exp(-(a * r) ** 2) / r - far["ec"] / r ** 2
-        gr = (COULOMB * Q[pa] * far["qn"] * dfdr / r)[:, None] * rv      # d E / d x(MM charge), per pair
-        for k in range(3):
-            g_all[:, k] += np.bincount(far["pj"], gr[:, k], minlength=len(g_all))
-            gq[:, k] -= np.bincount(pa, gr[:, k], minlength=len(gq))
-        # bare Coulomb with the switched charges: E = -C Q_A q_eff_j / r
-        rbn, rb = far["rbn"], far["rb"]
-        cb = COULOMB * Q[:, None] * qs[None, :] / rbn ** 3
-        gb = cb[:, :, None] * rb
-        gm += gb.sum(axis=0)
-        gq -= gb.sum(axis=1)
-        pot -= COULOMB * (Q[:, None] / rbn).sum(axis=0)
-        return g_all
+        return self.far.gradient(self.session.qm_charges, gq, gm, pot)
 
     def close(self):
         self.session.close()

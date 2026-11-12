@@ -204,7 +204,7 @@ subroutine qmmm_hcore (h, enuclr)
     implicit none
     double precision, intent (inout) :: h(*), enuclr
     integer :: i, j, k, ii, nv
-    double precision :: v(45), dv(3, 45), gam, dgam(3), sw, dsw(3), d(3)
+    double precision :: v(45), dv(3, 45), gam, dgam(3), sw, dsw(3), d(3), en
     integer, external :: ijbo
     call qmmm_read
     !
@@ -223,6 +223,10 @@ subroutine qmmm_hcore (h, enuclr)
       end if
     end if
     if (n_mm == 0) return
+    en = 0.d0
+!   each QM atom owns its diagonal block of h: atoms in parallel, the core energy by reduction
+!$omp parallel do schedule(dynamic, 1) default(shared) reduction(+:en) &
+!$omp   private(i, j, k, ii, nv, v, dv, gam, dgam, sw, dsw, d)
     do i = 1, numat
       ii = ijbo (i, i)
       do j = 1, n_mm
@@ -232,9 +236,11 @@ subroutine qmmm_hcore (h, enuclr)
         do k = 1, nv
           h(ii + k) = h(ii + k) - mm_q(j) * sw * v(k)
         end do
-        enuclr = enuclr + tore(nat(i)) * mm_q(j) * sw * gam
+        en = en + tore(nat(i)) * mm_q(j) * sw * gam
       end do
     end do
+!$omp end parallel do
+    enuclr = enuclr + en
 end subroutine qmmm_hcore
 subroutine qmmm_grad (dxyz)
 !
@@ -251,7 +257,9 @@ subroutine qmmm_grad (dxyz)
     implicit none
     double precision, intent (inout) :: dxyz(3, numat)
     integer :: i, j, k, ii, nv, m, n
-    double precision :: v(45), dv(3, 45), gam, dgam(3), sw, dsw(3), d(3), pv, dpv(3), g(3), wk(45), e, pk
+    double precision :: v(45), dv(3, 45), gam, dgam(3), sw, dsw(3), d(3), pv, dpv(3), g(3), wk(45), e, pk, &
+      ej, potj, gj(3)
+    integer, allocatable :: iia(:)
     integer, external :: ijbo
     if (n_mm == 0) return
     if (allocated(mm_pot)) then
@@ -261,22 +269,33 @@ subroutine qmmm_grad (dxyz)
     mm_grad = 0.d0
     mm_pot(:n_mm) = 0.d0
     e = 0.d0
-    do i = 1, numat
-      ii = ijbo (i, i)
-      !
-      !  weights g_k P_k of the atom's diagonal block
-      !
-      wk = 0.d0
-      n = 0
-      do k = 1, 9
-        do m = 1, k
-          n = n + 1
-          if (n > 45) exit
-          wk(n) = 2.d0
-          if (m == k) wk(n) = 1.d0
-        end do
+    !
+    !  weights g_k of the packed diagonal block: 1 on the diagonal, 2 off it
+    !
+    wk = 0.d0
+    n = 0
+    do k = 1, 9
+      do m = 1, k
+        n = n + 1
+        if (n > 45) exit
+        wk(n) = 2.d0
+        if (m == k) wk(n) = 1.d0
       end do
-      do j = 1, n_mm
+    end do
+    allocate (iia(numat))
+    do i = 1, numat
+      iia(i) = ijbo (i, i)
+    end do
+!   MM charges in parallel (each owns mm_grad(:, j) and mm_pot(j)); the QM gradient and the energy by
+!   reduction
+!$omp parallel do schedule(static) default(shared) reduction(+:e, dxyz) &
+!$omp   private(i, j, k, ii, nv, v, dv, gam, dgam, sw, dsw, d, pv, dpv, pk, g, ej, potj, gj)
+    do j = 1, n_mm
+      ej = 0.d0
+      potj = 0.d0
+      gj = 0.d0
+      do i = 1, numat
+        ii = iia(i)
         d = mm_xyz(:, j) - coord(:, i)
         call qmmm_pair (nat(i), d, nv, v, dv, gam, dgam, sw, dsw, .true.)
         if (sw == 0.d0) cycle
@@ -287,14 +306,19 @@ subroutine qmmm_grad (dxyz)
           pv = pv + pk * v(k)
           dpv = dpv + pk * dv(:, k)
         end do
-        e = e + mm_q(j) * sw * (tore(nat(i))*gam - pv)
-        mm_pot(j) = mm_pot(j) + sw * (tore(nat(i))*gam - pv) * fpc_9
+        ej = ej + mm_q(j) * sw * (tore(nat(i))*gam - pv)
+        potj = potj + sw * (tore(nat(i))*gam - pv) * fpc_9
         !  dE/dd, d = x(J) - x(A)
         g = mm_q(j) * (dsw * (tore(nat(i))*gam - pv) + sw * (tore(nat(i))*dgam - dpv)) * fpc_9
-        mm_grad(:, j) = mm_grad(:, j) + g
+        gj = gj + g
         dxyz(:, i) = dxyz(:, i) - g
       end do
+      e = e + ej
+      mm_pot(j) = potj
+      mm_grad(:, j) = gj
     end do
+!$omp end parallel do
+    deallocate (iia)
     e_qmmm = e * fpc_9
     if (Index (keywrd, " GRADIENTS") /= 0 .and. n_mm <= 2000 .and. .not. qmmm_session) then
       write (iw, '(/10x,a,f14.6,a)') "QM/MM ELECTROSTATIC ENERGY =", e_qmmm, " KCAL/MOL"
