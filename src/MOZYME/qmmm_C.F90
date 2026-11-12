@@ -34,4 +34,17 @@ module qmmm_C
   double precision, dimension(:),   allocatable :: qm_pot  ! (numat), kcal/(mol e): external potential at each
                                                            ! QM atom (API; the long-range part of PME), coupled
                                                            ! to its Mulliken charge (as MOL_QMMM in hcore)
+  ! Starting LMOs of each step of an API session (qmmm_lmo_guess, MOPAC_QMMM_GUESS): 0 = the converged LMOs
+  ! of the last step, k = extrapolated with a polynomial of degree k from the last k + 1 steps
+  integer :: lmo_guess = 0
+  type lmo_set                         ! the occupied LMOs of one step (arrays as in MOZYME_C)
+    integer :: nocc = -1
+    integer, dimension(:), allocatable :: ncf, nncf, ncocc, icocc
+    double precision, dimension(:), allocatable :: cocc
+  end type lmo_set
+  ! occupied LMOs of the steps before the last one, most recent first (the last one is in MOZYME_C)
+  type(lmo_set) :: lmo_hist(3)
+  ! QM coordinates of the last step: a second call at the same geometry (an energy reading) is not a step
+  double precision, dimension(:), allocatable :: last_xyz
+  double precision :: last_step = 0.d0   ! length of the last step (Angstroms, all QM coordinates)
 end module qmmm_C

@@ -100,6 +100,11 @@ module MOZYME_C
   !  optimizer near convergence (0: none), so that the last gradients are converged well
   !  below the GNORM criterion.  Applied in SCFCRI.
   double precision :: selcon_cap = 0.d0
+  !  Iterations of the last SCF (CPU or GPU path)
+  integer :: scf_iterations = 0
+  !  The caller replaced the LMOs (QM/MM: extrapolated from earlier steps): the next SCF builds the density
+  !  and the Fock matrix from them before its first rotation, instead of rotating with the old Fock matrix
+  logical :: rebuild_from_lmos = .false.
   double precision :: &
     angles(3, -20:maxres) !  Phi, Psi, and Omega for backbone angles (Ramachandran)
 

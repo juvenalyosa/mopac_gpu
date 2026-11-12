@@ -88,6 +88,8 @@ def main():
     ap.add_argument("--precision", default="", help="CUDA/OpenCL: single, mixed or double; default mixed on CUDA "
                     "(single drifts in NVE), the platform's own on OpenCL (Apple GPUs have only single)")
     ap.add_argument("--tolerance", type=float, default=0.01)
+    ap.add_argument("--guess", choices=["previous", "linear", "quadratic", "cubic"], default=None,
+                    help="starting LMOs of each step's SCF (see openmm_mopac.add_qmmm)")
     ap.add_argument("--nve", type=int, default=0, help="steps of an NVE check at the end")
     ap.add_argument("--nve-every", type=int, default=1, help="read the total energy every N NVE steps")
     ap.add_argument("--nve-traj", type=int, default=0, help="protein frame to nve_traj.pdb every N NVE steps")
@@ -160,7 +162,7 @@ def main():
     else:
         qmmm = add_qmmm(system, top, st.getPositions(), qm, qcharge, a.libmopac, ron=a.ron, roff=a.roff,
                         tolerance=a.tolerance, pme=False if a.no_pme else None,
-                        pme_gpu=False if a.pme_cpu else None)
+                        pme_gpu=False if a.pme_cpu else None, guess=a.guess)
         lr = "none (cut-off)" if not qmmm.region.pme else "PME on the GPU" if qmmm.region.pme_gpu else "PME"
         print(f"QM region: {len(qm)} atoms + {len(qmmm.region.links)} link atoms, charge {qcharge}; long-range "
               f"QM-MM electrostatics: {lr}", flush=True)
@@ -185,6 +187,7 @@ def main():
     dist = [[] for _ in pairs]
     snaps = []
     t0 = time.perf_counter()
+    it0, calls0 = (qmmm.scf_iterations, qmmm.calls) if qmmm else (0, 0)
     done = 0
     while done < a.steps:
         n = min(chunk, a.steps - done)
@@ -200,7 +203,8 @@ def main():
     t = time.perf_counter() - t0
     print(f"QM/MM NVT: {a.steps} steps x {a.dt} fs in {t:.1f} s = {t / a.steps:.3f} s/step, "
           f"{a.steps * a.dt / 1000 / (t / 86400):.2f} ps/day; MM charges seen "
-          f"{qmmm.last['n_mm'] if qmmm else 0}", flush=True)
+          f"{qmmm.last['n_mm'] if qmmm else 0}" + (f"; SCF iterations per step "
+          f"{(qmmm.scf_iterations - it0) / max(1, qmmm.calls - calls0):.1f}" if qmmm else ""), flush=True)
 
     for (i, j, name), d in zip(pairs, dist):
         d = np.array(d)

@@ -23,7 +23,7 @@ module mopac_api
   public :: mopac_system, mopac_properties, mopac_state, mozyme_state
   ! public subroutines of the MOPAC API
   public :: mopac_scf, mopac_relax, mopac_vibe, mozyme_scf, mozyme_relax, mozyme_vibe
-  public :: mozyme_qmmm_init, mozyme_qmmm_step, mozyme_qmmm_finalize
+  public :: mozyme_qmmm_init, mozyme_qmmm_step, mozyme_qmmm_finalize, mozyme_qmmm_scf_iterations
   ! public subroutines to create derived types of the API that it can destroy
   public :: create_mopac_state, create_mozyme_state
   ! public subroutines to destroy derived types created by the API
@@ -243,6 +243,14 @@ module mopac_api
       type(mozyme_state), intent(inout) :: state
       type(mopac_properties), intent(out) :: properties
     end subroutine mozyme_qmmm_finalize
+
+    ! SCF iterations of the last mozyme_qmmm_step
+    module function mozyme_qmmm_scf_iterations() result(n) bind(c)
+#ifdef WIN32
+!dec$ attributes dllexport :: mozyme_qmmm_scf_iterations
+#endif
+      integer(c_int) :: n
+    end function mozyme_qmmm_scf_iterations
 
     module subroutine create_mopac_state(state) bind(c)
 #ifdef WIN32

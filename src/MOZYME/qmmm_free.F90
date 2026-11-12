@@ -18,12 +18,17 @@ subroutine qmmm_free
 !  Forget the MM point charges and the external potential of a QM/MM session (qmmm_C), so that they
 !  cannot act on later calculations in the same process.
 !
-    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_pot, qm_pot, qmmm_session, mm_numcal, e_qmmm
+    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_pot, qm_pot, qmmm_session, mm_numcal, e_qmmm, &
+      lmo_guess, lmo_hist, lmo_set, last_xyz, last_step
     implicit none
     n_mm = 0
     mm_numcal = -1
     e_qmmm = 0.d0
     qmmm_session = .false.
+    lmo_guess = 0
+    lmo_hist = lmo_set()
+    last_step = 0.d0
+    if (allocated(last_xyz)) deallocate (last_xyz)
     if (allocated(mm_xyz)) deallocate (mm_xyz)
     if (allocated(mm_q)) deallocate (mm_q)
     if (allocated(mm_grad)) deallocate (mm_grad)

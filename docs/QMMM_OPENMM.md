@@ -67,6 +67,29 @@ python scripts/qmmm/run_qmmm_md.py protein.pdb --libmopac build/libmopac.so --qm
 - The periodic box must hold the QM region plus `roff` on every side (checked; an error says so).
 - `tolerance` is MOPAC's relative SCF criterion (default 0.01); below 0.1 MOPAC also uses `THRESH=1.D-15`.
   An SCF that does not converge stops the run with an error. 0.001 costs ~1.8 x the SCF time of 0.01.
+- `guess` (`add_qmmm(..., guess=...)`, `run_qmmm_md.py --guess`, or the environment variable
+  `MOPAC_QMMM_GUESS`) sets where the SCF of each step starts: `previous` (default), the converged LMOs of
+  the last step; `linear`, `quadratic` or `cubic`, LMOs extrapolated from the last 2, 3 or 4 steps. The
+  extrapolation acts on the projectors onto the occupied space, P(n-k), applied to the LMOs of the last step
+  (occupied C' = a0 C(n) + Sum ak P(n-k) C(n), virtual V' = V(n) - Sum ak P(n-k) V(n), a = 4, -6, 4, -1 for
+  cubic), which does not depend on how the LMOs of a step are rotated among themselves; extrapolating the
+  coefficients themselves amplified those rotations until the SCF failed (3 points, 90 steps). The time
+  steps must be equal: a call at the same geometry is skipped, and a step more than twice as long or short
+  as the last restarts the history. Chignolin, Tyr2 as the QM region (21 + 2 link atoms), MOPAC on the CPU,
+  2 ps NVE of 1 fs: SCF iterations per step and the drift from the QM/MM force (kJ/mol/ps):
+
+  | `guess` | `tolerance=0.01` | | `tolerance=0.001` | |
+  |---|---:|---:|---:|---:|
+  | `previous` | 17.4 | -4.25 ± 0.12 | 29.2 | -0.39 ± 0.08 |
+  | `linear` | 10.8 | -1.28 ± 0.05 | 21.0 | -0.03 ± 0.05 |
+  | `quadratic` | 7.5 | +5.37 ± 0.10 | 16.0 | +0.42 ± 0.09 |
+  | `cubic` | 9.0 | +0.72 ± 0.06 | 12.1 | +0.12 ± 0.08 |
+
+  An SCF stopped at the tolerance keeps part of the error of its starting point: LMOs that lag behind the
+  geometry lose energy, LMOs that overshoot gain it, and a tighter tolerance makes both smaller. Over 10 ps
+  of the same system: `previous` with 0.01, 17.3 iterations and -4.12 ± 0.03 kJ/mol/ps; `cubic` with 0.01,
+  9.5 and +0.42 ± 0.02; `cubic` with 0.001, 13.3 and +0.10 ± 0.01, with the same slope in each 2-ps window. `mozyme_qmmm_scf_iterations()`
+  (C API) / `QMSession.scf_iterations` return the iterations of the last step.
 - The H-bond correction of PM7 is used with `HB-SMOOTH` (its original form has kinks that MD and FORCE
   cannot cross).
 - QM-PME needs an orthorhombic box. Its parameters are fields of `qmmm.region` (`pme_alpha` = 0.25 1/A,

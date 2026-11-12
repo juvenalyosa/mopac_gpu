@@ -227,10 +227,12 @@ contains
       mozyme_gpu_disable_reason, MOZYME_GPU_REASON_NONE
     use mozyme_gpu_scf_driver, only : mozyme_gpu_apply_default_environment
 #endif
-    use qmmm_C, only : n_mm, qmmm_session
+    use qmmm_C, only : n_mm, qmmm_session, lmo_guess
     type(mopac_system), intent(in) :: system
     type(mozyme_state), intent(in) :: state
     integer(c_int), intent(out) :: status
+    character(len=16) :: guess
+    integer :: guess_len, guess_stat
 #ifdef GPU
     logical :: applied
     character(len=16) :: env
@@ -278,6 +280,18 @@ contains
     status = 0
     if (moperr) status = 1
     qmmm_session = (status == 0)
+    ! starting LMOs of each step (qmmm_lmo_guess): MOPAC_QMMM_GUESS=linear, quadratic or cubic extrapolates
+    ! them from the last 2, 3 or 4 steps; previous: the SCF starts from the LMOs of the last step
+    guess = ' '
+    call get_environment_variable('MOPAC_QMMM_GUESS', guess, length=guess_len, status=guess_stat)
+    select case (trim(adjustl(guess)))
+    case ('linear')
+      lmo_guess = 1
+    case ('quadratic')
+      lmo_guess = 2
+    case ('cubic')
+      lmo_guess = 3
+    end select
   end subroutine mozyme_qmmm_init
 
   ! One QM/MM evaluation: QM coordinates (Angstroms), MM point charges (Angstroms, electrons), switching
@@ -289,7 +303,8 @@ contains
 #ifdef WIN32
 !dec$ attributes dllexport :: mozyme_qmmm_step
 #endif
-    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_pot, qm_pot, ron => mm_ron, roff => mm_roff, qmmm_session
+    use qmmm_C, only : n_mm, mm_xyz, mm_q, mm_grad, mm_pot, qm_pot, ron => mm_ron, roff => mm_roff, qmmm_session, &
+      lmo_guess, last_xyz, last_step, lmo_hist, lmo_set
     use molkst_C, only : iscf, emin, numat
     use common_arrays_C, only : nat, p
     use parameters_C, only : tore, natorb
@@ -300,6 +315,7 @@ contains
     integer(c_int), intent(out) :: status
     integer :: n, i, k, ii
     integer, external :: ijbo
+    double precision :: step
     status = 1
     if (.not. qmmm_session) return               ! no open session (never opened, failed, or closed)
     if (moperr) return
@@ -333,6 +349,23 @@ contains
 !   the lowest heat so far (EMIN, meant for geometry optimization) gave gradients that were not the
 !   derivatives of the energy, and the total energy of NVE dynamics drifted.
     emin = 0.d0
+    ! extrapolation assumes equal time steps between calls; a call at the same geometry is not a step, and
+    ! a step more than twice as long or short as the last one (an unrelated geometry) restarts the history
+    if (lmo_guess > 0) then
+      if (allocated(last_xyz)) then
+        if (size(last_xyz) /= nvar) deallocate (last_xyz)
+      end if
+      ! (the first step of the session starts from LMOs not yet converged at any of its geometries)
+      if (allocated(last_xyz)) then
+        step = sqrt(sum((coord(:nvar) - last_xyz)**2))
+        if (step > 0.d0) then
+          if (last_step > 0.d0 .and. (step > 2.d0*last_step .or. step < 0.5d0*last_step)) lmo_hist = lmo_set()
+          call qmmm_lmo_guess()
+          last_step = step
+        end if
+      end if
+      last_xyz = coord(:nvar)
+    end if
     call compfg (xparam, .true., escf, .true., grad, .true.)
     if (moperr) return
     heat = escf
@@ -369,6 +402,16 @@ contains
     call mopac_finalize(properties)
     call qmmm_free()
   end subroutine mozyme_qmmm_finalize
+
+  ! SCF iterations of the last mozyme_qmmm_step (CPU or GPU path)
+  module function mozyme_qmmm_scf_iterations() result(n) bind(c)
+#ifdef WIN32
+!dec$ attributes dllexport :: mozyme_qmmm_scf_iterations
+#endif
+    use MOZYME_C, only : scf_iterations
+    integer(c_int) :: n
+    n = int(scf_iterations, c_int)
+  end function mozyme_qmmm_scf_iterations
 
   ! Get MOPAC version string
   module subroutine get_mopac_version(version) bind(c)

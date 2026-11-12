@@ -151,7 +151,7 @@ class MopacQMMMForce:
     """Builds the PythonForce; keep a reference to this object while the simulation runs."""
 
     def __init__(self, region: QMMMRegion, libmopac: str, qm_charge: int, positions_nm: np.ndarray,
-                 model: int = 0, tolerance: float = 1e-2):
+                 model: int = 0, tolerance: float = 1e-2, guess=None):
         self.region = region
         self.qm_idx = np.array(region.qm_atoms, dtype=int)
         self.link_q = np.array([q for q, m, g in region.links], dtype=int)
@@ -170,8 +170,10 @@ class MopacQMMMForce:
         self.group_size = np.bincount(self.group_of)
         self.group_first = np.unique(self.group_of, return_index=True)[1]
         x0 = self._qm_coords(positions_nm * 10.0)
-        self.session = QMSession(libmopac, nums, x0, charge=qm_charge, model=model, tolerance=tolerance)
+        self.session = QMSession(libmopac, nums, x0, charge=qm_charge, model=model, tolerance=tolerance,
+                                 guess=guess)
         self.calls = 0
+        self.scf_iterations = 0          # sum over the calls
         self.last = {}
         self.grid = None
         self.far = None
@@ -282,6 +284,7 @@ class MopacQMMMForce:
             np.add.at(forces, mm_idx[sel], -gmem * GRAD_KCAL_A_TO_KJ_NM)
             forces[self.qm_idx] -= ga.sum(axis=0) * GRAD_KCAL_A_TO_KJ_NM
         self.calls += 1
+        self.scf_iterations += self.session.scf_iterations or 0
         self.last = dict(heat=heat, n_mm=len(sel))
         return heat * KCAL_TO_KJ, forces
 
@@ -311,10 +314,12 @@ class MopacQMMMForce:
 
 def add_qmmm(system: mm.System, topology, positions, qm_atoms, qm_charge: int, libmopac: str,
              ron: float = 10.0, roff: float = 12.0, model: int = 0, tolerance: float = 1e-2, pme=None,
-             pme_gpu=None):
+             pme_gpu=None, guess=None):
     """Turn an OpenMM system into a QM/MM system; returns the MopacQMMMForce (keep it alive).
     pme: long-range QM-MM electrostatics by PME (default: when the NonbondedForce uses PME or Ewald).
-    pme_gpu: its grid on the GPU with CuPy (default: when CuPy sees a GPU)."""
+    pme_gpu: its grid on the GPU with CuPy (default: when CuPy sees a GPU).
+    guess: starting LMOs of each step's SCF, "previous" (those of the last step) or extrapolated from the
+    last steps ("linear", "quadratic", "cubic"); default: MOPAC's (environment variable MOPAC_QMMM_GUESS)."""
     if pme is None:
         pme = any(isinstance(f, mm.NonbondedForce) and f.getNonbondedMethod() in (mm.NonbondedForce.PME,
                   mm.NonbondedForce.Ewald) for f in system.getForces())
@@ -336,7 +341,7 @@ def add_qmmm(system: mm.System, topology, positions, qm_atoms, qm_charge: int, l
                         groups=np.array([a.residue.index for a in atoms]),
                         periodic=system.usesPeriodicBoundaryConditions(), pme=bool(pme),
                         pme_gpu=bool(pme and (gpu_available() if pme_gpu is None else pme_gpu)))
-    qmmm = MopacQMMMForce(region, libmopac, qm_charge, pos_nm, model=model, tolerance=tolerance)
+    qmmm = MopacQMMMForce(region, libmopac, qm_charge, pos_nm, model=model, tolerance=tolerance, guess=guess)
     force = mm.PythonForce(qmmm.compute)
     force.setUsesPeriodicBoundaryConditions(region.periodic)
     force.setName("MOPAC QM/MM")

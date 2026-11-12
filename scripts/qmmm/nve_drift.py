@@ -3,7 +3,7 @@
 
     python nve_drift.py prepare protein.pdb --out prep [--padding 1.0 --variants E:57=HID]
     python nve_drift.py run --prep prep --out run1 --libmopac libmopac.so --qm-residues E:57:sc,I:15 \
-        [--tolerance 0.001] [--mm-only] [--platform CUDA --precision mixed] [--nve 10000 --dt 1.0]
+        [--tolerance 0.001] [--guess linear] [--mm-only] [--platform CUDA --precision mixed] [--nve 10000]
 
 prepare builds the system as run_qmmm_md.py does (amber14 + TIP3P, hydrogens, water box), minimizes and
 equilibrates it with MM only, and saves the topology and the state; every `run` starts from that state, so
@@ -16,7 +16,9 @@ keeps its energy E_qm and its work along the path, W_qm = Sum 1/2 (F_n + F_n+1) 
 is not called again) and the total energy to nve.txt.  R_qm = E_qm(t) - E_qm(0) + W_qm(t) is the
 non-conservative part of the QM/MM force (zero, up to the trapezoid error, when the force is the exact gradient
 of E_qm); the total drift minus R_qm is what the MM part and the integration leave.  summary.json holds the
-fitted slopes (kJ/mol/ps) and their standard errors from ten block means.
+fitted slopes (kJ/mol/ps) and their standard errors from ten block means, and the mean number of SCF
+iterations per QM/MM call in NVT and NVE.  --guess linear starts the SCF of each step from LMOs extrapolated
+from the last two steps (MOPAC_QMMM_GUESS) instead of the LMOs of the last step.
 """
 
 import argparse
@@ -111,10 +113,13 @@ class Recorder:
         self.w = 0.0
         self.calls = self.same = 0
         self.active = False
+        self.iters = {False: [], True: []}     # SCF iterations per call in NVT (False) and NVE (True)
 
-    def __call__(self, state, e, f):
+    def __call__(self, state, e, f, iters=None):
         x = state.getPositions(asNumpy=True).value_in_unit(u.nanometer)
         self.calls += 1
+        if iters is not None:
+            self.iters[self.active].append(iters)
         if self.active and self.x is not None:
             if np.array_equal(x, self.x):
                 self.same += 1       # a second call at the same positions: keep the first
@@ -152,7 +157,7 @@ def run(a):
 
         def compute(self, state):
             e, f = orig(self, state)
-            rec(state, e, f)
+            rec(state, e, f, self.session.scf_iterations)
             return e, f
         om.MopacQMMMForce.compute = compute
         wanted = parse_residues(a.qm_residues)
@@ -161,7 +166,7 @@ def run(a):
         nb = [f for f in system.getForces() if isinstance(f, mm.NonbondedForce)][0]
         qch = int(round(sum(nb.getParticleParameters(i)[0].value_in_unit(u.elementary_charge) for i in qm)))
         qmmm = om.add_qmmm(system, top, st0.getPositions(), qm, qch, a.libmopac, ron=a.ron, roff=a.roff,
-                           tolerance=a.tolerance, pme_gpu=False if a.pme_cpu else None)
+                           tolerance=a.tolerance, pme_gpu=False if a.pme_cpu else None, guess=a.guess or None)
         om.prepare_mm_system(mm_system, top, qm)
         print(f"QM region: {len(qm)} atoms + {len(qmmm.region.links)} link atoms, charge {qch}, tolerance "
               f"{a.tolerance}, PME grid on the {'GPU' if qmmm.region.pme_gpu else 'CPU'}", flush=True)
@@ -217,6 +222,9 @@ def run(a):
     out = dict(vars(a), atoms=system.getNumParticles(), nvt_s_per_step=t_nvt / max(1, a.nvt),
                nve_s_per_step=t_nve / a.nve, drift_total=float(et[-1] - et[0]),
                rms_dev=float(np.std(et - np.polyval(fit, t))), qm_calls=rec.calls, qm_same_position_calls=rec.same)
+    for phase, it in (("nvt", rec.iters[False][1:]), ("nve", rec.iters[True])):
+        if it:
+            out[f"scf_iterations_{phase}"] = float(np.mean(it))
     out["slope_total"], out["slope_total_se"] = slope_se(t, et)
     if qmmm:
         res = (r[:, 4] - r[0, 4]) + (r[:, 5] - r[0, 5])
@@ -254,6 +262,8 @@ def main():
     ap.add_argument("--ctol", type=float, default=1e-8, help="constraint tolerance of the NVE run")
     ap.add_argument("--lj-switch", action="store_true", help="Lennard-Jones switching from 0.9 nm")
     ap.add_argument("--seed", type=int, default=11)
+    ap.add_argument("--guess", choices=["previous", "linear", "quadratic", "cubic"], default="",
+                    help="starting LMOs of each step's SCF (default: MOPAC's, see openmm_mopac.add_qmmm)")
     a = ap.parse_args()
     prepare(a) if a.cmd == "prepare" else run(a)
 

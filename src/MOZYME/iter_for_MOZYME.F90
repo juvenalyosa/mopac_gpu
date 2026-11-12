@@ -25,7 +25,8 @@ subroutine iter_for_MOZYME (ee)
          norred, numred, ncf, nce, scfref, thresh, ovmax, tiny, shift, &
          energy_diff, sumt, sumb, ijc, use_three_point_extrap, &
          ws, p1, p2, p3, partf, partp, idiag, mode, &
-         gpu_occ_enabled, gpu_virt_enabled, at_res, allres, selcon_cap
+         gpu_occ_enabled, gpu_virt_enabled, at_res, allres, selcon_cap, &
+         scf_iterations, rebuild_from_lmos
 !
     use funcon_C, only: fpc_9
 #ifdef GPU
@@ -373,7 +374,7 @@ subroutine iter_for_MOZYME (ee)
       nocc1 = nelred / 2
       nvir1 = norred - nocc1
       resident_initial_setup_needed = (imol /= numcal .or. &
-        (icalcn /= step_num .and. numat > numred+1))
+        (icalcn /= step_num .and. numat > numred+1) .or. rebuild_from_lmos)
       resident_loop_control_needed = (.not. bigscf .and. numcal == 1+numcal0)
       resident_pre_tidy_attempt_needed = mozyme_gpu_scf_requested() .and. &
         niter == 0 .and. resident_initial_setup_needed .and. &
@@ -491,6 +492,7 @@ subroutine iter_for_MOZYME (ee)
           if (resident_initial_setup_needed) then
             icalcn = step_num
             imol = numcal
+            rebuild_from_lmos = .false.
           end if
           call mozyme_section_timer_end('iter_resident_scf_boundary', mozyme_timer)
           call mozyme_section_timer_begin('iter_post_boundary', iter_post_timer)
@@ -763,7 +765,7 @@ subroutine iter_for_MOZYME (ee)
         return
       end if
       resident_initial_setup_needed = (imol /= numcal .or. &
-        (icalcn /= step_num .and. numat > numred+1))
+        (icalcn /= step_num .and. numat > numred+1) .or. rebuild_from_lmos)
       if (resident_initial_setup_needed) then
         if (nmol == numcal .and. numat > numred+1) then
           resident_fock_mode = 1
@@ -800,6 +802,7 @@ subroutine iter_for_MOZYME (ee)
           end if
           icalcn = step_num
           imol = numcal
+          rebuild_from_lmos = .false.
           call mozyme_section_timer_end('iter_resident_scf_boundary', mozyme_timer)
           call mozyme_section_timer_begin('iter_post_boundary', iter_post_timer)
           call mozyme_section_timer_begin('iter_between_boundaries', iter_between_timer)
@@ -823,7 +826,7 @@ subroutine iter_for_MOZYME (ee)
       !   REMOVE ELECTRON DENSITY DUE TO LMO'S INVOLVED IN SCF FROM
       !   THE DENSITY MATRIX
       !
-      if (imol /= numcal .or. icalcn /= step_num .and. numat > numred+1) then
+      if (imol /= numcal .or. icalcn /= step_num .and. numat > numred+1 .or. rebuild_from_lmos) then
         !---------------------------------------------------------
         !
         !   THIS PART IS ONLY RUN WHEN ICALCN IS INCREMENTED
@@ -881,6 +884,7 @@ subroutine iter_for_MOZYME (ee)
         end if
         icalcn = step_num
         imol = numcal
+        rebuild_from_lmos = .false.
         call mozyme_gpu_scf_note_host_modified()  ! p, f, partp, partf rewritten on the host
       end if
       if (.not. resident_initial_setup_needed .and. niter <= 10) then
@@ -1341,6 +1345,8 @@ subroutine iter_for_MOZYME (ee)
     end if
     icalcn = step_num
     imol = numcal
+    rebuild_from_lmos = .false.
+    scf_iterations = niter
     if (resident_final_reorth_due) then
       if (resident_strict_required) then
         if (.not. resident_final_reorth_done) then

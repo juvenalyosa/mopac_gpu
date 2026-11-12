@@ -12,6 +12,8 @@ each MM charge and qm.qm_charges the Mulliken charges.
 """
 
 import ctypes as C
+import os
+
 import numpy as np
 
 
@@ -40,7 +42,11 @@ class MopacProperties(C.Structure):
 
 class QMSession:
     def __init__(self, libpath, atomic_numbers, coords, charge=0, model=0, spin=0, tolerance=1.0,
-                 max_time=86400):
+                 max_time=86400, guess=None):
+        # guess: starting LMOs of each step, "previous" or extrapolated ("linear", "quadratic", "cubic");
+        # None: MOPAC's default or the environment variable MOPAC_QMMM_GUESS (read by mozyme_qmmm_init)
+        if guess:
+            os.environ["MOPAC_QMMM_GUESS"] = guess
         self.lib = C.CDLL(str(libpath))
         self.n = len(atomic_numbers)
         self._atom = (C.c_int * self.n)(*atomic_numbers)
@@ -60,6 +66,12 @@ class QMSession:
                       C.POINTER(C.c_double), C.POINTER(C.c_double), C.POINTER(C.c_double),
                       C.POINTER(C.c_double), C.POINTER(C.c_int)]
         f.restype = None
+        # SCF iterations of the last step (None with a library that predates mozyme_qmmm_scf_iterations)
+        self._iterations = getattr(self.lib, "mozyme_qmmm_scf_iterations", None)
+        if self._iterations is not None:
+            self._iterations.argtypes = []
+            self._iterations.restype = C.c_int
+        self.scf_iterations = None
 
     def step(self, coords, mm_coords, mm_charges, ron=0.0, roff=0.0, qm_pot=None):
         if self.closed:
@@ -90,6 +102,8 @@ class QMSession:
             raise RuntimeError("mozyme_qmmm_step failed: " + "; ".join(self.errors()))
         self.mm_pot = pot[:nmm]
         self.qm_charges = cq
+        if self._iterations is not None:
+            self.scf_iterations = self._iterations()
         return heat.value, g.reshape(self.n, 3), gm[:3 * nmm].reshape(nmm, 3)
 
     def errors(self):
