@@ -254,9 +254,11 @@ contains
     env = ' '
     call get_environment_variable('MOPAC_NOGPU', env, length=env_len, status=env_stat)
     lgpu = .not. (env_stat == 0 .and. env_len > 0 .and. index('0 F FALSE N NO OFF', trim(adjustl(env))) == 0)
-    ! as run_mopac: small QM regions are faster on the CPU (Tyr side chain, 16 atoms: 0.014 s per step on
-    ! the CPU, 0.026 s on a T4); MOPAC_FORCEGPU still forces the GPU
-    if (system%natom <= 100) lgpu = .false.
+    ! small QM regions are faster on the CPU; MOPAC_FORCEGPU still forces the GPU. Seconds per MD step
+    ! (chignolin in water, PME, A100 vs 12 Xeon threads): 10 QM atoms 0.022 CPU / 0.033 GPU, 31 atoms
+    ! 0.076 / 0.055, 43 atoms 0.149 / 0.065 (an L4 gave the same crossover). 20 lies between the measured
+    ! points; the crossover itself was not measured
+    if (system%natom <= 20) lgpu = .false.
 #endif
     call mopac_initialize(system)
 #ifdef GPU

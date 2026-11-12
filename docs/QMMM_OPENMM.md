@@ -97,8 +97,15 @@ OpenMM CUDA + MOPAC, Kaggle T4, 0.5 fs steps, TIP3P water box (`scripts/kaggle/m
 (`tolerance=0.01`, every step's SCF converged; the drifts are within the per-step fluctuation of the MM
 water.)
 
-QM regions of up to 100 atoms run on the CPU by default (as MOPAC does for small systems); larger ones on
-the GPU. A T4 is weak in double precision; an A100 should be several times faster (README, "Which GPU?").
+QM regions of up to 20 atoms (link atoms included) run on the CPU by default; larger ones on the GPU
+(`MOPAC_NOGPU=1` / `MOPAC_FORCEGPU=1` override it). A100, chignolin in water with PME, s per step, CPU (12
+Xeon threads) / GPU: 10 QM atoms 0.022 / 0.033, 31 atoms 0.076 / 0.055, 43 atoms 0.149 / 0.065, 86 atoms
+0.589 / 0.111, 138 atoms 0.176 on the GPU. The crossover lies between 10 and 31 atoms; 20 was not measured.
+Until 2026-11-12 the limit was 100 atoms, and the GPU had a floor of ~0.13 s per step below ~100 atoms:
+after every call the pair kernels put the CUDA stack limit back, and the next call made the driver grow it
+again (~90 ms per step on an A100). Since commit `52c7f964` the QM/MM session keeps it between steps
+(`MOPAC_GPU_STACK_RESTORE=d`, set unless already defined; `=all` restores after every call), which holds
+~1.2 GB more device memory on an A100. A T4 is weak in double precision; an A100 should be several times faster (README, "Which GPU?").
 
 ## Example: trypsin with BPTI
 

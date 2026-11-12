@@ -75,8 +75,11 @@ The solid timings include writing the `AUX` file, about half of the GPU time of 
 | Crambin, whole protein | 642 | 24 813 | 34.5 s | 1.33 s (**26×**) |
 | Trypsin–BPTI complex, with PME | 54 + 5 link ¹ | 46 853 | 0.231 s | |
 
-0.5-fs steps. ¹ QM regions of up to 100 atoms (link atoms included) run MOPAC on the CPU in GPU mode as
-well; OpenMM and the PME grid still use the GPU. The CPU QM/MM runs were shorter than the GPU runs.
+0.5-fs steps. ¹ In this run QM regions of up to 100 atoms (link atoms included) ran MOPAC on the CPU in GPU
+mode as well; OpenMM and the PME grid still use the GPU. The CPU QM/MM runs were shorter than the GPU runs.
+Since 2026-11-12 the limit is 20 atoms: a later A100 run (commit `52c7f964`, 400 steps) gave
+0.129 s per step for trypsin–BPTI with MOPAC on the GPU; regions of 10 atoms are still faster on the CPU
+(0.022 against 0.033 s per step, chignolin residue 1).
 
 All numbers are from one benchmark run (commit `c85eb96d`); see [Benchmarks](#8-benchmarks) to
 repeat them.
@@ -629,7 +632,7 @@ temps = md.temperatures(nvt.rows, natoms=642)   # K, one per table row
 
 ## 7. QM/MM with OpenMM
 
-The QM region is computed by MOPAC (PM7, MOZYME, on the GPU above 100 atoms) in the field of the MM
+The QM region is computed by MOPAC (PM7, MOZYME, on the GPU above 20 atoms) in the field of the MM
 point charges (electrostatic embedding); the force field, water, constraints, integrators,
 thermostats and reporters are OpenMM's; the coupling is an OpenMM `PythonForce`. QM–MM covalent bonds get hydrogen link atoms; the
 long-range QM–MM electrostatics use PME (on the GPU with CuPy). Full description:
@@ -769,7 +772,7 @@ commit message.
   temperature: MOPAC cannot read velocities together with a PDB geometry.
 - **Runs on the CPU instead of the GPU:** the Fock matrix of conventional-SCF molecules under 300
   orbitals, solids under 100 atoms (unless `MOPAC_FORCEGPU=1`), pKa calculations, and the programming
-  interface (`libmopac` API) except the MOZYME QM/MM session (QM regions above 100 atoms).
+  interface (`libmopac` API) except the MOZYME QM/MM session (QM regions above 20 atoms).
 - **Small systems** gain little: 3.1× for 125 water molecules; the 64–72-atom solids 1.3–4.2×.
 - **Inputs.** Hydrogens are required; broken crystal fragments are refused (see the chemistry
   check).
