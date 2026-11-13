@@ -218,7 +218,23 @@ Trypsin-BPTI (below; 59 QM atoms with the link atoms), Colab A100 40 GB, MOPAC a
 0.5 fs, `tolerance=0.01`: 0.063 s per step (680 ps/day) at commit `a6a4992e`, 0.127 s before it. That
 commit moved the real-space sums of QM-PME into CUDA kernels (0.105 s per step with them in NumPy) and
 spread the QM-MM loops of MOPAC over the CPU threads with OpenMP. Of the 0.063 s, MOPAC takes 0.035 s
-(the SCF ~0.030 s, 13 iterations on average), the rest of the Python force 0.021 s and OpenMM, with the transfer of positions and forces, 0.008 s.
+(the SCF ~0.030 s, 13 iterations on average). The 0.063 s include `run_qmmm_md.py` writing ten frames of the
+whole system to `qmmm_traj.pdb` in a 400-step run, ~0.24 s per frame or 6.5 ms per step averaged (measured at
+commit `89a30daf`); in long runs the frames are `steps / 10` apart and cost nothing per step.
+
+Profile at commit `89a30daf` (`colab/qmmm_prof_colab.ipynb`, same machine type, one prepared state, 400 NVT steps,
+wall time over the steps): 0.052 s at `tolerance=0.01` (two runs) and 0.067 s at 0.001 (21.5 SCF iterations),
+against 0.0022 s for OpenMM alone. At 0.01, medians per call: MOPAC 0.032 s (13.3 SCF iterations, 2.4 ms each),
+the Python part of the force 0.013 s (0.012 s with MOPAC replaced by an instant stub: imaging and switching over
+the ~46 000 MM charges on the CPU), the long-range term 0.003 s, OpenMM with the transfer of positions and
+forces ~0.003 s. Inside the SCF (`MOPAC_GPU_PROFILE=1`, which adds ~7 ms per step) the LMO rotations of `diagg2` take 11.7 ms per step and
+`diagg1` ~5 ms; `MOPAC_MOZYME_SCF_TRACE=1` shows 2460 rotations per sweep, a longest chain of 58 rotations
+on one LMO, ~14 us per rotation on that chain, and ~230 us of lock waits per block. Under `nsys` the GPU was busy
+26 ms of a 54-ms step, with 1700 kernel launches, 300 copies and 100 `cudaMalloc`/`cudaFree` pairs per step.
+`MOPAC_MOZYME_DIAGG2_STAGED=1` (coefficients in shared memory) made `diagg2` 1.9 ms and the step ~2 ms faster
+(49.6 and 49.9 ms against 51.6 and 52.4, two runs each); at the first call (same geometry in every run) its
+heats differed from the default by 6e-6 and 2e-6 kcal/mol, two default runs by 2e-6, and the profiled default
+run by 4e-6. `MOPAC_MOZYME_DIAGG2_COOPERATIVE=1` doubled the step (101-107 ms).
 
 ## Example: trypsin with BPTI
 
