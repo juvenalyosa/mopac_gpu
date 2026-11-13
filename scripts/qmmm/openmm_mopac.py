@@ -326,8 +326,8 @@ def add_qmmm(system: mm.System, topology, positions, qm_atoms, qm_charge: int, l
     ("previous", or the environment variable MOPAC_QMMM_GUESS).
     qm_constraints: keep the constraints of the force field between QM atoms (the X-H bonds with
     constraints=HBonds), as Amber's qmshake=1 does; by default all bonds of the QM region are free. With
-    1-fs steps it did not make the energy errors of the time step smaller in trypsin-BPTI (its heavy atoms
-    move fast too); 0.5 fs did (docs/QMMM_OPENMM.md).
+    1-fs steps it made the accumulated energy errors of the time step in trypsin-BPTI about a third smaller
+    but left the jumps (its heavy atoms move fast too); 0.5 fs removed them (docs/QMMM_OPENMM.md).
     qm_free: QM atoms whose constraints are removed all the same (a proton that may move)."""
     if pme is None:
         pme = any(isinstance(f, mm.NonbondedForce) and f.getNonbondedMethod() in (mm.NonbondedForce.PME,

@@ -123,11 +123,34 @@ python scripts/qmmm/run_qmmm_md.py protein.pdb --libmopac build/libmopac.so --qm
   | 0.5 fs | 1.0 ps | 0.034 | 0.23 (5) |
   | 1 fs, `qm_constraints=True` | 1.5 ps | 0.151 | 0.65 (7) |
 
-  Use 0.5 fs (the default of `run_qmmm_md.py`) when energy conservation matters. `qm_constraints=True`
-  (`--qm-constraints`) keeps the force field's X-H constraints inside the QM region, as Amber's `qmshake=1`
-  (its default when SHAKE is on) does, and `qm_free` (`--qm-free E:57:HD1`) leaves chosen atoms free (a
-  proton that may move); the constrained lengths are the force field's, not PM7's. At 1 fs it did not make
-  the errors per step smaller: the heavy atoms of the QM region (the ring of His57) move fast too.
+  The same check on the A100 (MOPAC on the GPU, OpenMM CUDA in mixed precision, the preparation of the
+  A100 rows above, tolerance 0.001, 5 ps of NVE after 0.4 ps at 300 K, seeds 11 to 13, commit 229b6fe4,
+  `colab/qmmm_dt_colab.ipynb`), from E_qm + W read every 10 fs (mean ± SD of the three runs, or the three
+  values):
+
+  | | SD of the 10-fs increments, kJ/mol | SD of the sums over 0.2 ps | increments > 1 kJ/mol | drift from the QM/MM force, kJ/mol/ps | s per step | s per ps |
+  |---|---:|---:|---:|---:|---:|---:|
+  | 1 fs | 0.29 ± 0.01 | 1.24 ± 0.30 | 6, 3, 7 | +1.6, -0.3, +3.9 | 0.089 | 89 |
+  | 1 fs, `qm_constraints=True` | 0.22 ± 0.05 | 0.82 ± 0.17 | 4, 2, 9 | +1.5, 0.0, -0.2 | 0.088 | 88 |
+  | 0.5 fs | 0.072 ± 0.007 | 0.20 ± 0.02 | 0, 0, 0 | -0.6, -0.2, -0.8 | 0.077 | 155 |
+  | 0.5 fs, `tolerance=0.01` (seed 11) | 0.072 | 0.21 | 0 | -8.8 | 0.061 | 122 |
+
+  (Step times of these NVE runs, which read energies and forces every 10 fs; in their NVT part a 1-fs step
+  took 0.072-0.077 s and a 0.5-fs step 0.067 s, or 0.051 s at 0.01.) With 0.5 fs the increments had no
+  tail (none above 0.5 kJ/mol; excess kurtosis -0.2 to 0.8, against 23 to 43 at 1 fs), the drift from the
+  QM/MM force had the same sign in the three runs, and the slopes of the total energy were -0.2 ± 0.7,
+  +0.6 ± 0.5 and -1.0 ± 0.6 kJ/mol/ps. The loss left at 0.5 fs (-0.2 to -0.8 kJ/mol/ps) is probably the
+  SCF's: at 0.01 it was -8.8, against -8.4 with 1-fs steps in the table above, so it did not depend on the
+  step; a run at 0.0001 would be needed to show it. 0.5-fs steps take 1.7-1.8 times as long per ps as 1-fs
+  steps (fewer SCF iterations per step, 21 against 24, do not make up for twice as many steps).
+
+  Use 0.5 fs (the default of `run_qmmm_md.py`), and in NVE also `tolerance=0.001` (26-31% more per step
+  than 0.01 here). `qm_constraints=True` (`--qm-constraints`) keeps the force field's X-H constraints
+  inside the QM region, as Amber's `qmshake=1` (its default when SHAKE is on) does, and `qm_free`
+  (`--qm-free E:57:HD1`) leaves chosen atoms free (a proton that may move); the constrained lengths are the
+  force field's, not PM7's. At 1 fs it made the accumulated errors about a third smaller but left as many
+  jumps (15 increments above 1 kJ/mol in the three runs, against 16): heavy atoms of the QM region move fast
+  too (the ring of His57 in the one constrained jump checked).
 - The H-bond correction of PM7 is used with `HB-SMOOTH` (its original form has kinks that MD and FORCE
   cannot cross).
 - QM-PME needs an orthorhombic box. Its parameters are fields of `qmmm.region` (`pme_alpha` = 0.25 1/A,
