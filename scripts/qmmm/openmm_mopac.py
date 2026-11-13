@@ -14,7 +14,7 @@ OpenMM works unchanged.
 
 What add_qmmm does to the MM system:
   * bonds, angles, torsions (and CMAP) whose atoms are all QM are switched off, constraints between QM
-    atoms are removed (MOPAC describes them);
+    atoms are removed (MOPAC describes them), unless qm_constraints keeps them;
   * NonbondedForce: the charges of the QM atoms are set to zero (the QM-MM electrostatics come from MOPAC,
     with the QM electron density polarized by the MM charges) and QM-QM pairs are excluded; the
     Lennard-Jones terms between QM and MM atoms are kept;
@@ -100,9 +100,12 @@ def _qm_bonds(topology, qm_set):
     return links
 
 
-def prepare_mm_system(system: mm.System, topology, qm_atoms) -> np.ndarray:
-    """Remove the MM description inside the QM region; returns the MM charges (e) of all particles."""
+def prepare_mm_system(system: mm.System, topology, qm_atoms, qm_constraints: bool = False,
+                      qm_free=()) -> np.ndarray:
+    """Remove the MM description inside the QM region; returns the MM charges (e) of all particles.
+    qm_constraints keeps the constraints between QM atoms, except those of the atoms in qm_free."""
     qm = set(qm_atoms)
+    free = set(qm_free)
     charges = np.zeros(system.getNumParticles())
     for f in system.getForces():
         if isinstance(f, mm.HarmonicBondForce):
@@ -142,7 +145,7 @@ def prepare_mm_system(system: mm.System, topology, qm_atoms) -> np.ndarray:
     # constraints between QM atoms
     for i in reversed(range(system.getNumConstraints())):
         a, b, d = system.getConstraintParameters(i)
-        if a in qm and b in qm:
+        if a in qm and b in qm and not (qm_constraints and a not in free and b not in free):
             system.removeConstraint(i)
     return charges
 
@@ -314,12 +317,18 @@ class MopacQMMMForce:
 
 def add_qmmm(system: mm.System, topology, positions, qm_atoms, qm_charge: int, libmopac: str,
              ron: float = 10.0, roff: float = 12.0, model: int = 0, tolerance: float = 1e-2, pme=None,
-             pme_gpu=None, guess=None):
+             pme_gpu=None, guess=None, qm_constraints: bool = False, qm_free=()):
     """Turn an OpenMM system into a QM/MM system; returns the MopacQMMMForce (keep it alive).
     pme: long-range QM-MM electrostatics by PME (default: when the NonbondedForce uses PME or Ewald).
     pme_gpu: its grid on the GPU with CuPy (default: when CuPy sees a GPU).
     guess: starting LMOs of each step's SCF, "previous" (those of the last step) or extrapolated from the
-    last 2 or 4 steps ("linear", "aspc"); default: MOPAC's (environment variable MOPAC_QMMM_GUESS)."""
+    last 2 or 4 steps ("linear", "aspc", not recommended: see docs/QMMM_OPENMM.md); default: MOPAC's
+    ("previous", or the environment variable MOPAC_QMMM_GUESS).
+    qm_constraints: keep the constraints of the force field between QM atoms (the X-H bonds with
+    constraints=HBonds), as Amber's qmshake=1 does; by default all bonds of the QM region are free. With
+    1-fs steps it did not make the energy errors of the time step smaller in trypsin-BPTI (its heavy atoms
+    move fast too); 0.5 fs did (docs/QMMM_OPENMM.md).
+    qm_free: QM atoms whose constraints are removed all the same (a proton that may move)."""
     if pme is None:
         pme = any(isinstance(f, mm.NonbondedForce) and f.getNonbondedMethod() in (mm.NonbondedForce.PME,
                   mm.NonbondedForce.Ewald) for f in system.getForces())
@@ -327,6 +336,8 @@ def add_qmmm(system: mm.System, topology, positions, qm_atoms, qm_charge: int, l
         raise ValueError("QM/MM PME needs a periodic system")
     qm_atoms = sorted(int(i) for i in qm_atoms)
     qm_set = set(qm_atoms)
+    if not set(qm_free) <= qm_set:
+        raise ValueError("qm_free: atoms outside the QM region: " + str(sorted(set(qm_free) - qm_set)))
     atoms = list(topology.atoms())
     pos_nm = np.array(positions.value_in_unit(unit.nanometer)) if hasattr(positions, "value_in_unit") \
         else np.asarray(positions, float)
@@ -335,7 +346,7 @@ def add_qmmm(system: mm.System, topology, positions, qm_atoms, qm_charge: int, l
         zq = _element_number(atoms[q])
         r_qm = np.linalg.norm(pos_nm[q] - pos_nm[m]) * 10.0
         links.append((q, m, XH_LENGTH.get(zq, 1.09) / r_qm))
-    charges = prepare_mm_system(system, topology, qm_atoms)
+    charges = prepare_mm_system(system, topology, qm_atoms, qm_constraints, qm_free)
     region = QMMMRegion(qm_atoms=qm_atoms, atomic_numbers=[_element_number(atoms[i]) for i in qm_atoms],
                         links=links, mm_charges=charges, ron=ron, roff=roff,
                         groups=np.array([a.residue.index for a in atoms]),

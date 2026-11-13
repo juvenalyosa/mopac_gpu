@@ -3,7 +3,8 @@
 
     python nve_drift.py prepare protein.pdb --out prep [--padding 1.0 --variants E:57=HID]
     python nve_drift.py run --prep prep --out run1 --libmopac libmopac.so --qm-residues E:57:sc,I:15 \
-        [--tolerance 0.001] [--guess linear] [--mm-only] [--platform CUDA --precision mixed] [--nve 10000]
+        [--tolerance 0.001] [--guess linear] [--qm-constraints [--qm-free E:57:HD1]] [--mm-only] \
+        [--platform CUDA --precision mixed] [--nve 10000]
 
 prepare builds the system as run_qmmm_md.py does (amber14 + TIP3P, hydrogens, water box), minimizes and
 equilibrates it with MM only, and saves the topology and the state; every `run` starts from that state, so
@@ -18,7 +19,8 @@ non-conservative part of the QM/MM force (zero, up to the trapezoid error, when 
 of E_qm); the total drift minus R_qm is what the MM part and the integration leave.  summary.json holds the
 fitted slopes (kJ/mol/ps) and their standard errors from ten block means, and the mean number of SCF
 iterations per QM/MM call in NVT and NVE.  --guess linear starts the SCF of each step from LMOs extrapolated
-from the last two steps (MOPAC_QMMM_GUESS) instead of the LMOs of the last step.
+from the last two steps (MOPAC_QMMM_GUESS) instead of the LMOs of the last step.  --qm-constraints keeps the
+X-H constraints inside the QM region (except for the atoms of --qm-free), see openmm_mopac.add_qmmm.
 """
 
 import argparse
@@ -34,7 +36,7 @@ import openmm.unit as u
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import openmm_mopac as om  # noqa: E402
-from run_qmmm_md import BACKBONE, PROTEIN, parse_residues, residue_matches  # noqa: E402
+from run_qmmm_md import BACKBONE, PROTEIN, find_atom, parse_residues, residue_matches  # noqa: E402
 
 FF = ("amber14-all.xml", "amber14/tip3p.xml")
 
@@ -165,9 +167,11 @@ def run(a):
               if residue_matches(x.residue, spec) and not (sc and x.name in BACKBONE)]
         nb = [f for f in system.getForces() if isinstance(f, mm.NonbondedForce)][0]
         qch = int(round(sum(nb.getParticleParameters(i)[0].value_in_unit(u.elementary_charge) for i in qm)))
+        free = [find_atom(top, x) for x in a.qm_free.split(",") if x.strip()]
         qmmm = om.add_qmmm(system, top, st0.getPositions(), qm, qch, a.libmopac, ron=a.ron, roff=a.roff,
-                           tolerance=a.tolerance, pme_gpu=False if a.pme_cpu else None, guess=a.guess or None)
-        om.prepare_mm_system(mm_system, top, qm)
+                           tolerance=a.tolerance, pme_gpu=False if a.pme_cpu else None, guess=a.guess or None,
+                           qm_constraints=a.qm_constraints, qm_free=free)
+        om.prepare_mm_system(mm_system, top, qm, a.qm_constraints, free)
         print(f"QM region: {len(qm)} atoms + {len(qmmm.region.links)} link atoms, charge {qch}, tolerance "
               f"{a.tolerance}, PME grid on the {'GPU' if qmmm.region.pme_gpu else 'CPU'}", flush=True)
     p, props = platform(a.platform, a.precision)
@@ -264,6 +268,8 @@ def main():
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--guess", choices=["previous", "linear", "aspc"], default="",
                     help="starting LMOs of each step's SCF (default: MOPAC's, see openmm_mopac.add_qmmm)")
+    ap.add_argument("--qm-constraints", action="store_true", help="keep the X-H constraints inside the QM region")
+    ap.add_argument("--qm-free", default="", help="QM atoms left unconstrained all the same, e.g. E:57:HD1")
     a = ap.parse_args()
     prepare(a) if a.cmd == "prepare" else run(a)
 

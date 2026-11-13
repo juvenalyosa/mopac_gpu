@@ -80,20 +80,54 @@ python scripts/qmmm/run_qmmm_md.py protein.pdb --libmopac build/libmopac.so --qm
   whereas `linear` and `aspc` have only a double root at 1); and keeping the converged LMOs as they were
   (each SCF leaves them non-orthogonal by ~1e-6 to 1e-5, so the P(n-k) were not projectors; they are now
   re-orthonormalized first). The time steps must be equal: a call at the same geometry is skipped, and a
-  step more than twice as long or short as the last restarts the history. MOPAC on the CPU, NVE of 1 fs,
-  SCF iterations per step and the drift from the QM/MM force (kJ/mol/ps):
+  step more than twice as long or short as the last restarts the history. **`linear` and `aspc` are not
+  recommended**: they halve the SCF iterations, but on the GPU they made the step slower and in NVE runs of
+  trypsin-BPTI they heated the system in episodes. NVE of 1 fs, SCF iterations per step and the drift from
+  the QM/MM force (kJ/mol/ps):
 
-  | system, length | `guess` | `tolerance=0.01` | | `tolerance=0.001` | |
+  | system, run | `guess` | `tolerance=0.01` | | `tolerance=0.001` | |
   |---|---|---:|---:|---:|---:|
-  | chignolin Tyr2 (21 + 2 link atoms), 10 ps | `previous` | 17.3 | -4.12 ± 0.03 | | |
+  | chignolin Tyr2 (21 + 2 link atoms), CPU, 10 ps | `previous` | 17.3 | -4.12 ± 0.03 | | |
   | | `aspc` | 8.4 | -0.09 ± 0.02 | 17.3 | +0.03 ± 0.02 |
-  | trypsin-BPTI (54 + 5), 2 ps | `previous` | 15.2 | -8.5 ± 0.2 | | |
+  | trypsin-BPTI (54 + 5), CPU, 2 ps | `previous` | 15.2 | -8.5 ± 0.2 | | |
   | | `aspc` | 8.4 | +1.5 ± 0.6 | 14.6 | -0.8 ± 0.4 |
+  | trypsin-BPTI (54 + 5), A100, 5 ps | `previous` | 14.9 | -8.4 ± 0.4 | 24.2 | +2.2 ± 0.2 |
+  | | `aspc` | 8.4 | +176 ± 17 | 14.4 | +8.5 ± 2.4 |
 
-  (trypsin: OpenMM CPU platform, 2 ps of MM equilibration only.) An SCF stopped at the tolerance keeps part
-  of the error of its starting point: LMOs that lag behind the geometry lose energy, and a tighter tolerance
-  makes the error smaller. `mozyme_qmmm_scf_iterations()` (C API) / `QMSession.scf_iterations` return the
-  iterations of the last step.
+  (CPU: MOPAC and OpenMM on an Apple M-series CPU, trypsin after 2 ps of MM equilibration only; A100: MOPAC
+  on the GPU, OpenMM CUDA in mixed precision, 50 ps of MM equilibration, commit 6ea3c4b5.) With `previous`
+  the QM/MM part drifts steadily; with `aspc` it came in episodes: on the A100, 0.5-ps blocks of +340 to
+  +640 kJ/mol/ps at 0.01, and +28 to +79 in the last 1.5 ps at 0.001, the earlier blocks being like
+  `previous`; on the CPU, one 0.2-ps block of +20 in the 2-ps run at 0.01. Chignolin showed none in 10 ps.
+  A likely reason, not proven: both schemes reproduce a linear trend exactly, so an error that the SCF
+  leaves in place (one that the energy criterion does not see) is carried forward as if it were motion.
+  The extrapolation runs on the host: on the A100 it took 44 ms per step (`MOPAC_GPU_PROFILE=1`, section
+  `qmmm_lmo_guess`), more than the whole SCF, so a 0.5-fs step of trypsin-BPTI took 0.095 s with `aspc`
+  against 0.059 s with `previous` at 0.01 (5.7 and 13.5 iterations), and 0.109 against 0.074 s at 0.001
+  (11.1 and 21.6). An SCF stopped at the tolerance keeps part of the error of its starting point: LMOs
+  that lag behind the geometry lose energy, and a tighter tolerance makes the error smaller.
+  `mozyme_qmmm_scf_iterations()` (C API) / `QMSession.scf_iterations` return the iterations of the last
+  step.
+- Time step: the bonds of the QM region are free (`add_qmmm` removes the constraints between QM atoms;
+  MOPAC describes them), and with 1-fs steps velocity Verlet makes energy errors of up to 1-3 kJ/mol in
+  single steps in which an atom of the QM region moves fast (trypsin-BPTI: Hδ1 of His57, H of Lys15 and
+  Ala16). The QM/MM force is the exact gradient there: the QM/MM energy along such a step, integrated in ten
+  sub-steps, changed by +0.015 kJ/mol against +2.18 from the trapezoid rule over the whole step (three
+  steps checked). These errors partly cancel and partly add up like a random walk. Trypsin-BPTI,
+  tolerance 0.001, MOPAC on the CPU, OpenMM OpenCL (single precision), energy and work of the QM/MM force
+  checked at every step (local preparation, 1 to 3 ps each):
+
+  | | per step, kJ/mol (SD) | per 0.5 ps (SD of block sums) |
+  |---|---:|---:|
+  | 1 fs | 0.108 | 1.75 |
+  | 0.5 fs | 0.034 | 0.22 |
+  | 1 fs, `qm_constraints=True` | 0.151 | 1.83 |
+
+  Use 0.5 fs (the default of `run_qmmm_md.py`) when energy conservation matters. `qm_constraints=True`
+  (`--qm-constraints`) keeps the force field's X-H constraints inside the QM region, as Amber's `qmshake=1`
+  (its default when SHAKE is on) does, and `qm_free` (`--qm-free E:57:HD1`) leaves chosen atoms free (a
+  proton that may move); the constrained lengths are the force field's, not PM7's. At 1 fs it did not make
+  the errors smaller: the heavy atoms of the QM region (the ring of His57) move fast too.
 - The H-bond correction of PM7 is used with `HB-SMOOTH` (its original form has kinks that MD and FORCE
   cannot cross).
 - QM-PME needs an orthorhombic box. Its parameters are fields of `qmmm.region` (`pme_alpha` = 0.25 1/A,
@@ -107,19 +141,27 @@ python scripts/qmmm/run_qmmm_md.py protein.pdb --libmopac build/libmopac.so --qm
 - One QM region per process; do not run two MOPAC sessions in the same directory.
 - Energy conservation depends on `tolerance`: an SCF converged only to the tolerance gives forces that are
   not exactly the derivatives of the energy, and the total energy falls. NVE with velocity Verlet, 1 fs,
-  5 ps after 400 steps of NVT (`scripts/qmmm/nve_drift.py`), trypsin-BPTI below (46 790 atoms), A100,
-  OpenMM in mixed precision; slope of a linear fit ± standard error from ten block means, one run each:
+  5 ps after 400 steps of NVT (`scripts/qmmm/nve_drift.py`), trypsin-BPTI, two preparations (46 790 and
+  46 859 atoms, 50 ps of MM equilibration each), A100, OpenMM in mixed precision; slope of a linear fit ±
+  standard error from ten block means, one run per setting and preparation (kJ/mol/ps):
 
-  | `tolerance` | total energy, kJ/mol/ps | part from the QM/MM force | s per step (NVT) |
-  |---|---:|---:|---:|
-  | MM only (20 ps) | -0.06 ± 0.12 | - | - |
-  | 0.01 | -4.4 ± 0.8 | -5.5 ± 0.3 | 0.059 |
-  | 0.001 | -0.6 ± 0.6 | +0.8 ± 0.2 | 0.076 |
-  | 0.0001 | +0.3 ± 0.6 | -0.3 ± 0.2 | 0.096 |
+  | `tolerance` | total, prep. 1 | QM/MM part, prep. 1 | total, prep. 2 | QM/MM part, prep. 2 | s per step (NVT) |
+  |---|---:|---:|---:|---:|---:|
+  | MM only (20 ps) | -0.06 ± 0.12 | - | -0.08 ± 0.06 | - | - |
+  | 0.01 | -4.4 ± 0.8 | -5.5 ± 0.3 | -7.6 ± 0.8 | -8.4 ± 0.4 | 0.059 / 0.058 |
+  | 0.001 | -0.6 ± 0.6 | +0.8 ± 0.2 | +3.0 ± 0.7 | +2.2 ± 0.2 | 0.076 / 0.071 |
+  | 0.0001 | +0.3 ± 0.6 | -0.3 ± 0.2 | +2.7 ± 0.7 | +2.5 ± 0.3 | 0.096 / 0.090 |
 
   The QM/MM part is the energy of the QM/MM force plus the work it did along the path (zero for an exact
-  gradient); in this run it was estimated after excluding the 40 of 500 readings where OpenMM had moved
-  molecules by a box vector, which `nve_drift.py` now handles. OpenMM's single precision on CUDA, its
+  gradient); in preparation 1 it was estimated after excluding the 40 of 500 readings where OpenMM had moved
+  molecules by a box vector, which `nve_drift.py` now handles (preparation 2). The standard errors do not
+  include the difference between preparations. With 0.01 the QM/MM part falls steadily (median ten-step
+  increment -0.08 kJ/mol in preparation 2). With 0.001 and 0.0001 the median increment is about zero and the
+  drift comes from a few ten-step intervals in which the energy of the QM/MM force plus its work jumps by
+  1 to 3 kJ/mol: without the ten largest increments (of 460 or 500), the sum over 5 ps was -0.1 and -2.6
+  kJ/mol at 0.001 and 0.0001 in preparation 1 and -0.6 and +0.6 in preparation 2, against +5.0, -1.1,
+  +10.5 and +11.2 with them. In preparation 2 these jumps were mostly positive. They are errors of the
+  1-fs time step, not of the force (see the time-step item below). OpenMM's single precision on CUDA, its
   default, drifts by itself: +11.1 ± 0.4 kJ/mol/ps for the same system with MM only (mixed -0.06, double
   -0.12), so `run_qmmm_md.py` uses mixed on CUDA (`--precision`); the QM/MM step took the same time in
   both. With single precision and 0.01 the two drifts partly cancel (+5.7 ± 0.8 in total). Every step

@@ -3,7 +3,8 @@
 
     python run_qmmm_md.py protein.pdb --libmopac /path/libmopac.so --qm-residues 2 \
         [--qm-sidechain] [--qm-charge 0] [--padding 1.6] [--ron 8 --roff 10] \
-        [--steps 200] [--dt 0.5] [--temperature 300] [--platform CUDA] [--precision single|mixed|double] [--nve 0]
+        [--steps 200] [--dt 0.5] [--temperature 300] [--platform CUDA] [--precision single|mixed|double] [--nve 0] \
+        [--qm-constraints [--qm-free E:57:HD1]]
 
 Prepares the system with OpenMM (hydrogens, amber14 + TIP3P, a water box with `padding` nm, ions), relaxes
 and equilibrates it with MM only (minimization + 20 ps NVT, 2 fs), then turns the selected residues (whole,
@@ -21,6 +22,9 @@ PME grid on the CPU (NumPy) even when CuPy sees a GPU.  --mm-only runs the same 
 left in the force field (an NVE reference for the MM part).  --nve-every N reads the total energy every N
 NVE steps (each reading evaluates all forces, the QM/MM force included, once more).  --nve-traj N writes
 every N NVE steps a frame of the protein (heavy atoms, plus every atom of the QM residues) to nve_traj.pdb.
+--qm-constraints keeps the X-H constraints inside the QM region (as Amber's qmshake=1); --qm-free names QM
+atoms left unconstrained all the same (a proton that may move).  For energy conservation use 0.5 fs, with or
+without them (docs/QMMM_OPENMM.md).
 """
 
 import argparse
@@ -90,6 +94,8 @@ def main():
     ap.add_argument("--tolerance", type=float, default=0.01)
     ap.add_argument("--guess", choices=["previous", "linear", "aspc"], default=None,
                     help="starting LMOs of each step's SCF (see openmm_mopac.add_qmmm)")
+    ap.add_argument("--qm-constraints", action="store_true", help="keep the X-H constraints inside the QM region")
+    ap.add_argument("--qm-free", default="", help="QM atoms left unconstrained all the same, e.g. E:57:HD1")
     ap.add_argument("--nve", type=int, default=0, help="steps of an NVE check at the end")
     ap.add_argument("--nve-every", type=int, default=1, help="read the total energy every N NVE steps")
     ap.add_argument("--nve-traj", type=int, default=0, help="protein frame to nve_traj.pdb every N NVE steps")
@@ -162,7 +168,8 @@ def main():
     else:
         qmmm = add_qmmm(system, top, st.getPositions(), qm, qcharge, a.libmopac, ron=a.ron, roff=a.roff,
                         tolerance=a.tolerance, pme=False if a.no_pme else None,
-                        pme_gpu=False if a.pme_cpu else None, guess=a.guess)
+                        pme_gpu=False if a.pme_cpu else None, guess=a.guess, qm_constraints=a.qm_constraints,
+                        qm_free=[find_atom(top, x) for x in a.qm_free.split(",") if x.strip()])
         lr = "none (cut-off)" if not qmmm.region.pme else "PME on the GPU" if qmmm.region.pme_gpu else "PME"
         print(f"QM region: {len(qm)} atoms + {len(qmmm.region.links)} link atoms, charge {qcharge}; long-range "
               f"QM-MM electrostatics: {lr}", flush=True)
