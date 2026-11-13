@@ -280,17 +280,15 @@ contains
     status = 0
     if (moperr) status = 1
     qmmm_session = (status == 0)
-    ! starting LMOs of each step (qmmm_lmo_guess): MOPAC_QMMM_GUESS=linear, quadratic or cubic extrapolates
-    ! them from the last 2, 3 or 4 steps; previous: the SCF starts from the LMOs of the last step
+    ! starting LMOs of each step (qmmm_lmo_guess): MOPAC_QMMM_GUESS=linear or aspc extrapolates them from
+    ! the last 2 or 4 steps; previous: the SCF starts from the LMOs of the last step
     guess = ' '
     call get_environment_variable('MOPAC_QMMM_GUESS', guess, length=guess_len, status=guess_stat)
     select case (trim(adjustl(guess)))
     case ('linear')
       lmo_guess = 1
-    case ('quadratic')
+    case ('aspc')
       lmo_guess = 2
-    case ('cubic')
-      lmo_guess = 3
     end select
   end subroutine mozyme_qmmm_init
 

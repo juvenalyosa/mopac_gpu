@@ -262,7 +262,7 @@ def main():
     ap.add_argument("--ctol", type=float, default=1e-8, help="constraint tolerance of the NVE run")
     ap.add_argument("--lj-switch", action="store_true", help="Lennard-Jones switching from 0.9 nm")
     ap.add_argument("--seed", type=int, default=11)
-    ap.add_argument("--guess", choices=["previous", "linear", "quadratic", "cubic"], default="",
+    ap.add_argument("--guess", choices=["previous", "linear", "aspc"], default="",
                     help="starting LMOs of each step's SCF (default: MOPAC's, see openmm_mopac.add_qmmm)")
     a = ap.parse_args()
     prepare(a) if a.cmd == "prepare" else run(a)

@@ -69,27 +69,31 @@ python scripts/qmmm/run_qmmm_md.py protein.pdb --libmopac build/libmopac.so --qm
   An SCF that does not converge stops the run with an error. 0.001 costs ~1.8 x the SCF time of 0.01.
 - `guess` (`add_qmmm(..., guess=...)`, `run_qmmm_md.py --guess`, or the environment variable
   `MOPAC_QMMM_GUESS`) sets where the SCF of each step starts: `previous` (default), the converged LMOs of
-  the last step; `linear`, `quadratic` or `cubic`, LMOs extrapolated from the last 2, 3 or 4 steps. The
-  extrapolation acts on the projectors onto the occupied space, P(n-k), applied to the LMOs of the last step
-  (occupied C' = a0 C(n) + Sum ak P(n-k) C(n), virtual V' = V(n) - Sum ak P(n-k) V(n), a = 4, -6, 4, -1 for
-  cubic), which does not depend on how the LMOs of a step are rotated among themselves; extrapolating the
-  coefficients themselves amplified those rotations until the SCF failed (3 points, 90 steps). The time
-  steps must be equal: a call at the same geometry is skipped, and a step more than twice as long or short
-  as the last restarts the history. Chignolin, Tyr2 as the QM region (21 + 2 link atoms), MOPAC on the CPU,
-  2 ps NVE of 1 fs: SCF iterations per step and the drift from the QM/MM force (kJ/mol/ps):
+  the last step; `linear` or `aspc`, LMOs extrapolated from the last 2 or 4 steps with the predictor
+  coefficients of Kolafa's always stable predictor-corrector (J. Comput. Chem. 25, 335 (2004); `aspc`:
+  2.8, -2.8, 1.2, -0.2). The extrapolation acts on the projectors onto the occupied space, P(n-k), applied
+  to the LMOs of the last step (occupied C' = B1 C(n) + Sum B(k+1) P(n-k) C(n), virtual
+  V' = V(n) - Sum B(k+1) P(n-k) V(n)), which does not depend on how the LMOs of a step are rotated among
+  themselves. Three things made earlier versions fail (SCF error in CHECK): extrapolating the coefficients
+  themselves (the rotations among occupied LMOs, which the SCF never corrects, grew); polynomial
+  extrapolation of degree 2 or 3 (B = 3, -3, 1 or 4, -6, 4, -1: trypsin-BPTI diverged within 35-85 steps,
+  whereas `linear` and `aspc` have only a double root at 1); and keeping the converged LMOs as they were
+  (each SCF leaves them non-orthogonal by ~1e-6 to 1e-5, so the P(n-k) were not projectors; they are now
+  re-orthonormalized first). The time steps must be equal: a call at the same geometry is skipped, and a
+  step more than twice as long or short as the last restarts the history. MOPAC on the CPU, NVE of 1 fs,
+  SCF iterations per step and the drift from the QM/MM force (kJ/mol/ps):
 
-  | `guess` | `tolerance=0.01` | | `tolerance=0.001` | |
-  |---|---:|---:|---:|---:|
-  | `previous` | 17.4 | -4.25 ± 0.12 | 29.2 | -0.39 ± 0.08 |
-  | `linear` | 10.8 | -1.28 ± 0.05 | 21.0 | -0.03 ± 0.05 |
-  | `quadratic` | 7.5 | +5.37 ± 0.10 | 16.0 | +0.42 ± 0.09 |
-  | `cubic` | 9.0 | +0.72 ± 0.06 | 12.1 | +0.12 ± 0.08 |
+  | system, length | `guess` | `tolerance=0.01` | | `tolerance=0.001` | |
+  |---|---|---:|---:|---:|---:|
+  | chignolin Tyr2 (21 + 2 link atoms), 10 ps | `previous` | 17.3 | -4.12 ± 0.03 | | |
+  | | `aspc` | 8.4 | -0.09 ± 0.02 | 17.3 | +0.03 ± 0.02 |
+  | trypsin-BPTI (54 + 5), 2 ps | `previous` | 15.2 | -8.5 ± 0.2 | | |
+  | | `aspc` | 8.4 | +1.5 ± 0.6 | 14.6 | -0.8 ± 0.4 |
 
-  An SCF stopped at the tolerance keeps part of the error of its starting point: LMOs that lag behind the
-  geometry lose energy, LMOs that overshoot gain it, and a tighter tolerance makes both smaller. Over 10 ps
-  of the same system: `previous` with 0.01, 17.3 iterations and -4.12 ± 0.03 kJ/mol/ps; `cubic` with 0.01,
-  9.5 and +0.42 ± 0.02; `cubic` with 0.001, 13.3 and +0.10 ± 0.01, with the same slope in each 2-ps window. `mozyme_qmmm_scf_iterations()`
-  (C API) / `QMSession.scf_iterations` return the iterations of the last step.
+  (trypsin: OpenMM CPU platform, 2 ps of MM equilibration only.) An SCF stopped at the tolerance keeps part
+  of the error of its starting point: LMOs that lag behind the geometry lose energy, and a tighter tolerance
+  makes the error smaller. `mozyme_qmmm_scf_iterations()` (C API) / `QMSession.scf_iterations` return the
+  iterations of the last step.
 - The H-bond correction of PM7 is used with `HB-SMOOTH` (its original form has kinks that MD and FORCE
   cannot cross).
 - QM-PME needs an orthorhombic box. Its parameters are fields of `qmmm.region` (`pme_alpha` = 0.25 1/A,

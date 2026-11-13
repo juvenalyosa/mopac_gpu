@@ -35,7 +35,7 @@ module qmmm_C
                                                            ! QM atom (API; the long-range part of PME), coupled
                                                            ! to its Mulliken charge (as MOL_QMMM in hcore)
   ! Starting LMOs of each step of an API session (qmmm_lmo_guess, MOPAC_QMMM_GUESS): 0 = the converged LMOs
-  ! of the last step, k = extrapolated with a polynomial of degree k from the last k + 1 steps
+  ! of the last step, 1 = extrapolated linearly from the last 2 steps, 2 = ASPC from the last 4
   integer :: lmo_guess = 0
   type lmo_set                         ! the occupied LMOs of one step (arrays as in MOZYME_C)
     integer :: nocc = -1

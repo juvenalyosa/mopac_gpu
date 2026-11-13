@@ -43,7 +43,7 @@ class MopacProperties(C.Structure):
 class QMSession:
     def __init__(self, libpath, atomic_numbers, coords, charge=0, model=0, spin=0, tolerance=1.0,
                  max_time=86400, guess=None):
-        # guess: starting LMOs of each step, "previous" or extrapolated ("linear", "quadratic", "cubic");
+        # guess: starting LMOs of each step, "previous" or extrapolated ("linear", "aspc");
         # None: MOPAC's default or the environment variable MOPAC_QMMM_GUESS (read by mozyme_qmmm_init)
         if guess:
             os.environ["MOPAC_QMMM_GUESS"] = guess

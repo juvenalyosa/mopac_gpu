@@ -88,7 +88,7 @@ def main():
     ap.add_argument("--precision", default="", help="CUDA/OpenCL: single, mixed or double; default mixed on CUDA "
                     "(single drifts in NVE), the platform's own on OpenCL (Apple GPUs have only single)")
     ap.add_argument("--tolerance", type=float, default=0.01)
-    ap.add_argument("--guess", choices=["previous", "linear", "quadratic", "cubic"], default=None,
+    ap.add_argument("--guess", choices=["previous", "linear", "aspc"], default=None,
                     help="starting LMOs of each step's SCF (see openmm_mopac.add_qmmm)")
     ap.add_argument("--nve", type=int, default=0, help="steps of an NVE check at the end")
     ap.add_argument("--nve-every", type=int, default=1, help="read the total energy every N NVE steps")

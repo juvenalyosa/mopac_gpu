@@ -319,7 +319,7 @@ def add_qmmm(system: mm.System, topology, positions, qm_atoms, qm_charge: int, l
     pme: long-range QM-MM electrostatics by PME (default: when the NonbondedForce uses PME or Ewald).
     pme_gpu: its grid on the GPU with CuPy (default: when CuPy sees a GPU).
     guess: starting LMOs of each step's SCF, "previous" (those of the last step) or extrapolated from the
-    last steps ("linear", "quadratic", "cubic"); default: MOPAC's (environment variable MOPAC_QMMM_GUESS)."""
+    last 2 or 4 steps ("linear", "aspc"); default: MOPAC's (environment variable MOPAC_QMMM_GUESS)."""
     if pme is None:
         pme = any(isinstance(f, mm.NonbondedForce) and f.getNonbondedMethod() in (mm.NonbondedForce.PME,
                   mm.NonbondedForce.Ewald) for f in system.getForces())

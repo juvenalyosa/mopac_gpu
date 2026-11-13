@@ -16,19 +16,27 @@
 subroutine qmmm_lmo_guess
 !
 !  Starting LMOs for the next step of a QM/MM session.  The SCF of a step started from the converged LMOs
-!  of the last step, C(n), lags behind the moving geometry; this extrapolates the occupied space with a
-!  polynomial of degree lmo_guess (at most) in the projectors P(n-k) onto the occupied spaces of the last
-!  steps (the time steps are assumed equal), applied to the LMOs of the last step:
+!  of the last step, C(n), lags behind the moving geometry; this extrapolates the occupied space from the
+!  last steps (the time steps are assumed equal) through the projectors P(n-k) onto their occupied spaces,
+!  applied to the LMOs of the last step:
 !
-!     occupied   C' = a0 C(n) + Sum_k ak P(n-k) C(n)        (a = 2, -1;  3, -3, 1;  4, -6, 4, -1)
-!     virtual    V' = V(n) - Sum_k ak P(n-k) V(n)
+!     occupied   C' = B1 C(n) + Sum_k B(k+1) P(n-k) C(n)
+!     virtual    V' = V(n) - Sum_k B(k+1) P(n-k) V(n)
 !
-!  P(n) C(n) = C(n) and P(n) V(n) = 0, so a space that did not move gives C' = C(n), V' = V(n).  The
+!  with the predictor coefficients of Kolafa's always stable predictor-corrector (J. Comput. Chem. 25, 335
+!  (2004)): lmo_guess 1 = linear, B = 2, -1; 2 = ASPC with k = 2, B = 2.8, -2.8, 1.2, -0.2 (4 steps).
+!  P(n) C(n) = C(n) and P(n) V(n) = 0, so a space that did not move gives C' = C(n), V' = V(n), and the
 !  projectors do not depend on how the LMOs of a step are rotated among themselves, which the SCF never
-!  changes: extrapolating the coefficients themselves amplified such rotations from step to step (3 points:
-!  the SCF failed after 90 steps).  P(n-k) X is kept on the atoms of each LMO of X.  The result is
-!  normalized and re-orthogonalized, and the next SCF builds the density and the Fock matrix from it
-!  before its first rotation (rebuild_from_lmos).
+!  changes (extrapolating the coefficients themselves amplified such rotations until the SCF failed).
+!  An SCF stopped at its tolerance leaves part of an error in place, and the extrapolation feeds it into
+!  the next step: polynomials of degree 2 and 3 (B = 3, -3, 1 and 4, -6, 4, -1, a triple and a quadruple
+!  root at 1) made the SCF of trypsin-BPTI diverge within 35-85 steps; the two schemes here have a double
+!  root at 1 and the others inside the unit circle (|z| = 0.45 for ASPC).  The converged LMOs are
+!  re-orthonormalized before they are kept: each SCF leaves them non-orthogonal by ~1e-6 to 1e-5, so the
+!  P(n-k) were not quite projectors, and ASPC fed that back until the SCF of trypsin-BPTI failed after
+!  ~120 steps.  P(n-k) X is kept on the atoms of each LMO of X.  The result is normalized and
+!  re-orthogonalized, and the next SCF builds the density and the Fock matrix from it before its first
+!  rotation (rebuild_from_lmos).
 !
     use qmmm_C, only : lmo_guess, lmo_hist, lmo_set
     use MOZYME_C, only : noccupied, nvirtual, ncf, nncf, ncocc, icocc, cocc, nce, nnce, ncvir, icvir, cvir, &
@@ -37,15 +45,22 @@ subroutine qmmm_lmo_guess
     use mozyme_gpu_scf_driver, only : mozyme_gpu_scf_note_host_lmos_modified
     use mozyme_section_timers, only : mozyme_section_timer_begin, mozyme_section_timer_end
     implicit none
-    double precision, parameter :: coef(0:3, 3) = reshape([2.d0, -1.d0, 0.d0, 0.d0, &
-                                                           3.d0, -3.d0, 1.d0, 0.d0, &
-                                                           4.d0, -6.d0, 4.d0, -1.d0], [4, 3])
+    double precision, parameter :: coef(0:3, 2) = reshape([2.d0, -1.d0, 0.d0, 0.d0, &
+                                                           2.8d0, -2.8d0, 1.2d0, -0.2d0], [4, 2])
+    integer, parameter :: nprev(2) = [1, 3]     ! earlier steps used besides the last one
     type(lmo_set) :: last
     double precision, dimension(:), allocatable :: ws, new_occ, new_vir
     integer, dimension(:), allocatable :: at, mark, cand, a_start, a_lmo
     integer :: k, n_hist, order
     double precision :: timer
     call mozyme_section_timer_begin('qmmm_lmo_guess', timer)
+    ! the SCF keeps the LMOs orthonormal only approximately; P(n-k) must be projectors
+    allocate (ws(norbs))
+    call normalize(noccupied, ncf, nncf, ncocc, icocc, cocc)
+    call normalize(nvirtual, nce, nnce, ncvir, icvir, cvir)
+    call reorth(ws)
+    call normalize(noccupied, ncf, nncf, ncocc, icocc, cocc)
+    call normalize(nvirtual, nce, nnce, ncvir, icvir, cvir)
     ! the converged occupied LMOs of the last step
     last%nocc = noccupied
     last%ncf = ncf(:noccupied)
@@ -58,13 +73,14 @@ subroutine qmmm_lmo_guess
       if (lmo_hist(k)%nocc /= noccupied) exit
       n_hist = k
     end do
-    order = min(lmo_guess, n_hist)
+    order = lmo_guess
+    if (nprev(order) > n_hist) order = min(n_hist, 1)   ! not enough steps yet: linear, or none
     if (order > 0) then
       allocate (at(numat), a_start(numat + 1))
       at = -1
       new_occ = coef(0, order)*cocc
       new_vir = cvir
-      do k = 1, order
+      do k = 1, nprev(order)
         call incidence(lmo_hist(k))
         allocate (mark(lmo_hist(k)%nocc), cand(lmo_hist(k)%nocc))
         mark = 0
@@ -80,7 +96,6 @@ subroutine qmmm_lmo_guess
     end do
     call move_set(last, lmo_hist(1))
     if (order > 0) then
-      allocate (ws(norbs))
       call normalize(noccupied, ncf, nncf, ncocc, icocc, cocc)
       call normalize(nvirtual, nce, nnce, ncvir, icvir, cvir)
       call reorth(ws)

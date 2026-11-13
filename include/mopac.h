@@ -223,8 +223,8 @@ void mozyme_qmmm_finalize(struct mozyme_state *state,
                           struct mopac_properties *properties);
 
 /* SCF iterations of the last mozyme_qmmm_step.  The SCF of each step starts from the LMOs of the last
-   step, or, with the environment variable MOPAC_QMMM_GUESS=linear (read by mozyme_qmmm_init), from LMOs
-   extrapolated linearly from the last two steps. */
+   step, or, with the environment variable MOPAC_QMMM_GUESS=linear or aspc (read by mozyme_qmmm_init), from
+   LMOs extrapolated from the last 2 or 4 steps. */
 int mozyme_qmmm_scf_iterations(void);
 
 /* allocate memory for mopac_state */
