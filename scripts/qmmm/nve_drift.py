@@ -21,6 +21,7 @@ fitted slopes (kJ/mol/ps) and their standard errors from ten block means, and th
 iterations per QM/MM call in NVT and NVE.  --guess linear starts the SCF of each step from LMOs extrapolated
 from the last two steps (MOPAC_QMMM_GUESS) instead of the LMOs of the last step.  --qm-constraints keeps the
 X-H constraints inside the QM region (except for the atoms of --qm-free), see openmm_mopac.add_qmmm.
+--nve 0 stops after the NVT steps (timing runs: summary.json then holds nvt_s_per_step and the SCF iterations).
 """
 
 import argparse
@@ -186,6 +187,16 @@ def run(a):
     t0 = time.perf_counter()
     integ.step(a.nvt)
     t_nvt = time.perf_counter() - t0
+    if a.nve <= 0:                          # NVT only (timing runs)
+        out = dict(vars(a), atoms=system.getNumParticles(), nvt_s_per_step=t_nvt / max(1, a.nvt), qm_calls=rec.calls)
+        if rec.iters[False][1:]:
+            out["scf_iterations_nvt"] = float(np.mean(rec.iters[False][1:]))
+        if qmmm:
+            qmmm.close()
+        with open(os.path.join(a.out, "summary.json"), "w") as fh:
+            json.dump(out, fh, indent=1, default=str)
+        print(f"NVT: {t_nvt / max(1, a.nvt):.4f} s/step", flush=True)
+        return
     st = ctx.getState(getPositions=True, getVelocities=True)
     del ctx, integ
 
