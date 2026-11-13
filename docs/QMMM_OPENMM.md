@@ -117,17 +117,17 @@ python scripts/qmmm/run_qmmm_md.py protein.pdb --libmopac build/libmopac.so --qm
   tolerance 0.001, MOPAC on the CPU, OpenMM OpenCL (single precision), energy and work of the QM/MM force
   checked at every step (local preparation, 1 to 3 ps each):
 
-  | | per step, kJ/mol (SD) | per 0.5 ps (SD of block sums) |
-  |---|---:|---:|
-  | 1 fs | 0.108 | 1.75 |
-  | 0.5 fs | 0.034 | 0.22 |
-  | 1 fs, `qm_constraints=True` | 0.151 | 1.83 |
+  | | length | SD per step, kJ/mol | SD of the sums over 0.2 ps (blocks) |
+  |---|---:|---:|---:|
+  | 1 fs | 2.8 ps | 0.108 | 1.09 (14) |
+  | 0.5 fs | 1.0 ps | 0.034 | 0.23 (5) |
+  | 1 fs, `qm_constraints=True` | 1.5 ps | 0.151 | 0.65 (7) |
 
   Use 0.5 fs (the default of `run_qmmm_md.py`) when energy conservation matters. `qm_constraints=True`
   (`--qm-constraints`) keeps the force field's X-H constraints inside the QM region, as Amber's `qmshake=1`
   (its default when SHAKE is on) does, and `qm_free` (`--qm-free E:57:HD1`) leaves chosen atoms free (a
   proton that may move); the constrained lengths are the force field's, not PM7's. At 1 fs it did not make
-  the errors smaller: the heavy atoms of the QM region (the ring of His57) move fast too.
+  the errors per step smaller: the heavy atoms of the QM region (the ring of His57) move fast too.
 - The H-bond correction of PM7 is used with `HB-SMOOTH` (its original form has kinks that MD and FORCE
   cannot cross).
 - QM-PME needs an orthorhombic box. Its parameters are fields of `qmmm.region` (`pme_alpha` = 0.25 1/A,
