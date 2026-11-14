@@ -274,6 +274,10 @@ contains
       ! kernel): trypsin-BPTI, 59 QM atoms, A100, 50 instead of 52 ms per 0.5-fs step, heats as the
       ! other kernel within its run-to-run differences
       code = mopac_setenv_default('MOPAC_MOZYME_DIAGG2_STAGED'//c_null_char, '1'//c_null_char)
+      ! each virtual starts its diagg2 chain at its own offset (MOPAC_MOZYME_DIAGG2_STAGGER=0: list order, where
+      ! every block began on the same occupied LMOs): trypsin-BPTI 31.2 instead of 33.4 ms per step, lock waits
+      ! halved, NVE drift of the QM/MM force as before (colab/qmmm_speed8_colab.ipynb)
+      code = mopac_setenv_default('MOPAC_MOZYME_DIAGG2_STAGGER'//c_null_char, '1'//c_null_char)
       mozyme_gpu_requested = .true.
       mozyme_gpu = .true.
       mozyme_resident_fock_gpu = .true.

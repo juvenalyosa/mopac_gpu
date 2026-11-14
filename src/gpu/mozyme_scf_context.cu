@@ -4884,8 +4884,11 @@ __device__ void block_rotate_pair_indexed(const DiaggRotateArgs &a, int ij, int 
 // on lock timing, so results differ run to run at rounding level (accepted:
 // tolerance vs CPU).
 // Position k of a virtual's chain of len pairs, starting at a per-virtual offset when stagger is set
-// (MOPAC_MOZYME_DIAGG2_STAGGER=1): the pairs of a virtual are stored by occupied index, so in list order every
-// block starts on the same few occupied LMOs and waits for their locks.
+// (MOPAC_MOZYME_DIAGG2_STAGGER=1, the default in QM/MM sessions): the pairs of a virtual are stored by occupied
+// index, so in list order every block starts on the same few occupied LMOs and waits for their locks.  In
+// trypsin-BPTI (59 QM atoms, A100) the lock waits per block halved (207 to 100 us per sweep) and diagg2 took 8.1
+// instead of 10.2 ms per step; the order of the rotations changes, so the SCF takes another path (1 % more
+// iterations, first-call forces 0.05 kJ/mol/nm apart against 0.025 between repeats; NVE drift as before).
 __device__ inline int diagg2_chain_pos(int k, int len, int i, int stagger) {
   if (!stagger || len <= 1) return k;
   const unsigned s0 = (static_cast<unsigned>(i) * 0x9E3779B1u) % static_cast<unsigned>(len);
