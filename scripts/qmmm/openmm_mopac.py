@@ -57,6 +57,7 @@ import openmm.unit as unit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mopac_qmmm_api import QMSession  # noqa: E402
+from qmmm_mm_gpu import MMChargesKernels  # noqa: E402
 from qmmm_pme import FarFieldGPU, FarFieldNumPy, PMEGrid, fused_far_field_available, gpu_available  # noqa: E402
 
 KCAL_TO_KJ = 4.184
@@ -181,11 +182,13 @@ class MopacQMMMForce:
         self.grid = None
         self.far = None
         self.qm_all = region.mm_charges[self.mm_idx_all]
-        # the work over all MM charges (imaging, switching groups, forces) on the GPU with CuPy when the PME
-        # grid is there (_compute_dev); QMMM_MM_GPU=0 keeps it in NumPy, QMMM_MM_GPU=numpy runs the device
-        # code path with NumPy (tests)
+        # the work over all MM charges (imaging, switching groups, forces) on the GPU when the PME grid is there
+        # (_compute_dev): in the fused kernels of qmmm_mm_gpu.py (orthorhombic boxes), else with CuPy array
+        # operations.  QMMM_MM_GPU=0 keeps it in NumPy (compute), =arrays uses the CuPy array code throughout,
+        # =numpy runs the array code with NumPy (tests)
         mode = os.environ.get("QMMM_MM_GPU", "")
         self.xp = None
+        self.mmk = None
         if mode == "numpy":
             self.xp = np
         elif mode != "0" and region.pme_gpu:
@@ -200,6 +203,13 @@ class MopacQMMMForce:
             self.d_q_all = xp.asarray(self.qm_all, dtype=float)
             at = {a: i for i, a in enumerate(self.qm_idx)}
             self.link_q_pos = np.array([at[q] for q in self.link_q], dtype=int)
+            if self.xp is not np and mode != "arrays":
+                try:
+                    self.mmk = MMChargesKernels(self.mm_idx_all, self.group_of, self.group_size, self.qm_all,
+                                                len(region.mm_charges), len(self.qm_idx))
+                except Exception as e:  # noqa: BLE001
+                    print("QM/MM: fused MM-charge kernels not used (%s); CuPy array code" % e, flush=True)
+        self.mmk_checked = False
 
     def _qm_coords(self, pos_a):
         xq = pos_a[self.qm_idx]
@@ -328,12 +338,10 @@ class MopacQMMMForce:
         return heat * KCAL_TO_KJ, forces
 
     def _compute_dev(self, state):
-        """compute() with the work over the MM charges on the device (self.xp); the QM atoms, MOPAC and the
-        last force terms on the host.  Same steps and terms as compute()."""
-        xp = self.xp
-        host = (lambda a: a) if xp is np else xp.asnumpy
+        """compute() with the work over the MM charges on the device: the QM atoms, MOPAC and the last force
+        terms on the host, the MM charges in the fused kernels (self.mmk, orthorhombic boxes) or in array
+        operations (self.xp).  Same steps and terms as compute()."""
         pos_nm = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
-        n = pos_nm.shape[0]
         nq = len(self.qm_idx)
         pq = pos_nm[self.qm_idx] * 10.0
         pl = pos_nm[self.link_m] * 10.0
@@ -350,18 +358,60 @@ class MopacQMMMForce:
             lq = pq[self.link_q_pos]
             xq = np.vstack([pq, lq + self.link_g[:, None] * (pl - lq)])
         c = xq.mean(axis=0)
+        if self.region.periodic:
+            self._check_box(xq, c, box)
+        xr = xq[:nq]
+        rmax = np.max(np.linalg.norm(xr - c, axis=1)) + self.region.roff + 3.0
+        kern = self.mmk is not None and box is not None and not np.any(box - np.diag(np.diag(box)))
+        if kern:
+            xm, xs, qs, xs_h, qs_h = self.mmk.select(pos_nm, xr, c, np.diag(box), rmax, self.region.ron,
+                                                     self.region.roff)
+            if not self.mmk_checked:
+                xm, xs, qs, xs_h, qs_h, kern = self._check_kernels_select(pos_nm, xr, c, box, rmax,
+                                                                          (xm, xs, qs, xs_h, qs_h))
+        else:
+            xm, xs, qs, xs_h, qs_h = self._select_arrays(pos_nm, xr, c, box, rmax)
+        g_all = None
+        if self.region.pme:
+            far = self._pme_far_potential(xq, xm, xs, qs, box, c)
+            heat, gq, gm = self.session.step(xq, xs_h, qs_h, 0.0, 0.0, qm_pot=far["phi"])
+            pot = self.session.mm_pot.copy()
+            g_all = self._pme_far_gradient(far, xq, xs, qs, gq, gm, pot, device=True)
+        else:
+            heat, gq, gm = self.session.step(xq, xs_h, qs_h, 0.0, 0.0)
+            pot = self.session.mm_pot
+        if kern:
+            forces, ga_sum = self.mmk.forces(g_all, gm, pot, GRAD_KCAL_A_TO_KJ_NM)
+            if not self.mmk_checked:
+                forces, ga_sum = self._check_kernels_forces(g_all, gm, pot, forces, ga_sum)
+        else:
+            forces, ga_sum = self._forces_arrays(g_all, gm, pot)
+        forces[self.qm_idx] -= gq[:nq] * GRAD_KCAL_A_TO_KJ_NM
+        if len(self.link_q):
+            fl = -gq[nq:] * GRAD_KCAL_A_TO_KJ_NM
+            np.add.at(forces, self.link_q, (1.0 - self.link_g)[:, None] * fl)
+            np.add.at(forces, self.link_m, self.link_g[:, None] * fl)
+        if ga_sum is not None:
+            forces[self.qm_idx] -= ga_sum * GRAD_KCAL_A_TO_KJ_NM
+        self.calls += 1
+        self.scf_iterations += self.session.scf_iterations or 0
+        self.last = dict(heat=heat, n_mm=len(xs_h))
+        return heat * KCAL_TO_KJ, forces
+
+    def _select_arrays(self, pos_nm, xr, c, box, rmax):
+        """MM charges imaged around the QM centre c (xm, device), the switched ones (xs, qs; device and
+        host), with array operations; keeps what _forces_arrays needs"""
+        xp = self.xp
+        host = (lambda a: a) if xp is np else xp.asnumpy
         cd = xp.asarray(c)
         xm = xp.asarray(pos_nm)[self.d_mm_idx] * 10.0
         if self.region.periodic:
-            self._check_box(xq, c, box)
             ref = cd + self._image_dev(xm[self.d_group_first] - cd, box)
             ref = ref[self.d_group_of]
             xm = ref + self._image_dev(xm - ref, box)
         ng = len(self.group_ids)
         cg = xp.stack([xp.bincount(self.d_group_of, weights=xm[:, k], minlength=ng) for k in range(3)], axis=1)
         cg /= self.d_group_size[:, None]
-        xr = xq[:nq]
-        rmax = np.max(np.linalg.norm(xr - c, axis=1)) + self.region.roff + 3.0
         near_g = xp.nonzero(xp.linalg.norm(cg - cd, axis=1) < rmax)[0]
         lam = 0.5
         rv = cg[near_g, None, :] - xp.asarray(xr)[None, :, :]
@@ -382,42 +432,67 @@ class MopacQMMMForce:
         gsel = self.d_group_of[sel]
         xs = xm[sel]
         qs = self.d_q_all[sel] * wg[gsel]
-        xs_h, qs_h = host(xs), host(qs)
-        if self.region.pme:
-            far = self._pme_far_potential(xq, xm, xs, qs, box, c)
-            heat, gq, gm = self.session.step(xq, xs_h, qs_h, 0.0, 0.0, qm_pot=far["phi"])
-            pot = self.session.mm_pot.copy()
-            g_all = self._pme_far_gradient(far, xq, xs, qs, gq, gm, pot, device=True)
-        else:
-            heat, gq, gm = self.session.step(xq, xs_h, qs_h, 0.0, 0.0)
-            pot = self.session.mm_pot
-        f = xp.zeros((n, 3))
-        if self.region.pme:
+        self._arr = dict(ng=ng, near_g=near_g, dw=dw, pA=pA, rv=rv, r=r, sel=sel, gsel=gsel, n=len(pos_nm))
+        return xm, xs, qs, host(xs), host(qs)
+
+    def _forces_arrays(self, g_all, gm, pot):
+        """forces (kJ/(mol nm)) on all atoms from the MM-charge terms after _select_arrays, and the switching
+        gradient on the QM atoms (kcal/(mol A), None without switched charges)"""
+        xp = self.xp
+        host = (lambda a: a) if xp is np else xp.asnumpy
+        a = self._arr
+        f = xp.zeros((a["n"], 3))
+        if g_all is not None:
             f[self.d_mm_idx] = xp.asarray(g_all) * -GRAD_KCAL_A_TO_KJ_NM
         ga_sum = None
+        sel = a["sel"]
         if len(sel):
             rows = self.d_mm_idx[sel]                             # each MM charge once
             f[rows] += xp.asarray(gm) * -GRAD_KCAL_A_TO_KJ_NM
             # switching forces: dE/dw_g = Sum_i q_i pot_i, w = w(dsoft(centre, QM atoms))
-            dEdw = xp.bincount(gsel, weights=self.d_q_all[sel] * xp.asarray(pot), minlength=ng)
-            coef = dEdw[near_g] * dw                              # dE/d dsoft, kcal/(mol A)
+            dEdw = xp.bincount(a["gsel"], weights=self.d_q_all[sel] * xp.asarray(pot), minlength=a["ng"])
+            coef = dEdw[a["near_g"]] * a["dw"]                    # dE/d dsoft, kcal/(mol A)
+            pA, rv, r = a["pA"], a["rv"], a["r"]
             u = rv / r[:, :, None]                                # unit vectors QM atom -> centre
             gc = coef[:, None] * xp.einsum('ga,gak->gk', pA, u)    # dE/d centre
             ga_sum = host((-coef[:, None, None] * pA[:, :, None] * u).sum(axis=0))   # dE/d QM atom
-            gmem = gc[xp.searchsorted(near_g, gsel)] / self.d_group_size[gsel][:, None]
+            gmem = gc[xp.searchsorted(a["near_g"], a["gsel"])] / self.d_group_size[a["gsel"]][:, None]
             f[rows] += gmem * -GRAD_KCAL_A_TO_KJ_NM
-        forces = np.array(host(f))
-        forces[self.qm_idx] -= gq[:nq] * GRAD_KCAL_A_TO_KJ_NM
-        if len(self.link_q):
-            fl = -gq[nq:] * GRAD_KCAL_A_TO_KJ_NM
-            np.add.at(forces, self.link_q, (1.0 - self.link_g)[:, None] * fl)
-            np.add.at(forces, self.link_m, self.link_g[:, None] * fl)
-        if ga_sum is not None:
-            forces[self.qm_idx] -= ga_sum * GRAD_KCAL_A_TO_KJ_NM
-        self.calls += 1
-        self.scf_iterations += self.session.scf_iterations or 0
-        self.last = dict(heat=heat, n_mm=len(sel))
-        return heat * KCAL_TO_KJ, forces
+        return np.array(host(f)), ga_sum
+
+    def _check_kernels_select(self, pos_nm, xr, c, box, rmax, got):
+        """first call with the fused kernels: their switched charges against the array code's; on a
+        mismatch the array code is used from here on"""
+        ref = self._select_arrays(pos_nm, xr, c, box, rmax)
+        same = len(got[3]) == len(ref[3])
+        d = max(float(np.abs(got[3] - ref[3]).max(initial=0.0)), float(np.abs(got[4] - ref[4]).max(initial=0.0))) \
+            if same else float("inf")
+        if same and d <= 1e-9:
+            print("QM/MM: fused MM-charge kernels, switched charges as in the array code (max diff %.1e)" % d,
+                  flush=True)
+            return (*got, True)
+        print("QM/MM: fused MM-charge kernels disagree with the array code (%d against %d switched charges, max "
+              "diff %.1e); array code used" % (len(got[3]), len(ref[3]), d), flush=True)
+        self.mmk, self.mmk_checked = None, True
+        return (*ref, False)
+
+    def _check_kernels_forces(self, g_all, gm, pot, forces, ga_sum):
+        """first call with the fused kernels: their forces against the array code's (after
+        _check_kernels_select); on a mismatch the array code is used from here on"""
+        self.mmk_checked = True
+        f_ref, ga_ref = self._forces_arrays(g_all, gm, pot)
+        scale = max(1.0, float(np.abs(f_ref).max()))
+        d = float(np.abs(forces - f_ref).max())
+        if ga_ref is not None:
+            d = max(d, float(np.abs(ga_sum - ga_ref).max()) * GRAD_KCAL_A_TO_KJ_NM)
+        if d <= 1e-9 * scale:
+            print("QM/MM: fused MM-charge kernels, forces as in the array code (max diff %.1e kJ/mol/nm)" % d,
+                  flush=True)
+            return forces, ga_sum
+        print("QM/MM: fused MM-charge kernels disagree with the array code (forces, max diff %.1e kJ/mol/nm); "
+              "array code used" % d, flush=True)
+        self.mmk = None
+        return f_ref, ga_ref
 
     def _pme_far_potential(self, xq, xm, xs, qs, box, c):
         """phi_far at the QM atoms (kcal/(mol e)), qmmm_pme.FarFieldNumPy / FarFieldGPU"""

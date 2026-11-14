@@ -16,6 +16,8 @@ that a step costs two charge spreadings, two FFT pairs and four small transfers.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from scipy.special import erfc
@@ -508,6 +510,9 @@ class FarFieldGPU:
         self.K = tuple(int(k) for k in grid.K)
         self.kl = tuple(np.float64(k / l) for k, l in zip(grid.K, grid.L))
         self.qm_host = None
+        self.rho = None
+        # cuFFT plans of _convolve: None not tried yet, False not used (QMMM_FFT_PLANS=0: CuPy rfftn/irfftn)
+        self.plans = False if os.environ.get("QMMM_FFT_PLANS", "") == "0" else None
 
     def _blocks(self, n):
         return ((n + self.BLOCK - 1) // self.BLOCK,), (self.BLOCK,)
@@ -519,12 +524,51 @@ class FarFieldGPU:
 
     def _grid_potential(self, x, q):
         """reciprocal-space potential grid of charges q at positions x (both on the device)"""
-        cp, g = self.cp, self.grid
-        rho = cp.zeros(self.K)
+        if self.rho is None:
+            self.rho = self.cp.zeros(self.K)
+        rho = self.rho
+        rho.fill(0.0)
         n = x.shape[0]
         if n:
             self.k_spread(*self._blocks(n), (x, q, np.int32(n), *self.kl, *(np.int32(k) for k in self.K), rho))
-        return cp.ascontiguousarray(g.fft.irfftn(g.fft.rfftn(rho) * g.kernel, s=self.K))
+        return self._convolve(rho)
+
+    def _convolve(self, rho):
+        """irfftn(rfftn(rho) * kernel), through two cuFFT plans made once: CuPy's rfftn and irfftn cost ~0.28 ms
+        of host time per call on a Colab A100 (four per step).  The first call checks the plans against
+        rfftn/irfftn; those are used if the plans fail or differ.  The result may be a buffer reused by the
+        next call."""
+        cp, g = self.cp, self.grid
+        if self.plans is None:
+            ref = cp.ascontiguousarray(g.fft.irfftn(g.fft.rfftn(rho) * g.kernel, s=self.K))
+            try:
+                import cupyx.scipy.fft as cfft
+                from cupy.cuda import cufft
+                spec = cp.empty(self.K[:2] + (self.K[2] // 2 + 1,), dtype=cp.complex128)
+                plans = (cfft.get_fft_plan(rho, axes=(0, 1, 2), value_type="R2C"),
+                         cfft.get_fft_plan(spec, shape=self.K, axes=(0, 1, 2), value_type="C2R"),
+                         spec, cp.empty(self.K), g.kernel / float(np.prod(self.K)), cufft.CUFFT_FORWARD,
+                         cufft.CUFFT_INVERSE)
+                d = float(cp.abs(self._convolve_plans(rho, plans) - ref).max())
+                ok = d <= 1e-12 * max(1e-300, float(cp.abs(ref).max()))
+                why = "differ from rfftn/irfftn by %.1e" % d
+            except Exception as e:  # noqa: BLE001
+                ok, why = False, repr(e)
+            self.plans = plans if ok else False
+            print(("QM-PME: cuFFT plans, %s" if ok else "QM-PME: cuFFT plans not used (%s); CuPy rfftn/irfftn")
+                  % why, flush=True)
+            return ref
+        if self.plans is False:
+            return cp.ascontiguousarray(g.fft.irfftn(g.fft.rfftn(rho) * g.kernel, s=self.K))
+        return self._convolve_plans(rho, self.plans)
+
+    @staticmethod
+    def _convolve_plans(rho, plans):
+        fwd, inv, spec, phi, kernel, forward, inverse = plans
+        fwd.fft(rho, spec, forward)
+        spec *= kernel
+        inv.fft(spec, phi, inverse)        # unnormalized: kernel carries 1/prod(K)
+        return phi
 
     def _gather(self, x, phi, scale):
         cp = self.cp
