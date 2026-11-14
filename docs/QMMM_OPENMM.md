@@ -383,6 +383,33 @@ The `diagg2` trace (`MOPAC_MOZYME_SCF_TRACE=1`, 20 steps) counted per sweep:
 - with the block kernel, a sweep spanned 790 us, 13.8 us per rotation of that chain, and each block waited 226 us
   for locks.
 
+Two later changes made the point-charge kernels faster on the GPU:
+- At commit `48bc1100`, their chunks are sized for ~32 000 threads. Before, there was one thread per QM atom over
+  64 charges, ~1900 threads in all. In `colab/qmmm_speed5_colab.ipynb` the main gradient kernel then took 0.09 ms
+  per step against 0.53 ms, and the `qmmm_grad` section 0.39 ms against 1.05 ms.
+- At commit `da705b9d`, the sums over the chunks run one thread per QM atom and value. They had taken 0.32 ms.
+
+Gaps inside the resident SCF loop, from `nsys` with NVTX marks at the SCF's stage boundaries (`MOPAC_NVTX=1`, the
+gaps charged by `analyze_prof.scf_gaps` in the notebooks):
+- The GPU was idle 4.0 ms per step in all.
+- 1800 of the gaps were shorter than 5 us and added up to 2.5 ms. These are the boundaries between ~2100 GPU
+  operations per step: kernels, copies and memsets.
+- Only 3 % of the operations were issued by the host after the GPU had gone idle.
+- 1.2 ms of the idle time fell while the host was inside `cudaEventSynchronize` after the convergence stage, and
+  0.7 ms inside `cudaMemcpy`.
+
+`QMMM_CUDA_BLOCKING_SYNC=0` or `1` sets OpenMM's CUDA property `UseBlockingSync` (`colab/qmmm_speed6_colab.ipynb`).
+It changed neither the step nor those idle times:
+
+| synchronization | s per step |
+|---|---:|
+| OpenMM's default | 0.0322 / 0.0320 |
+| spinning (`0`) | 0.0323 / 0.0321 |
+| blocking (`1`) | 0.0321 |
+
+Whole chignolin and crambin took 0.068 and 0.445 s with the default, and 0.068 and 0.447 s spinning. The first-call
+heats of the five trypsin runs lay within 6.1e-6 kcal/mol of −297.0127265.
+
 ## Example: trypsin with BPTI
 
 `scripts/kaggle/mopac_qmmm_enzyme` (PDB 2PTC, 46 637 atoms with TIP3P water):
