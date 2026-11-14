@@ -40,6 +40,7 @@ module mozyme_gpu_gradient
   public :: mozyme_gpu_pbc_solrot_run
   public :: mozyme_gpu_disp_enabled
   public :: mozyme_gpu_disp_check_enabled
+  public :: mozyme_gpu_qmmm_enabled
 
   ! Mirror of MozymePairTablesC in mozyme_pair_gradient.cu.
   type, bind(C) :: mozyme_pair_tables_c
@@ -232,6 +233,13 @@ contains
     implicit none
     mozyme_gpu_disp_enabled = gpu_allowed() .and. env_truthy('MOPAC_DH_DISP_GPU')
   end function mozyme_gpu_disp_enabled
+
+  ! MOPAC_QMMM_GPU=1 (set by the defaults): the MM point charges of QM/MM (qmmm_hcore, qmmm_grad) on the
+  ! device (src/gpu/qmmm_point_charges.cu).
+  logical function mozyme_gpu_qmmm_enabled()
+    implicit none
+    mozyme_gpu_qmmm_enabled = gpu_allowed() .and. env_truthy('MOPAC_QMMM_GPU')
+  end function mozyme_gpu_qmmm_enabled
 
   ! MOPAC_GPU_DISP_CHECK=1: compare with the CPU energy / numerical gradient.
   logical function mozyme_gpu_disp_check_enabled()

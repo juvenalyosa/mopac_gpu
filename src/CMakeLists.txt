@@ -78,6 +78,10 @@ if(GPU)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/mozyme_pair_gradient.cu)
     # CUDA PM6-DH/PM7 dispersion correction (energy + analytic gradient)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/dh_dispersion.cu)
+    # CUDA QM/MM point charges (one-electron matrix and gradient of the MM charges)
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/qmmm_point_charges.cu)
+    # NVTX ranges of the MOZYME section timers (MOPAC_NVTX=1)
+    target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/nvtx_ranges.cu)
     # CUDA PM6-DH+/PM7 hydrogen-bond correction (EH_plus energies + FD gradient)
     target_sources(mopac-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hbond_dh_plus.cu)
     # CUDA HMTR optimizer kernels
@@ -112,6 +116,8 @@ if(GPU)
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/grad_kernels.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/mozyme_pair_gradient.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/dh_dispersion.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/gpu/qmmm_point_charges.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/gpu/nvtx_ranges.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hbond_dh_plus.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/hmtr_optimizer.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/gpu/cosmo_gradient.cu

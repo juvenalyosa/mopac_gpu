@@ -22,6 +22,19 @@ module mozyme_section_timers
 
   logical, save :: env_checked = .false.
   logical, save :: profile_enabled = .false.
+  ! MOPAC_NVTX=1 (GPU builds): every section is also an NVTX range, for timelines in Nsight Systems
+  logical, save :: nvtx_enabled = .false.
+#ifdef GPU
+  interface
+    subroutine mopac_nvtx_push(name, name_len) bind(C, name='mopac_nvtx_push')
+      use iso_c_binding, only : c_char, c_int
+      character(kind=c_char), intent(in) :: name(*)
+      integer(c_int), value :: name_len
+    end subroutine mopac_nvtx_push
+    subroutine mopac_nvtx_pop() bind(C, name='mopac_nvtx_pop')
+    end subroutine mopac_nvtx_pop
+  end interface
+#endif
   integer, save :: section_count = 0
   character(len=section_name_len), save :: section_names(max_sections) = ' '
   integer(kind=8), save :: section_calls(max_sections) = 0_8
@@ -55,7 +68,15 @@ contains
     double precision, intent(out) :: token
 
     token = -1.d0
-    if (.not. mozyme_section_timers_enabled()) return
+    if (.not. mozyme_section_timers_enabled()) then
+#ifdef GPU
+      if (nvtx_enabled) call mopac_nvtx_push(name, len(name))
+#endif
+      return
+    end if
+#ifdef GPU
+    if (nvtx_enabled) call mopac_nvtx_push(name, len(name))
+#endif
     token = wall_seconds()
   end subroutine mozyme_section_timer_begin
 
@@ -76,6 +97,9 @@ contains
     integer :: idx
     double precision :: now, elapsed_ms
 
+#ifdef GPU
+    if (nvtx_enabled) call mopac_nvtx_pop()
+#endif
     if (.not. profile_enabled) return
     if (token < 0.d0) return
 
@@ -125,6 +149,7 @@ contains
     profile_enabled = env_enabled('MOPAC_MOZYME_SECTION_PROFILE') .or. &
       env_enabled('MOPAC_MOZYME_PROFILE') .or. &
       env_enabled('MOPAC_GPU_PROFILE')
+    nvtx_enabled = env_enabled('MOPAC_NVTX')
     env_checked = .true.
   end subroutine mozyme_section_timer_init
 
