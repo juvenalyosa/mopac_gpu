@@ -478,6 +478,35 @@ Checks against the lock kernel:
 - Whole chignolin and crambin, dense against the lock kernel at the first call: forces up to 0.39 and 0.53 kJ/mol/nm
   apart (largest force 4538 and 5836), with no repeat runs.
 
+At commit `e6fddf48`, `diagg1` also runs on dense matrices in QM/MM sessions (`MOPAC_MOZYME_DIAGG1_DENSE=1`, set
+unless already defined; commit `977d7e25`). `diagg1` computes the Fock elements between occupied and virtual LMOs and
+lists the pairs `diagg2` rotates.
+- The Fock matrix is built dense from its atom-pair blocks.
+- The elements come from two DGEMMs (cuBLAS), F_vo = (C_vir F) C_occ^T, on the dense LMO rows of `diagg2`.
+- The pair list follows the sparse kernel's rules: the prescreen on the first two atoms of each LMO, |F_ij| >
+  `oldlim`, ascending occupied order, and odd iterations recomputing only the listed pairs. So do `sumt`, `tiny` and
+  the virtual energies.
+- Only the density screen of the sparse sums (terms below `cutoff`, at most 1e-8) is gone.
+- If the dense tables cannot be built, the sparse passes run.
+
+Measured with `colab/qmmm_speed10_colab.ipynb`, one Colab session; `diagg1` took ~1.5 instead of 5.1 ms per step:
+
+| | dense `diagg1` | sparse `diagg1` |
+|---|---:|---:|
+| trypsin–BPTI, `tolerance=0.01` (two runs each) | 0.0215 / 0.0211 s | 0.0259 / 0.0259 s |
+| trypsin–BPTI, 0.001 | 0.0269 s | 0.0343 s |
+| whole chignolin | 0.0312 s | 0.0445 s |
+| whole crambin | 0.245 s | 0.352 s |
+
+Checks against the sparse `diagg1`:
+- SCF iterations per step: 13.4 at 0.01 and 21.7 at 0.001 with both. Whole crambin took 14.5 against 15.9.
+- First-call heats of the four trypsin runs at 0.01: within 3e-6 kcal/mol.
+- First-call forces at 0.01: the dense runs were 0.16–0.18 kJ/mol/nm from the sparse ones. The two sparse runs, whose
+  first SCF took 38 and 39 iterations, were 0.17 apart, and the two dense runs 0.016.
+- At 0.001 the dense and sparse first-call forces were 0.015 apart, and the heats 1e-7 kcal/mol.
+- NVE, 1 ps at 0.001 and 0.5 fs from the same state: the QM/MM force drifted by −0.92 ± 0.11 kJ/mol/ps, against −0.90
+  ± 0.11.
+
 ## Example: trypsin with BPTI
 
 `scripts/kaggle/mopac_qmmm_enzyme` (PDB 2PTC, 46 637 atoms with TIP3P water):
