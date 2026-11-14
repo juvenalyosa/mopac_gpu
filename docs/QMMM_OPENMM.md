@@ -410,6 +410,41 @@ It changed neither the step nor those idle times:
 Whole chignolin and crambin took 0.068 and 0.445 s with the default, and 0.068 and 0.447 s spinning. The first-call
 heats of the five trypsin runs lay within 6.1e-6 kcal/mol of −297.0127265.
 
+`diagg2`, the rotations between occupied and virtual LMOs, was the largest kernel, at 9.7 ms per step. Two
+attempts followed:
+
+- **One warp per virtual LMO** (`colab/qmmm_speed7_colab.ipynb`, commit `cdc2f84d`, reverted). The rotation was the
+  one of the cooperative kernel; the locks were those of the block kernel. It was slower: 31 us per rotation on the
+  critical chain against ~14 us, `diagg2` 24 against 10 ms per step, and the trypsin step 46.7 against 32.4 ms.
+  Its first-call heats and its NVE drift were as with the default kernel.
+- **Phase timers** in the trace (`colab/qmmm_speed8_colab.ipynb`, commit `d03f8d72`). In trypsin–BPTI the LMOs grew
+  during the first SCF from ~15 to ~50 of the 59 QM atoms, and stayed at ~53 atoms on average (occupied and
+  virtual alike). The pair list held ~3400 of the 76 × 61 = 4636 occupied–virtual pairs.
+  - Per sweep, each block (one virtual) did ~39 rotations. Inside the staged kernel they cost 80 us in staging the
+    occupied LMO, 81 us in the growth tests and 72 us in applying and writing back, ~6 us per rotation in all.
+  - Each block also waited 207 us for the occupied LMOs' locks.
+  - The pairs of a virtual are stored in ascending occupied index (`diagg1`), so every block began its chain on the
+    same occupied LMOs.
+
+At commit `2cb2f2be`, each virtual in a QM/MM session starts its chain at its own offset
+(`MOPAC_MOZYME_DIAGG2_STAGGER=1`, set unless already defined). With it:
+- the lock waits per block fell to 100 us, and the critical chain from 13.6 to 10.7 us per rotation;
+- `diagg2` took 8.1 instead of 10.2 ms per step (stage profile).
+
+| | staggered | list order |
+|---|---:|---:|
+| trypsin–BPTI, `tolerance=0.01` (two runs each) | 0.0313 / 0.0311 s | 0.0335 / 0.0334 s |
+| trypsin–BPTI, 0.001 | 0.0434 s | 0.0471 s |
+| whole chignolin | 0.0620 s | 0.0700 s |
+| whole crambin | 0.442 s | 0.457 s |
+
+The order of the rotations changes the SCF's path:
+- SCF iterations per step: 13.42 against 13.29, and 21.76 against 21.48 at 0.001.
+- First-call heats: within 3.5e-6 kcal/mol.
+- First-call forces: up to 0.054 kJ/mol/nm apart, against 0.025 between two runs in list order.
+- NVE, 1 ps at 0.001 and 0.5 fs from the same state: the QM/MM force drifted by −0.91 ± 0.11 kJ/mol/ps staggered,
+  against −0.94 ± 0.11 in list order.
+
 ## Example: trypsin with BPTI
 
 `scripts/kaggle/mopac_qmmm_enzyme` (PDB 2PTC, 46 637 atoms with TIP3P water):
