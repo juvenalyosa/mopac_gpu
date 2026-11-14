@@ -445,6 +445,39 @@ The order of the rotations changes the SCF's path:
 - NVE, 1 ps at 0.001 and 0.5 fs from the same state: the QM/MM force drifted by −0.91 ± 0.11 kJ/mol/ps staggered,
   against −0.94 ± 0.11 in list order.
 
+At commit `bba4e09c`, `diagg2` runs on dense LMO rows in QM/MM sessions (`MOPAC_MOZYME_DIAGG2_DENSE=1`, set unless
+already defined; commit `c8fd1164`). Each sweep goes through four kernels:
+- The LMOs are copied into rows with one column per basis function.
+- The lock sweep rotates whole rows, with the same angles, locks and staggered order. This drops the atom-list
+  bookkeeping of the sparse rotation.
+- An atom missing from an LMO is added where the squared norm of its coefficients exceeds `thresh`. This is the
+  test the sparse rotation applies to the coefficients a rotation would add, but here it is applied at the end of the
+  sweep instead of rotation by rotation.
+- The rows are written back.
+
+If an LMO's storage cannot take its new atoms, the dense result is dropped and the lock kernel does the sweep.
+Limits: at most 4096 atoms, and 6144 basis functions (one row in 48 KB of shared memory).
+
+Measured with `colab/qmmm_speed9_colab.ipynb`, one Colab session:
+- Every dense sweep of trypsin–BPTI was written back, with a median of 12 new atoms per sweep.
+- `diagg2` took 3.2 instead of 7.9 ms per step (stage profile).
+
+| | dense | lock kernel |
+|---|---:|---:|
+| trypsin–BPTI, `tolerance=0.01` (two runs each) | 0.0256 / 0.0258 s | 0.0305 / 0.0305 s |
+| trypsin–BPTI, 0.001 | 0.0349 s | 0.0430 s |
+| whole chignolin | 0.0464 s | 0.0628 s |
+| whole crambin | 0.354 s | 0.448 s |
+
+Checks against the lock kernel:
+- SCF iterations per step: 13.43 against 13.42 at 0.01, and 21.75 against 21.76 at 0.001.
+- First call, over the six pairs of the four trypsin runs at 0.01: heats within 1.5e-6 kcal/mol, forces within
+  0.032 kJ/mol/nm. Two runs with the lock kernel were 0.030 apart.
+- NVE, 1 ps at 0.001 and 0.5 fs from the same state: the QM/MM force drifted by −0.90 ± 0.12 kJ/mol/ps, against
+  −0.91 ± 0.11.
+- Whole chignolin and crambin, dense against the lock kernel at the first call: forces up to 0.39 and 0.53 kJ/mol/nm
+  apart (largest force 4538 and 5836), with no repeat runs.
+
 ## Example: trypsin with BPTI
 
 `scripts/kaggle/mopac_qmmm_enzyme` (PDB 2PTC, 46 637 atoms with TIP3P water):
