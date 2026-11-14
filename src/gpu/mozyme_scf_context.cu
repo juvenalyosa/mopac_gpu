@@ -9888,7 +9888,9 @@ mozyme_diagg2_dense_scatter_kernel(DiaggRotateArgs a, const int *atom_first, con
 // each LMO (diagg1_candidate), |F_ij| > oldlim, occupied LMOs in ascending order, odd iterations recomputing the
 // listed pairs only, sumt and tiny over the prescreened candidates (the listed pairs), eigv from the virtual's own
 // row.  The dense products also keep the terms the sparse sums leave out by the density screen (cutoff, at most
-// 1e-8).  If the dense tables cannot be built the sparse kernels run (DiaggVirtualArgs::dense_fail).
+// 1e-8).  If the dense tables cannot be built the sparse kernels run (DiaggVirtualArgs::dense_fail).  The default in
+// QM/MM sessions: on an A100, diagg1 took ~1.5 instead of 5.1 ms per step in trypsin-BPTI (59 QM atoms), the
+// first-call forces at tolerance 0.001 were 0.015 kJ/mol/nm from the sparse ones (colab/qmmm_speed10_colab.ipynb).
 
 // Block per atom: its Fock blocks with the atoms b <= at into the dense symmetric matrix (zeroed before).  A block
 // of two atoms is stored with the higher atom's orbitals as rows, a diagonal block as a packed lower triangle.

@@ -283,6 +283,10 @@ contains
       ! of 30.5 ms per step, whole crambin (642 QM atoms) 354 instead of 448 ms, first-call heats and NVE drift
       ! as before (colab/qmmm_speed9_colab.ipynb)
       code = mopac_setenv_default('MOPAC_MOZYME_DIAGG2_DENSE'//c_null_char, '1'//c_null_char)
+      ! diagg1's occupied-virtual Fock elements from dense matrices (MOPAC_MOZYME_DIAGG1_DENSE=0: the sparse passes);
+      ! A100, trypsin-BPTI 21.3 instead of 25.9 ms per step, whole crambin 245 instead of 352 ms, NVE drift as
+      ! before (colab/qmmm_speed10_colab.ipynb)
+      code = mopac_setenv_default('MOPAC_MOZYME_DIAGG1_DENSE'//c_null_char, '1'//c_null_char)
       mozyme_gpu_requested = .true.
       mozyme_gpu = .true.
       mozyme_resident_fock_gpu = .true.
