@@ -38,7 +38,7 @@ import openmm.app as app
 import openmm.unit as u
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from openmm_mopac import add_qmmm  # noqa: E402
+from openmm_mopac import add_qmmm, cuda_sync_property  # noqa: E402
 
 BACKBONE = ("N", "H", "CA", "HA", "C", "O", "OXT", "H1", "H2", "H3", "HA2", "HA3")
 PROTEIN = {"ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE", "LEU", "LYS", "MET", "PHE",
@@ -112,7 +112,7 @@ def main():
 
     plat = mm.Platform.getPlatformByName(a.platform)
     prec = a.precision or ("mixed" if a.platform == "CUDA" else "")
-    props = {"Precision": prec} if a.platform in ("CUDA", "OpenCL") and prec else {}
+    props = cuda_sync_property({"Precision": prec} if a.platform in ("CUDA", "OpenCL") and prec else {}, a.platform)
     pdb = app.PDBFile(a.pdb)
     ff = app.ForceField("amber14-all.xml", "amber14/tip3p.xml")
     mod = app.Modeller(pdb.topology, pdb.positions)

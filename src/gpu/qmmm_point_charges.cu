@@ -131,7 +131,7 @@ struct QmmmArgs {
   const double *mm_q;
   const double *pk;       // kSlots per QM atom: weighted density (qmmm_grad's wk * p)
   double ron, roff, ev, a0, fpc9;
-  double *part;           // per chunk and QM atom: kSlots + 1 (hcore) or 3 (grad)
+  double *part;           // per QM atom, value and chunk (chunks innermost): kSlots + 1 (hcore) or 3 (grad) values
   double *out_atom;       // per QM atom: kSlots + 1 (hcore: Sum q S v, Sum tore q S gam) or 3 (grad)
   double *part_mm;        // per chunk of QM atoms and charge: gradient (3), potential, energy
   double *mm_grad, *mm_pot, *mm_e;
@@ -161,20 +161,20 @@ __global__ void qmmm_hcore_partial(QmmmArgs a) {
     }
     en += par[5] * a.mm_q[j] * pt.sw * pt.ri1;
   }
-  double *p = a.part + (long long)t * (kSlots + 1);
-  for (int k = 0; k < kSlots; k++) p[k] = acc[k];
-  p[kSlots] = en;
+  double *p = a.part + (long long)i * (kSlots + 1) * a.nchunk + c;
+  for (int k = 0; k < kSlots; k++) p[(long long)k * a.nchunk] = acc[k];
+  p[(long long)kSlots * a.nchunk] = en;
 }
 
-// One thread per QM atom: the chunks of qmmm_hcore_partial or qmmm_grad_partial in order (width values each)
+// One thread per QM atom and value: the chunks of qmmm_hcore_partial or qmmm_grad_partial in order (width values
+// per atom).  One thread per QM atom over all its values took 0.3 ms of GPU time per step.
 __global__ void qmmm_sum_chunks(QmmmArgs a, int width) {
-  const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= a.numat) return;
-  for (int k = 0; k < width; k++) {
-    double s = 0.0;
-    for (int c = 0; c < a.nchunk; c++) s += a.part[((long long)c * a.numat + i) * width + k];
-    a.out_atom[(long long)i * width + k] = s;
-  }
+  const long long t = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  if (t >= (long long)a.numat * width) return;
+  const double *p = a.part + t * a.nchunk;
+  double s = 0.0;
+  for (int c = 0; c < a.nchunk; c++) s += p[c];
+  a.out_atom[t] = s;
 }
 
 // dE/dd for one QM atom i and charge j (d = x(J) - x(A), kcal/(mol A)); e and pot: the pair's energy terms
@@ -253,8 +253,8 @@ __global__ void qmmm_grad_partial(QmmmArgs a) {
     if (!on) continue;
     for (int x = 0; x < 3; x++) s[x] = s[x] + g[x];
   }
-  double *p = a.part + (long long)t * 3;
-  for (int x = 0; x < 3; x++) p[x] = s[x];
+  double *p = a.part + (long long)i * 3 * a.nchunk + c;
+  for (int x = 0; x < 3; x++) p[(long long)x * a.nchunk] = s[x];
 }
 
 // Device buffers kept between calls, grown as needed
@@ -339,7 +339,7 @@ extern "C" int mopac_cuda_qmmm_hcore(int numat, int n_mm, const int *nao, const 
   a.part = static_cast<double *>(b_part.ptr);
   a.out_atom = static_cast<double *>(b_atom.ptr);
   qmmm_hcore_partial<<<blocks(nt), kThreads>>>(a);
-  qmmm_sum_chunks<<<blocks(numat), kThreads>>>(a, width);
+  qmmm_sum_chunks<<<blocks((long long)numat * width), kThreads>>>(a, width);
   int code = finish("hcore");
   if (code) return code;
   static double *host = nullptr;
@@ -391,7 +391,7 @@ extern "C" int mopac_cuda_qmmm_grad(int numat, int n_mm, const int *nao, const d
   qmmm_grad_mm_partial<<<blocks((long long)n_mm * a.nachunk), kThreads>>>(a);
   qmmm_grad_mm_sum<<<blocks(n_mm), kThreads>>>(a);
   qmmm_grad_partial<<<blocks(nt), kThreads>>>(a);
-  qmmm_sum_chunks<<<blocks(numat), kThreads>>>(a, 3);
+  qmmm_sum_chunks<<<blocks((long long)numat * 3), kThreads>>>(a, 3);
   int code = finish("gradient");
   if (code) return code;
   if (cudaMemcpy(gq, b_atom.ptr, 3 * na * sizeof(double), cudaMemcpyDeviceToHost) != cudaSuccess ||

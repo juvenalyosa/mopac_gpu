@@ -55,7 +55,7 @@ def make_system(ff, top, lj_switch):
 def platform(name, precision):
     p = mm.Platform.getPlatformByName(name)
     props = {"Precision": precision} if name in ("CUDA", "OpenCL") and precision else {}
-    return p, props
+    return p, om.cuda_sync_property(props, name)
 
 
 def prepare(a):

@@ -519,6 +519,15 @@ class MopacQMMMForce:
         self.session.close()
 
 
+def cuda_sync_property(props: dict, platform_name: str) -> dict:
+    """QMMM_CUDA_BLOCKING_SYNC=0 / 1: OpenMM's CUDA property UseBlockingSync false / true (unset: OpenMM's default).
+    MOPAC and CuPy share the device's primary context with OpenMM, so they wait the same way."""
+    v = os.environ.get("QMMM_CUDA_BLOCKING_SYNC", "")
+    if platform_name == "CUDA" and v in ("0", "1"):
+        props["UseBlockingSync"] = "true" if v == "1" else "false"
+    return props
+
+
 def add_qmmm(system: mm.System, topology, positions, qm_atoms, qm_charge: int, libmopac: str,
              ron: float = 10.0, roff: float = 12.0, model: int = 0, tolerance: float = 1e-2, pme=None,
              pme_gpu=None, guess=None, qm_constraints: bool = False, qm_free=()):
