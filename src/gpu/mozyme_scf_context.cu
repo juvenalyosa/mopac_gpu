@@ -4883,6 +4883,15 @@ __device__ void block_rotate_pair_indexed(const DiaggRotateArgs &a, int ij, int 
 // The order in which different virtuals touch the same occupied LMO depends
 // on lock timing, so results differ run to run at rounding level (accepted:
 // tolerance vs CPU).
+// Position k of a virtual's chain of len pairs, starting at a per-virtual offset when stagger is set
+// (MOPAC_MOZYME_DIAGG2_STAGGER=1): the pairs of a virtual are stored by occupied index, so in list order every
+// block starts on the same few occupied LMOs and waits for their locks.
+__device__ inline int diagg2_chain_pos(int k, int len, int i, int stagger) {
+  if (!stagger || len <= 1) return k;
+  const unsigned s0 = (static_cast<unsigned>(i) * 0x9E3779B1u) % static_cast<unsigned>(len);
+  return static_cast<int>((static_cast<unsigned>(k) + s0) % static_cast<unsigned>(len));
+}
+
 constexpr int kDiaggRotBlockThreads = 256;
 constexpr int kDiaggWorkIntLockSpins = 6;   // lock-spin iterations of the last sweep (contention)
 constexpr int kDiaggWorkIntMaxChain = 7;    // most rotations performed by one block (critical path)
@@ -4892,7 +4901,11 @@ constexpr int kDiaggTimerBegin = 0;   // earliest block start (atomicMin)
 constexpr int kDiaggTimerEnd = 1;     // latest block end (atomicMax)
 constexpr int kDiaggTimerWait = 2;    // sum over blocks of the lock waits
 constexpr int kDiaggTimerRotate = 3;  // sum over blocks of the rotations
-constexpr int kDiaggTimerCount = 4;
+// phases of the staged rotation (sums over blocks): occupied LMO staged, growth counted, applied and stored
+constexpr int kDiaggTimerPrep = 4;
+constexpr int kDiaggTimerGrowth = 5;
+constexpr int kDiaggTimerApply = 6;
+constexpr int kDiaggTimerCount = 7;
 
 __device__ inline unsigned long long global_ns() {
   unsigned long long t;
@@ -4963,7 +4976,7 @@ __global__ void mozyme_diagg2_order_scatter_kernel(int nvir, const int *offsets,
 __global__ void __launch_bounds__(kDiaggRotBlockThreads)
 mozyme_diagg2_block_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
                            short *maps, int *cursor, const int *order,
-                           unsigned long long *timers) {
+                           unsigned long long *timers, int stagger) {
   __shared__ int s_joff[kDiaggMaxLmoAtoms];
   __shared__ int s_ioff[kDiaggMaxLmoAtoms];
   __shared__ int s_jatoms[kDiaggMaxLmoAtoms];
@@ -5031,7 +5044,8 @@ mozyme_diagg2_block_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
     block_map_set(imap, ilist, ncei0);
     __syncthreads();
 
-    for (int ij = start; ij < end; ++ij) {
+    for (int k = 0; k < end - start; ++k) {
+      const int ij = start + diagg2_chain_pos(k, end - start, i, stagger);
       const int j = a.ifmo[2 * ij + 1];
       if (a.ifmo[2 * ij] != i || j < 1 || j > a.nocc) {
         error = 1;
@@ -5125,8 +5139,18 @@ __device__ bool block_rotate_pair_staged(const DiaggRotateArgs &a, int ij, int r
                                          unsigned char *s_fi, unsigned char *s_fj,
                                          int *s_warp, double *s_cv, double *s_co,
                                          int &ncei0, int &mle0,
-                                         double &sumb_acc, int &nrej_acc, int &error) {
+                                         double &sumb_acc, int &nrej_acc, int &error,
+                                         unsigned long long *ph = nullptr) {
   const int tid = threadIdx.x;
+  // ph (MOPAC_MOZYME_SCF_TRACE, thread 0): ns in the prep, growth and apply phases, read at barriers
+  unsigned long long t_ph = (ph && tid == 0) ? global_ns() : 0;
+  auto phase = [&](int k) {
+    if (ph && tid == 0) {
+      const unsigned long long now = global_ns();
+      ph[k] += now - t_ph;
+      t_ph = now;
+    }
+  };
   const int i = a.ifmo[2 * ij];
   const int j = a.ifmo[2 * ij + 1];
   const double c = a.fmo[ij] * a.rot_const;
@@ -5164,6 +5188,7 @@ __device__ bool block_rotate_pair_staged(const DiaggRotateArgs &a, int ij, int r
   block_map_set(jmap, jlist, ncfj0);
   for (int q = tid; q < mlf0; q += blockDim.x) s_co[q] = ld_shared_double(a.cocc + loopj + q);
   __syncthreads();
+  phase(0);
 
   const double e = copysign(sqrt(4.0 * c * c + d * d), d);
   double alpha = sqrt(0.5 * (1.0 + d / e));
@@ -5221,6 +5246,7 @@ __device__ bool block_rotate_pair_staged(const DiaggRotateArgs &a, int ij, int r
       n_new_vir += n;
       orb_new_vir += orb;
     }
+    phase(1);
 
     const bool reject = (jbase + ncfj0 + n_new_occ > jncf) ||
                         (loopj + mlf0 + orb_new_occ > jur) ||
@@ -5334,6 +5360,7 @@ __device__ bool block_rotate_pair_staged(const DiaggRotateArgs &a, int ij, int r
     mle0 += orb_new_vir;
     block_map_clear(jmap, jlist, ncfj0);
     __syncthreads();
+    phase(2);
     return true;
   }
 }
@@ -5348,7 +5375,7 @@ __device__ inline void block_stage_load(double *dst, const double *src, int coun
 
 __global__ void __launch_bounds__(kDiaggRotBlockThreads)
 mozyme_diagg2_staged_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
-                            short *maps, int *cursor) {
+                            short *maps, int *cursor, unsigned long long *timers, int stagger) {
   __shared__ int s_joff[kDiaggMaxLmoAtoms];
   __shared__ int s_ioff[kDiaggMaxLmoAtoms];
   __shared__ int s_jatoms[kDiaggMaxLmoAtoms];
@@ -5381,6 +5408,8 @@ mozyme_diagg2_staged_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
   int error = 0;
   int rotated = 0;
   int spins = 0;
+  unsigned long long t_wait = 0, t_rot = 0, ph[3] = {0, 0, 0};
+  const unsigned long long t_begin = timers ? global_ns() : 0;
   while (error == 0) {
     if (tid == 0) s_next = atomicAdd(cursor, 1);
     __syncthreads();
@@ -5415,7 +5444,8 @@ mozyme_diagg2_staged_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
     if (staged) block_stage_load(s_cv, a.cvir + loopi, mle0);
     __syncthreads();
 
-    for (int ij = start; ij < end; ++ij) {
+    for (int k = 0; k < end - start; ++k) {
+      const int ij = start + diagg2_chain_pos(k, end - start, i, stagger);
       const int j = a.ifmo[2 * ij + 1];
       if (a.ifmo[2 * ij] != i || j < 1 || j > a.nocc) {
         error = 1;
@@ -5427,6 +5457,8 @@ mozyme_diagg2_staged_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
       const double d = a.eigs[j - 1] - a.eigv[i - 1] - a.shift;
       // Same test as the CPU (Abs(c/d) >= biglim): a NaN ratio (d == 0) is skipped.
       if (!(fabs(c / d) >= biglim)) continue;
+      unsigned long long t0 = 0;
+      if (timers && tid == 0) t0 = global_ns();
       if (tid == 0) {
         while (atomicCAS(olock + j - 1, 0, 1) != 0) {
           lock_backoff();
@@ -5435,11 +5467,16 @@ mozyme_diagg2_staged_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
         __threadfence();
       }
       __syncthreads();
+      unsigned long long t1 = 0;
+      if (timers && tid == 0) {
+        t1 = global_ns();
+        t_wait += t1 - t0;
+      }
       bool done = false;
       if (staged) {
         done = block_rotate_pair_staged(a, ij, retry, s_joff, ioff, s_jatoms, ilist, imap, jmap,
                                         s_fi, s_fj, s_warp, s_cv, s_co, ncei0, mle0, sumb_acc,
-                                        nrej_acc, error);
+                                        nrej_acc, error, timers ? ph : nullptr);
       }
       if (!done) {
         // Global-memory rotation: the staged virtual goes out first and is
@@ -5457,6 +5494,7 @@ mozyme_diagg2_staged_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
           else block_stage_load(s_cv, a.cvir + loopi, mle0);
         }
       }
+      if (timers && tid == 0) t_rot += global_ns() - t1;
       ++rotated;
       __syncthreads();
       __threadfence();
@@ -5471,6 +5509,15 @@ mozyme_diagg2_staged_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
   }
 
   if (blockIdx.x == 0 && tid == 0) a.work_ints[kDiaggWorkIntRounds] = 1;
+  if (timers && tid == 0) {
+    atomicMin(timers + kDiaggTimerBegin, t_begin);
+    atomicMax(timers + kDiaggTimerEnd, global_ns());
+    atomicAdd(timers + kDiaggTimerWait, t_wait);
+    atomicAdd(timers + kDiaggTimerRotate, t_rot);
+    atomicAdd(timers + kDiaggTimerPrep, ph[0]);
+    atomicAdd(timers + kDiaggTimerGrowth, ph[1]);
+    atomicAdd(timers + kDiaggTimerApply, ph[2]);
+  }
   if (tid == 0) {
     if (rotated != 0) {
       atomicAdd(a.work_ints + kDiaggWorkIntRotated, rotated);
@@ -5492,23 +5539,37 @@ __global__ void mozyme_diagg2_trace_kernel(const int *work_ints, const int *nij,
                                            const int *nrej,
                                            const int *resident_control_ints, int staged,
                                            int lpt, int grid,
-                                           const unsigned long long *timers) {
+                                           const unsigned long long *timers,
+                                           const int *ncf, int nocc, const int *nce, int nvir,
+                                           int stagger) {
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
   if (resident_control_terminal(resident_control_ints)) return;
-  // span: wall time of the sweep; wait / rotate: mean per block (us)
-  double span = 0.0, wait = 0.0, rot = 0.0;
+  // span: wall time of the sweep; wait / rotate and the staged rotation's prep / growth / apply phases: mean per
+  // block (us); atoms per occupied and virtual LMO after the sweep (mean, max)
+  double span = 0.0, wait = 0.0, rot = 0.0, prep = 0.0, growth = 0.0, apply = 0.0;
   if (timers && timers[kDiaggTimerEnd] > timers[kDiaggTimerBegin]) {
+    const double g = 1.0e-3 / max(grid, 1);
     span = 1.0e-3 * static_cast<double>(timers[kDiaggTimerEnd] - timers[kDiaggTimerBegin]);
-    wait = 1.0e-3 * static_cast<double>(timers[kDiaggTimerWait]) / max(grid, 1);
-    rot = 1.0e-3 * static_cast<double>(timers[kDiaggTimerRotate]) / max(grid, 1);
+    wait = g * static_cast<double>(timers[kDiaggTimerWait]);
+    rot = g * static_cast<double>(timers[kDiaggTimerRotate]);
+    prep = g * static_cast<double>(timers[kDiaggTimerPrep]);
+    growth = g * static_cast<double>(timers[kDiaggTimerGrowth]);
+    apply = g * static_cast<double>(timers[kDiaggTimerApply]);
   }
+  long long so = 0, sv = 0;
+  int mo = 0, mv = 0;
+  for (int k = 0; ncf && k < nocc; ++k) { so += ncf[k]; mo = max(mo, ncf[k]); }
+  for (int k = 0; nce && k < nvir; ++k) { sv += nce[k]; mv = max(mv, nce[k]); }
   printf(" [MOZYME GPU SCF trace] diagg2 staged=%d nij=%d rotated=%d max_chain=%d "
          "lock_spins=%d nrej=%d lpt=%d grid=%d span_us=%.1f wait_us=%.1f rotate_us=%.1f "
-         "shell_spill=%d shell_overflow=%d\n",
+         "shell_spill=%d shell_overflow=%d prep_us=%.1f growth_us=%.1f apply_us=%.1f stagger=%d "
+         "occ_atoms_mean=%.1f occ_atoms_max=%d vir_atoms_mean=%.1f vir_atoms_max=%d\n",
          staged, *nij, work_ints[kDiaggWorkIntRotated],
          work_ints[kDiaggWorkIntMaxChain], work_ints[kDiaggWorkIntLockSpins],
          nrej ? *nrej : -1, lpt, grid, span, wait, rot,
-         work_ints[kDiaggWorkIntShellSpill], work_ints[kDiaggWorkIntShellOverflow]);
+         work_ints[kDiaggWorkIntShellSpill], work_ints[kDiaggWorkIntShellOverflow], prep, growth,
+         apply, stagger, nocc > 0 ? static_cast<double>(so) / nocc : 0.0, mo,
+         nvir > 0 ? static_cast<double>(sv) / nvir : 0.0, mv);
 }
 
 // ---- addhb: hydrogen-bond pair discovery ----------------------------------
@@ -9586,8 +9647,10 @@ bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
         args.resident_control_ints);
     if (!cuda_context_ok(cudaGetLastError(), label)) return false;
   }
+  // MOPAC_MOZYME_DIAGG2_STAGGER=1: each virtual starts its chain at its own offset (diagg2_chain_pos)
+  static const int stagger = env_enabled("MOPAC_MOZYME_DIAGG2_STAGGER") ? 1 : 0;
   unsigned long long *timers = nullptr;
-  if (trace && !staged && dev.diagg_rot_timers.resize(kDiaggTimerCount)) {
+  if (trace && dev.diagg_rot_timers.resize(kDiaggTimerCount)) {
     timers = dev.diagg_rot_timers.ptr;
     // begin = all ones (atomicMin), the rest zero
     if (!cuda_context_ok(cudaMemsetAsync(timers, 0, kDiaggTimerCount * sizeof(unsigned long long)),
@@ -9608,18 +9671,19 @@ bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
   if (staged) {
     mozyme_diagg2_staged_kernel<<<grid, kDiaggRotBlockThreads, kDiaggStagedSharedBytes>>>(
         args, dev.diagg_offsets.ptr, dev.diagg_olock.ptr, dev.diagg_rot_maps.ptr,
-        dev.diagg_rot_cursor.ptr);
+        dev.diagg_rot_cursor.ptr, timers, stagger);
   } else {
     mozyme_diagg2_block_kernel<<<grid, kDiaggRotBlockThreads>>>(
         args, dev.diagg_offsets.ptr, dev.diagg_olock.ptr, dev.diagg_rot_maps.ptr,
-        dev.diagg_rot_cursor.ptr, lpt ? dev.diagg_rot_order.ptr : nullptr, timers);
+        dev.diagg_rot_cursor.ptr, lpt ? dev.diagg_rot_order.ptr : nullptr, timers, stagger);
   }
   if (!cuda_context_ok(cudaGetLastError(), label)) return false;
   if (trace && dev.diagg_work_ints.ptr && args.control_ints) {
     mozyme_diagg2_trace_kernel<<<1, 1>>>(dev.diagg_work_ints.ptr,
                                          args.control_ints + args.nij_slot, args.nrej_out,
                                          args.resident_control_ints, staged ? 1 : 0, lpt ? 1 : 0,
-                                         grid, timers);
+                                         grid, timers, args.ncf, args.nocc, args.nce, args.nvir,
+                                         stagger);
     return cuda_context_ok(cudaGetLastError(), label);
   }
   return true;
