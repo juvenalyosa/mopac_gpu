@@ -5095,6 +5095,113 @@ mozyme_diagg2_block_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
   }
 }
 
+// ---- diagg2, one warp per virtual -------------------------------------------
+//
+// The lock-based sweep of mozyme_diagg2_block_kernel with a warp in place of the block: each warp takes the next
+// virtual from the cursor and performs its rotations with warp_rotate_pair (the rotation of the cooperative
+// kernel) under the occupied LMO's lock.  The block kernel was built for proteins (LMOs of 150-250 atoms); in
+// QM/MM regions the LMOs have a few dozen atoms and a 256-thread block spent most of each rotation in barriers:
+// 13.8 us per rotation on the critical chain (58 rotations of one virtual, trypsin-BPTI, 59 QM atoms).
+// MOPAC_MOZYME_DIAGG2_WARP=1.
+constexpr int kDiaggWarpLockThreads = 64;   // 2 warps: 4 x kDiaggMaxLmoAtoms ints of shared memory each
+
+__global__ void __launch_bounds__(kDiaggWarpLockThreads)
+mozyme_diagg2_warp_kernel(DiaggRotateArgs a, const int *offsets, int *olock, int *cursor,
+                          const int *order, unsigned long long *timers) {
+  constexpr int kWarps = kDiaggWarpLockThreads / 32;
+  __shared__ int s_joff[kWarps][kDiaggMaxLmoAtoms];
+  __shared__ int s_ioff[kWarps][kDiaggMaxLmoAtoms];
+  __shared__ int s_jatoms[kWarps][kDiaggMaxLmoAtoms];
+  __shared__ int s_iatoms[kWarps][kDiaggMaxLmoAtoms];
+
+  if (resident_control_terminal(a.resident_control_ints)) return;
+  const int nij = a.control_ints[a.nij_slot];
+  const int retry = a.control_ints[a.retry_slot];
+  const double tiny = a.control_scalars[a.tiny_slot];
+  const double biglim = a.control_scalars[a.biglim_slot];
+  a.shift = resident_control_double_or(a.resident_control_scalars,
+                                       kResidentControlShift, a.shift);
+  if (nij <= 0) return;
+
+  const int lane = threadIdx.x & 31;
+  const int w = threadIdx.x >> 5;
+  double sumb_acc = 0.0;
+  int nrej_acc = 0;
+  int error = 0;
+  int rotated = 0;
+  int spins = 0;
+  unsigned long long t_wait = 0, t_rot = 0;
+  const unsigned long long t_begin = timers ? global_ns() : 0;
+  while (error == 0) {
+    int next = 0;
+    if (lane == 0) next = atomicAdd(cursor, 1);
+    next = __shfl_sync(0xffffffffu, next, 0);
+    if (next >= a.nvir) break;
+    const int i = (order ? order[next] : next) + 1;
+    const int start = offsets[i - 1];
+    int end = offsets[i];
+    if (end > nij) end = nij;
+    for (int ij = start; ij < end; ++ij) {
+      const int j = a.ifmo[2 * ij + 1];
+      if (a.ifmo[2 * ij] != i || j < 1 || j > a.nocc) {
+        error = 1;
+        break;
+      }
+      const double f = a.fmo[ij];
+      if (fabs(f) < tiny) continue;
+      const double c = f * a.rot_const;
+      const double d = a.eigs[j - 1] - a.eigv[i - 1] - a.shift;
+      // Same test as the CPU (Abs(c/d) >= biglim): a NaN ratio (d == 0) is skipped.
+      if (!(fabs(c / d) >= biglim)) continue;
+      unsigned long long t0 = 0;
+      if (timers && lane == 0) t0 = global_ns();
+      if (lane == 0) {
+        while (atomicCAS(olock + j - 1, 0, 1) != 0) {
+          lock_backoff();
+          ++spins;
+        }
+        __threadfence();
+      }
+      __syncwarp();
+      unsigned long long t1 = 0;
+      if (timers && lane == 0) {
+        t1 = global_ns();
+        t_wait += t1 - t0;
+      }
+      warp_rotate_pair(a, ij, retry, s_joff[w], s_ioff[w], s_jatoms[w], s_iatoms[w], sumb_acc,
+                       nrej_acc, error);
+      __syncwarp();
+      if (timers && lane == 0) t_rot += global_ns() - t1;
+      ++rotated;
+      __threadfence();
+      if (lane == 0) atomicExch(olock + j - 1, 0);
+      __syncwarp();
+      if (error != 0) break;
+    }
+  }
+
+  if (blockIdx.x == 0 && threadIdx.x == 0) a.work_ints[kDiaggWorkIntRounds] = 1;
+  if (lane == 0) {
+    if (timers) {
+      atomicMin(timers + kDiaggTimerBegin, t_begin);
+      atomicMax(timers + kDiaggTimerEnd, global_ns());
+      atomicAdd(timers + kDiaggTimerWait, t_wait);
+      atomicAdd(timers + kDiaggTimerRotate, t_rot);
+    }
+    if (rotated != 0) {
+      atomicAdd(a.work_ints + kDiaggWorkIntRotated, rotated);
+      atomicMax(a.work_ints + kDiaggWorkIntMaxChain, rotated);
+    }
+    if (spins != 0) atomicAdd(a.work_ints + kDiaggWorkIntLockSpins, spins);
+    if (sumb_acc != 0.0) atomicAdd_double(a.sumb_out, sumb_acc);
+    if (nrej_acc != 0) atomicAdd(a.nrej_out, nrej_acc);
+    if (error != 0) {
+      atomicExch(a.work_ints + kDiaggWorkIntError, 1);
+      if (a.ok_slot) atomicExch(a.ok_slot, 0);
+    }
+  }
+}
+
 // ---- diagg2 with the LMO coefficients staged in shared memory -------------
 //
 // Same sweep as mozyme_diagg2_block_kernel (one block per virtual from the
@@ -9529,7 +9636,9 @@ bool diagg2_staged_enabled() {
 bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
                              DiaggRotateArgs args, const char *label) {
   static const bool cooperative = env_enabled("MOPAC_MOZYME_DIAGG2_COOPERATIVE");
-  const bool staged = !cooperative && diagg2_staged_enabled();
+  static const bool warp_env = env_enabled("MOPAC_MOZYME_DIAGG2_WARP");
+  const bool warp = !cooperative && warp_env;
+  const bool staged = !cooperative && !warp && diagg2_staged_enabled();
   auto &dev = ctx.device;
   if (cooperative || !dev.diagg_olock.ptr || !dev.diagg_offsets.ptr ||
       dev.diagg_olock.count < static_cast<std::size_t>(ctx.config.noccupied)) {
@@ -9543,7 +9652,10 @@ bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
   int blocks_per_sm = 0;
   if (!cuda_context_ok(cudaGetDevice(&device), label) ||
       !cuda_context_ok(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device), label) ||
-      !cuda_context_ok(staged ? cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      !cuda_context_ok(warp ? cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                                  &blocks_per_sm, mozyme_diagg2_warp_kernel,
+                                  kDiaggWarpLockThreads, 0)
+                       : staged ? cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                                     &blocks_per_sm, mozyme_diagg2_staged_kernel,
                                     kDiaggRotBlockThreads, kDiaggStagedSharedBytes)
                               : cudaOccupancyMaxActiveBlocksPerMultiprocessor(
@@ -9553,7 +9665,10 @@ bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
     return false;
   }
   if (blocks_per_sm <= 0 || sms <= 0) return launch_diagg2_parallel(max_pairs, args, label);
-  int grid = std::min(blocks_per_sm * sms, std::max(1, ctx.config.nvirtual));
+  // the warp kernel: kDiaggWarpLockThreads / 32 virtuals per block
+  const int per_block = warp ? kDiaggWarpLockThreads / 32 : 1;
+  int grid = std::min(blocks_per_sm * sms,
+                      (std::max(1, ctx.config.nvirtual) + per_block - 1) / per_block);
   if (grid < 1) grid = 1;
   const std::size_t map_count =
       static_cast<std::size_t>(2 * grid) * static_cast<std::size_t>(ctx.config.natoms);
@@ -9605,7 +9720,11 @@ bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
       !cuda_context_ok(cudaMemsetAsync(dev.diagg_rot_cursor.ptr, 0, sizeof(int)), label)) {
     return false;
   }
-  if (staged) {
+  if (warp) {
+    mozyme_diagg2_warp_kernel<<<grid, kDiaggWarpLockThreads>>>(
+        args, dev.diagg_offsets.ptr, dev.diagg_olock.ptr, dev.diagg_rot_cursor.ptr,
+        lpt ? dev.diagg_rot_order.ptr : nullptr, timers);
+  } else if (staged) {
     mozyme_diagg2_staged_kernel<<<grid, kDiaggRotBlockThreads, kDiaggStagedSharedBytes>>>(
         args, dev.diagg_offsets.ptr, dev.diagg_olock.ptr, dev.diagg_rot_maps.ptr,
         dev.diagg_rot_cursor.ptr);
@@ -9616,10 +9735,11 @@ bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
   }
   if (!cuda_context_ok(cudaGetLastError(), label)) return false;
   if (trace && dev.diagg_work_ints.ptr && args.control_ints) {
+    // staged=2: the warp kernel (grid: its warps, so wait / rotate are means per warp)
     mozyme_diagg2_trace_kernel<<<1, 1>>>(dev.diagg_work_ints.ptr,
                                          args.control_ints + args.nij_slot, args.nrej_out,
-                                         args.resident_control_ints, staged ? 1 : 0, lpt ? 1 : 0,
-                                         grid, timers);
+                                         args.resident_control_ints, warp ? 2 : (staged ? 1 : 0),
+                                         lpt ? 1 : 0, grid * per_block, timers);
     return cuda_context_ok(cudaGetLastError(), label);
   }
   return true;
