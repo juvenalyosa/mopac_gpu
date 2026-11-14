@@ -278,6 +278,11 @@ contains
       ! every block began on the same occupied LMOs): trypsin-BPTI 31.2 instead of 33.4 ms per step, lock waits
       ! halved, NVE drift of the QM/MM force as before (colab/qmmm_speed8_colab.ipynb)
       code = mopac_setenv_default('MOPAC_MOZYME_DIAGG2_STAGGER'//c_null_char, '1'//c_null_char)
+      ! diagg2 on dense LMO rows (MOPAC_MOZYME_DIAGG2_DENSE=0: the lock kernel on the LMOs' atom lists): QM/MM
+      ! regions have LMOs over most of the region (trypsin-BPTI ~53 of 59 atoms); A100, trypsin-BPTI 25.7 instead
+      ! of 30.5 ms per step, whole crambin (642 QM atoms) 354 instead of 448 ms, first-call heats and NVE drift
+      ! as before (colab/qmmm_speed9_colab.ipynb)
+      code = mopac_setenv_default('MOPAC_MOZYME_DIAGG2_DENSE'//c_null_char, '1'//c_null_char)
       mozyme_gpu_requested = .true.
       mozyme_gpu = .true.
       mozyme_resident_fock_gpu = .true.

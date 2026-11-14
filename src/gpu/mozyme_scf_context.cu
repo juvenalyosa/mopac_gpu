@@ -9587,7 +9587,9 @@ bool resident_scf_trace_enabled();
 // sparse rotation applies to the coefficients a rotation would add), at the end of the LMO in ascending atom
 // order.  If an LMO's storage cannot hold its new atoms, or anything else fails, the dense result is dropped and
 // the lock kernel does the sweep (skip_if_set stays 0).  The sparse rotation drops sub-threshold contributions as
-// it goes; here they stay in the rows until the end of the sweep.
+// it goes; here they stay in the rows until the end of the sweep.  The default in QM/MM sessions: on an A100,
+// diagg2 took 3.2 instead of 7.9 ms per step in trypsin-BPTI (59 QM atoms), every sweep was written back, and
+// whole crambin (642 QM atoms) took 354 instead of 448 ms per step (colab/qmmm_speed9_colab.ipynb).
 constexpr int kDiaggDenseThreads = 128;
 constexpr int kDiaggDenseMaxAtoms = 4096;    // atom membership map of an LMO (shared memory)
 constexpr int kDenseIntFail = 0;              // the dense sweep cannot be used for this diagg2
