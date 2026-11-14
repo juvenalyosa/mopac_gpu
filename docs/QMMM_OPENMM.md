@@ -335,6 +335,54 @@ with both changes off: Python 1.9 against 8.7 ms, long-range 1.8 against 2.5 ms.
 within 2.2e-13 on the three position sets. Per call the stubbed path runs 38 kernels and 12 copies (194 and 33 with
 the array code), and the GPU is busy 1.5 ms of 4.2 ms. The full step with MOPAC was not measured at `92e8f2e6`.
 
+At commit `c484ceee`, MOPAC's loops over all QM atom – MM charge pairs run in CUDA kernels
+(`src/gpu/qmmm_point_charges.cu`). These are `qmmm_hcore`, which puts the charges into the one-electron matrix,
+and `qmmm_grad`, the gradient on both. Before, they ran on the CPU with OpenMP. `MOPAC_QMMM_GPU=0` keeps them there.
+The first call compares the two and stays on the CPU if they differ. In every run below they agreed: the hcore terms
+within 6.8e-13 eV, and the gradient, potentials and energy within 9.9e-13.
+
+Measured with `colab/qmmm_speed4_colab.ipynb`, same protocol, one Colab session:
+
+| | point charges on the GPU | on the CPU |
+|---|---:|---:|
+| trypsin–BPTI, `tolerance=0.01` (two runs each) | 0.0343 / 0.0342 s | 0.0381 / 0.0388 s |
+| trypsin–BPTI, 0.001 | 0.0484 s | 0.0519 s |
+| whole chignolin | 0.0706 s | 0.0752 s |
+| whole crambin | 0.451 s | 0.483 s |
+
+With `MOPAC_GPU_PROFILE=1`, `qmmm_grad` took 1.05 ms per step against 2.76 ms, and `qmmm_hcore` 0.30 ms against
+1.80 ms.
+
+The first call of the session's first run took 5.6 s, against 0.23 s in the later runs. CuPy compiles its kernels at
+first use and caches them, which would account for this; it was not checked.
+
+First call:
+- Over the six pairs of the four trypsin runs at 0.01, heats differed by up to 2.9e-6 kcal/mol, and the largest
+  force component by up to 0.028 kJ/mol/nm.
+- All four heats lay within 7.1e-6 of −297.0127265.
+- Whole chignolin, GPU against CPU: forces up to 0.99 kJ/mol/nm on QM atoms and 0.059 on MM atoms. Its SCF converged
+  in 30 iterations against 29 (no repeats).
+- Whole crambin: 0.48 and 0.020 kJ/mol/nm; 31 iterations both.
+
+Inside MOPAC (trypsin–BPTI, `nsys` of 38 steps with `MOPAC_NVTX=1`, which makes every section timer an NVTX
+range): a MOPAC call took 26.6 ms of wall time, with the GPU busy for 21.1 ms. Of the 5.5 ms of idle GPU, 4.0 ms
+fell inside the resident SCF loop. There MOPAC launches ~1590 kernels per step, many of them shorter than the
+~5 us a launch costs the host.
+
+The largest kernels per step:
+
+| kernel | time per step | launches per step |
+|---|---:|---:|
+| staged `diagg2` | 9.7 ms | 15 |
+| `diagg1_virtual` | 4.4 ms | 30 |
+| pair gradient | 1.0 ms | 1 |
+| the point-charge kernels, together | 1.0 ms | |
+
+The `diagg2` trace (`MOPAC_MOZYME_SCF_TRACE=1`, 20 steps) counted per sweep:
+- ~2400 rotations, 61 thread blocks, and a longest chain of 58 rotations on one LMO;
+- with the block kernel, a sweep spanned 790 us, 13.8 us per rotation of that chain, and each block waited 226 us
+  for locks.
+
 ## Example: trypsin with BPTI
 
 `scripts/kaggle/mopac_qmmm_enzyme` (PDB 2PTC, 46 637 atoms with TIP3P water):
