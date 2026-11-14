@@ -293,6 +293,48 @@ converged in 31 iterations, the others in 32.
 These two regions had no repeat runs, so how much of these differences is run-to-run variation was not
 measured.
 
+A line profile with MOPAC replaced by an instant stub (`colab/qmmm_pyprof_colab.ipynb`, same machine type) found
+the remaining Python time to be host work. The GPU was busy 1.75 ms of a 13.6-ms call. About 190 CuPy operations per
+step cost ~19 us of host time each, and the four FFTs of the long-range term ~0.28 ms each. Two changes followed:
+
+- At commit `1caa9976`, the work over the MM charges moved into fused CUDA kernels (`scripts/qmmm/qmmm_mm_gpu.py`);
+  `QMMM_MM_GPU=arrays` keeps the CuPy array code.
+- The long-range FFTs now go through cuFFT plans made once; `QMMM_FFT_PLANS=0` keeps CuPy's `rfftn`/`irfftn`.
+
+Both are compared with the old code at the first call and switched off, with a message, if they differ. In every
+run below they agreed:
+- the kernels within 1.4e-14 (switched charges, and forces in kJ/mol/nm);
+- the potential grids from the plans within 6.7e-16 (absolute) of those from `rfftn`/`irfftn`.
+
+Measured with `colab/qmmm_speed3_colab.ipynb`, same protocol, all runs in one Colab session; two runs of the same
+setting differed by up to 0.6 ms per step:
+
+| `tolerance=0.01` | s per step | MOPAC | Python | long-range |
+|---|---:|---:|---:|---:|
+| both changes | 0.0372 / 0.0374 | 0.0285 | 0.0037 | 0.0019 |
+| both off (as at `46637c1f`) | 0.0437 / 0.0431 | 0.0291 | 0.0089 | 0.0026 |
+| only the kernels off | 0.0426 | 0.0289 | 0.0091 | 0.0021 |
+| only the plans off | 0.0374 | 0.0286 | 0.0037 | 0.0025 |
+
+MOPAC, Python and long-range are medians per call. With a tolerance of 0.001, a step took 0.0509 s against 0.0564 s.
+Whole chignolin took 0.074 s per step against 0.080 s (Python 2.2 ms per call against 8.1 ms), and whole crambin
+0.490 s against 0.496 s (Python 5.0 ms against 12.5 ms). Each of these was one run.
+
+First call, the same geometry in every run:
+- Over the 15 pairs of the six trypsin runs at 0.01, heats differed by up to 7.0e-6 kcal/mol and the largest force
+  component by up to 0.038 kJ/mol/nm.
+- The two pairs with the same setting differed by 4.6e-6 and 6.0e-6 kcal/mol, and by 0.031 and 0.022 kJ/mol/nm.
+- All heats lay within 6.3e-6 of −297.0127265.
+- Whole chignolin and crambin, both changes against both off: up to 0.054 and 0.34 kJ/mol/nm on QM atoms, and 0.0035
+  and 0.011 on MM atoms (no repeats).
+
+Under `nsys` with the stub, one kernel took 1.84 ms of GPU time per call: the switching force on the QM atoms, one
+thread per QM atom over all 14 536 groups. Commit `92e8f2e6` sums it over chunks of 64 groups instead, and the two
+kernels now take 0.09 ms. With the stub (`qmmm_pyprof2`, another session), a call then took 3.9 ms against 11.4 ms
+with both changes off: Python 1.9 against 8.7 ms, long-range 1.8 against 2.5 ms. The kernels' forces agreed with NumPy
+within 2.2e-13 on the three position sets. Per call the stubbed path runs 38 kernels and 12 copies (194 and 33 with
+the array code), and the GPU is busy 1.5 ms of 4.2 ms. The full step with MOPAC was not measured at `92e8f2e6`.
+
 ## Example: trypsin with BPTI
 
 `scripts/kaggle/mopac_qmmm_enzyme` (PDB 2PTC, 46 637 atoms with TIP3P water):
