@@ -193,6 +193,43 @@ python scripts/qmmm/run_qmmm_md.py protein.pdb --libmopac build/libmopac.so --qm
 
 ## Speed
 
+### Current state (commit `e6fddf48`, Colab A100 40 GB)
+
+Seconds per 0.5-fs step, with MOPAC and QM-PME on the GPU. Trypsin–BPTI is the system of the example below.
+
+| system | QM atoms | `tolerance=0.01` | `tolerance=0.001` | simulated time per day at 0.001 |
+|---|---:|---:|---:|---:|
+| trypsin–BPTI | 59 | 0.021 | 0.027 | ~1.6 ns |
+| whole chignolin | 138 | 0.031 | — | ~1.4 ns (at 0.01) |
+| whole crambin | 642 | 0.245 | — | ~0.18 ns (at 0.01) |
+
+Use 0.5-fs steps and a tolerance of 0.001 for NVE or anything that needs energy conservation (see the
+time-step and tolerance items in "Details and limits"). The same trypsin–BPTI step took 0.052 s (0.067 s at
+0.001) at commit `89a30daf`, in another session.
+
+These parts of the speed work are on by default. Each switch below turns one off, and each was compared with the
+code before it in one session (subsections below):
+
+| what | on by default | off with |
+|---|---|---|
+| MM-charge work (imaging, switching, forces) in fused CUDA kernels | when CuPy sees a GPU | `QMMM_MM_GPU=arrays` (CuPy array code) or `QMMM_MM_GPU=0` (NumPy) |
+| long-range FFTs through cuFFT plans | idem | `QMMM_FFT_PLANS=0` |
+| MOPAC's QM atom – MM charge loops on the GPU | MOZYME on the GPU | `MOPAC_QMMM_GPU=0` |
+| device buffers from a stream-ordered pool; pair tables kept on the device | GPU builds | `MOPAC_GPU_ASYNC_ALLOC=0`, `MOPAC_GPU_PAIR_TABLE_CACHE=0` |
+| `diagg2` with shared-memory staging, staggered chains, dense LMO rows | QM/MM sessions | `MOPAC_MOZYME_DIAGG2_STAGED=0`, `MOPAC_MOZYME_DIAGG2_STAGGER=0`, `MOPAC_MOZYME_DIAGG2_DENSE=0` |
+| `diagg1` from dense matrix products | QM/MM sessions | `MOPAC_MOZYME_DIAGG1_DENSE=0` |
+
+Diagnostics:
+- `MOPAC_GPU_PROFILE=1`: MOPAC's section and SCF stage times. It adds synchronizations.
+- `MOPAC_MOZYME_SCF_TRACE=1`: one line per `diagg2` sweep.
+- `MOPAC_NVTX=1`: NVTX ranges of MOPAC's sections and marks at the SCF stage boundaries, for Nsight Systems.
+- The notebooks `colab/qmmm_prof_colab.ipynb`, `qmmm_pyprof_colab.ipynb` and `qmmm_speed2`–`qmmm_speed10` hold the
+  profiling and validation runs.
+
+The rest of this section records how the time per step came down, with the checks of each change.
+
+### Earlier measurements
+
 OpenMM CUDA + MOPAC, Kaggle T4, 0.5 fs steps, TIP3P water box (`scripts/kaggle/mopac_qmmm`):
 
 | QM region | atoms (QM / all) | MOPAC on the GPU | MOPAC on the CPU (1 core) | NVE drift (GPU run) |
