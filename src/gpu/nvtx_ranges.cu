@@ -13,10 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// NVTX ranges for the MOZYME section timers (MOPAC_NVTX=1, src/MOZYME/mozyme_section_timers.F90), so that
-// Nsight Systems timelines show which part of MOPAC runs while the GPU waits.  NVTX 3 is header-only (CUDA 12);
-// without the header the calls do nothing.
+// NVTX ranges for the MOZYME section timers (MOPAC_NVTX=1, src/MOZYME/mozyme_section_timers.F90) and marks at
+// the stage boundaries of the resident SCF (mozyme_scf_context.cu), so that Nsight Systems timelines show which
+// part of MOPAC runs while the GPU waits.  NVTX 3 is header-only (CUDA 12); without the header the calls do
+// nothing.
 
+#include <cstdlib>
 #include <string>
 
 #if defined(__has_include)
@@ -39,5 +41,18 @@ extern "C" void mopac_nvtx_push(const char *name, int name_len) {
 extern "C" void mopac_nvtx_pop() {
 #ifdef MOPAC_HAVE_NVTX
   nvtxRangePop();
+#endif
+}
+
+// a mark when MOPAC_NVTX is set (the Fortran side checks the variable itself before push / pop)
+extern "C" void mopac_nvtx_mark(const char *label) {
+#ifdef MOPAC_HAVE_NVTX
+  static const bool on = [] {
+    const char *v = std::getenv("MOPAC_NVTX");
+    return v && *v && *v != '0';
+  }();
+  if (on && label) nvtxMarkA(label);
+#else
+  (void)label;
 #endif
 }

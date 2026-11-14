@@ -18,23 +18,25 @@
 // integrals of qmmm_pair (src/MOZYME/qmmm.F90).  On the CPU these loops over all QM atom - charge pairs took
 // ~2 ms of a 0.037-s QM/MM step of trypsin-BPTI (59 QM atoms, ~2200 charges, 12 OpenMP threads, Colab A100).
 //
-// Every sum runs in a fixed order: over the charges of a chunk of kChunk charges (one thread per QM atom and
-// chunk), then over the chunks (one thread per QM atom); the charges' own sums over the QM atoms one thread
-// per charge.  Per QM atom only the elements qmmm_pair sets are kept: the 10 of an sp block and the 5 d
+// Every sum runs in a fixed order: over a chunk of charges (one thread per QM atom and chunk), then over the
+// chunks (one thread per QM atom); the charges' own sums likewise over chunks of QM atoms.  The chunks are sized
+// for ~kTargetThreads threads per kernel: with one thread per QM atom over 64 charges (1900 threads for
+// trypsin-BPTI) the kernels took 1.0 ms of GPU time per step.  Per QM atom only the elements qmmm_pair sets are kept: the 10 of an sp block and the 5 d
 // diagonal elements (kSlots; their packed positions in the atom's diagonal block are slot_pos in qmmm.F90).
 // The kernels use no shared memory; the file also compiles as C++ with a shim (tests run the kernels thread
 // by thread on the CPU).
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
 namespace {
 
 constexpr int kSlots = 15;
-constexpr int kChunk = 64;
 constexpr int kThreads = 128;
+constexpr long long kTargetThreads = 32768;
 
 struct PairTerms {
   double rr, u[3];
@@ -119,7 +121,9 @@ __device__ __forceinline__ void slot_value(int k, const PairTerms &t, bool want_
 __device__ __forceinline__ int nslots(int nao) { return nao >= 9 ? 15 : (nao >= 4 ? 10 : 1); }
 
 struct QmmmArgs {
-  int numat, n_mm, nchunk;
+  int numat, n_mm;
+  int chunk, nchunk;      // charges per chunk, chunks
+  int achunk, nachunk;    // QM atoms per chunk, chunks (the charges' sums)
   const int *nao;
   const double *par;      // 6 per QM atom: am, dd, qq, ad, aq, tore
   const double *coord;    // 3 per QM atom
@@ -129,6 +133,7 @@ struct QmmmArgs {
   double ron, roff, ev, a0, fpc9;
   double *part;           // per chunk and QM atom: kSlots + 1 (hcore) or 3 (grad)
   double *out_atom;       // per QM atom: kSlots + 1 (hcore: Sum q S v, Sum tore q S gam) or 3 (grad)
+  double *part_mm;        // per chunk of QM atoms and charge: gradient (3), potential, energy
   double *mm_grad, *mm_pot, *mm_e;
 };
 
@@ -141,8 +146,8 @@ __global__ void qmmm_hcore_partial(QmmmArgs a) {
   const double *par = a.par + 6 * i;
   double acc[kSlots], en = 0.0;
   for (int k = 0; k < kSlots; k++) acc[k] = 0.0;
-  const int j1 = (c + 1) * kChunk < a.n_mm ? (c + 1) * kChunk : a.n_mm;
-  for (int j = c * kChunk; j < j1; j++) {
+  const int j1 = (c + 1) * a.chunk < a.n_mm ? (c + 1) * a.chunk : a.n_mm;
+  for (int j = c * a.chunk; j < j1; j++) {
     double d[3];
     for (int x = 0; x < 3; x++) d[x] = a.mm_xyz[3 * j + x] - a.coord[3 * i + x];
     PairTerms pt;
@@ -199,12 +204,15 @@ __device__ __forceinline__ void pair_gradient(const QmmmArgs &a, int i, int j, d
     g[x] = q * (pt.dsw * pt.u[x] * core + pt.sw * (tore * pt.d1 * pt.u[x] - dpv[x])) * a.fpc9;
 }
 
-// One thread per charge j: its gradient, potential (kcal/(mol e)) and energy over all QM atoms
-__global__ void qmmm_grad_mm(QmmmArgs a) {
-  const int j = blockIdx.x * blockDim.x + threadIdx.x;
-  if (j >= a.n_mm) return;
+// One thread per charge j and chunk of QM atoms: the charge's gradient, potential (kcal/(mol e)) and energy over
+// the chunk
+__global__ void qmmm_grad_mm_partial(QmmmArgs a) {
+  const long long t = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  if (t >= (long long)a.n_mm * a.nachunk) return;
+  const int j = (int)(t % a.n_mm), c = (int)(t / a.n_mm);
   double gj[3] = {0.0, 0.0, 0.0}, ej = 0.0, potj = 0.0;
-  for (int i = 0; i < a.numat; i++) {
+  const int i1 = (c + 1) * a.achunk < a.numat ? (c + 1) * a.achunk : a.numat;
+  for (int i = c * a.achunk; i < i1; i++) {
     double g[3], e, pot;
     bool on;
     pair_gradient(a, i, j, g, e, pot, on);
@@ -213,9 +221,22 @@ __global__ void qmmm_grad_mm(QmmmArgs a) {
     potj = potj + pot;
     for (int x = 0; x < 3; x++) gj[x] = gj[x] + g[x];
   }
-  for (int x = 0; x < 3; x++) a.mm_grad[3 * j + x] = gj[x];
-  a.mm_pot[j] = potj;
-  a.mm_e[j] = ej;
+  double *p = a.part_mm + (long long)t * 5;
+  for (int x = 0; x < 3; x++) p[x] = gj[x];
+  p[3] = potj;
+  p[4] = ej;
+}
+
+// One thread per charge: the chunks of qmmm_grad_mm_partial in order
+__global__ void qmmm_grad_mm_sum(QmmmArgs a) {
+  const int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j >= a.n_mm) return;
+  double s[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+  for (int c = 0; c < a.nachunk; c++)
+    for (int k = 0; k < 5; k++) s[k] += a.part_mm[((long long)c * a.n_mm + j) * 5 + k];
+  for (int x = 0; x < 3; x++) a.mm_grad[3 * j + x] = s[x];
+  a.mm_pot[j] = s[3];
+  a.mm_e[j] = s[4];
 }
 
 // One thread per QM atom i and chunk c of charges: Sum_j dE/dd (to be subtracted from the QM atom's gradient)
@@ -224,8 +245,8 @@ __global__ void qmmm_grad_partial(QmmmArgs a) {
   if (t >= (long long)a.numat * a.nchunk) return;
   const int i = (int)(t % a.numat), c = (int)(t / a.numat);
   double s[3] = {0.0, 0.0, 0.0};
-  const int j1 = (c + 1) * kChunk < a.n_mm ? (c + 1) * kChunk : a.n_mm;
-  for (int j = c * kChunk; j < j1; j++) {
+  const int j1 = (c + 1) * a.chunk < a.n_mm ? (c + 1) * a.chunk : a.n_mm;
+  for (int j = c * a.chunk; j < j1; j++) {
     double g[3], e, pot;
     bool on;
     pair_gradient(a, i, j, g, e, pot, on);
@@ -254,7 +275,7 @@ struct Buffer {
   }
 };
 
-Buffer b_nao, b_par, b_coord, b_xyz, b_q, b_pk, b_part, b_atom, b_grad, b_pot, b_e;
+Buffer b_nao, b_par, b_coord, b_xyz, b_q, b_pk, b_part, b_part_mm, b_atom, b_grad, b_pot, b_e;
 
 int blocks(long long n) { return (int)((n + kThreads - 1) / kThreads); }
 
@@ -267,7 +288,13 @@ bool upload_common(QmmmArgs &a, int numat, int n_mm, const int *nao, const doubl
     return false;
   a.numat = numat;
   a.n_mm = n_mm;
-  a.nchunk = (n_mm + kChunk - 1) / kChunk;
+  // chunks of >= 8 charges (>= 4 QM atoms), as many as give ~kTargetThreads threads
+  long long nc = std::min<long long>((n_mm + 7) / 8, std::max<long long>(1, kTargetThreads / numat));
+  a.chunk = (int)((n_mm + nc - 1) / nc);
+  a.nchunk = (n_mm + a.chunk - 1) / a.chunk;
+  nc = std::min<long long>((numat + 3) / 4, std::max<long long>(1, kTargetThreads / n_mm));
+  a.achunk = (int)((numat + nc - 1) / nc);
+  a.nachunk = (numat + a.achunk - 1) / a.achunk;
   a.nao = static_cast<const int *>(b_nao.ptr);
   a.par = static_cast<const double *>(b_par.ptr);
   a.coord = static_cast<const double *>(b_coord.ptr);
@@ -345,6 +372,7 @@ extern "C" int mopac_cuda_qmmm_grad(int numat, int n_mm, const int *nao, const d
   const size_t na = (size_t)numat, nm = (size_t)n_mm;
   const long long nt = (long long)numat * a.nchunk;
   if (!b_pk.put(pk, kSlots * na * sizeof(double)) || !b_part.reserve((size_t)nt * 3 * sizeof(double)) ||
+      !b_part_mm.reserve((size_t)a.nachunk * nm * 5 * sizeof(double)) ||
       !b_atom.reserve(3 * na * sizeof(double)) || !b_grad.reserve(3 * nm * sizeof(double)) ||
       !b_pot.reserve(nm * sizeof(double)) || !b_e.reserve(nm * sizeof(double)))
     return 2;
@@ -356,10 +384,12 @@ extern "C" int mopac_cuda_qmmm_grad(int numat, int n_mm, const int *nao, const d
   a.fpc9 = fpc9;
   a.part = static_cast<double *>(b_part.ptr);
   a.out_atom = static_cast<double *>(b_atom.ptr);
+  a.part_mm = static_cast<double *>(b_part_mm.ptr);
   a.mm_grad = static_cast<double *>(b_grad.ptr);
   a.mm_pot = static_cast<double *>(b_pot.ptr);
   a.mm_e = static_cast<double *>(b_e.ptr);
-  qmmm_grad_mm<<<blocks(n_mm), kThreads>>>(a);
+  qmmm_grad_mm_partial<<<blocks((long long)n_mm * a.nachunk), kThreads>>>(a);
+  qmmm_grad_mm_sum<<<blocks(n_mm), kThreads>>>(a);
   qmmm_grad_partial<<<blocks(nt), kThreads>>>(a);
   qmmm_sum_chunks<<<blocks(numat), kThreads>>>(a, 3);
   int code = finish("gradient");

@@ -448,6 +448,8 @@ __global__ void mozyme_reorth_kernel(
     double *sumtot_out);
 #endif
 
+extern "C" void mopac_nvtx_mark(const char *label);  // nvtx_ranges.cu (MOPAC_NVTX=1)
+
 namespace {
 
 constexpr int kMozymeScfAbiVersion = 34;
@@ -11505,6 +11507,7 @@ bool resident_stage_profile_enabled() {
 
 bool begin_resident_stage_timing(MozymeScfContext &ctx, bool time_stage,
                                  const char *label) {
+  mopac_nvtx_mark(label);
   if (resident_stage_profile_enabled()) {
     auto &dev = ctx.device;
     if (dev.pending_stage_start) {
@@ -11534,6 +11537,7 @@ void record_resident_stage_profile(MozymeScfContext &ctx,
 // Close the running stage under `stop_label` and start a new one immediately,
 // so a stage can be broken into sub-stages in the profile report.
 void split_resident_stage_profile(MozymeScfContext &ctx, const char *stop_label) {
+  mopac_nvtx_mark(stop_label);
   if (!resident_stage_profile_enabled()) return;
   auto &dev = ctx.device;
   if (!dev.pending_stage_start) return;
@@ -11598,6 +11602,7 @@ bool finish_resident_stage_timing(MozymeScfContext &ctx, bool time_stage,
                                   const char *sync_label,
                                   const char *elapsed_label,
                                   double *wall_ms) {
+  mopac_nvtx_mark(stop_label);
   if (resident_stage_profile_enabled()) {
     record_resident_stage_profile(ctx, stop_label);
   }
