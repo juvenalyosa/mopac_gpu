@@ -1,17 +1,19 @@
-"""The work over the MM charges of the QM/MM force (openmm_mopac.MopacQMMMForce) in four CUDA kernels.
+"""The work over the MM charges of the QM/MM force (openmm_mopac.MopacQMMMForce) in five CUDA kernels.
 
 With array operations (MopacQMMMForce._select_arrays / _forces_arrays, CuPy) a step of trypsin-BPTI (46 800 MM
 charges, Colab A100) launched ~190 small operations, each ~20 us of Python and launch overhead on the Xeon host,
-~8 ms in all against ~0.3 ms of GPU work.  MMChargesKernels does the same steps with the same arithmetic in four
-kernels, one thread per switching group or per QM atom; the charges of each group must be contiguous in the
-arrays (the atoms of a residue are, in an OpenMM topology):
+~8 ms in all against ~0.3 ms of GPU work.  MMChargesKernels does the same steps with the same arithmetic in five
+kernels; the charges of each switching group must be contiguous in the arrays (the atoms of a residue are, in an
+OpenMM topology):
 
 - mm_groups: images the group next to the QM centre (its first charge to the image nearest the centre, the others
   to the image nearest the first), its centre, and its switching weight (smooth minimum of the distances from
   the centre to the QM atoms);
 - mm_select: the switched charges, in the order of the array code (cumulative sum of the counts);
 - mm_forces (after MOPAC): the force on every MM charge (long-range term, MOPAC's gradient, switching);
-- mm_qm_forces: the switching force on each QM atom.
+- mm_qm_partial, mm_qm_sum: the switching force on each QM atom, summed over chunks of CHUNK groups (one thread
+  per QM atom and chunk) and then over the chunks in order (one thread per QM atom).  One thread per QM atom over
+  all groups took 1.8 ms of GPU time per step in trypsin-BPTI.
 
 Sums over the charges of a group run in the order of the array code and the kernels are compiled without fused
 multiply-add; sums over QM atoms or groups are ordered differently there, so the results agree to rounding.
@@ -128,19 +130,34 @@ __global__ void mm_forces(const double *gall, int has_far, const double *up, lon
   }
 }
 
-__global__ void mm_qm_forces(const double *cg, const double *coef, const long long *cnt, const double *rmin,
-                             const double *sumex, const double *xr, int ng, int nq, double lam, double *ga)
+__global__ void mm_qm_partial(const double *cg, const double *coef, const long long *cnt, const double *rmin,
+                              const double *sumex, const double *xr, int ng, int nq, int chunk, int nchunk,
+                              double lam, double *part)
 {
-  int a = blockIdx.x * blockDim.x + threadIdx.x;
-  if (a >= nq) return;
+  long long t = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  if (t >= (long long)nq * nchunk) return;
+  int a = (int)(t % nq), c = (int)(t / nq);
+  int g1 = (c + 1) * chunk < ng ? (c + 1) * chunk : ng;
   double s0 = 0.0, s1 = 0.0, s2 = 0.0;
-  for (int g = 0; g < ng; g++) {
+  for (int g = c * chunk; g < g1; g++) {
     if (cnt[g] == 0) continue;
     double v0 = cg[3 * (long long)g] - xr[3 * a], v1 = cg[3 * (long long)g + 1] - xr[3 * a + 1],
            v2 = cg[3 * (long long)g + 2] - xr[3 * a + 2];
     double r = sqrt(v0 * v0 + v1 * v1 + v2 * v2);
-    double t = -coef[g] * (exp(-(r - rmin[g]) / lam) / sumex[g]);
-    s0 += t * (v0 / r); s1 += t * (v1 / r); s2 += t * (v2 / r);
+    double tg = -coef[g] * (exp(-(r - rmin[g]) / lam) / sumex[g]);
+    s0 += tg * (v0 / r); s1 += tg * (v1 / r); s2 += tg * (v2 / r);
+  }
+  part[3 * t] = s0; part[3 * t + 1] = s1; part[3 * t + 2] = s2;
+}
+
+__global__ void mm_qm_sum(const double *part, int nq, int nchunk, double *ga)
+{
+  int a = blockIdx.x * blockDim.x + threadIdx.x;
+  if (a >= nq) return;
+  double s0 = 0.0, s1 = 0.0, s2 = 0.0;
+  for (int c = 0; c < nchunk; c++) {
+    const double *p = part + 3 * ((long long)c * nq + a);
+    s0 += p[0]; s1 += p[1]; s2 += p[2];
   }
   ga[3 * a] = s0; ga[3 * a + 1] = s1; ga[3 * a + 2] = s2;
 }
@@ -148,8 +165,9 @@ __global__ void mm_qm_forces(const double *cg, const double *coef, const long lo
 }
 """
 
-KERNELS = ("mm_groups", "mm_select", "mm_forces", "mm_qm_forces")
+KERNELS = ("mm_groups", "mm_select", "mm_forces", "mm_qm_partial", "mm_qm_sum")
 BLOCK = 128
+CHUNK = 64                             # groups per thread in mm_qm_partial
 
 
 class CuPyBackend:
@@ -212,6 +230,8 @@ class MMChargesKernels:
         self.sel = be.zeros(4 * nm)                      # switched positions (3 n), then charges (n)
         self.up = be.zeros(4 * nm)                       # MOPAC's gradient on them (3 n), then dE/dq (n)
         self.out = be.zeros((n_atoms + nq, 3))           # forces on all atoms, then on the QM atoms
+        self.nchunk = max(1, (ng + CHUNK - 1) // CHUNK)
+        self.part = be.zeros(3 * max(nq, 1) * self.nchunk)  # mm_qm_partial: per chunk of groups and QM atom
         self.h_sel, self.h_out = be.pinned(4 * nm), be.pinned((n_atoms + nq, 3))
         self.incl, self.n_sel = None, 0
 
@@ -250,7 +270,9 @@ class MMChargesKernels:
                                     np.int64(n), self.idx, self.gstart, self.gsize, self.q, self.incl, self.cnt,
                                     self.dw, self.rmin, self.sumex, self.cg, self.xr, i32(ng), i32(nq),
                                     f64(self.lam), f64(conv), self.coef, self.out))
-        be.launch("mm_qm_forces", nq, (self.cg, self.coef, self.cnt, self.rmin, self.sumex, self.xr, i32(ng),
-                                       i32(nq), f64(self.lam), self.out[self.n_atoms:]))
+        be.launch("mm_qm_partial", nq * self.nchunk, (self.cg, self.coef, self.cnt, self.rmin, self.sumex, self.xr,
+                                                      i32(ng), i32(nq), i32(CHUNK), i32(self.nchunk), f64(self.lam),
+                                                      self.part))
+        be.launch("mm_qm_sum", nq, (self.part, i32(nq), i32(self.nchunk), self.out[self.n_atoms:]))
         h = be.download(self.out, self.h_out)
         return np.array(h[:self.n_atoms]), (h[self.n_atoms:].copy() if n else None)
