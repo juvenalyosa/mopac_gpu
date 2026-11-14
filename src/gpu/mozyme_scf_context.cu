@@ -3358,7 +3358,7 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   __shared__ int s_slot;
 
   if (resident_control_terminal(a.resident_control_ints)) return;
-  if (a.dense_fail && ld_shared_int(a.dense_fail) == 0) return;
+  if (a.dense_fail && __ldcg(a.dense_fail) == 0) return;
   const int i = blockIdx.x + 1;
   if (i > a.nvir) return;
   const int tid = threadIdx.x;
