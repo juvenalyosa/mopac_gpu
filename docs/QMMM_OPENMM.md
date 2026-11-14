@@ -236,6 +236,63 @@ on one LMO, ~14 us per rotation on that chain, and ~230 us of lock waits per blo
 heats differed from the default by 6e-6 and 2e-6 kcal/mol, two default runs by 2e-6, and the profiled default
 run by 4e-6. `MOPAC_MOZYME_DIAGG2_COOPERATIVE=1` doubled the step (101-107 ms).
 
+Four changes at commit `46637c1f`, each with an off switch:
+
+- The imaging, switching and force assembly over the MM charges run on the GPU with CuPy when the
+  long-range term does (`QMMM_MM_GPU=0` keeps them in NumPy), and the long-range term takes its input from
+  the device.
+- QM/MM sessions use the staged `diagg2`: `MOPAC_MOZYME_DIAGG2_STAGED=1` is set unless already defined.
+- Device buffers that live for one call (pair gradient, hcore and solrot pair terms, dispersion and H-bond
+  corrections) come from CUDA's stream-ordered pool (`MOPAC_GPU_ASYNC_ALLOC=0` gives `cudaMalloc`/`cudaFree`).
+- The parameter tables of the MOZYME pair kernels stay on the device while the parameters do not change
+  (`MOPAC_GPU_PAIR_TABLE_CACHE=0` rebuilds them every call).
+
+The ordering kernel of the default (unstaged) `diagg2` also scans in parallel now (1.1 ms per step before,
+under `nsys`); the staged kernel does not use that ordering.
+
+Measured with `colab/qmmm_speed2_colab.ipynb` on the same machine type, prepared state and protocol as the
+profile above. Each figure is one run unless two are given. Two runs of the same setting differed by up to
+0.1 ms per step.
+
+| `tolerance=0.01` | s per step | MOPAC | Python | long-range |
+|---|---:|---:|---:|---:|
+| all four changes | 0.0429 / 0.0428 | 0.0285 | 0.0090 | 0.0025 |
+| all four off | 0.0507 / 0.0507 | 0.0317 | 0.0129 | 0.0034 |
+| only `QMMM_MM_GPU=0` | 0.0480 | 0.0287 | 0.0131 | 0.0034 |
+| only staged off | 0.0440 | 0.0297 | 0.0091 | 0.0025 |
+| only async alloc off | 0.0437 | 0.0293 | 0.0091 | 0.0025 |
+| only table cache off | 0.0435 | 0.0291 | 0.0090 | 0.0025 |
+
+MOPAC, Python and long-range are medians per call, in seconds. At a tolerance of 0.001 a step took 0.057 s,
+against 0.066 s with all four off.
+
+Under `nsys`, 6.8 `cudaMalloc`/`cudaFree` pairs per step remain, against 100 before, and allocation calls take
+0.36 ms per step against 1.8 ms. The staged kernel took 9.9 ms per step, against 10.6 ms for the default block
+kernel.
+
+The changes do not alter the first call, which sees the same geometry in every run. Heats of all nine runs at
+0.01 lay within 6.1e-6 kcal/mol of the profile above (−297.0127265). Over the 36 pairs of runs at 0.01:
+- heats differed by up to 9e-6 kcal/mol, and the largest force component by up to 0.043 kJ/mol/nm (largest
+  force 2607);
+- the two pairs with the same setting differed by 1.2e-6 and 4.9e-6 kcal/mol and by 0.021 kJ/mol/nm.
+
+With MOPAC replaced by an instant stub, the NumPy and the GPU path of the Python part gave the same energies
+and forces within 1e-12 on three position sets, one of them with molecules split across the box. The stubbed
+call took 11.0 ms on the GPU path against 14.8 ms in NumPy.
+
+Larger QM regions, all four changes against all four off (one run each):
+
+| QM region | s per step | with staged off | all four off | Python per call |
+|---|---:|---:|---:|---|
+| whole chignolin (138 QM atoms, 200 steps) | 0.080 | 0.083 | 0.095 | 8 ms, against 18 |
+| whole crambin (642 QM atoms, 40 steps) | 0.49 | 0.53 | 0.66 | 13 ms, against 143 |
+
+Their first-call forces differed from the all-off run by up to 0.077 and 0.79 kJ/mol/nm on QM atoms
+(largest force 4538 and 5836), and by up to 0.002 and 0.024 on MM atoms. For crambin the all-off SCF
+converged in 31 iterations, the others in 32.
+These two regions had no repeat runs, so how much of these differences is run-to-run variation was not
+measured.
+
 ## Example: trypsin with BPTI
 
 `scripts/kaggle/mopac_qmmm_enzyme` (PDB 2PTC, 46 637 atoms with TIP3P water):

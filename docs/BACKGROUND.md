@@ -409,6 +409,8 @@ Common environment flags
 - Residency: `MOPAC_RESIDENT_SCF=1` (prefer resident on medium systems)
 - Diagnostics: `MOPAC_GPU_PROFILE=1|2`, `MOPAC_GPU_VERBOSE=1`, `MOPAC_GPU_SCF_DEBUG=1`, `MOPAC_GPU_STREAM_TRACE=1`
 - Eigenvectors host fetch (printing): set `MOPAC_EIG2HOST` non‑empty
+- Per-call device buffers come from CUDA's stream-ordered pool (`MOPAC_GPU_ASYNC_ALLOC=0`: `cudaMalloc`/`cudaFree`);
+  MOZYME pair-parameter tables stay on the device between calls (`MOPAC_GPU_PAIR_TABLE_CACHE=0`: rebuilt every call)
 
 MOZYME (localized) flags
 - Enable/disable: keyword `MOZYME_GPU`, or env `MOZYME_GPU_FORCE=1` / `MOZYME_GPU_OFF=1`
