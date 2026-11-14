@@ -270,6 +270,10 @@ contains
       ! (putting it back after every call made the driver re-grow it each step: 12.5 vs 2.0 ms per gradient
       ! with 10 QM atoms on an L4)
       code = mopac_setenv_default('MOPAC_GPU_STACK_RESTORE'//c_null_char, 'd'//c_null_char)
+      ! diagg2 with the LMO coefficients in shared memory (MOPAC_MOZYME_DIAGG2_STAGED=0: the global-memory
+      ! kernel): trypsin-BPTI, 59 QM atoms, A100, 50 instead of 52 ms per 0.5-fs step, heats as the
+      ! other kernel within its run-to-run differences
+      code = mopac_setenv_default('MOPAC_MOZYME_DIAGG2_STAGED'//c_null_char, '1'//c_null_char)
       mozyme_gpu_requested = .true.
       mozyme_gpu = .true.
       mozyme_resident_fock_gpu = .true.

@@ -4914,14 +4914,36 @@ __global__ void mozyme_diagg2_order_count_kernel(int nvir, const int *offsets, c
   atomicAdd(buckets + min(n, kDiaggOrderBuckets - 1), 1);
 }
 
-__global__ void mozyme_diagg2_order_scan_kernel(int *buckets, const int *resident_control_ints) {
-  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+// Exclusive scan of the buckets from the largest count down, one block: thread t holds the buckets
+// K-1-t*per .. K-per-t*per (a serial loop over the 4096 buckets in one thread took ~70 us per sweep).
+constexpr int kDiaggOrderScanThreads = 1024;
+static_assert(kDiaggOrderBuckets % kDiaggOrderScanThreads == 0, "buckets per scan thread");
+
+__global__ void __launch_bounds__(kDiaggOrderScanThreads)
+mozyme_diagg2_order_scan_kernel(int *buckets, const int *resident_control_ints) {
+  constexpr int per = kDiaggOrderBuckets / kDiaggOrderScanThreads;
+  __shared__ int s_sum[kDiaggOrderScanThreads];
+  if (blockIdx.x != 0) return;
   if (resident_control_terminal(resident_control_ints)) return;
-  int running = 0;   // largest counts first
-  for (int b = kDiaggOrderBuckets - 1; b >= 0; --b) {
-    const int c = buckets[b];
-    buckets[b] = running;
-    running += c;
+  const int t = threadIdx.x;
+  int local[per];
+  int sum = 0;
+  for (int k = 0; k < per; ++k) {
+    local[k] = buckets[kDiaggOrderBuckets - 1 - (t * per + k)];
+    sum += local[k];
+  }
+  s_sum[t] = sum;
+  __syncthreads();
+  for (int off = 1; off < kDiaggOrderScanThreads; off <<= 1) {   // inclusive scan of the thread sums
+    const int v = t >= off ? s_sum[t - off] : 0;
+    __syncthreads();
+    s_sum[t] += v;
+    __syncthreads();
+  }
+  int running = s_sum[t] - sum;   // largest counts first
+  for (int k = 0; k < per; ++k) {
+    buckets[kDiaggOrderBuckets - 1 - (t * per + k)] = running;
+    running += local[k];
   }
 }
 
@@ -9555,7 +9577,8 @@ bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
     }
     mozyme_diagg2_order_count_kernel<<<blocks, threads>>>(
         nvir, dev.diagg_offsets.ptr, nij_ptr, dev.diagg_rot_buckets.ptr, args.resident_control_ints);
-    mozyme_diagg2_order_scan_kernel<<<1, 1>>>(dev.diagg_rot_buckets.ptr, args.resident_control_ints);
+    mozyme_diagg2_order_scan_kernel<<<1, kDiaggOrderScanThreads>>>(dev.diagg_rot_buckets.ptr,
+                                                                    args.resident_control_ints);
     mozyme_diagg2_order_scatter_kernel<<<blocks, threads>>>(
         nvir, dev.diagg_offsets.ptr, nij_ptr, dev.diagg_rot_buckets.ptr, dev.diagg_rot_order.ptr,
         args.resident_control_ints);

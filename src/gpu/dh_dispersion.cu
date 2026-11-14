@@ -22,6 +22,8 @@
 
 #include <cuda_runtime.h>
 
+#include "stream_alloc.h"
+
 #include <cmath>
 #include <cstdio>
 
@@ -154,11 +156,11 @@ template <typename T>
 struct DevPtr {
   T *ptr = nullptr;
   bool upload(const T *host, size_t n) {
-    if (cudaMalloc(reinterpret_cast<void **>(&ptr), n * sizeof(T)) != cudaSuccess) return false;
+    if (mopac_stream_malloc(reinterpret_cast<void **>(&ptr), n * sizeof(T)) != cudaSuccess) return false;
     return cudaMemcpy(ptr, host, n * sizeof(T), cudaMemcpyHostToDevice) == cudaSuccess;
   }
   ~DevPtr() {
-    if (ptr) cudaFree(ptr);
+    mopac_stream_free(ptr);
   }
 };
 

@@ -181,6 +181,25 @@ class MopacQMMMForce:
         self.grid = None
         self.far = None
         self.qm_all = region.mm_charges[self.mm_idx_all]
+        # the work over all MM charges (imaging, switching groups, forces) on the GPU with CuPy when the PME
+        # grid is there (_compute_dev); QMMM_MM_GPU=0 keeps it in NumPy, QMMM_MM_GPU=numpy runs the device
+        # code path with NumPy (tests)
+        mode = os.environ.get("QMMM_MM_GPU", "")
+        self.xp = None
+        if mode == "numpy":
+            self.xp = np
+        elif mode != "0" and region.pme_gpu:
+            import cupy
+            self.xp = cupy
+        if self.xp is not None:
+            xp = self.xp
+            self.d_mm_idx = xp.asarray(self.mm_idx_all)
+            self.d_group_of = xp.asarray(self.group_of)
+            self.d_group_first = xp.asarray(self.group_first)
+            self.d_group_size = xp.asarray(self.group_size, dtype=float)
+            self.d_q_all = xp.asarray(self.qm_all, dtype=float)
+            at = {a: i for i, a in enumerate(self.qm_idx)}
+            self.link_q_pos = np.array([at[q] for q in self.link_q], dtype=int)
 
     def _qm_coords(self, pos_a):
         xq = pos_a[self.qm_idx]
@@ -200,7 +219,31 @@ class MopacQMMMForce:
             d -= np.outer(np.round(d[:, k] / box[k, k]), box[k])
         return d
 
+    def _image_dev(self, d, box):
+        """_image on the device (self.xp)"""
+        xp = self.xp
+        if not np.any(box - np.diag(np.diag(box))):
+            L = xp.asarray(np.diag(box))
+            return d - L * xp.round(d / L)
+        rows = xp.asarray(box)
+        d = d.copy()
+        for k in (2, 1, 0):
+            d -= xp.outer(xp.round(d[:, k] / box[k, k]), rows[k])
+        return d
+
+    def _check_box(self, xq, c, box):
+        # one image of each MM charge: the box must hold the QM region plus roff on every side
+        span = np.max(np.linalg.norm(xq - c, axis=1))
+        # (the real-space PME pairs use the same single image: pme_cutoff must fit too)
+        reach = max(self.region.roff, self.region.pme_cutoff if self.region.pme else 0.0)
+        if 2.0 * (span + reach) > min(box[0, 0], box[1, 1], box[2, 2]):
+            raise ValueError("QM/MM: periodic box %.1f A too small for the QM region (radius %.1f A) plus "
+                             "%.1f A (roff or the PME real-space cut-off) on each side; use a larger box"
+                             % (min(box[0, 0], box[1, 1], box[2, 2]), span, reach))
+
     def compute(self, state):
+        if self.xp is not None:
+            return self._compute_dev(state)
         pos = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer) * 10.0   # A
         n = pos.shape[0]
         box = None
@@ -217,14 +260,7 @@ class MopacQMMMForce:
         xm = pos[mm_idx]
         c = xq.mean(axis=0)
         if self.region.periodic:
-            # one image of each MM charge: the box must hold the QM region plus roff on every side
-            span = np.max(np.linalg.norm(xq - c, axis=1))
-            # (the real-space PME pairs use the same single image: pme_cutoff must fit too)
-            reach = max(self.region.roff, self.region.pme_cutoff if self.region.pme else 0.0)
-            if 2.0 * (span + reach) > min(box[0, 0], box[1, 1], box[2, 2]):
-                raise ValueError("QM/MM: periodic box %.1f A too small for the QM region (radius %.1f A) plus "
-                                 "%.1f A (roff or the PME real-space cut-off) on each side; use a larger box"
-                                 % (min(box[0, 0], box[1, 1], box[2, 2]), span, reach))
+            self._check_box(xq, c, box)
             # whole groups: the first charge of each group nearest to the QM centroid, the other charges of
             # the group nearest to it (imaging every atom separately split waters at half a box, and the
             # switching factor of the split group jumped)
@@ -291,6 +327,98 @@ class MopacQMMMForce:
         self.last = dict(heat=heat, n_mm=len(sel))
         return heat * KCAL_TO_KJ, forces
 
+    def _compute_dev(self, state):
+        """compute() with the work over the MM charges on the device (self.xp); the QM atoms, MOPAC and the
+        last force terms on the host.  Same steps and terms as compute()."""
+        xp = self.xp
+        host = (lambda a: a) if xp is np else xp.asnumpy
+        pos_nm = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+        n = pos_nm.shape[0]
+        nq = len(self.qm_idx)
+        pq = pos_nm[self.qm_idx] * 10.0
+        pl = pos_nm[self.link_m] * 10.0
+        box = None
+        if self.region.periodic:
+            box = state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(unit.nanometer) * 10.0
+            # positions may be wrapped: make the QM region (and its link partners) whole
+            ref = pq[0].copy()
+            pq = ref + self._image(pq - ref, box)
+            if len(pl):
+                pl = ref + self._image(pl - ref, box)
+        xq = pq
+        if len(self.link_q):
+            lq = pq[self.link_q_pos]
+            xq = np.vstack([pq, lq + self.link_g[:, None] * (pl - lq)])
+        c = xq.mean(axis=0)
+        cd = xp.asarray(c)
+        xm = xp.asarray(pos_nm)[self.d_mm_idx] * 10.0
+        if self.region.periodic:
+            self._check_box(xq, c, box)
+            ref = cd + self._image_dev(xm[self.d_group_first] - cd, box)
+            ref = ref[self.d_group_of]
+            xm = ref + self._image_dev(xm - ref, box)
+        ng = len(self.group_ids)
+        cg = xp.stack([xp.bincount(self.d_group_of, weights=xm[:, k], minlength=ng) for k in range(3)], axis=1)
+        cg /= self.d_group_size[:, None]
+        xr = xq[:nq]
+        rmax = np.max(np.linalg.norm(xr - c, axis=1)) + self.region.roff + 3.0
+        near_g = xp.nonzero(xp.linalg.norm(cg - cd, axis=1) < rmax)[0]
+        lam = 0.5
+        rv = cg[near_g, None, :] - xp.asarray(xr)[None, :, :]
+        r = xp.linalg.norm(rv, axis=2)
+        rmin = r.min(axis=1)
+        ex = xp.exp(-(r - rmin[:, None]) / lam)
+        dsoft = rmin - lam * xp.log(ex.sum(axis=1))
+        pA = ex / ex.sum(axis=1)[:, None]
+        ron, roff = self.region.ron, self.region.roff
+        x = xp.clip((dsoft - ron) / (roff - ron), 0.0, 1.0)
+        w = 1.0 - 10*x**3 + 15*x**4 - 6*x**5
+        dw = xp.where((x > 0) & (x < 1), (-30*x**2 + 60*x**3 - 30*x**4) / (roff - ron), 0.0)
+        on = w > 0
+        near_g, w, dw, pA, rv, r = near_g[on], w[on], dw[on], pA[on], rv[on], r[on]
+        wg = xp.zeros(ng)
+        wg[near_g] = w
+        sel = xp.nonzero(wg[self.d_group_of] > 0)[0]
+        gsel = self.d_group_of[sel]
+        xs = xm[sel]
+        qs = self.d_q_all[sel] * wg[gsel]
+        xs_h, qs_h = host(xs), host(qs)
+        if self.region.pme:
+            far = self._pme_far_potential(xq, xm, xs, qs, box, c)
+            heat, gq, gm = self.session.step(xq, xs_h, qs_h, 0.0, 0.0, qm_pot=far["phi"])
+            pot = self.session.mm_pot.copy()
+            g_all = self._pme_far_gradient(far, xq, xs, qs, gq, gm, pot, device=True)
+        else:
+            heat, gq, gm = self.session.step(xq, xs_h, qs_h, 0.0, 0.0)
+            pot = self.session.mm_pot
+        f = xp.zeros((n, 3))
+        if self.region.pme:
+            f[self.d_mm_idx] = xp.asarray(g_all) * -GRAD_KCAL_A_TO_KJ_NM
+        ga_sum = None
+        if len(sel):
+            rows = self.d_mm_idx[sel]                             # each MM charge once
+            f[rows] += xp.asarray(gm) * -GRAD_KCAL_A_TO_KJ_NM
+            # switching forces: dE/dw_g = Sum_i q_i pot_i, w = w(dsoft(centre, QM atoms))
+            dEdw = xp.bincount(gsel, weights=self.d_q_all[sel] * xp.asarray(pot), minlength=ng)
+            coef = dEdw[near_g] * dw                              # dE/d dsoft, kcal/(mol A)
+            u = rv / r[:, :, None]                                # unit vectors QM atom -> centre
+            gc = coef[:, None] * xp.einsum('ga,gak->gk', pA, u)    # dE/d centre
+            ga_sum = host((-coef[:, None, None] * pA[:, :, None] * u).sum(axis=0))   # dE/d QM atom
+            gmem = gc[xp.searchsorted(near_g, gsel)] / self.d_group_size[gsel][:, None]
+            f[rows] += gmem * -GRAD_KCAL_A_TO_KJ_NM
+        forces = np.array(host(f))
+        forces[self.qm_idx] -= gq[:nq] * GRAD_KCAL_A_TO_KJ_NM
+        if len(self.link_q):
+            fl = -gq[nq:] * GRAD_KCAL_A_TO_KJ_NM
+            np.add.at(forces, self.link_q, (1.0 - self.link_g)[:, None] * fl)
+            np.add.at(forces, self.link_m, self.link_g[:, None] * fl)
+        if ga_sum is not None:
+            forces[self.qm_idx] -= ga_sum * GRAD_KCAL_A_TO_KJ_NM
+        self.calls += 1
+        self.scf_iterations += self.session.scf_iterations or 0
+        self.last = dict(heat=heat, n_mm=len(sel))
+        return heat * KCAL_TO_KJ, forces
+
     def _pme_far_potential(self, xq, xm, xs, qs, box, c):
         """phi_far at the QM atoms (kcal/(mol e)), qmmm_pme.FarFieldNumPy / FarFieldGPU"""
         reg = self.region
@@ -306,10 +434,11 @@ class MopacQMMMForce:
             self.far = (FarFieldGPU if fused else FarFieldNumPy)(self.grid, reg.pme_alpha, reg.pme_cutoff)
         return dict(phi=self.far.potential(xq, xm, self.qm_all, xs, qs, c, L))
 
-    def _pme_far_gradient(self, far, xq, xs, qs, gq, gm, pot):
+    def _pme_far_gradient(self, far, xq, xs, qs, gq, gm, pot, device=False):
         """Add the gradient of E_far (kcal/(mol A)) to gq (QM atoms) and gm (switched charges, at fixed
-        weights), dE_far/dq_eff to pot; returns the gradient on all MM charges from the Ewald part"""
-        return self.far.gradient(self.session.qm_charges, gq, gm, pot)
+        weights), dE_far/dq_eff to pot; returns the gradient on all MM charges from the Ewald part (left on
+        the GPU with device=True when the far field runs there)"""
+        return self.far.gradient(self.session.qm_charges, gq, gm, pot, device=device)
 
     def close(self):
         self.session.close()

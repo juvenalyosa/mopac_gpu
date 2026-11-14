@@ -294,10 +294,10 @@ class FarFieldNumPy:
                         rb=rb, rbn=rbn, qm_all=qm_all, qs=qs)
         return COULOMB * (phi_real + g.value(st_q, phi_mm) + background - phi_bare)
 
-    def gradient(self, Q, gq, gm, pot):
+    def gradient(self, Q, gq, gm, pot, device=False):
         """Q: Mulliken charges of the QM atoms.  Adds the gradient of E_far (kcal/(mol A)) to gq (QM atoms) and
         gm (switched charges, at fixed weights), dE_far/dq_eff to pot; returns the gradient on every MM charge
-        from the Ewald part"""
+        from the Ewald part (device: ignored, NumPy)"""
         g, a, far = self.grid, self.alpha, self.far
         qm_all, qs = far["qm_all"], far["qs"]
         # reciprocal space
@@ -513,6 +513,8 @@ class FarFieldGPU:
         return ((n + self.BLOCK - 1) // self.BLOCK,), (self.BLOCK,)
 
     def _dev(self, a):
+        if isinstance(a, self.cp.ndarray):                 # already on the device (openmm_mopac._compute_dev)
+            return self.cp.ascontiguousarray(a, dtype=self.cp.float64)
         return self.cp.asarray(np.ascontiguousarray(a, dtype=np.float64))
 
     def _grid_potential(self, x, q):
@@ -558,7 +560,7 @@ class FarFieldGPU:
             self.qm_sum = float(self.qm_host.sum())
         self.L = np.asarray(L, dtype=np.float64)
         self.xq, self.xm = self._dev(xq), self._dev(xm)
-        self.xs, self.qs = self._dev(np.reshape(xs, (-1, 3))), self._dev(qs)
+        self.xs, self.qs = self._dev(xs).reshape(-1, 3), self._dev(qs)
         phi_mm = self._grid_potential(self.xm, self.qm)
         rec, self.grad_rec = self._gather(self.xq, phi_mm, cp.ones(self.xq.shape[0]))
         real = self._pair_phi(self.xq, self.xm, self.qm, 1, self.L)
@@ -566,7 +568,7 @@ class FarFieldGPU:
         background = -np.pi * self.qm_sum / (g.V * a * a)
         return cp.asnumpy(COULOMB * (real + rec + background - bare))
 
-    def gradient(self, Q, gq, gm, pot):
+    def gradient(self, Q, gq, gm, pot, device=False):
         cp = self.cp
         Qd = self._dev(Q)
         gqd = COULOMB * Qd[:, None] * self.grad_rec                       # reciprocal, QM atoms
@@ -580,4 +582,4 @@ class FarFieldGPU:
             gm += cp.asnumpy(gs)
             pot += cp.asnumpy(ps)
         gq += cp.asnumpy(gqd)
-        return cp.asnumpy(g_all)
+        return g_all if device else cp.asnumpy(g_all)

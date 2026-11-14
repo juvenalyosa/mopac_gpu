@@ -37,9 +37,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#include "stream_alloc.h"
 
 // Fortran section-timer hook (mozyme_section_timers), so the upload / kernel /
 // download split of the hcore entry point shows up in the [PROFILE] report.
@@ -217,18 +220,18 @@ struct DeviceArray {
   bool upload(const T *host, size_t n) {
     if (n == 0) return true;
     if (!host) return false;
-    if (cudaMalloc(reinterpret_cast<void **>(&ptr), n * sizeof(T)) != cudaSuccess) return false;
+    if (mopac_stream_malloc(reinterpret_cast<void **>(&ptr), n * sizeof(T)) != cudaSuccess) return false;
     count = n;
     return cudaMemcpy(ptr, host, n * sizeof(T), cudaMemcpyHostToDevice) == cudaSuccess;
   }
   bool alloc(size_t n) {
     if (n == 0) return true;
-    if (cudaMalloc(reinterpret_cast<void **>(&ptr), n * sizeof(T)) != cudaSuccess) return false;
+    if (mopac_stream_malloc(reinterpret_cast<void **>(&ptr), n * sizeof(T)) != cudaSuccess) return false;
     count = n;
     return true;
   }
   ~DeviceArray() {
-    if (ptr) cudaFree(ptr);
+    mopac_stream_free(ptr);
   }
 };
 
@@ -296,6 +299,64 @@ struct PairTables {
     return true;
   }
 };
+
+// The tables do not change between the calls of a calculation: they stay on the device and are uploaded
+// again only when a host value differs from the last upload (another method or parameter set).  Uploading
+// them at every call was 24 allocations and 24 synchronous copies per gradient and per hcore call.
+// MOPAC_GPU_PAIR_TABLE_CACHE=0 uploads them at every call.
+void append_bytes(std::vector<unsigned char> &k, const void *p, size_t bytes) {
+  const auto *b = static_cast<const unsigned char *>(p);
+  k.insert(k.end(), b, b + bytes);
+}
+
+std::vector<unsigned char> pair_tables_key(const MozymePairTablesC &t) {
+  std::vector<unsigned char> k;
+  k.reserve(200000);
+  append_bytes(k, t.natorb, 107 * sizeof(int));
+  append_bytes(k, t.npq, 107 * 3 * sizeof(int));
+  append_bytes(k, t.iod, 107 * sizeof(int));
+  for (const double *a : {t.zs, t.zp, t.zd, t.betas, t.betap, t.betad, t.tore, t.alp, t.am, t.ad, t.aq,
+                          t.dd, t.qq}) {
+    append_bytes(k, a, 107 * sizeof(double));
+  }
+  append_bytes(k, t.po, 9 * 107 * sizeof(double));
+  append_bytes(k, t.ddp, 6 * 107 * sizeof(double));
+  for (const double *a : {t.guess1, t.guess2, t.guess3}) append_bytes(k, a, 107 * 4 * sizeof(double));
+  append_bytes(k, t.alpb, 100 * 100 * sizeof(double));
+  append_bytes(k, t.xfac, 100 * 100 * sizeof(double));
+  append_bytes(k, t.v_par, 60 * sizeof(double));
+  for (const double x : {t.a0, t.ev, t.cutofs, t.cutof1, t.trunc_1, t.trunc_2}) append_bytes(k, &x, sizeof(x));
+  append_bytes(k, t.method_flags, sizeof(t.method_flags));
+  return k;
+}
+
+bool pair_table_cache_enabled() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("MOPAC_GPU_PAIR_TABLE_CACHE");
+    return !(v && (*v == '0' || *v == 'n' || *v == 'N' || *v == 'f' || *v == 'F'));
+  }();
+  return enabled;
+}
+
+// Tables for one call: the cached ones, or (cache off) `local` uploaded now.  nullptr on a CUDA failure.
+const PairTables *pair_tables(const MozymePairTablesC &t, PairTables &local) {
+  if (!pair_table_cache_enabled()) return local.upload(t) ? &local : nullptr;
+  // never freed: freeing at process exit could run after the CUDA context is gone
+  static PairTables *cached = nullptr;
+  static std::vector<unsigned char> *key = new std::vector<unsigned char>();
+  std::vector<unsigned char> next = pair_tables_key(t);
+  if (cached && next == *key) return cached;
+  delete cached;
+  cached = new PairTables();
+  if (!cached->upload(t)) {
+    delete cached;
+    cached = nullptr;
+    key->clear();
+    return nullptr;
+  }
+  key->swap(next);
+  return cached;
+}
 
 // Geometry / block index shared by both kernels.
 struct PairGeom {
@@ -1131,7 +1192,8 @@ int pair_gradient_launch(
   EventTimer timer;
   const HostClock::time_point t_start = HostClock::now();
   GeomBuffers geom;
-  PairTables tab;
+  PairTables tab_local;  // used only with the table cache off
+  const PairTables *tab = nullptr;
   DeviceArray<double> d_p, d_pa, d_pb, d_dxyz, d_q, d_energies, d_scratch, d_pair_w;
   DeviceArray<unsigned char> d_flags;
   DeviceArray<int> d_dpairs;
@@ -1143,7 +1205,7 @@ int pair_gradient_launch(
   const double *resident_p = ext ? nullptr : mopac_cuda_mozyme_resident_density_device(mpack);
   if (!geom.upload(numat, npairs, pair_i, pair_j, pair_off, row_start, diag_off, iorbs, nat,
                    coord, a.g) ||
-      !tab.upload(*tables) ||
+      !(tab = pair_tables(*tables, tab_local)) ||
       (!resident_p && !d_p.upload(p, ext ? static_cast<size_t>(ext->np) : static_cast<size_t>(mpack))) ||
       !d_dxyz.upload(dxyz, 3 * na) || !d_q.alloc(na) ||
       (d_on_device && !d_energies.alloc(static_cast<size_t>(kProbesPerPair) *
@@ -1161,9 +1223,9 @@ int pair_gradient_launch(
   a.g.cutof1 = tables->cutof1;
   a.g.cutof2 = cutof2;
   a.p = resident_p ? resident_p : d_p.ptr;
-  a.tore = tab.tore.ptr;
-  a.ovl = tab.ovl;
-  a.core = tab.core;
+  a.tore = tab->tore.ptr;
+  a.ovl = tab->ovl;
+  a.core = tab->core;
   a.cutofp = cutofp;
   a.chnge = chnge;
   a.chnge2 = 0.5 * chnge;
@@ -1562,8 +1624,9 @@ extern "C" int mopac_cuda_solrot_pairs(
     return 1;
   }
   EventTimer timer;
-  PairTables tab;
-  if (!tab.upload(*tables)) return 2;
+  PairTables tab_local;  // used only with the table cache off
+  const PairTables *tab = nullptr;
+  if (!(tab = pair_tables(*tables, tab_local))) return 2;
   // full-size w / wk on the device: the last generation's copies of the Fock build go first
   DeviceArray<double> d_wfull, d_wkfull;
   bool resident = false;
@@ -1690,8 +1753,8 @@ extern "C" int mopac_cuda_solrot_pairs(
     }
     SolrotArgs a;
     std::memset(&a, 0, sizeof(a));
-    a.ovl = tab.ovl;
-    a.core = tab.core;
+    a.ovl = tab->ovl;
+    a.core = tab->core;
     a.npairs = np;
     a.pair_ni = d_ni.ptr;
     a.pair_nj = d_nj.ptr;
@@ -1837,7 +1900,8 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
   EventTimer timer;
   const HostClock::time_point t_start = HostClock::now();
   GeomBuffers geom;
-  PairTables tab;
+  PairTables tab_local;  // used only with the table cache off
+  const PairTables *tab = nullptr;
   DeviceArray<double> d_h, d_enuc, d_scratch;
   DeviceArray<int> d_nijbo;
   HcoreArgs a;
@@ -1845,7 +1909,7 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
   const size_t na = static_cast<size_t>(numat);
   if (!geom.upload(numat, npairs, pair_i, pair_j, pair_off, row_start, diag_off, iorbs, nat,
                    coord, a.g) ||
-      !tab.upload(*tables) || !d_h.upload(h, static_cast<size_t>(mpack)) || !d_enuc.alloc(1) ||
+      !(tab = pair_tables(*tables, tab_local)) || !d_h.upload(h, static_cast<size_t>(mpack)) || !d_enuc.alloc(1) ||
       cudaMemset(d_enuc.ptr, 0, sizeof(double)) != cudaSuccess) {
     return 2;
   }
@@ -1864,8 +1928,8 @@ extern "C" int mopac_cuda_mozyme_hcore_pairs(
   a.g.d_on_device = d_on_device;
   a.g.cutof1 = tables->cutof1;
   a.g.cutof2 = cutof2;
-  a.ovl = tab.ovl;
-  a.core = tab.core;
+  a.ovl = tab->ovl;
+  a.core = tab->core;
   a.h = d_h.ptr;
   a.enuc = d_enuc.ptr;
 
