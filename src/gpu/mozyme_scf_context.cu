@@ -36,6 +36,7 @@
 
 #ifdef __CUDACC__
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 #include <cooperative_groups.h>
 
 extern "C" int mopac_cuda_mozyme_sparse_fock_run_device(
@@ -1684,6 +1685,8 @@ struct MozymeScfDeviceState {
   // dense diagg2 (MOPAC_MOZYME_DIAGG2_DENSE): LMO rows, atom orbital offsets, flags and sum of |beta|
   DeviceBuffer<double> diagg_dense_co, diagg_dense_cv, diagg_dense_sumb;
   DeviceBuffer<int> diagg_dense_first, diagg_dense_ints;
+  // dense diagg1 (MOPAC_MOZYME_DIAGG1_DENSE): Fock matrix, C_vir F and the occupied-virtual elements
+  DeviceBuffer<double> diagg1_dense_f, diagg1_dense_t, diagg1_dense_fvo;
   // diagg1 candidate index: atom neighbour CSR (from nijbo) and atom -> occupied
   // LMOs whose first two atoms are that atom.
   DeviceBuffer<int> diagg_nbr_count, diagg_nbr_start, diagg_nbr_list;
@@ -3162,6 +3165,8 @@ struct DiaggVirtualArgs {
   int spill_slots = 0;
   int spill_atoms = 0;
   int spill_bits = 0;
+  // dense diagg1 (MOPAC_MOZYME_DIAGG1_DENSE): its failure flag; when set, this kernel runs only if it is non-zero
+  const int *dense_fail = nullptr;
 };
 
 __host__ __device__ inline std::size_t diagg1_spill_ints_per_slot(int atoms, int bits) {
@@ -3353,6 +3358,7 @@ mozyme_diagg1_virtual_kernel(DiaggVirtualArgs a) {
   __shared__ int s_slot;
 
   if (resident_control_terminal(a.resident_control_ints)) return;
+  if (a.dense_fail && ld_shared_int(a.dense_fail) == 0) return;
   const int i = blockIdx.x + 1;
   if (i > a.nvir) return;
   const int tid = threadIdx.x;
@@ -9872,6 +9878,218 @@ mozyme_diagg2_dense_scatter_kernel(DiaggRotateArgs a, const int *atom_first, con
   if (threadIdx.x == 0) (l.occ ? a.ncf : a.nce)[l.k] = l.n + running_new;
 }
 
+// ---- diagg1 with dense matrices ---------------------------------------------
+//
+// MOPAC_MOZYME_DIAGG1_DENSE=1: the occupied-virtual Fock elements of diagg1 from the dense Fock matrix and the dense
+// LMO rows (see the dense diagg2 above), F_vo = (C_vir F) C_occ^T, with two DGEMMs.  mozyme_diagg1_virtual_kernel
+// builds F c_vir over each virtual LMO and its shell of neighbour atoms and sums it over every candidate occupied
+// LMO, one block per virtual (~0.3 ms per SCF iteration in trypsin-BPTI, whose LMOs span ~53 of 59 atoms).  The
+// candidates, the emitted pairs and the totals are those of that kernel: the prescreen on the first two atoms of
+// each LMO (diagg1_candidate), |F_ij| > oldlim, occupied LMOs in ascending order, odd iterations recomputing the
+// listed pairs only, sumt and tiny over the prescreened candidates (the listed pairs), eigv from the virtual's own
+// row.  The dense products also keep the terms the sparse sums leave out by the density screen (cutoff, at most
+// 1e-8).  If the dense tables cannot be built the sparse kernels run (DiaggVirtualArgs::dense_fail).
+
+// Block per atom: its Fock blocks with the atoms b <= at into the dense symmetric matrix (zeroed before).  A block
+// of two atoms is stored with the higher atom's orbitals as rows, a diagonal block as a packed lower triangle.
+__global__ void mozyme_diagg1_dense_fock_kernel(int numat, int mpack, int norbs, const int *nijbo, const int *iorbs,
+                                                const int *atom_first, const double *fao, double *F, int *ints,
+                                                const int *resident_control_ints) {
+  if (resident_control_terminal(resident_control_ints)) return;
+  const int at = blockIdx.x + 1;
+  if (at > numat) return;
+  const int na = iorbs[at - 1];
+  if (na < 1) return;
+  const std::size_t fa = static_cast<std::size_t>(atom_first[at - 1]);
+  const std::size_t n = static_cast<std::size_t>(norbs);
+  for (int b = threadIdx.x + 1; b <= at; b += blockDim.x) {
+    const int nb = iorbs[b - 1];
+    if (nb < 1) continue;
+    const int kj = mozyme_nijbo_at(nijbo, numat, at, b);
+    if (kj < 0) continue;
+    const std::size_t fb = static_cast<std::size_t>(atom_first[b - 1]);
+    if (b == at) {
+      if (kj + (na * (na + 1)) / 2 > mpack) {
+        atomicExch(ints + kDenseIntFail, 1);
+        continue;
+      }
+      for (int p = 0; p < na; ++p) {
+        for (int q = 0; q <= p; ++q) {
+          const double v = fao[kj + (p * (p + 1)) / 2 + q];
+          F[(fa + p) * n + fa + q] = v;
+          F[(fa + q) * n + fa + p] = v;
+        }
+      }
+    } else {
+      if (kj + na * nb > mpack) {
+        atomicExch(ints + kDenseIntFail, 1);
+        continue;
+      }
+      for (int p = 0; p < na; ++p) {
+        for (int q = 0; q < nb; ++q) {
+          const double v = fao[kj + p * nb + q];
+          F[(fa + p) * n + fb + q] = v;
+          F[(fb + q) * n + fa + p] = v;
+        }
+      }
+    }
+  }
+}
+
+// The prescreen of diagg1_candidate for occupied j and the virtual whose first two atoms are i1, i2: 1 when one of
+// the four first-atom pairs has a Fock block and their first elements add up to flim, 0 if not, -1 on a bad LMO.
+__device__ inline int diagg1_prescreen(const DiaggVirtualArgs &a, int j, int i1, int i2, double flim) {
+  const int jbase = a.nncf[j - 1];
+  const int ncf_j = a.ncf[j - 1];
+  if (jbase < 0 || ncf_j <= 0 || jbase + ncf_j > a.icocc_dim) return -1;
+  const int j1 = a.icocc[jbase];
+  const int j2 = ncf_j > 1 ? a.icocc[jbase + 1] : j1;
+  const int i1j1 = mozyme_nijbo_at(a.nijbo, a.numat, i1, j1);
+  const int i1j2 = mozyme_nijbo_at(a.nijbo, a.numat, i1, j2);
+  const int i2j1 = mozyme_nijbo_at(a.nijbo, a.numat, i2, j1);
+  const int i2j2 = mozyme_nijbo_at(a.nijbo, a.numat, i2, j2);
+  if (i1j1 < 0 && i1j2 < 0 && i2j1 < 0 && i2j2 < 0) return 0;
+  double pre = 0.0;
+  if (i1j1 >= 0) pre = fabs(a.fao[i1j1]);
+  if (i1j2 >= 0) pre += fabs(a.fao[i1j2]);
+  if (i2j1 >= 0) pre += fabs(a.fao[i2j1]);
+  if (i2j2 >= 0) pre += fabs(a.fao[i2j2]);
+  return pre < flim ? 0 : 1;
+}
+
+// One block per virtual: the count pass (a.fill = 0) and the fill pass of mozyme_diagg1_virtual_kernel with the
+// values taken from the dense products: T = C_vir F (nvir x norbs), fvo = T C_occ^T (nvir x nocc), cvd = C_vir.
+__global__ void __launch_bounds__(kDiaggBlockThreads)
+mozyme_diagg1_dense_emit_kernel(DiaggVirtualArgs a, const double *T, const double *fvo, const double *cvd,
+                                const int *dense_ints) {
+  __shared__ int s_warp[8];
+  __shared__ double s_red[8];
+  __shared__ int s_running;
+  __shared__ int s_fail;
+  if (resident_control_terminal(a.resident_control_ints)) return;
+  if (ld_shared_int(dense_ints + kDenseIntFail) != 0) return;
+  const int i = blockIdx.x + 1;
+  if (i > a.nvir) return;
+  const int tid = threadIdx.x;
+  const int idiagg = resident_control_int_or(a.resident_control_ints, kResidentControlDiaggMode, a.idiagg);
+  double flim = a.flim;
+  double oldlim = a.oldlim;
+  if (a.resident_control_scalars) {
+    flim = fmin(3.0, a.resident_control_scalars[kResidentControlDiaggFref] * 0.5);
+    oldlim = a.resident_control_scalars[kResidentControlDiaggOldlim];
+  }
+  const bool even_mode = (idiagg <= 5 || idiagg % 2 == 0);
+  if (!even_mode && !a.fill) {
+    if (tid == 0) a.counts[i - 1] = a.nfmo[i - 1];
+    return;
+  }
+  const int nce_i = a.nce[i - 1];
+  const int ibase = a.nnce[i - 1];
+  if (nce_i <= 0 || ibase < 0 || ibase + nce_i > a.icvir_dim) {
+    if (tid == 0) atomicExch(a.work_ints + kDiaggWorkIntError, 1);
+    return;
+  }
+  if (tid == 0) s_fail = 0;
+  const double *ti = T + static_cast<std::size_t>(i - 1) * a.norbs;
+  const double *fi = fvo + static_cast<std::size_t>(i - 1) * a.nocc;
+  if (a.fill) {
+    const double *ci = cvd + static_cast<std::size_t>(i - 1) * a.norbs;
+    double part = 0.0;
+    for (int c = tid; c < a.norbs; c += blockDim.x) part += ti[c] * ci[c];
+    const double eigv_i = block_sum_double(part, s_red);
+    if (tid == 0) a.eigv[i - 1] = eigv_i;
+  }
+  __syncthreads();
+  double sumt_local = 0.0;
+  double tiny_local = 0.0;
+  if (even_mode) {
+    const int i1 = a.icvir[ibase];
+    const int i2 = nce_i > 1 ? a.icvir[ibase + 1] : i1;
+    const int base = a.fill ? a.offsets[i - 1] : 0;
+    if (tid == 0) s_running = 0;
+    __syncthreads();
+    for (int chunk = 0; chunk < a.nocc; chunk += blockDim.x) {
+      const int j = chunk + tid + 1;
+      int emit = 0;
+      double value = 0.0;
+      if (j <= a.nocc) {
+        const int cand = diagg1_prescreen(a, j, i1, i2, flim);
+        if (cand < 0) {
+          s_fail = 1;
+        } else if (cand) {
+          value = fi[j - 1];
+          sumt_local += fabs(value);
+          tiny_local = fmax(tiny_local, fabs(value));
+          emit = (value != 0.0 && fabs(value) > oldlim) ? 1 : 0;
+        }
+      }
+      int chunk_total = 0;
+      const int rank = block_exclusive_scan_int(emit, s_warp, &chunk_total);
+      if (a.fill && emit) {
+        const int pos = base + s_running + rank;
+        if (pos < a.capacity) {
+          a.ifmo[2 * pos] = i;
+          a.ifmo[2 * pos + 1] = j;
+          a.fmo[pos] = value;
+        }
+      }
+      __syncthreads();
+      if (tid == 0) s_running += chunk_total;
+      __syncthreads();
+    }
+    if (tid == 0) {
+      if (a.fill) {
+        int emitted = s_running;
+        const int room = a.capacity - base;
+        if (emitted > room) emitted = room < 0 ? 0 : room;
+        a.nfmo[i - 1] = emitted;
+      } else {
+        a.counts[i - 1] = s_running;
+      }
+    }
+  } else {
+    const int base = a.offsets[i - 1];
+    const int n = a.nfmo[i - 1];
+    for (int t = tid; t < n; t += blockDim.x) {
+      const int pos = base + t;
+      if (pos >= a.capacity) break;
+      const int j = a.ifmo[2 * pos + 1];
+      if (j < 1 || j > a.nocc) {
+        s_fail = 1;
+        break;
+      }
+      const double value = fi[j - 1];
+      sumt_local += fabs(value);
+      tiny_local = fmax(tiny_local, fabs(value));
+      a.fmo[pos] = value;
+    }
+  }
+  __syncthreads();
+  if (s_fail) {
+    if (tid == 0) atomicExch(a.work_ints + kDiaggWorkIntError, 1);
+    return;
+  }
+  if (a.fill) {
+    const double sumt_block = block_sum_double(sumt_local, s_red);
+    const double tiny_block = block_max_double(tiny_local, s_red);
+    if (tid == 0) {
+      atomicAdd_double(a.work_scalars + kDiaggWorkDoubleSumt, sumt_block);
+      atomicMax_double(a.work_scalars + kDiaggWorkDoubleTiny, tiny_block);
+    }
+  }
+}
+
+// cuBLAS handle of the dense diagg1 (default stream); nullptr if it cannot be created
+cublasHandle_t diagg1_dense_cublas() {
+  static cublasHandle_t handle = nullptr;
+  static bool tried = false;
+  if (!tried) {
+    tried = true;
+    if (cublasCreate(&handle) != CUBLAS_STATUS_SUCCESS) handle = nullptr;
+  }
+  return handle;
+}
+
 // MOPAC_MOZYME_DIAGG2_STAGED=1: mozyme_diagg2_staged_kernel (coefficients in
 // shared memory) instead of mozyme_diagg2_block_kernel.  Needs more than the
 // default 48 KB of shared memory per block; if that cannot be set, the block
@@ -10465,6 +10683,81 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
     va.work_ints = dev.diagg_work_ints.ptr;
     va.resident_control_ints = dev.resident_control_ints.ptr;
 
+    // MOPAC_MOZYME_DIAGG1_DENSE=1: the dense products and the count / fill passes on them; the sparse passes below
+    // then return at once (va.dense_fail), unless the dense tables could not be built
+    static const bool dense1_env = env_enabled("MOPAC_MOZYME_DIAGG1_DENSE");
+    bool dense1 = dense1_env && nocc > 0 && nvir > 0 && numat <= kDiaggDenseMaxAtoms && norbs <= 4096 &&
+                  diagg1_dense_cublas() != nullptr;
+    if (dense1) {
+      const std::size_t nb = static_cast<std::size_t>(norbs);
+      dense1 = dev.diagg_dense_co.resize(static_cast<std::size_t>(nocc) * nb) &&
+               dev.diagg_dense_cv.resize(static_cast<std::size_t>(nvir) * nb) &&
+               dev.diagg_dense_first.resize(static_cast<std::size_t>(numat) + 1) &&
+               dev.diagg_dense_ints.resize(kDenseIntCount) && dev.diagg_dense_sumb.resize(1) &&
+               dev.diagg1_dense_f.resize(nb * nb) && dev.diagg1_dense_t.resize(static_cast<std::size_t>(nvir) * nb) &&
+               dev.diagg1_dense_fvo.resize(static_cast<std::size_t>(nvir) * nocc);
+    }
+    if (dense1) {
+      DiaggRotateArgs ra{};
+      ra.nocc = nocc;
+      ra.nvir = nvir;
+      ra.numat = numat;
+      ra.norbs = norbs;
+      ra.icocc_dim = ctx.state.icocc_dim;
+      ra.icvir_dim = ctx.state.icvir_dim;
+      ra.cocc_dim = ctx.state.cocc_dim;
+      ra.cvir_dim = ctx.state.cvir_dim;
+      ra.nncf = dev.nncf.ptr;
+      ra.ncf = dev.ncf.ptr;
+      ra.ncocc = dev.ncocc.ptr;
+      ra.icocc = dev.icocc.ptr;
+      ra.nnce = dev.nnce.ptr;
+      ra.nce = dev.nce.ptr;
+      ra.ncvir = dev.ncvir.ptr;
+      ra.icvir = dev.icvir.ptr;
+      ra.iorbs = dev.iorbs.ptr;
+      ra.cocc = dev.cocc.ptr;
+      ra.cvir = dev.cvir.ptr;
+      ra.resident_control_ints = dev.resident_control_ints.ptr;
+      cudaMemsetAsync(dev.diagg_dense_co.ptr, 0, dev.diagg_dense_co.count * sizeof(double));
+      cudaMemsetAsync(dev.diagg_dense_cv.ptr, 0, dev.diagg_dense_cv.count * sizeof(double));
+      cudaMemsetAsync(dev.diagg1_dense_f.ptr, 0, dev.diagg1_dense_f.count * sizeof(double));
+      mozyme_diagg2_dense_prepare_kernel<<<1, 256>>>(numat, dev.iorbs.ptr, dev.diagg_dense_first.ptr,
+                                                     dev.diagg_dense_ints.ptr, dev.diagg_dense_sumb.ptr,
+                                                     dev.resident_control_ints.ptr);
+      mozyme_diagg2_dense_gather_kernel<<<nocc + nvir, kDiaggDenseThreads>>>(
+          ra, dev.diagg_dense_first.ptr, dev.diagg_dense_co.ptr, dev.diagg_dense_cv.ptr, dev.diagg_dense_ints.ptr);
+      mozyme_diagg1_dense_fock_kernel<<<numat, 128>>>(numat, mpack, norbs, dev.nijbo.ptr, dev.iorbs.ptr,
+                                                      dev.diagg_dense_first.ptr, dev.f.ptr, dev.diagg1_dense_f.ptr,
+                                                      dev.diagg_dense_ints.ptr, dev.resident_control_ints.ptr);
+      // column-major view: T^T (norbs x nvir) = F C_vir^T, fvo^T (nocc x nvir) = C_occ T^T
+      const double one = 1.0, zero = 0.0;
+      cublasHandle_t h = diagg1_dense_cublas();
+      const bool gemm_ok =
+          cublasDgemm(h, CUBLAS_OP_N, CUBLAS_OP_N, norbs, nvir, norbs, &one, dev.diagg1_dense_f.ptr, norbs,
+                      dev.diagg_dense_cv.ptr, norbs, &zero, dev.diagg1_dense_t.ptr, norbs) == CUBLAS_STATUS_SUCCESS &&
+          cublasDgemm(h, CUBLAS_OP_T, CUBLAS_OP_N, nocc, nvir, norbs, &one, dev.diagg_dense_co.ptr, norbs,
+                      dev.diagg1_dense_t.ptr, norbs, &zero, dev.diagg1_dense_fvo.ptr, nocc) == CUBLAS_STATUS_SUCCESS;
+      if (!gemm_ok) {
+        const int one_int = 1;
+        cudaMemcpyAsync(dev.diagg_dense_ints.ptr + kDenseIntFail, &one_int, sizeof(int), cudaMemcpyHostToDevice);
+        cudaStreamSynchronize(nullptr);
+      }
+      split_resident_stage_profile(ctx, "resident diagg1_index stop event");
+      va.fill = 0;
+      mozyme_diagg1_dense_emit_kernel<<<nvir, kDiaggBlockThreads>>>(
+          va, dev.diagg1_dense_t.ptr, dev.diagg1_dense_fvo.ptr, dev.diagg_dense_cv.ptr, dev.diagg_dense_ints.ptr);
+      split_resident_stage_profile(ctx, "resident diagg1_count stop event");
+      mozyme_exclusive_scan_kernel<<<1, 1024>>>(nvir, nullptr, dev.diagg_counts.ptr, dev.diagg_offsets.ptr,
+                                                dev.resident_control_ints.ptr);
+      va.fill = 1;
+      mozyme_diagg1_dense_emit_kernel<<<nvir, kDiaggBlockThreads>>>(
+          va, dev.diagg1_dense_t.ptr, dev.diagg1_dense_fvo.ptr, dev.diagg_dense_cv.ptr, dev.diagg_dense_ints.ptr);
+      if (!cuda_context_ok(cudaGetLastError(), "resident dense diagg1 kernels")) break;
+      split_resident_stage_profile(ctx, "resident diagg1_fill stop event");
+      va.dense_fail = dev.diagg_dense_ints.ptr + kDenseIntFail;
+    }
+
     // Candidate index for the even-mode search (see diagg1_candidate).
     va.nbr_start = nullptr;
     va.nbr_list = nullptr;
@@ -10472,7 +10765,7 @@ bool compute_diagg_on_gpu(MozymeScfContext &ctx, double *wall_ms) {
     va.head_list = nullptr;
     va.occ_words = 0;
     std::size_t dyn_shared = 0;
-    if (diagg1_index_enabled() && dev.diagg_nbr_list.ptr && dev.diagg_head_list.ptr &&
+    if (!dense1 && diagg1_index_enabled() && dev.diagg_nbr_list.ptr && dev.diagg_head_list.ptr &&
         diagg1_dynamic_shared_ok((nocc + 31) / 32, &dyn_shared)) {
       const int nbr_cap = static_cast<int>(dev.diagg_nbr_list.count);
       const int head_cap = static_cast<int>(dev.diagg_head_list.count);
