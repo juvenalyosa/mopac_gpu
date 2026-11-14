@@ -1681,6 +1681,9 @@ struct MozymeScfDeviceState {
   DeviceBuffer<int> diagg_rot_order;    // virtuals by decreasing pair count (MOPAC_MOZYME_DIAGG2_LPT)
   DeviceBuffer<int> diagg_rot_buckets;  // counting-sort buckets of that order
   DeviceBuffer<unsigned long long> diagg_rot_timers;  // sweep timers (MOPAC_MOZYME_SCF_TRACE)
+  // dense diagg2 (MOPAC_MOZYME_DIAGG2_DENSE): LMO rows, atom orbital offsets, flags and sum of |beta|
+  DeviceBuffer<double> diagg_dense_co, diagg_dense_cv, diagg_dense_sumb;
+  DeviceBuffer<int> diagg_dense_first, diagg_dense_ints;
   // diagg1 candidate index: atom neighbour CSR (from nijbo) and atom -> occupied
   // LMOs whose first two atoms are that atom.
   DeviceBuffer<int> diagg_nbr_count, diagg_nbr_start, diagg_nbr_list;
@@ -4173,6 +4176,8 @@ struct DiaggRotateArgs {
   int fast_path;
   const int *resident_control_ints;
   const double *resident_control_scalars;
+  // set (non-zero) when the dense sweep has done this diagg2 (MOPAC_MOZYME_DIAGG2_DENSE): the lock kernels return
+  const int *skip_if_set;
 };
 
 // Exclusive orbital offsets for an LMO atom list, written to `off`; returns
@@ -4990,6 +4995,7 @@ mozyme_diagg2_block_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
   __shared__ int s_next;
 
   if (resident_control_terminal(a.resident_control_ints)) return;
+  if (a.skip_if_set && ld_shared_int(a.skip_if_set) != 0) return;
   const int nij = a.control_ints[a.nij_slot];
   const int retry = a.control_ints[a.retry_slot];
   const double tiny = a.control_scalars[a.tiny_slot];
@@ -5392,6 +5398,7 @@ mozyme_diagg2_staged_kernel(DiaggRotateArgs a, const int *offsets, int *olock,
   double *s_co = s_stage + kDiaggStageCoeffs;
 
   if (resident_control_terminal(a.resident_control_ints)) return;
+  if (a.skip_if_set && ld_shared_int(a.skip_if_set) != 0) return;
   const int nij = a.control_ints[a.nij_slot];
   const int retry = a.control_ints[a.retry_slot];
   const double tiny = a.control_scalars[a.tiny_slot];
@@ -9569,6 +9576,300 @@ bool launch_diagg2_parallel(int max_pairs, DiaggRotateArgs args,
 // the cooperative sweep when MOPAC_MOZYME_DIAGG2_COOPERATIVE is set.
 bool resident_scf_trace_enabled();
 
+// ---- diagg2 on dense LMO rows ------------------------------------------------
+//
+// In QM/MM regions the LMOs span most of the region (trypsin-BPTI: ~53 of 59 atoms once the first SCF has grown
+// them), so the atom-list bookkeeping of a rotation (staging the occupied list and its offsets, the growth tests:
+// ~6 us per rotation in the staged kernel) buys little.  MOPAC_MOZYME_DIAGG2_DENSE=1: the LMOs are copied into
+// dense rows (one column per basis function, zero where an LMO has no atom), the sweep rotates whole rows under
+// the same occupied locks, with the same angles and in the same staggered order, and the rows are written back.
+// An atom missing from an LMO is added when the squared norm of its coefficients exceeds thresh (the test the
+// sparse rotation applies to the coefficients a rotation would add), at the end of the LMO in ascending atom
+// order.  If an LMO's storage cannot hold its new atoms, or anything else fails, the dense result is dropped and
+// the lock kernel does the sweep (skip_if_set stays 0).  The sparse rotation drops sub-threshold contributions as
+// it goes; here they stay in the rows until the end of the sweep.
+constexpr int kDiaggDenseThreads = 128;
+constexpr int kDiaggDenseMaxAtoms = 4096;    // atom membership map of an LMO (shared memory)
+constexpr int kDenseIntFail = 0;              // the dense sweep cannot be used for this diagg2
+constexpr int kDenseIntDone = 1;              // the dense sweep was written back (skip_if_set of the lock kernels)
+constexpr int kDenseIntRotated = 2;
+constexpr int kDenseIntMaxChain = 3;
+constexpr int kDenseIntNewAtoms = 4;
+constexpr int kDenseIntCount = 5;
+
+// Orbital offset of every atom (atom_first[numat] = norbs) and the flags of this sweep; one block.
+__global__ void mozyme_diagg2_dense_prepare_kernel(int numat, const int *iorbs, int *atom_first, int *ints,
+                                                   double *sumb, const int *resident_control_ints) {
+  __shared__ int s_warp[32];
+  if (resident_control_terminal(resident_control_ints)) return;
+  int running = 0;
+  for (int chunk = 0; chunk < numat; chunk += blockDim.x) {
+    const int at = chunk + threadIdx.x;
+    const int n = at < numat ? iorbs[at] : 0;
+    int total = 0;
+    const int prefix = block_exclusive_scan_int(n, s_warp, &total);
+    if (at < numat) atom_first[at] = running + prefix;
+    running += total;
+  }
+  if (threadIdx.x == 0) {
+    atom_first[numat] = running;
+    for (int k = 0; k < kDenseIntCount; ++k) ints[k] = 0;
+    *sumb = 0.0;
+  }
+}
+
+// LMO r (occupied 0..nocc-1, then virtual) of the storage of `a`: its atom list, count, list and coefficient bases
+// and capacities (as in block_rotate_pair_indexed: the next LMO's bases, the last LMO the array dimensions, the
+// coefficients at most norbs).
+struct DenseLmo {
+  bool occ;
+  int k, n, base, cbase, cap_atoms, cap_coef;
+  const int *list;
+  double *coef;
+};
+
+__device__ inline DenseLmo dense_lmo(const DiaggRotateArgs &a, int r) {
+  DenseLmo l;
+  l.occ = r < a.nocc;
+  l.k = l.occ ? r : r - a.nocc;
+  const int count = l.occ ? a.nocc : a.nvir;
+  l.n = ld_shared_int((l.occ ? a.ncf : a.nce) + l.k);
+  l.base = (l.occ ? a.nncf : a.nnce)[l.k];
+  l.cbase = (l.occ ? a.ncocc : a.ncvir)[l.k];
+  l.cap_atoms = (l.k + 1 < count) ? (l.occ ? a.nncf : a.nnce)[l.k + 1] : (l.occ ? a.icocc_dim : a.icvir_dim);
+  l.cap_coef = (l.k + 1 < count) ? (l.occ ? a.ncocc : a.ncvir)[l.k + 1] : (l.occ ? a.cocc_dim : a.cvir_dim);
+  if (l.cap_coef > l.cbase + a.norbs) l.cap_coef = l.cbase + a.norbs;
+  l.list = l.occ ? a.icocc : a.icvir;
+  l.coef = l.occ ? a.cocc : a.cvir;
+  return l;
+}
+
+// Stages LMO l's atom list and offsets in shared memory and its membership in s_in (numat entries); returns the
+// coefficient count, or -1 (block-uniform) when the LMO is out of range.
+__device__ int dense_stage_lmo(const DiaggRotateArgs &a, const DenseLmo &l, int *s_list, int *s_off,
+                               unsigned char *s_in, int *s_warp) {
+  if (l.n < 0 || l.n > kDiaggMaxLmoAtoms || l.base < 0 || l.cbase < 0 || l.base + l.n > l.cap_atoms) return -1;
+  for (int e = threadIdx.x; e < l.n; e += blockDim.x) s_list[e] = ld_shared_int(l.list + l.base + e);
+  if (s_in) {
+    for (int at = threadIdx.x; at < a.numat; at += blockDim.x) s_in[at] = 0;
+  }
+  __syncthreads();
+  int err = 0;
+  const int m = block_build_offsets(s_list, l.n, a.iorbs, a.numat, s_off, s_warp, &err);
+  if (s_in) {
+    for (int e = threadIdx.x; e < l.n; e += blockDim.x) {
+      const int at = s_list[e];
+      if (at >= 1 && at <= a.numat) s_in[at - 1] = 1;
+    }
+  }
+  if (__syncthreads_or(err) || l.cbase + m > l.cap_coef) return -1;
+  return m;
+}
+
+// One block per LMO: its coefficients into its dense row (rows zeroed before).
+__global__ void __launch_bounds__(kDiaggDenseThreads)
+mozyme_diagg2_dense_gather_kernel(DiaggRotateArgs a, const int *atom_first, double *dco, double *dcv, int *ints) {
+  __shared__ int s_list[kDiaggMaxLmoAtoms];
+  __shared__ int s_off[kDiaggMaxLmoAtoms];
+  __shared__ int s_warp[32];
+  if (resident_control_terminal(a.resident_control_ints)) return;
+  const DenseLmo l = dense_lmo(a, blockIdx.x);
+  if (dense_stage_lmo(a, l, s_list, s_off, nullptr, s_warp) < 0) {
+    if (threadIdx.x == 0) atomicExch(ints + kDenseIntFail, 1);
+    return;
+  }
+  double *row = (l.occ ? dco : dcv) + static_cast<std::size_t>(l.k) * a.norbs;
+  for (int e = threadIdx.x; e < l.n; e += blockDim.x) {
+    const int at = s_list[e];
+    const int no = a.iorbs[at - 1];
+    const double *src = l.coef + l.cbase + s_off[e];
+    double *dst = row + atom_first[at - 1];
+    for (int q = 0; q < no; ++q) dst[q] = ld_shared_double(src + q);
+  }
+}
+
+// The lock sweep on the dense rows: one block per virtual (from the cursor), its row in shared memory for the
+// whole chain, the occupied row read and written in global memory inside the occupied LMO's lock.
+__global__ void __launch_bounds__(kDiaggDenseThreads)
+mozyme_diagg2_dense_rotate_kernel(DiaggRotateArgs a, const int *offsets, int *olock, int *cursor, double *dco,
+                                  double *dcv, int *ints, double *dsumb, int stagger) {
+  extern __shared__ double s_row[];
+  __shared__ int s_next;
+  if (resident_control_terminal(a.resident_control_ints)) return;
+  if (ld_shared_int(ints + kDenseIntFail) != 0) return;
+  const int nij = a.control_ints[a.nij_slot];
+  const double tiny = a.control_scalars[a.tiny_slot];
+  const double biglim = a.control_scalars[a.biglim_slot];
+  a.shift = resident_control_double_or(a.resident_control_scalars, kResidentControlShift, a.shift);
+  if (nij <= 0) return;
+  const int tid = threadIdx.x;
+  const int norbs = a.norbs;
+  double sumb_acc = 0.0;
+  int rotated = 0;
+  int error = 0;
+  while (error == 0) {
+    if (tid == 0) s_next = atomicAdd(cursor, 1);
+    __syncthreads();
+    const int i = s_next + 1;
+    __syncthreads();
+    if (i > a.nvir) break;
+    const int start = offsets[i - 1];
+    int end = offsets[i];
+    if (end > nij) end = nij;
+    if (start >= end) continue;
+    double *vrow = dcv + static_cast<std::size_t>(i - 1) * norbs;
+    for (int c = tid; c < norbs; c += blockDim.x) s_row[c] = ld_shared_double(vrow + c);
+    __syncthreads();
+    for (int k = 0; k < end - start; ++k) {
+      const int ij = start + diagg2_chain_pos(k, end - start, i, stagger);
+      const int j = a.ifmo[2 * ij + 1];
+      if (a.ifmo[2 * ij] != i || j < 1 || j > a.nocc) {
+        error = 1;
+        break;
+      }
+      const double f = a.fmo[ij];
+      if (fabs(f) < tiny) continue;
+      const double c = f * a.rot_const;
+      const double d = a.eigs[j - 1] - a.eigv[i - 1] - a.shift;
+      // Same test as the CPU (Abs(c/d) >= biglim): a NaN ratio (d == 0) is skipped.
+      if (!(fabs(c / d) >= biglim)) continue;
+      const double e = copysign(sqrt(4.0 * c * c + d * d), d);
+      const double alpha = sqrt(0.5 * (1.0 + d / e));
+      const double beta = -copysign(sqrt(fmax(0.0, 1.0 - alpha * alpha)), c);
+      if (tid == 0) {
+        sumb_acc += fabs(beta);
+        while (atomicCAS(olock + j - 1, 0, 1) != 0) lock_backoff();
+        __threadfence();
+      }
+      __syncthreads();
+      double *orow = dco + static_cast<std::size_t>(j - 1) * norbs;
+      for (int col = tid; col < norbs; col += blockDim.x) {
+        const double av = ld_shared_double(orow + col);
+        const double bv = s_row[col];
+        orow[col] = alpha * av + beta * bv;
+        s_row[col] = alpha * bv - beta * av;
+      }
+      ++rotated;
+      __syncthreads();
+      __threadfence();
+      if (tid == 0) atomicExch(olock + j - 1, 0);
+      __syncthreads();
+    }
+    for (int col = tid; col < norbs; col += blockDim.x) vrow[col] = s_row[col];
+    __syncthreads();
+  }
+  if (tid == 0) {
+    if (error != 0) atomicExch(ints + kDenseIntFail, 1);
+    if (rotated != 0) {
+      atomicAdd(ints + kDenseIntRotated, rotated);
+      atomicMax(ints + kDenseIntMaxChain, rotated);
+    }
+    if (sumb_acc != 0.0) atomicAdd_double(dsumb, sumb_acc);
+  }
+}
+
+// Growth of LMO l: flag of atom at (0-based, not in the LMO): squared norm of its dense coefficients > thresh.
+__device__ inline int dense_new_atom(const DiaggRotateArgs &a, const double *row, const int *atom_first, int at,
+                                     const unsigned char *s_in) {
+  if (s_in[at]) return 0;
+  const double *x = row + atom_first[at];
+  const int no = a.iorbs[at];
+  double s = 0.0;
+  for (int q = 0; q < no; ++q) s += x[q] * x[q];
+  return s > a.thresh ? 1 : 0;
+}
+
+// One block per LMO: its new atoms counted against its storage; any LMO that does not fit fails the sweep.
+__global__ void __launch_bounds__(kDiaggDenseThreads)
+mozyme_diagg2_dense_check_kernel(DiaggRotateArgs a, const int *atom_first, const double *dco, const double *dcv,
+                                 int *ints) {
+  __shared__ int s_list[kDiaggMaxLmoAtoms];
+  __shared__ int s_off[kDiaggMaxLmoAtoms];
+  __shared__ unsigned char s_in[kDiaggDenseMaxAtoms];
+  __shared__ int s_warp[32];
+  if (resident_control_terminal(a.resident_control_ints)) return;
+  if (ld_shared_int(ints + kDenseIntFail) != 0) return;
+  const DenseLmo l = dense_lmo(a, blockIdx.x);
+  const int m = dense_stage_lmo(a, l, s_list, s_off, s_in, s_warp);
+  if (m < 0) {
+    if (threadIdx.x == 0) atomicExch(ints + kDenseIntFail, 1);
+    return;
+  }
+  const double *row = (l.occ ? dco : dcv) + static_cast<std::size_t>(l.k) * a.norbs;
+  int n_new = 0, orb_new = 0;
+  for (int chunk = 0; chunk < a.numat; chunk += blockDim.x) {
+    const int at = chunk + threadIdx.x;
+    const int flag = at < a.numat ? dense_new_atom(a, row, atom_first, at, s_in) : 0;
+    int n = 0, orb = 0;
+    block_scan_flag_orbs(flag, flag ? a.iorbs[at] : 0, s_warp, &n, &orb);
+    n_new += n;
+    orb_new += orb;
+  }
+  if (threadIdx.x == 0) {
+    if (l.base + l.n + n_new > l.cap_atoms || l.n + n_new > kDiaggMaxLmoAtoms ||
+        l.cbase + m + orb_new > l.cap_coef) {
+      atomicExch(ints + kDenseIntFail, 1);
+    }
+    if (n_new) atomicAdd(ints + kDenseIntNewAtoms, n_new);
+  }
+}
+
+// One block per LMO: the dense row back into the storage (the LMO's atoms in place, its new atoms appended), unless
+// the sweep failed; block 0 then marks the sweep done and adds its sums.
+__global__ void __launch_bounds__(kDiaggDenseThreads)
+mozyme_diagg2_dense_scatter_kernel(DiaggRotateArgs a, const int *atom_first, const double *dco, const double *dcv,
+                                   int *ints, const double *dsumb, int trace) {
+  __shared__ int s_list[kDiaggMaxLmoAtoms];
+  __shared__ int s_off[kDiaggMaxLmoAtoms];
+  __shared__ unsigned char s_in[kDiaggDenseMaxAtoms];
+  __shared__ int s_warp[32];
+  if (resident_control_terminal(a.resident_control_ints)) return;
+  const bool fail = ld_shared_int(ints + kDenseIntFail) != 0;
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    if (!fail) {
+      ints[kDenseIntDone] = 1;
+      a.work_ints[kDiaggWorkIntRounds] = 1;
+      atomicAdd(a.work_ints + kDiaggWorkIntRotated, ints[kDenseIntRotated]);
+      atomicMax(a.work_ints + kDiaggWorkIntMaxChain, ints[kDenseIntMaxChain]);
+      if (*dsumb != 0.0) atomicAdd_double(a.sumb_out, *dsumb);
+    }
+    if (trace) {
+      printf(" [MOZYME GPU SCF trace] diagg2_dense done=%d rotated=%d max_chain=%d new_atoms=%d\n", fail ? 0 : 1,
+             ints[kDenseIntRotated], ints[kDenseIntMaxChain], ints[kDenseIntNewAtoms]);
+    }
+  }
+  if (fail) return;
+  const DenseLmo l = dense_lmo(a, blockIdx.x);
+  const int m = dense_stage_lmo(a, l, s_list, s_off, s_in, s_warp);
+  if (m < 0) return;   // checked by mozyme_diagg2_dense_check_kernel
+  const double *row = (l.occ ? dco : dcv) + static_cast<std::size_t>(l.k) * a.norbs;
+  for (int e = threadIdx.x; e < l.n; e += blockDim.x) {
+    const int at = s_list[e];
+    const int no = a.iorbs[at - 1];
+    const double *src = row + atom_first[at - 1];
+    double *dst = l.coef + l.cbase + s_off[e];
+    for (int q = 0; q < no; ++q) dst[q] = src[q];
+  }
+  int *list = l.occ ? a.icocc : a.icvir;
+  int running_new = 0, running_orb = 0;
+  for (int chunk = 0; chunk < a.numat; chunk += blockDim.x) {
+    const int at = chunk + threadIdx.x;
+    const int flag = at < a.numat ? dense_new_atom(a, row, atom_first, at, s_in) : 0;
+    const int no = flag ? a.iorbs[at] : 0;
+    int n = 0, orb = 0;
+    const int prefix = block_scan_flag_orbs(flag, no, s_warp, &n, &orb);
+    if (flag) {
+      list[l.base + l.n + running_new + (prefix & 0xffff)] = at + 1;
+      const double *src = row + atom_first[at];
+      double *dst = l.coef + l.cbase + m + running_orb + (prefix >> 16);
+      for (int q = 0; q < no; ++q) dst[q] = src[q];
+    }
+    running_new += n;
+    running_orb += orb;
+  }
+  if (threadIdx.x == 0) (l.occ ? a.ncf : a.nce)[l.k] = l.n + running_new;
+}
+
 // MOPAC_MOZYME_DIAGG2_STAGED=1: mozyme_diagg2_staged_kernel (coefficients in
 // shared memory) instead of mozyme_diagg2_block_kernel.  Needs more than the
 // default 48 KB of shared memory per block; if that cannot be set, the block
@@ -9662,6 +9963,52 @@ bool launch_diagg2_for_diagg(MozymeScfContext &ctx, int max_pairs,
                                          sizeof(unsigned long long)), label)) {
       return false;
     }
+  }
+  // MOPAC_MOZYME_DIAGG2_DENSE=1: the sweep on dense LMO rows first; the lock kernel below then returns at once
+  // (skip_if_set), unless the dense sweep could not be used for this diagg2
+  static const bool dense_env = env_enabled("MOPAC_MOZYME_DIAGG2_DENSE");
+  const int nocc = ctx.config.noccupied;
+  const int norbs = ctx.config.norbs;
+  const int natoms = ctx.config.natoms;
+  bool dense = dense_env && args.control_ints && nocc > 0 && nvir > 0 && natoms <= kDiaggDenseMaxAtoms &&
+               static_cast<std::size_t>(norbs) * sizeof(double) <= 48 * 1024;
+  if (dense) {
+    dense = dev.diagg_dense_co.resize(static_cast<std::size_t>(nocc) * norbs) &&
+            dev.diagg_dense_cv.resize(static_cast<std::size_t>(nvir) * norbs) &&
+            dev.diagg_dense_first.resize(static_cast<std::size_t>(natoms) + 1) &&
+            dev.diagg_dense_ints.resize(kDenseIntCount) && dev.diagg_dense_sumb.resize(1);
+  }
+  if (dense) {
+    int dense_bps = 0;
+    const std::size_t row_bytes = static_cast<std::size_t>(norbs) * sizeof(double);
+    if (!cuda_context_ok(cudaMemsetAsync(dev.diagg_dense_co.ptr, 0, dev.diagg_dense_co.count * sizeof(double)),
+                         label) ||
+        !cuda_context_ok(cudaMemsetAsync(dev.diagg_dense_cv.ptr, 0, dev.diagg_dense_cv.count * sizeof(double)),
+                         label) ||
+        !cuda_context_ok(cudaMemsetAsync(dev.diagg_olock.ptr, 0, dev.diagg_olock.count * sizeof(int)), label) ||
+        !cuda_context_ok(cudaMemsetAsync(dev.diagg_rot_cursor.ptr, 0, sizeof(int)), label) ||
+        !cuda_context_ok(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                             &dense_bps, mozyme_diagg2_dense_rotate_kernel, kDiaggDenseThreads, row_bytes),
+                         label)) {
+      return false;
+    }
+    const int lmos = nocc + nvir;
+    const int dgrid = std::max(1, std::min(std::max(1, dense_bps) * sms, nvir));
+    mozyme_diagg2_dense_prepare_kernel<<<1, 256>>>(natoms, args.iorbs, dev.diagg_dense_first.ptr,
+                                                   dev.diagg_dense_ints.ptr, dev.diagg_dense_sumb.ptr,
+                                                   args.resident_control_ints);
+    mozyme_diagg2_dense_gather_kernel<<<lmos, kDiaggDenseThreads>>>(
+        args, dev.diagg_dense_first.ptr, dev.diagg_dense_co.ptr, dev.diagg_dense_cv.ptr, dev.diagg_dense_ints.ptr);
+    mozyme_diagg2_dense_rotate_kernel<<<dgrid, kDiaggDenseThreads, row_bytes>>>(
+        args, dev.diagg_offsets.ptr, dev.diagg_olock.ptr, dev.diagg_rot_cursor.ptr, dev.diagg_dense_co.ptr,
+        dev.diagg_dense_cv.ptr, dev.diagg_dense_ints.ptr, dev.diagg_dense_sumb.ptr, stagger);
+    mozyme_diagg2_dense_check_kernel<<<lmos, kDiaggDenseThreads>>>(
+        args, dev.diagg_dense_first.ptr, dev.diagg_dense_co.ptr, dev.diagg_dense_cv.ptr, dev.diagg_dense_ints.ptr);
+    mozyme_diagg2_dense_scatter_kernel<<<lmos, kDiaggDenseThreads>>>(
+        args, dev.diagg_dense_first.ptr, dev.diagg_dense_co.ptr, dev.diagg_dense_cv.ptr, dev.diagg_dense_ints.ptr,
+        dev.diagg_dense_sumb.ptr, trace ? 1 : 0);
+    if (!cuda_context_ok(cudaGetLastError(), label)) return false;
+    args.skip_if_set = dev.diagg_dense_ints.ptr + kDenseIntDone;
   }
   if (!cuda_context_ok(cudaMemsetAsync(dev.diagg_olock.ptr, 0,
                                        dev.diagg_olock.count * sizeof(int)),
