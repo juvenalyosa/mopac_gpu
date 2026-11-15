@@ -66,23 +66,25 @@ water molecules: 3.1×).
 The solid timings include writing the `AUX` file, about half of the GPU time of the 512–576-atom cells
 (without it: silicon 512 10.0 s, quartz 7.7 s, rutile 7.8 s, urea 7.1 s).
 
-**QM/MM dynamics** (OpenMM + MOPAC, protein in a water box; time per MD step):
+**QM/MM dynamics** (OpenMM + MOPAC, protein in a water box with PME; seconds per 0.5-fs MD step on one
+A100, MOPAC and the long-range QM–MM term on the GPU; commit `e6fddf48`):
 
-| QM region | QM atoms | Atoms in total | MOPAC on the CPU | MOPAC on the GPU |
+| QM region | QM atoms | Atoms in total | `tolerance=0.01` | `tolerance=0.001` |
 |---|---:|---:|---:|---:|
-| Tyrosine side chain (chignolin) | 15 | 4 730 | 0.028 s ¹ | |
-| Chignolin, whole peptide | 138 | 12 095 | 2.0 s | 0.185 s (**11×**) |
-| Crambin, whole protein | 642 | 24 813 | 34.5 s | 1.33 s (**26×**) |
-| Trypsin–BPTI complex, with PME | 54 + 5 link ¹ | 46 853 | 0.231 s | |
+| Trypsin–BPTI active site | 54 + 5 link | 46 859 | 0.021 s | 0.027 s |
+| Chignolin, whole peptide | 138 | 12 095 | 0.031 s | |
+| Crambin, whole protein | 642 | 24 828 | 0.245 s | |
 
-0.5-fs steps. ¹ In this run QM regions of up to 100 atoms (link atoms included) ran MOPAC on the CPU in GPU
-mode as well; OpenMM and the PME grid still use the GPU. The CPU QM/MM runs were shorter than the GPU runs.
-Since 2026-11-12 the limit is 20 atoms: a later A100 run (commit `52c7f964`, 400 steps) gave
-0.129 s per step for trypsin–BPTI with MOPAC on the GPU; regions of 10 atoms are still faster on the CPU
-(0.022 against 0.033 s per step, chignolin residue 1).
+NVT steps from one prepared state, no trajectory output; MM charges switched off between 10 and 12 Å
+(trypsin–BPTI) or 6 and 8 Å (whole proteins). Use `tolerance=0.001` for NVE (see
+`docs/QMMM_OPENMM.md`). In the benchmark run of the tables above (commit `c85eb96d`) the same two whole
+proteins took 0.185 s and 1.33 s per step with MOPAC on the GPU and 2.0 s and 34.5 s with MOPAC on the
+CPU; the trypsin–BPTI step took 0.129 s at commit `52c7f964`. QM regions of up to 20 atoms run MOPAC
+on the CPU, which was faster for 10 atoms (0.022 against 0.033 s per step, chignolin residue 1).
 
-All numbers are from one benchmark run (commit `c85eb96d`); see [Benchmarks](#8-benchmarks) to
-repeat them.
+The MOZYME and solid numbers are from one benchmark run (commit `c85eb96d`); see
+[Benchmarks](#8-benchmarks) to repeat them. The QM/MM numbers and how they came down are in
+`docs/QMMM_OPENMM.md` (Speed).
 
 ---
 
@@ -669,8 +671,9 @@ simulation.step(1000)
 qmmm.close()
 ```
 
-At the measured rates, 1 ns with 0.5-fs steps takes about 4 days with a 138-atom QM region and about a
-month with 642 QM atoms on one A100.
+At the measured rates (one A100, commit `e6fddf48`), 1 ns with 0.5-fs steps takes about 15 hours for
+the 59-atom trypsin–BPTI region at `tolerance=0.001`, about 17 hours for the 138 atoms of chignolin
+and about 6 days for the 642 atoms of crambin (both at 0.01).
 
 ---
 
@@ -766,8 +769,8 @@ commit message.
   and no pressure. NVE and NVT are available.
 - **Time step.** `DRC` chooses its own step, about 0.1 fs when hydrogen atoms move. One picosecond
   of crambin is about 10 000 steps (≈ 45 minutes on an A100); 1 ps of a 7 000-atom protein about
-  7.5 hours. The dynamics tests so far cover 4–100 fs (MOPAC) and 0.1–0.2 ps (QM/MM); long-time
-  energy conservation has not been established.
+  7.5 hours. The dynamics tests so far cover 4–100 fs (MOPAC) and up to 5 ps of QM/MM NVE
+  (trypsin–BPTI, `docs/QMMM_OPENMM.md`); energy conservation over nanoseconds has not been tested.
 - **NVE after NVT** restarts from the last NVT geometry with fresh velocities at the same
   temperature: MOPAC cannot read velocities together with a PDB geometry.
 - **Runs on the CPU instead of the GPU:** the Fock matrix of conventional-SCF molecules under 300
