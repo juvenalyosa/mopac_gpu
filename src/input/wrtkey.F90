@@ -138,7 +138,7 @@ end subroutine wrtkey
 subroutine wrtchk (allkey)
   use molkst_C, only: keywrd, is_PARAM, uhf, method_mndo, method_am1, &
   method_pm3, method_mndod, method_pm6, method_rm1, rhf, mozyme, line, &
-  method_pm7, method_pm6_org, method_pm8, method_indo, koment, title, refkey
+  method_pm7, method_pm6_org, method_pm8, method_indo, koment, title, refkey, keywrd_quoted
   use chanel_C, only: iw, input_fn
   implicit none
   logical :: birad, exci, ci, trip
@@ -271,6 +271,15 @@ subroutine wrtchk (allkey)
   end if
   if (Index (keywrd, " BUSSI") /= 0 .and. Index (keywrd, " TEMPERATURE=") == 0) then
     write (iw, "(//10X,'BUSSI AND NO TEMPERATURE')")
+    write (iw, 10000)
+    go to 1020
+  end if
+!
+!   MM_CHARGES acts only in MOZYME (qmmm_hcore, qmmm_grad); without it the charges were silently unused
+!
+  if (Index (keywrd_quoted, " MM_CHARGES=") /= 0 .and. &
+    Index (keywrd, " MOZ") + Index (keywrd, " LOCATE-TS") + Index (keywrd, " RAPID") == 0) then   ! as compfg
+    write (iw, "(//10X,'MM_CHARGES AND NO MOZYME')")
     write (iw, 10000)
     go to 1020
   end if
@@ -1747,7 +1756,7 @@ subroutine wrtout (allkey)
   if (myword(allkey, " MAKVEC"))  write (iw,'(" *  MAKVEC     - PRINT DETAILS OF SUBROUTINE MAKVEC")')
   if (myword(allkey, " DIIS"))    write (iw,'(" *  DIIS       - PRINT DETAILS OF SUBROUTINE DIIS  ")')
   if (myword(allkey, " FLEPO"))   write (iw,'(" *  FLEPO      - PRINT DETAILS OF SUBROUTINE FLEPO ")')
-  if (myword(allkey, " HMTR"))    write (iw,'(" *  HMTR       - Enable hierarchical memetic trust-region pre-optimization")')
+  if (myword(allkey, " HMTR"))    write (iw,'(" *  HMTR       - SEARCH OF DIHEDRAL ANGLES BEFORE BFGS (EXPERIMENTAL)")')
   if (myword(allkey, " FMAT"))    write (iw,'(" *  FMAT       - PRINT DETAILS OF SUBROUTINE FMAT  ")')
   if (myword(allkey, " DFORCE"))  write (iw,'(" *  DFORCE     - PRINT FORCE MATRIX OVER CARTESIAN COORDINATES")')
   if (myword(allkey, " HCORE"))   write (iw,'(" *  HCORE      - PRINT DETAILS OF SUBROUTINE HCORE ")')
@@ -1897,7 +1906,7 @@ subroutine wrtwor (allkey)
   if (myword(allkey, " NONR"))       write (iw,'(" *  NONR       - DO NOT USE NEWTON-RAPHSON STEP IN EF")')
   if (myword(allkey, " SNAP"))       write (iw,'(" *  SNAP       - INCREASE PRECISION OF SYMMETRY ANGLES")')
   if (myword(allkey, " PULAY"))      write (iw,'(" *  PULAY      - PULAY''S METHOD TO BE USED IN SCF")')
-  if (myword(allkey, " EDIIS"))      write (iw,'(" *  EDIIS      - HYBRID EDIIS/CDIIS SCF WITH DAMPING AND LEVEL SHIFT")')
+  if (myword(allkey, " EDIIS"))      write (iw,'(" *  EDIIS      - DAMPED START AND ADAPTIVE LEVEL SHIFT IN THE SCF")')
   if (myword(allkey, " CAMP"))       write (iw,'(" *  CAMP,KING- THE CAMP-KING CONVERGER TO BE USED")')
   if (myword(allkey, " KING"))       write (iw,'(" *  CAMP,KING- THE CAMP-KING CONVERGER TO BE USED")')
   if (myword(allkey, " LET"))        write (iw,'(" *  LET        - OVERRIDE SOME SAFETY CHECKS")')
