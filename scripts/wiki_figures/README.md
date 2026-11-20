@@ -15,7 +15,7 @@ python embed_wiki.py path/to/mopac_gpu.wiki
 - `jobs.py`: every calculation behind a figure; each job runs in `work/<name>/` and is skipped once `done.json`
   exists. MOPAC runs with one thread unless the job says otherwise.
 - `figures.py`: figures drawn from numbers published in `README.md` and `docs/QMMM_OPENMM.md` (examples 2, 39, 55, 56,
-  59, 63, 64) and the diagram of example 57; `figures_runs.py`: the figures that read the calculations.
+  60, 64, 65) and the diagram of example 57; `figures_runs.py`: the figures that read the calculations.
 - `figlib.py`: the two themes (the validated reference palette of the data-visualization method, light and dark
   steps), readers of MOPAC output and PyMOL renders.
 - `embed_wiki.py`: the captions; it replaces the figure blocks it wrote before, so it can be run again.

@@ -591,6 +591,21 @@ Without the long-range part, the energy differences depend on the cut-off by 20-
 (the charged residues of a protein converge slowly); with QM-PME the result is nearly independent of roff,
 and roff = 12 A is enough.
 
+## Reaction scans (`qmmm_scan.py`)
+
+`scripts/qmmm/qmmm_scan.py` follows a reaction coordinate by adiabatic mapping: it prepares the system as
+`run_qmmm_md.py` does, minimizes the reactant with QM/MM, then moves one distance (`--scan A-B`) to `--to` in steps of
+`--step` with a harmonic restraint (`--k`, default 2000 kJ/mol/A^2), minimizing at each value from the structure of the
+value before, and with `--back` returns the same way. Only residues with an atom within `--free-radius` (10 A) of the
+QM region move freely; the rest are held at their equilibrated positions (`--hold`, 50 kJ/mol/A^2), so that each
+window relaxes the active site and not the whole water box (minimizing all of trypsin-BPTI in water lowered the energy
+by thousands of kJ/mol per window, from the relaxation of the box). `scan.csv` gives, per window, the target and the
+distance reached, the energy without the restraints, the QM heat and the distances named in `--watch`;
+`scan_frames.pdb` the residues within 5 A of the QM region. The energies belong to single minimized structures: a
+potential-energy profile along one path, not a free energy; a difference between the forward and the backward scan
+shows where the path depends on its history. Example: the wiki, QM/MM example 59 (Ser195 of trypsin attacking the
+carbonyl carbon of Lys15 of BPTI).
+
 ## Validation
 
 - QM water + TIP3P water (point charges): all gradient components on the QM atoms and the MM charges agree

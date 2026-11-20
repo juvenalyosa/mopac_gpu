@@ -166,8 +166,8 @@ def ex39(theme, ctx):
     return fig
 
 
-@figure(59)
-def ex59(theme, ctx):
+@figure(60)
+def ex60(theme, ctx):
     """largest |GPU - CPU| of the heat of formation, README.md Accuracy (A100, c85eb96d)"""
     c = L.style(theme)
     rows = [("Water clusters, 375-6 000 atoms", 0.006), ("Crambin, DNA, BPTI, ubiquitin,\nbarnase, bacteriorhodopsin", 0.02),
@@ -194,8 +194,8 @@ def ex59(theme, ctx):
     return fig
 
 
-@figure(63)
-def ex63(theme, ctx):
+@figure(64)
+def ex64(theme, ctx):
     """FP64 rate and memory bandwidth of NVIDIA GPUs, vendor data sheets as listed in README.md (Which GPU?)"""
     c = L.style(theme)
     gpus = [("H200", 34, 4.8), ("H100 SXM", 34, 3.35), ("H100 PCIe", 26, 2.0), ("A100", 9.7, 1.8),
@@ -221,8 +221,8 @@ def ex63(theme, ctx):
     return fig
 
 
-@figure(64)
-def ex64(theme, ctx):
+@figure(65)
+def ex65(theme, ctx):
     c = L.style(theme)
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(8.4, 3.4))
     for ax, data, ref, col in ((a1, MOZYME_SP, "MOZYME single points\nagainst 1 CPU core", 0),

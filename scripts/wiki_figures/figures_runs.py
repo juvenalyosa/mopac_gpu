@@ -1320,6 +1320,68 @@ def ex54(theme, ctx):
     return fig
 
 
+def scan_rows(ctx):
+    import csv
+    with open(ctx.work / "enzyme_scan" / "scan.csv") as fh:
+        rows = list(csv.DictReader(fh))
+    for r in rows:
+        for k, v in r.items():
+            if k != "window":
+                r[k] = float(v)
+    return rows
+
+
+@figure(59)
+def ex59(theme, ctx):
+    c = L.style(theme)
+    rows = scan_rows(ctx)
+    e0 = rows[0]["e"]
+    fwd = [rows[0]] + [r for r in rows if r["window"].startswith("f")]
+    back = [fwd[-1]] + [r for r in rows if r["window"].startswith("b")]
+    frames = ctx.work / "enzyme_scan" / "scan_frames.pdb"
+    last = len(fwd)                       # model of the last forward window
+    pngs = []
+    for state, name in ((1, "reactant"), (last, "end")):
+        out = ctx.renders / f"ex59-{name}-{theme}.png"
+
+        def build(cmd, cc, state=state):
+            cmd.load(str(frames), "m", state=state)
+            cmd.hide("everything")
+            act = "(chain E and resi 57+102+195 and not name N+C+O+H+HA) or (chain I and resi 15+16)"
+            cmd.show("sticks", act); cmd.set("stick_radius", 0.17)
+            L.element_colours(cmd, act); cmd.color("carbon_t", f"({act}) and elem C")
+            cmd.color("s2", "chain I and resi 15+16 and elem C")
+            cmd.distance("d1", "chain E and resi 195 and name OG", "chain I and resi 15 and name C")
+            cmd.distance("d2", "chain E and resi 195 and name HG", "chain E and resi 57 and name NE2")
+            cmd.hide("labels"); cmd.set("dash_color", "s1"); cmd.set("dash_width", 3); cmd.set("dash_gap", 0.25)
+            cmd.orient("chain E and resi 57+195 or chain I and resi 15")
+        L.pymol_render(out, build, 900, 800, theme)
+        pngs.append(out)
+    fig = plt.figure(figsize=(9.8, 3.9))
+    for k, (png, lab) in enumerate(zip(pngs, (f"reactant: Ser195 OG···C {fwd[0]['d']:.2f} Å",
+                                             f"end of the scan: {fwd[-1]['d']:.2f} Å"))):
+        ax = fig.add_axes([0.0, 0.52 - 0.5 * k, 0.27, 0.47]); L.image_axes(ax, png)
+        ax.text(0.02, 0.02, lab, transform=ax.transAxes, fontsize=7.5, color=c["text2"])
+    a1 = fig.add_axes([0.35, 0.15, 0.29, 0.72]); a2 = fig.add_axes([0.71, 0.15, 0.28, 0.72])
+    kcal = 1 / 4.184
+    for part, col, lab, ls in ((fwd, c["series"][0], "forward", "-"), (back, c["series"][1], "back", (0, (4, 2)))):
+        a1.plot([r["d"] for r in part], [(r["e"] - e0) * kcal for r in part], "o", ls=ls, ms=4, color=col, label=lab)
+    a1.set_xlabel("Ser195 OG – Lys15 C (Å)"); a1.set_ylabel("energy − reactant (kcal/mol)")
+    a1.invert_xaxis(); a1.legend(fontsize=8)
+    a1.set_title("minimized energy along the scan", fontsize=9.5, fontweight="normal")
+    for part, ls, mk in ((fwd, "-", "o"), (back, (0, (4, 2)), "s")):
+        a2.plot([r["d"] for r in part], [r["E:195:OG-E:195:HG"] for r in part], marker=mk, ms=3.5, ls=ls,
+                color=c["series"][2])
+        a2.plot([r["d"] for r in part], [r["E:195:HG-E:57:NE2"] for r in part], marker=mk, ms=3.5, ls=ls,
+                color=c["series"][6])
+    a2.text(0.03, 0.95, "Ser195 OG–HG", color=c["series"][2], transform=a2.transAxes, fontsize=8.5, va="top")
+    a2.text(0.03, 0.86, "HG···His57 NE2", color=c["series"][6], transform=a2.transAxes, fontsize=8.5, va="top")
+    a2.set_xlabel("Ser195 OG – Lys15 C (Å)"); a2.set_ylabel("distance (Å)")
+    a2.invert_xaxis()
+    a2.set_title("where the Ser195 proton is", fontsize=9.5, fontweight="normal")
+    return fig
+
+
 @figure(58)
 def ex58(theme, ctx):
     c = L.style(theme)
@@ -1338,8 +1400,8 @@ def ex58(theme, ctx):
 
 
 # --------------------------------------------------------------------------------------------- checks
-@figure(60)
-def ex60(theme, ctx):
+@figure(61)
+def ex61(theme, ctx):
     c = L.style(theme)
     names = [("diamond", "diamond, 64"), ("silicon", "silicon, 64"), ("graphene", "graphene, 72 (2D)"),
              ("rutile", "rutile, 72"), ("quartz", "α-quartz, 72"), ("zno", "ZnO, 72"),
@@ -1353,8 +1415,8 @@ def ex60(theme, ctx):
     return fig
 
 
-@figure(61)
-def ex61(theme, ctx):
+@figure(62)
+def ex62(theme, ctx):
     c = L.style(theme)
     log = L.text(ctx.work / "pme_check" / "run.log")
     rows = re.findall(r"PASS (.*?): ([\d.e+-]+) (.+?) \(<= ([\d.e+-]+)\)", log)
@@ -1378,8 +1440,8 @@ def ex61(theme, ctx):
     return fig
 
 
-@figure(62)
-def ex62(theme, ctx):
+@figure(63)
+def ex63(theme, ctx):
     c = L.style(theme)
     t = ctx.out("times_chig")
     stages = {}

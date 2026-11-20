@@ -71,12 +71,12 @@ CAP = {
     56: f"Forces on the QM atoms against the cut-off, without and with the long-range term (trypsin–BPTI, 8 snapshots, reference PME at 24 Å); {DOCS}.",
     57: "What `add_qmmm` does to an OpenMM system (`scripts/qmmm/openmm_mopac.py`).",
     58: "QM/MM electrostatic energy of chignolin with one TIP3P water as point charges at increasing distance (one job per distance).",
-    59: f"Largest difference between GPU and CPU heats in the benchmark checks; {README}.",
-    60: "The cells of `tests/data/materials/small`.",
-    61: "The 11 CPU checks of `tests/check_qmmm_pme_ewald.py`: value and tolerance of each (unit in brackets).",
-    62: "Time of the stages of the SCF reported by `TIMES` for this job.",
-    63: "FP64 rate and memory bandwidth of NVIDIA GPUs, vendor data as listed in the README (*Which GPU?*); only the A100 and the T4 were timed with this code.",
-    64: f"Speed-up of the A100 against the system size; {README}.",
+    60: f"Largest difference between GPU and CPU heats in the benchmark checks; {README}.",
+    61: "The cells of `tests/data/materials/small`.",
+    62: "The 11 CPU checks of `tests/check_qmmm_pme_ewald.py`: value and tolerance of each (unit in brackets).",
+    63: "Time of the stages of the SCF reported by `TIMES` for this job.",
+    64: "FP64 rate and memory bandwidth of NVIDIA GPUs, vendor data as listed in the README (*Which GPU?*); only the A100 and the T4 were timed with this code.",
+    65: f"Speed-up of the A100 against the system size; {README}.",
 }
 HEAD = ("<!-- figures -->\n<sub>Figures: calculations with the " + CPU + ", one core unless a caption says otherwise, "
         "or published numbers where the caption says so. Scripts: "

@@ -88,7 +88,7 @@ The MOZYME and solid numbers are from one benchmark run (commit `c85eb96d`); see
 
 ---
 
-**[Wiki: 64 worked examples](https://github.com/juvenalyosa/mopac_gpu/wiki)**, most of them with the new keywords
+**[Wiki: 65 worked examples](https://github.com/juvenalyosa/mopac_gpu/wiki)**, most of them with the new keywords
 (dynamics, `TRUST`, `SWIG`, `SMEAR`, solids, QM/MM), plus a [description of every new keyword](https://github.com/juvenalyosa/mopac_gpu/wiki/New-keywords)
 in the manner of the MOPAC manual, and troubleshooting.
 
@@ -679,6 +679,8 @@ mixed, since single precision drifts in NVE), `--qm-constraints` / `--qm-free E:
 constraints inside the QM region; by default all its bonds are free, so keep 0.5-fs steps), `--guess`
 (where each step's SCF starts; keep the default `previous`), `--seed`. `--help` lists them all.
 MOPAC runs on the CPU for QM regions of up to 20 atoms (link atoms included) and on the GPU above.
+
+**Reaction scans:** `scripts/qmmm/qmmm_scan.py` moves a restrained distance step by step and minimizes the active site at each step (adiabatic mapping); the wiki's QM/MM example 59 follows the attack of Ser195 on the substrate in trypsin.
 
 **From your own OpenMM script:**
 
