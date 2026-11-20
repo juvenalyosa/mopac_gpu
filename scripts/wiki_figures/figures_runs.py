@@ -20,6 +20,27 @@ def two(fig_w=8.6, fig_h=3.5, split=0.46):
     return fig, a0, a1
 
 
+def energy_panel(ax, rows, c, title=True):
+    """potential, kinetic and total energy (changes from the first row) on one scale, so that the conservation of
+    the total is seen against the energy the other two exchange"""
+    t = np.array([r[0] for r in rows])
+    pot = np.array([r[1] for r in rows]) - rows[0][1]
+    kin = np.array([r[2] for r in rows]) - rows[0][2]
+    tot = np.array([r[3] for r in rows]) - rows[0][3]
+    ax.plot(t, pot, color=c["series"][0], lw=1.4, label="potential")
+    ax.plot(t, kin, color=c["series"][1], lw=1.4, label="kinetic")
+    ax.plot(t, tot, color=c["series"][2], lw=2.4, label="total")
+    ax.axhline(0, color=c["axis"], lw=0.8)
+    ax.set_xlabel("time (fs)"); ax.set_ylabel("change from 0 fs (kcal/mol)")
+    lo, hi = min(pot.min(), kin.min()), max(pot.max(), kin.max())
+    ax.set_ylim(lo - 0.08 * (hi - lo), hi + 0.35 * (hi - lo))          # room for the legend above the curves
+    ax.legend(loc="upper center", ncol=3, fontsize=8)
+    if title:
+        ax.set_title(f"total within {np.abs(tot).max():.3f} kcal/mol; potential and kinetic\nexchange up to "
+                     f"{max(np.ptp(pot), np.ptp(kin)):.0f} kcal/mol", fontsize=8.5, fontweight="normal")
+    return tot
+
+
 def note(ax, s, c, x=0.02, y=0.02, ha="left"):
     ax.text(x, y, s, transform=ax.transAxes, fontsize=8, color=c["text2"], ha=ha, va="bottom")
 
@@ -368,16 +389,16 @@ def ex14(theme, ctx):
     nve = L.drc_rows(L.text(next((wf / "nve").glob("*.out"))))
     natoms = len(L.pdb_atoms(next((wf / "prepare").glob("*.pdb"))))
     ndof = 3 * natoms - 3
-    fig, axs = plt.subplots(1, 3, figsize=(9.0, 3.0))
+    fig, axs = plt.subplots(1, 3, figsize=(9.6, 3.2))
     axs[0].plot([x[0] for x in opt], [x[2] - opt[0][2] for x in opt], "-", color=c["series"][0])
     axs[0].set_title("optimization (TRUST)", fontsize=9.5)
     axs[0].set_xlabel("cycle"); axs[0].set_ylabel("heat − start (kcal/mol)")
     tt = [r[0] for r in nvt]; T = [2 * r[2] / (ndof * KB) for r in nvt]
     axs[1].plot(tt, T, color=c["series"][1]); axs[1].axhline(300, color=c["axis"], lw=0.8, ls=(0, (3, 3)))
     axs[1].set_title("NVT, 300 K", fontsize=9.5); axs[1].set_xlabel("time (fs)"); axs[1].set_ylabel("temperature (K)")
-    axs[2].plot([r[0] for r in nve], [r[3] - nve[0][3] for r in nve], color=c["series"][2])
-    axs[2].set_title("NVE", fontsize=9.5); axs[2].set_xlabel("time (fs)")
-    axs[2].set_ylabel("total energy − start (kcal/mol)")
+    energy_panel(axs[2], nve, c, title=False)
+    tot = np.array([r[3] for r in nve]) - nve[0][3]
+    axs[2].set_title(f"NVE: total within {np.abs(tot).max():.3f} kcal/mol", fontsize=9.5)
     fig.suptitle(f"scripts/mozyme_md_workflow.py on chignolin ({natoms} atoms after ADD-H)", x=0.01, ha="left",
                  fontsize=9.5, color=c["text2"])
     fig.tight_layout()
@@ -655,13 +676,12 @@ def ex26(theme, ctx):
     c = L.style(theme)
     r = L.drc_rows(ctx.out("md_nve"))
     t = np.array([x[0] for x in r])
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(8.6, 3.2))
-    a1.plot(t, [x[1] - r[0][1] for x in r], color=c["series"][0], label="potential")
-    a1.plot(t, [x[2] - r[0][2] for x in r], color=c["series"][1], label="kinetic")
-    a1.set_xlabel("time (fs)"); a1.set_ylabel("change from 0 fs (kcal/mol)"); a1.legend()
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(8.6, 3.4))
+    energy_panel(a1, r, c)
     a2.plot(t, [x[3] - r[0][3] for x in r], color=c["series"][2])
     a2.set_xlabel("time (fs)"); a2.set_ylabel("total energy − at 0 fs (kcal/mol)")
-    a2.set_title(f"largest |ERROR| {max(abs(x[4]) for x in r):.3f} kcal/mol", fontsize=9.5, fontweight="normal")
+    a2.set_title(f"the total alone, magnified; largest |ERROR| {max(abs(x[4]) for x in r):.3f}", fontsize=8.5,
+                 fontweight="normal")
     fig.suptitle("chignolin, NVE from Maxwell–Boltzmann velocities at 300 K (TEMPERATURE=300)", x=0.01, ha="left",
                  fontsize=9.5, color=c["text2"])
     fig.tight_layout()
@@ -1058,8 +1078,7 @@ def ex45(theme, ctx):
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(8.6, 3.2))
     a1.plot([x[0] for x in r], temps(r, 64), color=c["series"][1]); a1.axhline(300, color=c["axis"], lw=0.9, ls=(0, (3, 3)))
     a1.set_xlabel("time (fs)"); a1.set_ylabel("temperature (K)")
-    a2.plot([x[0] for x in r], [x[3] - r[0][3] for x in r], color=c["series"][2])
-    a2.set_xlabel("time (fs)"); a2.set_ylabel("total energy − at 0 fs (kcal/mol)")
+    energy_panel(a2, r, c)
     fig.suptitle("diamond, 64 atoms, NVE at 300 K in a fixed cell", x=0.01, ha="left", fontsize=9.5, color=c["text2"])
     fig.tight_layout()
     return fig
