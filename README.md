@@ -89,7 +89,8 @@ The MOZYME and solid numbers are from one benchmark run (commit `c85eb96d`); see
 ---
 
 **[Wiki: 64 worked examples](https://github.com/juvenalyosa/mopac_gpu/wiki)**, most of them with the new keywords
-(dynamics, `TRUST`, `SWIG`, `SMEAR`, solids, QM/MM), plus a keyword reference and troubleshooting.
+(dynamics, `TRUST`, `SWIG`, `SMEAR`, solids, QM/MM), plus a [description of every new keyword](https://github.com/juvenalyosa/mopac_gpu/wiki/New-keywords)
+in the manner of the MOPAC manual, and troubleshooting.
 
 ## Contents
 
@@ -197,8 +198,8 @@ cmake --build build-cpu --target mopac --parallel
 ```
 
 The CPU build accepts every input in this README; the new keywords (`TEMPERATURE=`, `BUSSI=`,
-`SEED=`, `TRUST`, `SWIG`, `SMEAR`) and the input chemistry check work there too, just without the GPU
-speed.
+`SEED=`, `TRUST`, `SWIG`, `HB-SMOOTH`, `SMEAR`, `MM_CHARGES=`) and the input chemistry check work there too,
+just without the GPU speed.
 
 ### Python packages for QM/MM
 
@@ -239,18 +240,24 @@ Crambin, single point energy
 mopac crambin.mop          # writes crambin.out (and crambin.arc)
 ```
 
-What to look for in `crambin.out`:
+The result is in `crambin.out`:
+
+```
+          FINAL HEAT OF FORMATION =      -2901.67894 KCAL/MOL
+```
+
+A GPU run writes no extra lines by default. To see where the SCF ran, run it with
+`MOPAC_GPU_DEBUG=1 mopac crambin.mop`; the output then also holds the GPU trace lines:
 
 ```
  [MOZYME GPU] resident SCF enabled by default (disable with NOGPU or MOPAC_NOGPU=1)
  ...
  [MOZYME GPU SCF] status=success reason=backend_complete code=0 iterations=42
- ...
-          FINAL HEAT OF FORMATION =      -2901.67894 KCAL/MOL
 ```
 
-`status=success` means the SCF ran on the GPU. If you see `status=fallback_cpu`, that SCF was
-finished by the CPU code (correct result, CPU speed); see [Limitations](#10-limitations).
+`status=success` means the SCF ran on the GPU. A line with `status=fallback_cpu` is written with or
+without `MOPAC_GPU_DEBUG`: that SCF was finished by the CPU code (correct result, CPU speed); see
+[Limitations](#10-limitations). Jobs of 100 atoms or fewer run on the CPU.
 
 > The PDB must contain hydrogen atoms. Crystal structures usually do not; add them first with
 > `ADD-H` ([example 6.2](#62-prepare-a-pdb-from-the-protein-data-bank)). Ready-made hydrogenated
@@ -298,18 +305,25 @@ one-centre terms and the far periodic images (point charges) stay on the host. D
 ## 5. New keywords
 
 These keywords are **new in this fork**. They follow MOPAC's usual form (`WORD=value`) and are
-listed in the output header like every other keyword.
+listed in the output header like every other keyword. The wiki page
+[New keywords](https://github.com/juvenalyosa/mopac_gpu/wiki/New-keywords) describes each of them, and the
+existing keywords whose behaviour changed (`DRC`, `FORCE` with MOZYME, `LET`, `NOGPU`, `SHIFT` in solids), in the
+manner of the MOPAC manual.
 
 - `SWIG` (with `EPS=`): smooth COSMO surface with a consistent gradient (Lange and Herbert).
 - `HB-SMOOTH`: the PM6-DH+ / PM7 hydrogen-bond correction without kinks (for optimization, FORCE, MD).
 - `TRUST`: trust-region L-BFGS geometry optimizer, recommended for MOZYME (the line searches of the default
   L-BFGS-B fail on the noise of the MOZYME SCF; with `TRUST` the radius follows the directional derivative
-  and no step is ever undone, so the LMOs of the last SCF stay valid).
+  and no step is ever undone, so the LMOs of the last SCF stay valid). It writes no restart file: give
+  enough `CYCLES` (see [6.5](#65-geometry-optimization)).
 - `SMEAR=kT` (eV; `SMEAR` alone: 0.1): Fermi–Dirac occupations for metals and small-gap solids
-  (closed-shell RHF). The heat is the Mermin free energy E − TS; the output also prints E(kT → 0).
-  See `docs/BACKGROUND.md`.
-- `MM_CHARGES="file"`: QM/MM electrostatic embedding in MM point charges (x y z q per line); the OpenMM
-  driver passes them through the API instead (`mozyme_qmmm_init/step/finalize` in `include/mopac.h`).
+  (closed-shell RHF, conventional SCF; MOZYME ignores it). The heat is the Mermin free energy E − TS; the
+  output also gives −TS and the term to add for an estimate of E(kT → 0). See `docs/BACKGROUND.md`.
+- `MM_CHARGES="file"`: QM/MM electrostatic embedding of a MOZYME job in MM point charges (x y z q per line;
+  without `MOZYME` the charges are not used); the OpenMM driver passes them through the API instead
+  (`mozyme_qmmm_init/step/finalize` in `include/mopac.h`).
+- `EDIIS` (experimental): damped density mixing and an adaptive level shift in the first iterations of the
+  conventional SCF; not part of the benchmarks.
 
 ### Molecular dynamics at a temperature (used with `DRC`)
 
@@ -322,25 +336,30 @@ listed in the output header like every other keyword.
 Rules: `TEMPERATURE` needs `DRC`; `BUSSI` needs `TEMPERATURE`. Otherwise the job stops with
 `TEMPERATURE AND NO DRC` or `BUSSI AND NO TEMPERATURE`.
 
-During the run a line is printed every 50 steps (numbers for illustration):
+During the run a line is printed every 50 integration steps (chignolin, `TEMPERATURE=300 BUSSI=10`,
+started from an optimized structure):
 
 ```
-          TEMPERATURE: STEP      50  TIME(FS)     4.912  T(K)   302.14  <T>(K)   301.77  ENERGY TO BATH (KCAL/MOL)     -3.1275
+          TEMPERATURE: STEP      50  TIME(FS)     5.005  T(K)   194.04  <T>(K)   240.18  ENERGY TO BATH (KCAL/MOL)    -18.4783
 ```
 
 `T(K)` is the instantaneous temperature, `<T>(K)` the running average and `ENERGY TO BATH` the
-energy the thermostat has taken out (negative) or put in (positive). In the DRC table the column
-`ERROR` stays the **integration error only**: the energy exchanged with the bath is booked
-separately, so a small `ERROR` means the dynamics is accurate in NVT as well as in NVE.
+energy the thermostat has taken out of the system (positive) or put in (negative); here the system had
+cooled (see [6.8](#68-nvt-dynamics-constant-temperature-at-300-k)) and the thermostat had put energy in.
+In the DRC table the column `ERROR` stays the **integration error only**: the energy exchanged with the
+bath is booked separately, so a small `ERROR` means the dynamics is accurate in NVT as well as in NVE.
 
 ### GPU control
 
 | Keyword / environment variable | Meaning |
 |---|---|
-| *(nothing)* | A `MOZYME` job uses the GPU when one with compute capability ≥ 7.0 is present. |
+| *(nothing)* | A job of more than 100 atoms uses the GPU when one with compute capability ≥ 7.0 is present. |
 | `NOGPU` (keyword) | Run this job entirely on the CPU (identical to the CPU build). |
 | `MOPAC_NOGPU=1` (environment) | Same, for every job started from this shell. |
-| `MOPAC_FORCEGPU=1` (environment) | Use the GPU even if the input says `NOGPU`, and for solids under 100 atoms. |
+| `MOPAC_FORCEGPU=1` (environment) | Use the GPU for jobs of 100 atoms or fewer too. With `NOGPU` in the input the MOZYME GPU path stays off. |
+| `MOPAC_GPU_DEBUG=1` (environment) | Print the GPU trace lines (where each SCF ran) and the detected devices. |
+
+More environment variables: `docs/GPU_GUIDE.md`; for QM/MM, `docs/QMMM_OPENMM.md`.
 
 ### Input chemistry check (automatic, no keyword needed)
 
@@ -450,7 +469,12 @@ Crambin, optimization
 ```
 
 The final geometry is written to `job.arc` and, with `PDBOUT`, to `job.pdb`. If the job stops at
-the cycle limit, MOPAC leaves a restart file `job.res`; continue with:
+the cycle limit (`NUMBER OF CYCLES EXCEEDED`), MOPAC writes neither, and `TRUST` writes no restart file:
+the output ends with the last geometry as a complete MOPAC data set, after `CURRENT VALUE OF HEAT OF
+FORMATION`. To continue, copy that data set (from its keyword line to its last atom) into a new input
+file and run it. Give enough `CYCLES` to avoid this.
+
+Without `TRUST`, the default optimizer leaves a restart file `job.res` at the cycle limit; continue with
 
 ```
 PM7 MOZYME CYCLES=200 RESTART GEO_DAT="1crn_hydrogenated.pdb" PDBOUT
@@ -458,7 +482,7 @@ Crambin, optimization continued
 
 ```
 
-Only the final geometry, as a PDB, from the restart file:
+and write only the final geometry, as a PDB, from that restart file with
 
 ```
 PM7 MOZYME 1SCF RESTART PDBOUT GEO_DAT="1crn_hydrogenated.pdb"
@@ -649,9 +673,13 @@ python3 scripts/qmmm/run_qmmm_md.py protein.pdb --libmopac build/libmopac.so \
 ```
 
 Useful options: `--qm-charge`, `--ron/--roff` (switching of the MM charges, Å), `--tolerance`
-(SCF criterion), `--no-pme` (cut-off only), `--pme-cpu`, `--variants E:57=HID` (protonation states),
-`--distances E:195:OG-I:15:C` (distances to follow), `--cutoff-test 8,12,16,24` (force error against
-the cut-off), `--seed`. `--help` lists them all.
+(MOPAC's relative SCF criterion, default 0.01; use 0.001 for NVE), `--no-pme` (cut-off only), `--pme-cpu`,
+`--variants E:57=HID` (protonation states), `--distances E:195:OG-I:15:C` (distances to follow),
+`--cutoff-test 8,12,16,24` (force error against the cut-off), `--precision` (OpenMM on CUDA; default
+mixed, since single precision drifts in NVE), `--qm-constraints` / `--qm-free E:57:HD1` (keep the X–H
+constraints inside the QM region; by default all its bonds are free, so keep 0.5-fs steps), `--guess`
+(where each step's SCF starts; keep the default `previous`), `--seed`. `--help` lists them all.
+MOPAC runs on the CPU for QM regions of up to 20 atoms (link atoms included) and on the GPU above.
 
 **From your own OpenMM script:**
 
@@ -773,9 +801,13 @@ commit message.
   (trypsin–BPTI, `docs/QMMM_OPENMM.md`); energy conservation over nanoseconds has not been tested.
 - **NVE after NVT** restarts from the last NVT geometry with fresh velocities at the same
   temperature: MOPAC cannot read velocities together with a PDB geometry.
-- **Runs on the CPU instead of the GPU:** the Fock matrix of conventional-SCF molecules under 300
-  orbitals, solids under 100 atoms (unless `MOPAC_FORCEGPU=1`), pKa calculations, and the programming
-  interface (`libmopac` API) except the MOZYME QM/MM session (QM regions above 20 atoms).
+- **Runs on the CPU instead of the GPU:** every job of 100 atoms or fewer, MOZYME included (unless
+  `MOPAC_FORCEGPU=1`), the Fock matrix of conventional-SCF molecules under 300 orbitals, pKa calculations,
+  and the programming interface (`libmopac` API) except the MOZYME QM/MM session (QM regions above 20
+  atoms).
+- **Keywords that act only in one SCF:** `SMEAR` and `EDIIS` only in the conventional SCF (MOZYME ignores
+  them); `MM_CHARGES` only with MOZYME (without it the charges are not used). COSMO does not screen the
+  `MM_CHARGES` point charges.
 - **Small systems** gain little: 3.1× for 125 water molecules; the 64–72-atom solids 1.3–4.2×.
 - **Inputs.** Hydrogens are required; broken crystal fragments are refused (see the chemistry
   check).
