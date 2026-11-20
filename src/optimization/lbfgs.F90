@@ -157,11 +157,12 @@
       tlast = tleft
       resfil = .false.
 !
-!  TRUST: trust-region L-BFGS (trust_region_lbfgs below) instead of L-BFGS-B, except on a
-!  restart (the restart file holds the L-BFGS-B state).  Meant for MOZYME, whose SCF noise made
-!  the line searches of L-BFGS-B fail.
+!  TRUST: trust-region L-BFGS (trust_region_lbfgs below) instead of L-BFGS-B.  Meant for MOZYME,
+!  whose SCF noise made the line searches of L-BFGS-B fail.  On a restart it starts from the
+!  geometry of the restart file (read by readmo) with an empty memory; the restart files it writes
+!  hold that geometry and an L-BFGS-B state at "START", so either optimizer can continue from them.
 !
-      use_tr = index(keywrd, " TRUST") /= 0 .and. .not. restrt
+      use_tr = index(keywrd, " TRUST") /= 0
       if (use_tr) then
         call trust_region_lbfgs()
         goto 99
@@ -480,7 +481,7 @@ contains
 !
       call compfg (xparam, .true., escf, .true., grad, .true.)
       if (moperr) return
-      nstep = 0
+      if (.not. restrt) nstep = 0          ! a restart goes on counting from the restart file
       tx1 = seconds (2)
       tstep = 0.d0
       gnorm = dSqrt (ddot(nvar, grad, 1, grad, 1))
@@ -496,6 +497,7 @@ contains
       do it = 1, maxcyc
         if (tleft < 1.5d0*cycmx) then
           write (iw, "(20x,a,/30x,a)") "THERE IS NOT ENOUGH TIME FOR ANOTHER CYCLE", "NOW GOING TO FINAL"
+          call trust_restart_file(.true.)
           iflepo = -1
           exit
         end if
@@ -586,6 +588,10 @@ contains
         g0 = grad
         e0 = escf
         gnorm = dSqrt (ddot(nvar, grad, 1, grad, 1))
+        if (tlast - tleft > tdump) then
+          tlast = tleft
+          call trust_restart_file(.false.)
+        end if
         tleft = Max (0.d0, tleft)
         call prttim (tleft, tprt, txt)
         call print_cycle()
@@ -601,6 +607,7 @@ contains
         end if
         if (it == maxcyc) then
           write (iw, "(/20x,a,/)") "NUMBER OF CYCLES EXCEEDED.  NOW GOING TO FINAL"
+          call trust_restart_file(.true.)
           iflepo = -1
         end if
       end do
@@ -617,6 +624,31 @@ contains
       selcon_cap = 0.d0
       deallocate (sm, ym, rho, alp, dir, x0, g0)
     end subroutine trust_region_lbfgs
+
+    subroutine trust_restart_file(announce)
+!
+!  Restart file of TRUST: the current geometry and gradient, as lbfsav writes them, with an
+!  L-BFGS-B state at "START".  RESTART then goes on with TRUST (empty memory) or, without TRUST,
+!  starts L-BFGS-B at that geometry.  ANNOUNCE: the run stops here (cycle or time limit); else a
+!  periodic dump (DUMP=), reported on the cycle line.
+!
+      logical, intent(in) :: announce
+      wa = 0.d0
+      iwa = 0
+      task = "START"
+      csave = " Unused"
+      lsave = .false.
+      isave = 0
+      dsave = 0.d0
+      tt0 = seconds (1) - time0
+      call lbfsav (tt0, 1, wa, nwa, iwa, niwa, task, csave, lsave, isave, dsave, nstep, escf)
+      if (announce) then
+        write (iw, "(//10x,' - THE CALCULATION IS BEING DUMPED TO DISK')")
+        write (iw, "(10x,'   RESTART IT USING THE KEYWORD ""RESTART""')")
+      else
+        resfil = .true.
+      end if
+    end subroutine trust_restart_file
     end subroutine lbfgs
     subroutine lbfsav (tt0, mode, wa, nwa, iwa, niwa, task, csave, lsave, isave, &
    & dsave, nstep, escf)
