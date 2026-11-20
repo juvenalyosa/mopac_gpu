@@ -40,8 +40,9 @@ Switching the GPU off, for a job or for a whole environment:
 - `MOPAC_NOGPU=1` (or `MOZYME_GPU_OFF=1`) in the environment.
 
 Either one disables every GPU helper (resident SCF, hcore, gradient, dispersion, hydrogen-bond
-correction) and reproduces the CPU result bit for bit. `MOPAC_FORCEGPU=1` in the environment
-overrides the keyword.
+correction) and reproduces the CPU result bit for bit. `MOPAC_FORCEGPU=1` in the environment does not
+undo the keyword: with `NOGPU` no device is selected and the MOZYME GPU defaults are not applied.
+`MOPAC_FORCEGPU=1` is for jobs of 100 atoms or fewer, which otherwise run on the CPU.
 
 Inputs from the PDB must be complete: heavy-atom-only structures do not converge in MOZYME on
 the CPU either. Run `ADD-H` first (`scripts/hydrogenate_publication_benchmark_inputs.py` does it

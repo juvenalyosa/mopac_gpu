@@ -314,16 +314,18 @@ manner of the MOPAC manual.
 - `HB-SMOOTH`: the PM6-DH+ / PM7 hydrogen-bond correction without kinks (for optimization, FORCE, MD).
 - `TRUST`: trust-region L-BFGS geometry optimizer, recommended for MOZYME (the line searches of the default
   L-BFGS-B fail on the noise of the MOZYME SCF; with `TRUST` the radius follows the directional derivative
-  and no step is ever undone, so the LMOs of the last SCF stay valid). It writes no restart file: give
-  enough `CYCLES` (see [6.5](#65-geometry-optimization)).
+  and no step is ever undone, so the LMOs of the last SCF stay valid). At the cycle limit it writes a
+  restart file; `RESTART` continues (see [6.5](#65-geometry-optimization)).
 - `SMEAR=kT` (eV; `SMEAR` alone: 0.1): Fermi–Dirac occupations for metals and small-gap solids
   (closed-shell RHF, conventional SCF; MOZYME ignores it). The heat is the Mermin free energy E − TS; the
   output also gives −TS and the term to add for an estimate of E(kT → 0). See `docs/BACKGROUND.md`.
 - `MM_CHARGES="file"`: QM/MM electrostatic embedding of a MOZYME job in MM point charges (x y z q per line;
-  without `MOZYME` the charges are not used); the OpenMM driver passes them through the API instead
-  (`mozyme_qmmm_init/step/finalize` in `include/mopac.h`).
+  without `MOZYME` the job stops with `MM_CHARGES AND NO MOZYME`); the OpenMM driver passes them through the
+  API instead (`mozyme_qmmm_init/step/finalize` in `include/mopac.h`).
 - `EDIIS` (experimental): damped density mixing and an adaptive level shift in the first iterations of the
   conventional SCF; not part of the benchmarks.
+- `HMTR` (experimental): a particle-swarm search of the dihedral angles before the BFGS optimizer (internal
+  coordinates only); see `docs/BACKGROUND.md`.
 
 ### Molecular dynamics at a temperature (used with `DRC`)
 
@@ -469,20 +471,17 @@ Crambin, optimization
 ```
 
 The final geometry is written to `job.arc` and, with `PDBOUT`, to `job.pdb`. If the job stops at
-the cycle limit (`NUMBER OF CYCLES EXCEEDED`), MOPAC writes neither, and `TRUST` writes no restart file:
-the output ends with the last geometry as a complete MOPAC data set, after `CURRENT VALUE OF HEAT OF
-FORMATION`. To continue, copy that data set (from its keyword line to its last atom) into a new input
-file and run it. Give enough `CYCLES` to avoid this.
-
-Without `TRUST`, the default optimizer leaves a restart file `job.res` at the cycle limit; continue with
+the cycle limit (`NUMBER OF CYCLES EXCEEDED`), MOPAC writes neither, but leaves a restart file `job.res`
+(with `TRUST` too, since commit `b46602aa`); continue with
 
 ```
-PM7 MOZYME CYCLES=200 RESTART GEO_DAT="1crn_hydrogenated.pdb" PDBOUT
+PM7 MOZYME TRUST CYCLES=200 RESTART GEO_DAT="1crn_hydrogenated.pdb" PDBOUT
 Crambin, optimization continued
 
 ```
 
-and write only the final geometry, as a PDB, from that restart file with
+(`TRUST` restarts from the stored geometry with an empty L-BFGS memory; without `TRUST` the default
+optimizer continues) and write only the final geometry, as a PDB, from the restart file with
 
 ```
 PM7 MOZYME 1SCF RESTART PDBOUT GEO_DAT="1crn_hydrogenated.pdb"
@@ -806,8 +805,7 @@ commit message.
   and the programming interface (`libmopac` API) except the MOZYME QM/MM session (QM regions above 20
   atoms).
 - **Keywords that act only in one SCF:** `SMEAR` and `EDIIS` only in the conventional SCF (MOZYME ignores
-  them); `MM_CHARGES` only with MOZYME (without it the charges are not used). COSMO does not screen the
-  `MM_CHARGES` point charges.
+  them); `MM_CHARGES` only with MOZYME. COSMO does not screen the `MM_CHARGES` point charges.
 - **Small systems** gain little: 3.1× for 125 water molecules; the 64–72-atom solids 1.3–4.2×.
 - **Inputs.** Hydrogens are required; broken crystal fragments are refused (see the chemistry
   check).

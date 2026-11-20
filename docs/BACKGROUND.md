@@ -8,7 +8,7 @@ Barranquilla MOPAC is an implementation of MOPAC specialized for large systems (
 Contents
 - Why Barranquilla MOPAC? (Large‑system specialization)
 - Physics background (semiempirical PMx, Fock build, SCF equations)
-- HMTR geometry optimization (trust‑region, models, update rules)
+- HMTR: an experimental search of dihedral angles before BFGS
 - GPU implementation (conventional SCF and MOZYME)
 - Automatic policies (no‑tuning defaults)
 - Build and run (with examples)
@@ -32,10 +32,10 @@ Barranquilla MOPAC is a semiempirical, GPU‑accelerated MOPAC flavor designed f
 - Determinism and verification: when enabled (developer mode), per‑pair verifiers compare device and host contributions without impacting production runs.
 
 3) Robust self‑consistency (fewer iterations, same physics)
-- CDIIS (Pulay) converges very fast near the fixed point but can overshoot early; EDIIS (energy DIIS) is safer far from convergence. Barranquilla uses a hybrid EDIIS→CDIIS strategy with residual‑based switching, adaptive negative level shifts for virtuals, and residual‑proportional damping. You get faster, more predictable SCF with no change to the underlying Hamiltonian.
+- CDIIS (Pulay) converges very fast near the fixed point but can overshoot early. The SCF of solids starts with damped density mixing and a 20 eV level shift, and switches Pulay's converger on after 50 iterations; the keyword `EDIIS` gives the conventional SCF of molecules the same damped start plus a level shift that is turned off in two steps as the density change falls (despite its name, no energy-DIIS interpolation is done; `PULAY` switches CDIIS on). The Hamiltonian and the converged state are those of MOPAC.
 
 4) Geometry optimization that scales
-- The HMTR optimizer (Hierarchical Memetic Trust‑Region) marries population‑based, torsion‑aware exploration with a rigorous trust‑region micro‑solver. It batches energy/gradient calls — which are the dominant cost at each geometry step — across GPU(s), and it adapts the trust radius using the standard acceptance ratio ρ. This approach is particularly effective for proteins (many low‑curvature torsions) and soft materials.
+- Geometry optimization of large systems uses MOPAC's L-BFGS, or `TRUST` (a trust-region L-BFGS that never undoes a step, for the noisy MOZYME SCF; see the wiki page New keywords). `HMTR` (Hierarchical Memetic Trust-Region) is an experimental pre-stage of the BFGS optimizer that varies dihedral angles with a particle swarm; see below.
 
 5) Automatic policies (no tuning required)
 - Barranquilla selects CPU/GPU policies from problem size and device CC: small SCFs stay on CPU; medium cases keep data resident; large cases stream J/K; MOZYME pair work is enabled on newer GPUs and can be forced when needed. You typically only choose the number of GPUs; the code chooses the rest.
@@ -77,7 +77,7 @@ with convergence declared when ‖R‖ and the changes in `E` and `P` fall below
 
 The SCF loop is: start from a guess `P`, assemble `F[P]`, solve `F C = S C ε`, update occupations and form a new `P`, mix the density/Fock information using a convergence accelerator, measure `R`, and iterate. Near the fixed point, Pulay’s CDIIS (commutator DIIS) constructs an optimal linear combination of recent Fock/density pairs that minimizes the residual norm. Far from self‑consistency, CDIIS can be over‑aggressive; energy DIIS (EDIIS) forms a convex combination that lowers the total energy and is more stable.
 
-Barranquilla MOPAC adopts a hybrid strategy: begin with EDIIS‑like damped mixing and an adaptive negative level shift on the virtual space to stabilize the spectral gap, then switch on CDIIS automatically once the residual is small (or after a few iterations). This strategy reduces iterations while preserving the underlying semiempirical physics and the final fixed point.
+In Barranquilla MOPAC the SCF of a solid starts with damped mixing of the densities (P = (1 − α) P_old + α P_new, α = 0.003/PL between 0.10 and 0.50, while PL > 0.01 and for at most six iterations) under a 20 eV level shift of the virtual levels, and Pulay's converger (CDIIS) is switched on after 50 iterations. The keyword `EDIIS` applies the same damped start to the conventional SCF of molecules, with a level shift that is reduced in two steps as PL falls below 0.1 and 0.01; it does not form energy-DIIS combinations, and CDIIS needs `PULAY`. `EDIIS` is experimental and MOZYME ignores it.
 
 **Accuracy of the gradients (all systems).** The pair derivatives of `dcart` are finite differences of the pair energy (`dhc`, step 1e-4 A). By default one evaluation at the first atom shifted by half a step along x, y and z serves the three directions, so each component is centred only along its own axis: an error of order 1e-4 A times the mixed second derivatives, up to ~0.05 kcal/mol/A per component against central differences of the heat (PM6 / PM7, benzene + water, graphene 6x6 with 2 or 3 Tv, diamond and quartz cells; upstream openmopac 78dc4572 the same). PRECISE or FORCE switch to central differences in every direction: errors <= 0.005 kcal/mol/A (graphene, 2e-3 A steps), at about 2.2 times the cost of the pair loop on the CPU (crambin 2.3-2.7 -> 5.3-6.1 s). Use PRECISE for finite-difference checks and very tight optimizations. In cells with exactly equidistant images (perfect diamond 2x2x2) the nearest-image exchange also gives one-sided derivatives at the ties.
 
@@ -85,40 +85,40 @@ Barranquilla MOPAC adopts a hybrid strategy: begin with EDIIS‑like damped mixi
 
 ---
 
-## HMTR Geometry Optimization — Trust‑Region with GPU Support
+## HMTR — Experimental Search of Dihedral Angles before BFGS
 
-HMTR (Hierarchical Memetic Trust‑Region) is a geometry optimizer that minimizes the potential energy surface \(E(R)\) with respect to the nuclear coordinates \(R\) by coupling two complementary mechanisms. A memetic, population‑based stage proposes diverse candidate geometries (with an emphasis on torsional subspaces for large biomolecules), and a rigorous trust‑region micro‑solver refines each candidate using a quadratic model. The design is well‑suited to GPUs because many energy/gradient evaluations for different candidates can be batched.
+`HMTR` (Hierarchical Memetic Trust‑Region) is an experimental pre-stage of MOPAC's BFGS optimizer: it acts only when
+BFGS is used (`BFGS`, `DFP`, `FLEPO`, or a single variable) and does nothing with the default L-BFGS or with `TRUST`.
+It varies the dihedral angles of the atoms given in internal coordinates that are flagged for optimization; with
+atoms in Cartesian coordinates (XYZ or PDB input) there are none, and it prints
+`HMTR: no dihedral angle to vary (atoms in Cartesian coordinates); skipped`.
 
-At a current geometry \(R_k\), the optimizer builds a local quadratic model of the energy around \(R_k\)
-```
-m_k(p) = E(R_k) + g_k^T p + (1/2) p^T B_k p
-```
-where \(g_k = \partial E/\partial R |_{R_k}\) is the gradient and \(B_k\) is a Hessian or quasi‑Newton approximation. The trial step \(p\) is obtained by solving the trust‑region subproblem
-```
-minimize_p  m_k(p)  subject to  ‖p‖ ≤ Δ_k
-```
-with a norm chosen for the coordinate representation (Cartesian, internal, or torsional; a diagonal scaling can be used to account for units). If \(B_k\) is positive definite and the unconstrained Newton step \(p_N = -B_k^{-1} g_k\) satisfies \(‖p_N‖ ≤ Δ_k\), then \(p = p_N\) is used. Otherwise, a truncated step on the trust‑region boundary is computed, for example via the dogleg path between the Cauchy (steepest‑descent) point and the Newton point, or with truncated conjugate gradients.
-
-The model quality is assessed by the ratio of actual to predicted decrease
-```
-ρ_k = [ E(R_k) − E(R_k + p_k) ] / [ m_k(0) − m_k(p_k) ]
-```
-and both the step and the trust‑region radius are updated accordingly. A step is accepted when \(ρ_k\) exceeds a small threshold \(η_0\) (e.g., 0.1), in which case \(R_{k+1} = R_k + p_k\); otherwise the step is rejected and \(R_{k+1} = R_k\). The trust radius is adapted: if \(ρ_k\) is large (e.g., \(ρ_k ≥ η_2\)), then the radius is expanded \(Δ_{k+1} = τ_{\text{expand}} Δ_k\); if \(ρ_k\) is poor (e.g., \(ρ_k ≤ η_1\)), then the radius is shrunk \(Δ_{k+1} = τ_{\text{shrink}} Δ_k\); otherwise the radius is left unchanged. Typical values are \(η_1 \approx 0.25\), \(η_2 \approx 0.75\), \(τ_{\text{expand}} \approx 2\), \(τ_{\text{shrink}} \approx 1/2\).
-
-To update the curvature model, HMTR employs a quasi‑Newton formula such as BFGS. Let \(s_k = p_k\) and \(y_k = g(R_k + p_k) − g(R_k)\). The BFGS update reads
-```
-B_{k+1} = B_k − (B_k s_k s_k^T B_k) / (s_k^T B_k s_k) + (y_k y_k^T) / (y_k^T s_k)
-```
-with a standard damping if \(y_k^T s_k\) is too small, to maintain positive definiteness. The gradients \(g\) are obtained from the semiempirical electronic structure (Hellmann–Feynman plus Pulay terms), and the trust‑region solve treats the nuclear surface only; the SCF is converged at each geometry evaluation.
-
-The “memetic” component maintains a population of candidate geometries and uses simple evolutionary moves in a low‑curvature subspace (e.g., torsions). A particle‑swarm‑like update for torsions is convenient:
+A population of 32 sets of dihedral angles (one at the input values, the others with random changes of up to ±2.5°)
+moves for at most 50 generations by a particle-swarm update:
 ```
 v_{i}^{t+1} = ω v_{i}^{t} + c1·r1 ⊙ (pbest_i − θ_i^t) + c2·r2 ⊙ (gbest − θ_i^t)
 θ_{i}^{t+1} = wrap( θ_i^t + v_{i}^{t+1} )
 ```
-where \(θ_i\) are the torsions of particle \(i\), \(v_i\) their velocities, \(pbest_i\) the best torsions previously found by particle \(i\), and \(gbest\) the global best in the population. The operator `wrap` enforces periodicity and any box constraints; \(ω, c1, c2\) are inertial and cognitive/social weights and \(r1, r2\) are uniform random vectors. Each particle is then refined by the trust‑region micro‑optimizer described above. The population proposal stage is trivially parallel and is evaluated in batches on GPU(s); the trust‑region steps are cheap relative to the energy/gradient calls and run on the host.
+where \(θ_i\) are the dihedral angles of member \(i\) (degrees), \(v_i\) their velocities (at most 20° per
+generation), \(pbest_i\) the best angles found by member \(i\), \(gbest\) the best of the population, `wrap` keeps
+the angles in [0°, 360°), ω = 0.7, c1 = c2 = 1.6, and \(r1, r2\) are uniform random numbers. After its energy and
+gradient are computed, each member takes one micro-step along the negative gradient in the dihedral angles, of length at
+most the member's radius (3° to start, between 0.01° and 30°). The step is kept when the energy falls and the ratio ρ of
+the actual to the predicted (linear) decrease is at least 0.25; the radius is then doubled if ρ > 0.75 and the step
+reached it, and halved when the step is not kept. All other coordinates stay at their input values. The search stops after 50 generations or
+when every component of the best member's gradient is below 10⁻³ kcal/(mol degree); the best set of angles is then the
+starting point of BFGS. A geometry whose energy or gradient is not finite is never kept.
 
-In practice, HMTR’s effectiveness on proteins and soft materials comes from combining torsional diversity (to escape narrow basins separated by small barriers) with a principled local model to accept or reject moves. The acceptance ratio \(ρ\) acts as a universal quality indicator independent of the particular coordinate choice or step generator, and the trust‑region radius adapts the aggressiveness of local refinement automatically. All energy and gradient evaluations use the same semiempirical Hamiltonian and SCF stack described earlier; the GPU acceleration enters only through batched evaluations across the population or internal micro‑batches.
+The members are evaluated one after the other: the energy and gradient (`compfg`) work on MOPAC's global arrays, so
+they cannot run in parallel threads. On the GPU the particle-swarm update runs on the device.
+
+Fixed in commit `8221d864` (November 2026): the interface through which HMTR called `compfg` declared the coordinates and gradient as
+assumed-shape arrays, whereas `compfg` takes explicit-shape arrays, so every evaluation received an array descriptor
+instead of the geometry (all bond lengths zero; the job stopped with `TWO ATOMS ARE COINCIDENT` or looped in `gmetry`);
+the angles were treated as degrees although MOPAC stores them in radians; the z coordinates of Cartesian input were
+taken for dihedral angles; and on the CPU the members were evaluated in parallel OpenMP threads. Test (PM7 n-hexane in
+internal coordinates, backbone dihedrals 70°, −60°, 80°, start +84.15 kcal/mol): after the HMTR stage and one BFGS cycle
+the heat was −35.27 kcal/mol, against −8.95 kcal/mol after one BFGS cycle without HMTR (all-anti conformer: −36.68).
 
 ### Math Appendix: Semiempirical (NDDO/PMx) Essentials
 
@@ -270,8 +270,8 @@ A complete MOZYME SCF GPU claim is valid only when the strict resident-SCF
 readiness contract reports `full_scf_gpu_status=complete` and
 `full_scf_gpu_ready=1`; see `docs/GPU_GUIDE.md`. For running MOZYME jobs on a GPU (requirements, accuracy, speed, how to switch it off) see `docs/MOZYME_GPU_USER_GUIDE.md`.
 
-HMTR (geometry optimization)
-HMTR evaluates many candidate geometries per outer iteration and uses a trust‑region micro‑solver to refine them. Barranquilla batches the energy/gradient calls across the candidate set and assigns them to GPU(s) in round‑robin fashion, using one CUDA stream per host thread. The trust‑region algebra (model assembly, radius adaptation, BFGS updates) remains on the host, while the dominant cost — the electronic energy and gradient at each candidate geometry — is evaluated on device. This division leverages GPU throughput where it counts without complicating the optimizer math.
+HMTR (experimental)
+The particle-swarm update of the dihedral angles runs on the device; the energy and gradient of the members are computed one after the other with the same SCF stack as single-geometry runs.
 
 Memory, determinism, and precision
 All SCF arrays that live on the GPU use double precision. Packed‑lower formats are used for \(F\) and (optionally) \(P\) and are unpacked only for GEMM/SYRK operations that require full column‑major storage. Deterministic cuBLAS/cuSOLVER settings are recommended for regression testing; they can be enabled via environment. Resident mode minimizes host/device transfers on medium problems; streaming minimizes peak device memory on very large problems by staging only the needed pair blocks at a time.
@@ -307,12 +307,9 @@ device: batch over block list (single/multi‑GPU), small dense kernels over loc
 Very small blocks remain on CPU; large blocks are offloaded to maximize GPU occupancy.
 ```
 
-HMTR
+HMTR (experimental)
 ```
-host:   propose θ_i (torsions) → form R_i candidates → batch E,∇E on device → trust‑region refine per candidate → accept/reject by ρ → update Δ
-device: evaluate many E,∇E calls concurrently (one stream per host thread) using the same SCF stack as single‑geometry runs.
-
-All trust‑region algebra (model m_k, radius/ρ update, BFGS) remains on host; GPU is used where the cost lies (E,∇E).
+host:   per generation: PSO update of the dihedral angles (device when available) → for each member in turn: E, ∇E (compfg) → one micro-step along −∇E → best member
 ```
 
 ---
@@ -521,7 +518,7 @@ GPU/SCF policy
 - `MOPAC_RESIDENT_SCF=1`  Keep SCF data resident on GPU.
 
 SCF hybrid mixer
-- `EDIIS` keyword: enable hybrid mode.
+- `EDIIS` keyword: damped start and adaptive level shift in the conventional SCF (experimental; MOZYME ignores it).
 
 MOZYME
 - `MOZYME`, `MOZYME_GPU`, `MOZYME_MINBLK=INT`  Enable and tune MOZYME GPU.
@@ -542,7 +539,7 @@ Best practices
 - Use MOZYME for biomolecules; tune `MOZYME_MINBLK` (3–6).
 - Let the auto‑guard keep tiny SCFs on CPU.
 - Place TMPDIR on fast NVMe for streaming.
-- Use `EDIIS` for tough SCFs.
+- For a tough SCF of a large molecule, try `PULAY` first; `EDIIS` is experimental.
 
 ---
 
