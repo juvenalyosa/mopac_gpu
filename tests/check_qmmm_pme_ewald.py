@@ -73,7 +73,9 @@ def far_object(q_all, Q, alpha=0.25, spacing=1.2, order=4, gpu=False):
     f.region = QMMMRegion(qm_atoms=[], atomic_numbers=[], mm_charges=np.asarray(q_all, float), periodic=True,
                           pme=True, pme_alpha=alpha, pme_spacing=spacing, pme_order=order, pme_gpu=gpu)
     f.mm_idx_all = np.arange(len(q_all))
+    f.qm_all = f.region.mm_charges[f.mm_idx_all]                     # set in __init__ since a6a4992e
     f.grid = None
+    f.far = None
     f.session = SimpleNamespace(qm_charges=np.asarray(Q, float))
     return f
 
