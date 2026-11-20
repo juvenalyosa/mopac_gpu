@@ -368,8 +368,10 @@
           exit
         end if
     !
-    !   No atom inside the allowed angle - reduce the angle
+    !   No atom inside the allowed angle - reduce the angle.  If none passed even at zero, the
+    !   angles are not numbers (NaN coordinates): keep NC instead of looping forever
     !
+        if (theta == 0.d0) exit
         theta = theta * 0.5d0
         if (theta < 0.0174533d0) theta = 0.d0
       end do

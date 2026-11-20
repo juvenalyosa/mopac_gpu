@@ -17,6 +17,7 @@
 
 module hmtr_optimizer_mod
   use iso_c_binding, only : c_double, c_int, c_bool, c_ptr, c_null_ptr, c_associated
+  use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
 #ifdef GPU
   use gpu_hmtr_interfaces
   use gpu_runtime_interfaces, only: mopac_cuda_set_active_stream, mopac_cuda_clear_active_stream
@@ -31,6 +32,10 @@ module hmtr_optimizer_mod
   implicit none
 
   integer, parameter :: dp = c_double
+  ! HMTR works in degrees (wrapping, velocities, perturbations, micro-step radii); MOPAC's xparam holds
+  ! angles in radians: torsions are converted where they meet xparam and the gradient
+  real(dp), parameter :: HMTR_RAD2DEG = 57.295779513082321_dp
+  real(dp), parameter :: HMTR_DEG2RAD = 1.0_dp / HMTR_RAD2DEG
   real(dp), parameter :: HMTR_FULL_CYCLE = 360.0_dp
   real(dp), parameter :: HMTR_HALF_CYCLE = 0.5_dp * HMTR_FULL_CYCLE
   integer, parameter :: HMTR_DEFAULT_POPULATION = 32
@@ -54,13 +59,16 @@ module hmtr_optimizer_mod
   end interface
 
   interface
+     ! compfg (src/compfg.F90) is external with explicit-shape xparam(nvar) and grad(nvar): declared
+     ! assumed-shape here, the call passed array descriptors and compfg read them as coordinates
+     ! (every bond length zero, "TWO ATOMS ARE COINCIDENT" or a hang in gmetry)
      subroutine compfg(xparam, int, escf, fulscf, grad, lgrad)
        import :: dp
-       real(dp), intent(in) :: xparam(:)
+       real(dp), intent(in) :: xparam(*)
        logical, intent(in) :: int
        real(dp), intent(out) :: escf
        logical, intent(in) :: fulscf
-       real(dp), intent(out) :: grad(:)
+       real(dp) :: grad(*)
        logical, intent(in) :: lgrad
      end subroutine compfg
   end interface
@@ -607,7 +615,7 @@ contains
 
   subroutine hmtr_optimize_torsions(xseed, evaluator, best_coords, best_energy, best_grad, &
        max_iters, pop_size, use_gpu, grad_tol, wrap_angles, ierr)
-    use common_arrays_C, only : loc, lopt
+    use common_arrays_C, only : loc, lopt, na
 #ifdef GPU
     use mod_vars_cuda, only : lgpu
 #endif
@@ -691,13 +699,15 @@ contains
     ntors = 0
     do i = 1, nvar
        if (loc(2,i) == 3 .and. loc(1,i) > 0) then
-          if (lopt(3,loc(1,i)) /= 0) then
+          ! coordinate 3 is a dihedral angle only for an atom given in internal coordinates
+          if (na(loc(1,i)) > 0 .and. lopt(3,loc(1,i)) /= 0) then
              ntors = ntors + 1
              torsion_idx(ntors) = i
           end if
        end if
     end do
     if (ntors == 0) then
+       write(iw,'(/10x,a)') "HMTR: no dihedral angle to vary (atoms in Cartesian coordinates); skipped"
        best_coords = xseed
        best_energy = base_energy
        best_grad = base_grad
@@ -713,7 +723,7 @@ contains
 
     allocate(init(population, ntors))
     do i = 1, population
-       init(i,:) = xseed(torsion_idx)
+       init(i,:) = xseed(torsion_idx) * HMTR_RAD2DEG
     end do
     if (population > 1) call perturb_initial(init, params%use_wrap)
 
@@ -766,7 +776,7 @@ contains
 
     if (status == 0) then
        best_coords = pop%base_coords
-       best_coords(pop%torsion_idx) = pop%gbest
+       best_coords(pop%torsion_idx) = pop%gbest * HMTR_DEG2RAD
        best_energy = minval(pop%pbest_energy)
        best_grad = pop%gbest_grad_full
     else
@@ -876,10 +886,21 @@ contains
 #endif
     status = 0
     scratch = pop%base_coords
-    scratch(pop%torsion_idx) = pop%torsions(member,:)
+    scratch(pop%torsion_idx) = pop%torsions(member,:) * HMTR_DEG2RAD
     call evaluator(scratch, energy, grad_full, status)
+    if (status == 0 .and. .not. (ieee_is_finite(energy) .and. all(ieee_is_finite(grad_full)))) then
+       ! a geometry the SCF cannot handle: the member is never the best and takes no micro-step
+       ! (a NaN gradient would give NaN coordinates, on which gmetry looped forever)
+       energy = huge(1.0_dp)
+       grad_full = 0.0_dp
+       grad_tors = 0.0_dp
+#ifdef GPU
+       if (stream_bound) call mopac_cuda_clear_active_stream()
+#endif
+       return
+    end if
     if (status == 0) then
-       grad_tors = grad_full(pop%torsion_idx)
+       grad_tors = grad_full(pop%torsion_idx) * HMTR_DEG2RAD     ! kcal/(mol degree)
        call hmtr_micro_refine(pop, member, evaluator, energy, grad_tors, grad_full, scratch, status)
        if (status == 0) call hmtr_cache_store(pop, pop%torsions(member,:), energy, grad_tors, grad_full)
     end if
@@ -902,21 +923,15 @@ contains
     call hmtr_prepare_batch(pop%gpu_enabled)
 #endif
     stat = 0
-!$omp parallel default(shared) private(member, ierr, scratch_loc) if (.not. pop%gpu_enabled)
+    ! one member after the other: the evaluator (compfg) works on MOPAC's global arrays, so members
+    ! evaluated in parallel OpenMP threads overwrote each other's geometry, density and gradient
     allocate(scratch_loc(size(pop%base_coords)))
-!$omp do schedule(dynamic)
     do member = first, last
        call hmtr_evaluate_member(pop, member, evaluator, energies(member), gradients(member,:), &
             gradients_full(member,:), scratch_loc, ierr)
-       if (ierr /= 0) then
-!$omp critical(hmtr_batch_err)
-          if (stat == 0) stat = ierr
-!$omp end critical(hmtr_batch_err)
-       end if
+       if (ierr /= 0 .and. stat == 0) stat = ierr
     end do
-!$omp end do nowait
     deallocate(scratch_loc)
-!$omp end parallel
 #ifdef GPU
     call hmtr_log_batch_usage(pop%gpu_enabled)
 #endif
@@ -1003,10 +1018,11 @@ contains
     end if
 
     scratch = pop%base_coords
-    scratch(pop%torsion_idx) = new_tors
+    scratch(pop%torsion_idx) = new_tors * HMTR_DEG2RAD
     allocate(new_grad(size(grad_full)))
     energy_old = energy
     call evaluator(scratch, new_energy, new_grad, status)
+    if (status == 0 .and. .not. all(ieee_is_finite(new_grad))) new_energy = huge(1.0_dp)
     if (status == 0 .and. new_energy < energy) then
        pred = -dot_product(grad_old, step)
        actual = energy_old - new_energy
@@ -1019,7 +1035,7 @@ contains
           pop%torsions(member,:) = new_tors
           energy = new_energy
           grad_full = new_grad
-          grad_tors = new_grad(pop%torsion_idx)
+          grad_tors = new_grad(pop%torsion_idx) * HMTR_DEG2RAD
           if (rho > HMTR_MICRO_ETA2 .and. abs(step_norm - radius) < 1.0e-6_dp) then
              radius = min(radius * 2.0_dp, HMTR_MICRO_RADIUS_MAX)
           else if (rho < HMTR_MICRO_ETA1) then
