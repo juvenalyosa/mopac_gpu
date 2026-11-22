@@ -16,9 +16,10 @@ steps of --step with a harmonic restraint (--k, kJ/mol/A^2), minimizing the whol
 structure of the value before; with --back it goes back to the start the same way.  A coordinate is a distance
 "A-B" or a difference of two distances "A-B-C" = d(A,B) - d(B,C) (for a proton B moving from A to C).  With --scan2 the
 two coordinates are restrained together on a grid, row by row: for each value of the first, the second runs from
---from2 to --to2 and back on the next row (each window starts from the one before).  Only the residues with an atom
-within --free-radius of the QM region move freely; the others are held at their equilibrated positions by harmonic
-restraints (--hold), so that each window relaxes the active site rather than the whole water box.
+--from2 to --to2 and back on the next row (each window starts from the one before); --back then returns along the
+last row to --from2 and up the first column to the reactant.  Only the residues with an atom within --free-radius of
+the QM region move freely; the others are held by harmonic restraints (--hold) at their positions after an MM
+minimization of the equilibrated system, so that each window relaxes the active site rather than the whole water box.
 
 Writes scan.csv, one row per window: the restraint target and the value reached (target, d; target2, d2 for the
 second coordinate), the potential energy without the restraints (kJ/mol, MM + QM/MM), the energy of the scan
@@ -115,8 +116,16 @@ def main():
     sim.minimizeEnergy()
     sim.context.setVelocitiesToTemperature(a.temperature * u.kelvin, a.seed)
     sim.step(int(a.mm_equil_ps * 500))
-    x0 = sim.context.getState(getPositions=True, enforcePeriodicBox=False).getPositions()
     print(f"MM equilibration {a.mm_equil_ps} ps: {time.perf_counter() - t0:.1f} s", flush=True)
+    # minimize the whole system with MM, so that the atoms held below sit at a minimum of their energy: held at an
+    # equilibrated (thermal) snapshot instead, they keep trading MM energy for restraint energy from window to window
+    t0 = time.perf_counter()
+    e1 = sim.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(u.kilojoule_per_mole)
+    sim.minimizeEnergy(tolerance=a.min_tol * u.kilojoule_per_mole / u.nanometer)
+    st = sim.context.getState(getEnergy=True, getPositions=True, enforcePeriodicBox=False)
+    x0 = st.getPositions()
+    print(f"MM minimization: {st.getPotentialEnergy().value_in_unit(u.kilojoule_per_mole) - e1:.0f} kJ/mol, "
+          f"{time.perf_counter() - t0:.1f} s", flush=True)
 
     # QM region and restraint
     wanted = parse_residues(a.qm_residues)
@@ -228,9 +237,15 @@ def main():
         s0 = rows[0]["d2"] if a.from2 is None else a.from2
         m = int(round(abs(a.to2 - s0) / a.step2))
         col = [s0 + np.sign(a.to2 - s0) * a.step2 * k for k in range(m + 1)]
-        for i, r in enumerate([d0] + targets):
+        rs = [d0] + targets
+        for i, r in enumerate(rs):
             for j, s in enumerate(col if i % 2 == 0 else col[::-1]):
                 window(f"g{i}_{j if i % 2 == 0 else m - j}", [float(r), float(s)], a.min_iter)
+        if a.back:
+            # along the last row to the first value of the second coordinate, then up the first column
+            path = [(rs[-1], s) for s in (col[-2::-1] if n % 2 == 0 else [])] + [(r, col[0]) for r in rs[-2::-1]]
+            for k, (r, s) in enumerate(path):
+                window(f"b{k + 1}", [float(r), float(s)], a.min_iter)
     app.PDBFile.writeFooter(sub.topology, frames)
     frames.close()
     keys = list(rows[0])
