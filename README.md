@@ -680,7 +680,7 @@ constraints inside the QM region; by default all its bonds are free, so keep 0.5
 (where each step's SCF starts; keep the default `previous`), `--seed`. `--help` lists them all.
 MOPAC runs on the CPU for QM regions of up to 20 atoms (link atoms included) and on the GPU above.
 
-**Reaction scans:** `scripts/qmmm/qmmm_scan.py` moves a restrained distance step by step and minimizes the active site at each step (adiabatic mapping); the wiki's QM/MM example 59 follows the attack of Ser195 on the substrate in trypsin.
+**Reaction scans:** `scripts/qmmm/qmmm_scan.py` moves one or two restrained coordinates (a distance, or a difference of two distances for a proton transfer) step by step on a grid and minimizes the active site at each point (adiabatic mapping); the wiki's QM/MM example 59 maps the attack of Ser195 on the substrate in trypsin together with the proton transfer to His57, and [`colab/enzyme_scan_colab.ipynb`](https://colab.research.google.com/github/juvenalyosa/mopac_gpu/blob/main/colab/enzyme_scan_colab.ipynb) runs it on a Colab GPU (about 11 minutes per map of 182 points on an L4).
 
 **From your own OpenMM script:**
 

@@ -71,6 +71,7 @@ CAP = {
     56: f"Forces on the QM atoms against the cut-off, without and with the long-range term (trypsin–BPTI, 8 snapshots, reference PME at 24 Å); {DOCS}.",
     57: "What `add_qmmm` does to an OpenMM system (`scripts/qmmm/openmm_mopac.py`).",
     58: "QM/MM electrostatic energy of chignolin with one TIP3P water as point charges at increasing distance (one job per distance).",
+    59: "Trypsin–BPTI: PM7 QM/MM map of the attack of Ser195 on Lys15 of BPTI, replica 1 of 3, run by the notebook on a Colab L4 GPU (commit `e799de85`). A: the minimized reactant; B: the lowest point of the last row with the proton (green) on His57, Ser195 OG bonded to the carbonyl carbon. Map: energy of the minimized structures against the coordinates reached, contours every 4 kcal/mol, and the lowest path through the grid points (orange). Right: the energy along that path in the three replicas; its highest point is 22.4, 24.8 and 23.2 kcal/mol. Potential energies of single minimized structures, not free energies.",
     60: f"Largest difference between GPU and CPU heats in the benchmark checks; {README}.",
     61: "The cells of `tests/data/materials/small`.",
     62: "The 11 CPU checks of `tests/check_qmmm_pme_ewald.py`: value and tolerance of each (unit in brackets).",

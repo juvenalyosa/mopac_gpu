@@ -1320,9 +1320,12 @@ def ex54(theme, ctx):
     return fig
 
 
-def scan_rows(ctx):
+ENZ = "enzyme_scan_l4"          # results of colab/enzyme_scan_colab.ipynb (an L4 GPU), unzipped in <ext>
+
+
+def scan_rows(ctx, seed):
     import csv
-    with open(ctx.work / "enzyme_scan" / "scan.csv") as fh:
+    with open(ctx.ext / ENZ / f"seed_{seed}" / "scan.csv") as fh:
         rows = list(csv.DictReader(fh))
     for r in rows:
         for k, v in r.items():
@@ -1331,54 +1334,119 @@ def scan_rows(ctx):
     return rows
 
 
+def scan_grid(rows):
+    """{(row, column): window} of the grid windows g<i>_<j>"""
+    return {tuple(int(v) for v in r["window"][1:].split("_")): r for r in rows if r["window"].startswith("g")}
+
+
+def lowest_path(g, start, goal):
+    """the path through neighbouring grid points (diagonals too) whose highest energy is lowest"""
+    import heapq
+    best, prev, pq = {start: g[start]["e"]}, {}, [(g[start]["e"], start)]
+    while pq:
+        h, p = heapq.heappop(pq)
+        if h > best[p]:
+            continue
+        for q in ((p[0] + a, p[1] + b) for a in (-1, 0, 1) for b in (-1, 0, 1) if a or b):
+            if q in g and max(h, g[q]["e"]) < best.get(q, np.inf):
+                best[q], prev[q] = max(h, g[q]["e"]), p
+                heapq.heappush(pq, (best[q], q))
+    path = [goal]
+    while path[-1] != start:
+        path.append(prev[path[-1]])
+    return path[::-1]
+
+
+def scan_end(g):
+    """the lowest point of the last row with the proton on His57"""
+    last = max(i for i, _ in g)
+    return min((k for k in g if k[0] == last and g[k]["d2"] > 0), key=lambda k: g[k]["e"])
+
+
 @figure(59)
 def ex59(theme, ctx):
+    from matplotlib.colors import LinearSegmentedColormap
     c = L.style(theme)
-    rows = scan_rows(ctx)
+    kcal = 1 / 4.184
+    runs = {s: scan_rows(ctx, s) for s in (1, 2, 3)}
+    rows = runs[1]
     e0 = rows[0]["e"]
-    fwd = [rows[0]] + [r for r in rows if r["window"].startswith("f")]
-    back = [fwd[-1]] + [r for r in rows if r["window"].startswith("b")]
-    frames = ctx.work / "enzyme_scan" / "scan_frames.pdb"
-    last = len(fwd)                       # model of the last forward window
+    g = scan_grid(rows)
+    end = scan_end(g)
+    frames = ctx.ext / ENZ / "seed_1" / "scan_frames.pdb"
+    picks = [(rows[0], "reactant", "A"), (g[end], "end", "B")]
     pngs = []
-    for state, name in ((1, "reactant"), (last, "end")):
+    for row, name, _ in picks:
+        state = rows.index(row) + 1           # one model per window, in order
         out = ctx.renders / f"ex59-{name}-{theme}.png"
 
         def build(cmd, cc, state=state):
-            cmd.load(str(frames), "m", state=state)
-            cmd.hide("everything")
-            act = "(chain E and resi 57+102+195 and not name N+C+O+H+HA) or (chain I and resi 15+16)"
-            cmd.show("sticks", act); cmd.set("stick_radius", 0.17)
-            L.element_colours(cmd, act); cmd.color("carbon_t", f"({act}) and elem C")
+            cmd.load(str(frames), "m0")
+            cmd.create("m", "m0", state, 1); cmd.delete("m0")
+            cmd.hide("everything"); cmd.set("depth_cue", 0)
+            # the catalytic triad's side chains and the scissile peptide of BPTI (Lys15 C=O, Ala16 N)
+            act = ("(chain E and resi 57+102+195 and not name N+C+O+H+HA) or "
+                   "(chain I and ((resi 15 and name N+H+CA+HA+CB+C+O) or (resi 16 and name N+H+CA)))")
+            # the bonds that form and break: drawn as bonds when short, as dashes when not
+            hg, og = "chain E and resi 195 and name HG", "chain E and resi 195 and name OG"
+            ne2, cc = "chain E and resi 57 and name NE2", "chain I and resi 15 and name C"
+            for k, (s1, s2, cut) in enumerate(((og, cc, 1.7), (hg, ne2, 1.3), (hg, og, 1.3))):
+                cmd.unbond(s1, s2)
+                if cmd.get_distance(s1, s2) < cut:
+                    cmd.bond(s1, s2)
+                elif k < 2:
+                    cmd.distance(f"d{k}", s1, s2)
+            cmd.show("sticks", f"({act}) and not (elem H and neighbor elem C)"); cmd.set("stick_radius", 0.17)
+            L.element_colours(cmd, f"({act})"); cmd.color("carbon_t", f"({act}) and elem C")
             cmd.color("s2", "chain I and resi 15+16 and elem C")
-            cmd.distance("d1", "chain E and resi 195 and name OG", "chain I and resi 15 and name C")
-            cmd.distance("d2", "chain E and resi 195 and name HG", "chain E and resi 57 and name NE2")
-            cmd.hide("labels"); cmd.set("dash_color", "s1"); cmd.set("dash_width", 3); cmd.set("dash_gap", 0.25)
-            cmd.orient("chain E and resi 57+195 or chain I and resi 15")
+            cmd.show("spheres", hg); cmd.set("sphere_scale", 0.2); cmd.color("s3", hg)
+            cmd.hide("labels"); cmd.set("dash_color", "s7"); cmd.set("dash_width", 3); cmd.set("dash_gap", 0.25)
+            cmd.orient("(chain E and resi 57+195 and not name N+C+O) or (chain I and resi 15 and name CA+C+O)")
+            cmd.zoom(f"({act})", 0.5, complete=1)
         L.pymol_render(out, build, 900, 800, theme)
         pngs.append(out)
-    fig = plt.figure(figsize=(9.8, 3.9))
-    for k, (png, lab) in enumerate(zip(pngs, (f"reactant: Ser195 OG···C {fwd[0]['d']:.2f} Å",
-                                             f"end of the scan: {fwd[-1]['d']:.2f} Å"))):
-        ax = fig.add_axes([0.0, 0.52 - 0.5 * k, 0.27, 0.47]); L.image_axes(ax, png)
-        ax.text(0.02, 0.02, lab, transform=ax.transAxes, fontsize=7.5, color=c["text2"])
-    a1 = fig.add_axes([0.35, 0.15, 0.29, 0.72]); a2 = fig.add_axes([0.71, 0.15, 0.28, 0.72])
-    kcal = 1 / 4.184
-    for part, col, lab, ls in ((fwd, c["series"][0], "forward", "-"), (back, c["series"][1], "back", (0, (4, 2)))):
-        a1.plot([r["d"] for r in part], [(r["e"] - e0) * kcal for r in part], "o", ls=ls, ms=4, color=col, label=lab)
-    a1.set_xlabel("Ser195 OG – Lys15 C (Å)"); a1.set_ylabel("energy − reactant (kcal/mol)")
-    a1.invert_xaxis(); a1.legend(fontsize=8)
-    a1.set_title("minimized energy along the scan", fontsize=9.5, fontweight="normal")
-    for part, ls, mk in ((fwd, "-", "o"), (back, (0, (4, 2)), "s")):
-        a2.plot([r["d"] for r in part], [r["E:195:OG-E:195:HG"] for r in part], marker=mk, ms=3.5, ls=ls,
-                color=c["series"][2])
-        a2.plot([r["d"] for r in part], [r["E:195:HG-E:57:NE2"] for r in part], marker=mk, ms=3.5, ls=ls,
-                color=c["series"][6])
-    a2.text(0.03, 0.95, "Ser195 OG–HG", color=c["series"][2], transform=a2.transAxes, fontsize=8.5, va="top")
-    a2.text(0.03, 0.86, "HG···His57 NE2", color=c["series"][6], transform=a2.transAxes, fontsize=8.5, va="top")
-    a2.set_xlabel("Ser195 OG – Lys15 C (Å)"); a2.set_ylabel("distance (Å)")
-    a2.invert_xaxis()
-    a2.set_title("where the Ser195 proton is", fontsize=9.5, fontweight="normal")
+    fig = plt.figure(figsize=(10.6, 4.3))
+    for k, (png, (row, _, letter)) in enumerate(zip(pngs, picks)):
+        ax = fig.add_axes([0.0, 0.53 - 0.5 * k, 0.25, 0.4]); L.image_axes(ax, png, crop=True)
+        where = "Ser195" if row["d2"] < 0 else "His57"
+        ax.text(0.0, -0.04, f"{letter}  OG···C {row['d']:.2f} Å, H on {where}", transform=ax.transAxes, fontsize=8,
+                color=c["text2"], va="top")
+    # the map of replica 1, against the values reached (not the targets)
+    am = fig.add_axes([0.32, 0.14, 0.33, 0.74])
+    x = np.array([r["d"] for r in g.values()]); y = np.array([r["d2"] for r in g.values()])
+    z = np.array([(r["e"] - e0) * kcal for r in g.values()])
+    lv = np.arange(np.floor(z.min() / 4) * 4, z.max() + 4, 4)
+    cm = LinearSegmentedColormap.from_list("s", c["seq"])
+    cs = am.tricontourf(x, y, z, levels=lv, cmap=cm)
+    am.tricontour(x, y, z, levels=lv, colors=c["surface"], linewidths=0.5)
+    am.plot(x, y, ".", ms=2, color=c["text2"], alpha=0.5)
+    path = lowest_path(g, (0, 0), end)
+    am.plot([g[p]["d"] for p in path], [g[p]["d2"] for p in path], "-", lw=1.6, color=c["series"][1])
+    for row, _, letter in picks:
+        am.plot(row["d"], row["d2"], "o", ms=8, color=c["series"][1], mec=c["surface"], mew=1.5)
+        am.annotate(letter, (row["d"], row["d2"]), xytext=(7 if letter == "A" else -16, 4), textcoords="offset points",
+                    fontsize=10, fontweight="bold", color=c["text"])
+    ys = list(y) + [rows[0]["d2"]]
+    am.set_ylim(min(ys) - 0.06, max(ys) + 0.06); am.set_xlim(max(list(x) + [rows[0]["d"]]) + 0.04, min(x) - 0.04)
+    am.grid(False)
+    am.set_xlabel("Ser195 OG – Lys15 C (Å)"); am.set_ylabel("d(OG–HG) − d(HG–NE2) (Å)")
+    for yy, va, lab in ((0.03, "bottom", "H on Ser195"), (0.97, "top", "H on His57")):
+        am.text(0.97, yy, lab, transform=am.transAxes, ha="right", va=va, fontsize=8, color=c["text"],
+                bbox=dict(boxstyle="round,pad=0.25", fc=c["surface"], ec="none", alpha=0.85))
+    am.set_title("QM/MM energy of the minimized structures (replica 1)", fontsize=9.5, fontweight="normal")
+    cax = fig.add_axes([0.66, 0.14, 0.012, 0.74])
+    cb = fig.colorbar(cs, cax=cax); cb.outline.set_visible(False)
+    cb.set_label("energy − reactant (kcal/mol)", color=c["text2"]); cb.ax.tick_params(colors=c["text2"])
+    # the energy along the lowest path of each replica
+    ah = fig.add_axes([0.79, 0.14, 0.2, 0.74])
+    for k, (s, rr) in enumerate(runs.items()):
+        gs = scan_grid(rr)
+        ps = lowest_path(gs, (0, 0), scan_end(gs))
+        ah.plot([gs[p]["d"] for p in ps], [(gs[p]["e"] - rr[0]["e"]) * kcal for p in ps], "o-", ms=3.5,
+                color=c["series"][[1, 0, 2][k]], label=f"replica {s}")
+    ah.invert_xaxis(); ah.legend(fontsize=8, loc="upper left")
+    ah.set_xlabel("Ser195 OG – Lys15 C (Å)"); ah.set_ylabel("energy − reactant (kcal/mol)")
+    ah.set_title("along the lowest path", fontsize=9.5, fontweight="normal")
     return fig
 
 

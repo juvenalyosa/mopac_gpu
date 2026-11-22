@@ -191,17 +191,6 @@ def jobs():
                          steps=[dict(mop=None, files=[CHIG])], threads=4)
     for k, d in enumerate([4, 5, 6, 7, 8, 10, 12, 15, 20, 25, 30]):
         J[f"mmq_{k:02d}"] = dict(mmq=d, steps=[dict(mop=None, files=[CHIG])])
-    # an enzyme reaction: Ser195 OG of trypsin attacks the carbonyl C of Lys15 of BPTI (PDB 2PTC) while His57 takes the
-    # Ser195 proton; QM/MM map of the two coordinates (7 x 9 points) and the way back along its edge
-    J["enzyme_scan"] = dict(enzyme=["--qm-residues", "E:57:sc,E:102:sc,E:195:sc,I:15,I:16", "--variants", "E:57=HID",
-                                    "--scan", "E:195:OG-I:15:C", "--to", "1.5", "--step", "0.15",
-                                    "--scan2", "E:195:OG-E:195:HG-E:57:NE2", "--from2", "-1.1", "--to2", "1.1",
-                                    "--step2", "0.275", "--back",
-                                    "--watch", "E:195:OG-E:195:HG,E:195:HG-E:57:NE2,I:15:C-I:15:O,I:15:C-I:16:N,"
-                                               "E:57:HD1-E:102:OD2",
-                                    "--min-iter", "150", "--min-iter-start", "1000", "--mm-equil-ps", "20",
-                                    "--platform", "OpenCL"],
-                            steps=[dict(mop=None)], threads=6)
     J["times_chig"] = pdb_job("PM7 MOZYME 1SCF TIMES", "Chignolin, stage times")
     J["pme_check"] = dict(script=["python", str(REPO / "tests/check_qmmm_pme_ewald.py")], steps=[dict(mop=None)])
     return J
@@ -257,10 +246,6 @@ def run(name, job, mopac, libmopac, work, python):
         rc = sh([python, str(REPO / "scripts/mozyme_parallel_force.py"), mopac, CHIG.name, "--keywords",
                  "PM7 MOZYME GEO-OK THERMO(298)", "--workers", str(job["parallel_force"]), "--work-dir", "pf",
                  "--gpus", "none"])
-    elif "enzyme" in job:
-        import urllib.request
-        urllib.request.urlretrieve("https://files.rcsb.org/download/2PTC.pdb", d / "2PTC.pdb")
-        rc = sh([python, str(REPO / "scripts/qmmm/qmmm_scan.py"), "2PTC.pdb", "--libmopac", libmopac] + job["enzyme"])
     elif "qmmm" in job:
         rc = sh([python, str(REPO / "scripts/qmmm/run_qmmm_md.py"), CHIG.name, "--libmopac", libmopac]
                 + job["qmmm"])

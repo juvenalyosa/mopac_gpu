@@ -52,10 +52,14 @@ def save(fig, out_dir, name, theme):
     return fn
 
 
-def image_axes(ax, png):
-    """show a rendered (transparent) PNG in an axes without frame"""
+def image_axes(ax, png, crop=False):
+    """show a rendered (transparent) PNG in an axes without frame; crop: to the drawn pixels, with a small margin"""
     import matplotlib.image as mpimg
     im = mpimg.imread(png)
+    if crop:
+        ys, xs = np.nonzero(im[..., 3] > 0.02)
+        m = int(0.04 * max(im.shape[:2]))
+        im = im[max(ys.min() - m, 0):ys.max() + m + 1, max(xs.min() - m, 0):xs.max() + m + 1]
     ax.imshow(im)
     ax.set_axis_off()
     return ax
