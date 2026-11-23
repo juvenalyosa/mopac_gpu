@@ -599,9 +599,12 @@ and roff = 12 A is enough.
 value before, and with `--back` returns the same way. A coordinate can also be a difference of two distances,
 `A-B-C` = d(A,B) − d(B,C), for a proton B moving from A to C; `--scan2` (with `--from2`, `--to2`, `--step2`) adds a
 second coordinate and scans the two on a grid, row by row in alternating directions, and `--back` then returns along
-the last row and the first column. Only residues with an atom within `--free-radius` (10 A) of the QM region move
-freely; the rest are held (`--hold`, 50 kJ/mol/A^2) at their positions after an MM minimization of the equilibrated
-system, so that each window relaxes the active site and not the whole water box (minimizing all of trypsin-BPTI in
+the last row and the first column. `--release` then removes the scan restraints and minimizes (at most
+`--release-iter`, 3000, iterations) from the last point of the scan, or from each point of the last row of a grid
+(windows `r_<label>`): a structure that stays where the scan left it lies in a local minimum of the energy (or on a
+slope too flat for the minimizer), one that moves away does not. Only residues with an atom within `--free-radius`
+(10 A) of the QM region move freely; the rest are held (`--hold`, 50 kJ/mol/A^2) at their positions after an MM
+minimization of the equilibrated system, so that each window relaxes the active site and not the whole water box (minimizing all of trypsin-BPTI in
 water lowered the energy by thousands of kJ/mol per window, from the relaxation of the box). Held at the equilibrated
 snapshot itself, as in the first version of the script, the held atoms kept moving toward it for several windows:
 in a trypsin-BPTI map their restraint energy fell by 58 kJ/mol, most of it over the first five windows, and two

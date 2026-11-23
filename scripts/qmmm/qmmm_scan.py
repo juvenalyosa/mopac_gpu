@@ -17,9 +17,13 @@ structure of the value before; with --back it goes back to the start the same wa
 "A-B" or a difference of two distances "A-B-C" = d(A,B) - d(B,C) (for a proton B moving from A to C).  With --scan2 the
 two coordinates are restrained together on a grid, row by row: for each value of the first, the second runs from
 --from2 to --to2 and back on the next row (each window starts from the one before); --back then returns along the
-last row to --from2 and up the first column to the reactant.  Only the residues with an atom within --free-radius of
-the QM region move freely; the others are held by harmonic restraints (--hold) at their positions after an MM
-minimization of the equilibrated system, so that each window relaxes the active site rather than the whole water box.
+last row to --from2 and up the first column to the reactant.  --release then minimizes without the scan restraints
+(at most --release-iter iterations), from the last point of the scan or from each point of the last row of a grid
+(windows r_<label>): a structure that stays where the scan left it lies in a local minimum of the energy (or on a
+slope too flat for the minimizer), one that moves away does not.  Only the residues with an atom within
+--free-radius of the QM region move freely; the others are held by harmonic restraints (--hold) at their positions
+after an MM minimization of the equilibrated system, so that each window relaxes the active site rather than the
+whole water box.
 
 Writes scan.csv, one row per window: the restraint target and the value reached (target, d; target2, d2 for the
 second coordinate), the potential energy without the restraints (kJ/mol, MM + QM/MM), the energy of the scan
@@ -67,6 +71,9 @@ def main():
     ap.add_argument("--to2", type=float, default=None)
     ap.add_argument("--step2", type=float, default=0.2)
     ap.add_argument("--back", action="store_true", help="scan back to the start afterwards")
+    ap.add_argument("--release", action="store_true", help="at the end, minimize without restraints from the last "
+                    "point of the scan (from each point of the last row of a grid)")
+    ap.add_argument("--release-iter", type=int, default=3000, help="minimizer iterations of each --release")
     ap.add_argument("--watch", default="", help="distances to report, e.g. E:195:HG-E:57:NE2")
     ap.add_argument("--free-radius", type=float, default=10.0, help="residues within this distance (A) of the QM "
                     "region move freely; the others are restrained")
@@ -227,9 +234,15 @@ def main():
     d0 = rows[0]["d"]
     n = int(round(abs(d0 - a.to) / a.step))
     targets = [d0 + np.sign(a.to - d0) * a.step * (k + 1) for k in range(n)]
+    ends = {}                               # positions of the points --release starts from
+
+    def remember():
+        ends[rows[-1]["window"]] = sim.context.getState(getPositions=True).getPositions(asNumpy=True)
+
     if len(coords) == 1:
         for k, r in enumerate(targets):
             window(f"f{k + 1}", [float(r)], a.min_iter)
+        remember()
         if a.back:
             for k, r in enumerate(targets[-2::-1] + [d0]):
                 window(f"b{k + 1}", [float(r)], a.min_iter)
@@ -241,11 +254,18 @@ def main():
         for i, r in enumerate(rs):
             for j, s in enumerate(col if i % 2 == 0 else col[::-1]):
                 window(f"g{i}_{j if i % 2 == 0 else m - j}", [float(r), float(s)], a.min_iter)
+                if i == len(rs) - 1:
+                    remember()
         if a.back:
             # along the last row to the first value of the second coordinate, then up the first column
             path = [(rs[-1], s) for s in (col[-2::-1] if n % 2 == 0 else [])] + [(r, col[0]) for r in rs[-2::-1]]
             for k, (r, s) in enumerate(path):
                 window(f"b{k + 1}", [float(r), float(s)], a.min_iter)
+    if a.release:
+        # no restraints: does the structure stay where the scan left it, or does it go back?
+        for label, x in sorted(ends.items()):
+            sim.context.setPositions(x)
+            window(f"r_{label}", None, a.release_iter)
     app.PDBFile.writeFooter(sub.topology, frames)
     frames.close()
     keys = list(rows[0])
