@@ -1320,7 +1320,7 @@ def ex54(theme, ctx):
     return fig
 
 
-ENZ = "enzyme_scan_l4"          # results of colab/enzyme_scan_colab.ipynb (an L4 GPU), unzipped in <ext>
+ENZ = "enzyme_scan_l4_db2e4ad4"  # results of colab/enzyme_scan_colab.ipynb (an L4 GPU), unzipped in <ext>
 
 
 def scan_rows(ctx, seed):
@@ -1363,6 +1363,11 @@ def scan_end(g):
     return min((k for k in g if k[0] == last and g[k]["d2"] > 0), key=lambda k: g[k]["e"])
 
 
+def scan_released(rows):
+    """{grid window: the window r_<grid window> minimized from it without the scan restraints (--release)}"""
+    return {r["window"][2:]: r for r in rows if r["window"].startswith("r_")}
+
+
 @figure(59)
 def ex59(theme, ctx):
     from matplotlib.colors import LinearSegmentedColormap
@@ -1373,8 +1378,10 @@ def ex59(theme, ctx):
     e0 = rows[0]["e"]
     g = scan_grid(rows)
     end = scan_end(g)
+    rel = scan_released(rows)
     frames = ctx.ext / ENZ / "seed_1" / "scan_frames.pdb"
-    picks = [(rows[0], "reactant", "A"), (g[end], "end", "B")]
+    # B: the adduct minimized without the scan restraints from the end of the lowest path
+    picks = [(rows[0], "reactant", "A"), (rel[g[end]["window"]], "end", "B")]
     pngs = []
     for row, name, _ in picks:
         state = rows.index(row) + 1           # one model per window, in order
@@ -1409,8 +1416,8 @@ def ex59(theme, ctx):
     for k, (png, (row, _, letter)) in enumerate(zip(pngs, picks)):
         ax = fig.add_axes([0.0, 0.53 - 0.5 * k, 0.25, 0.4]); L.image_axes(ax, png, crop=True)
         where = "Ser195" if row["d2"] < 0 else "His57"
-        ax.text(0.0, -0.04, f"{letter}  OG···C {row['d']:.2f} Å, H on {where}", transform=ax.transAxes, fontsize=8,
-                color=c["text2"], va="top")
+        ax.text(0.0, -0.04, f"{letter}  OG···C {row['d']:.2f} Å, H on {where}" + (", unrestrained" if k else ""),
+                transform=ax.transAxes, fontsize=8, color=c["text2"], va="top")
     # the map of replica 1, against the values reached (not the targets)
     am = fig.add_axes([0.32, 0.14, 0.33, 0.74])
     x = np.array([r["d"] for r in g.values()]); y = np.array([r["d2"] for r in g.values()])
@@ -1422,6 +1429,12 @@ def ex59(theme, ctx):
     am.plot(x, y, ".", ms=2, color=c["text2"], alpha=0.5)
     path = lowest_path(g, (0, 0), end)
     am.plot([g[p]["d"] for p in path], [g[p]["d2"] for p in path], "-", lw=1.6, color=c["series"][1])
+    # --release: from each point of the last row to where the minimization without the scan restraints stopped
+    for w, r in rel.items():
+        s0 = next(q for q in g.values() if q["window"] == w)
+        am.annotate("", (r["d"], r["d2"]), (s0["d"], s0["d2"]), arrowprops=dict(arrowstyle="-|>", color=c["text"],
+                    lw=0.8, shrinkA=0, shrinkB=2, mutation_scale=7))
+        am.plot(r["d"], r["d2"], "o", ms=3.5, color=c["text"], mec=c["surface"], mew=0.6)
     for row, _, letter in picks:
         am.plot(row["d"], row["d2"], "o", ms=8, color=c["series"][1], mec=c["surface"], mew=1.5)
         am.annotate(letter, (row["d"], row["d2"]), xytext=(7 if letter == "A" else -16, 4), textcoords="offset points",
@@ -1431,7 +1444,7 @@ def ex59(theme, ctx):
     am.grid(False)
     am.set_xlabel("Ser195 OG – Lys15 C (Å)"); am.set_ylabel("d(OG–HG) − d(HG–NE2) (Å)")
     for yy, va, lab in ((0.03, "bottom", "H on Ser195"), (0.97, "top", "H on His57")):
-        am.text(0.97, yy, lab, transform=am.transAxes, ha="right", va=va, fontsize=8, color=c["text"],
+        am.text(0.75, yy, lab, transform=am.transAxes, ha="center", va=va, fontsize=8, color=c["text"], zorder=5,
                 bbox=dict(boxstyle="round,pad=0.25", fc=c["surface"], ec="none", alpha=0.85))
     am.set_title("QM/MM energy of the minimized structures (replica 1)", fontsize=9.5, fontweight="normal")
     cax = fig.add_axes([0.66, 0.14, 0.012, 0.74])
@@ -1442,8 +1455,13 @@ def ex59(theme, ctx):
     for k, (s, rr) in enumerate(runs.items()):
         gs = scan_grid(rr)
         ps = lowest_path(gs, (0, 0), scan_end(gs))
+        col = c["series"][[1, 0, 2][k]]
         ah.plot([gs[p]["d"] for p in ps], [(gs[p]["e"] - rr[0]["e"]) * kcal for p in ps], "o-", ms=3.5,
-                color=c["series"][[1, 0, 2][k]], label=f"replica {s}")
+                color=col, label=f"replica {s}")
+        # the end of the path minimized without the scan restraints (open circle)
+        r = scan_released(rr)[gs[ps[-1]]["window"]]
+        ah.plot(r["d"], (r["e"] - rr[0]["e"]) * kcal, "o", ms=6, mfc="none", mec=col, mew=1.3)
+    ah.plot([], [], "o", ms=6, mfc="none", mec=c["text2"], mew=1.3, label="end, unrestrained")
     ah.invert_xaxis(); ah.legend(fontsize=8, loc="upper left")
     ah.set_xlabel("Ser195 OG – Lys15 C (Å)"); ah.set_ylabel("energy − reactant (kcal/mol)")
     ah.set_title("along the lowest path", fontsize=9.5, fontweight="normal")
