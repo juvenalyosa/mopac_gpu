@@ -595,26 +595,46 @@ and roff = 12 A is enough.
 
 `scripts/qmmm/qmmm_scan.py` follows a reaction coordinate by adiabatic mapping: it prepares the system as
 `run_qmmm_md.py` does, minimizes the reactant with QM/MM, then moves one distance (`--scan A-B`) to `--to` in steps of
-`--step` with a harmonic restraint (`--k`, default 2000 kJ/mol/A^2), minimizing at each value from the structure of the
-value before, and with `--back` returns the same way. A coordinate can also be a difference of two distances,
+`--step` with a harmonic restraint (`--k`, default 2000 kJ/mol/A^2), minimizing at each value from the structure of
+the value before, and with `--back` returns the same way. A coordinate can also be a difference of two distances,
 `A-B-C` = d(A,B) − d(B,C), for a proton B moving from A to C; `--scan2` (with `--from2`, `--to2`, `--step2`) adds a
 second coordinate and scans the two on a grid, row by row in alternating directions, and `--back` then returns along
-the last row and the first column. `--release` then removes the scan restraints and minimizes (at most
-`--release-iter`, 3000, iterations) from the last point of the scan, or from each point of the last row of a grid
-(windows `r_<label>`): a structure that stays where the scan left it lies in a local minimum of the energy (or on a
-slope too flat for the minimizer), one that moves away does not. Only residues with an atom within `--free-radius`
-(10 A) of the QM region move freely; the rest are held (`--hold`, 50 kJ/mol/A^2) at their positions after an MM
-minimization of the equilibrated system, so that each window relaxes the active site and not the whole water box (minimizing all of trypsin-BPTI in
-water lowered the energy by thousands of kJ/mol per window, from the relaxation of the box). Held at the equilibrated
-snapshot itself, as in the first version of the script, the held atoms kept moving toward it for several windows:
-in a trypsin-BPTI map their restraint energy fell by 58 kJ/mol, most of it over the first five windows, and two
+the last row and the first column.
+
+`--release` then removes the scan restraints and minimizes from the last point of the scan (from each point of the
+last row of a grid) and from each point lower than all its neighbours (windows `r_<label>`): a structure that stays
+where the scan left it lies in a minimum, one that moves away does not, and the lowest minimum near the reactant is
+the reference to measure the energies of the reaction from (the minimized starting structure need not be it).
+`--hessian` checks each structure minimized without restraints: the frequencies of the QM atoms with everything else
+fixed, from central differences of the forces; a minimum has none imaginary.
+
+Only residues with an atom within `--free-radius` (10 A) of the QM region move; the other atoms are fixed (zero mass,
+which OpenMM's minimizer leaves in place) where an MM minimization of the equilibrated system left them, so that each
+window relaxes the active site and not the whole water box (minimizing all of trypsin-BPTI in water lowered the energy
+by thousands of kJ/mol per window, from the relaxation of the box). In earlier versions the outer atoms were held by
+harmonic restraints, first at the equilibrated snapshot itself: there they kept moving toward it for several windows,
+their restraint energy fell by 58 kJ/mol in a trypsin-BPTI map, most of it over the first five windows, and two
 neighbouring points of the map whose active sites differed by less than 0.3 A differed by 50 kJ/mol in the energy
-without the restraints. `scan.csv` gives,
-per window, the targets and the values reached, the energy without the restraints, the QM heat and the distances
-named in `--watch`; `scan_frames.pdb` the residues within 5 A of the QM region. The energies belong to single
-minimized structures: a potential-energy map along one path, not a free energy; a difference between the forward and
-the backward scan shows where the path depends on its history. Example: the wiki, QM/MM example 59 (Ser195 of trypsin
-attacking the carbonyl carbon of Lys15 of BPTI while His57 takes its proton).
+without the restraints.
+
+The minimizations use flexible bonds (no constraints, so that the forces vanish at a minimum) and run in pieces until
+the largest force on a moving atom is below `--fmax` (10 kJ/mol/nm = 0.24 kcal/mol/A). OpenMM's own stopping
+criterion, the root-mean-square force over all atoms, is diluted by the fixed ones, and earlier versions also stopped
+each window after a fixed number of iterations. In single or mixed precision the MM energy is not smoother than about
+10⁻³ kJ/mol: in a test of the MM part alone (trypsin-BPTI in water, CPU platform), L-BFGS stopped with forces of
+25–120 kJ/mol/nm left on a few atoms, the energy changing along them by less than that. A window whose energy stops
+going down is therefore counted as converged when the force on every QM atom is below `--fmax`; `scan.csv` gives both
+largest forces (`fmax`, `fmax_qm`) and the verdict (`conv`). On CUDA the forces are computed deterministically
+(`DeterministicForces`), so that the same `--seed` gives the same MM equilibration on the same GPU; without it, the
+same seeds gave reactants 0.01–0.11 A apart in the OG–C distance on an L4.
+
+`scan.csv` gives, per window, the targets and the values reached, the energy without the restraints, the QM heat, the
+forces left, the number of QM/MM evaluations, the lowest frequencies (with `--hessian`) and the distances named in
+`--watch`; `scan_frames.pdb` the residues within 5 A of the QM region. The energies belong to single minimized
+structures: a potential-energy map along one path, not a free energy; a difference between the forward and the
+backward scan shows where the path depends on its history, and replicas from different MM snapshots show how much the
+map depends on the snapshot. Example: the wiki, QM/MM example 59 (Ser195 of trypsin attacking the carbonyl carbon of
+Lys15 of BPTI while His57 takes its proton).
 
 ## Validation
 

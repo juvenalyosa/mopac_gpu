@@ -18,20 +18,29 @@ structure of the value before; with --back it goes back to the start the same wa
 two coordinates are restrained together on a grid, row by row: for each value of the first, the second runs from
 --from2 to --to2 and back on the next row (each window starts from the one before); --back then returns along the
 last row to --from2 and up the first column to the reactant.  --release then minimizes without the scan restraints
-(at most --release-iter iterations), from the last point of the scan or from each point of the last row of a grid
-(windows r_<label>): a structure that stays where the scan left it lies in a local minimum of the energy (or on a
-slope too flat for the minimizer), one that moves away does not.  Only the residues with an atom within
---free-radius of the QM region move freely; the others are held by harmonic restraints (--hold) at their positions
-after an MM minimization of the equilibrated system, so that each window relaxes the active site rather than the
-whole water box.
+from the last point of the scan (from each point of the last row of a grid) and from each point of the scan lower
+than all its neighbours (windows r_<label>): a structure that stays where the scan left it lies in a minimum of the
+energy, one that moves away does not; the lowest of the minima near the reactant is the reference the energies of a
+reaction should be measured from.  --hessian adds a check of each structure minimized without restraints: the
+frequencies of the QM atoms, everything else fixed, from central differences of the forces (a minimum has none
+imaginary).
 
-Writes scan.csv, one row per window: the restraint target and the value reached (target, d; target2, d2 for the
-second coordinate), the potential energy without the restraints (kJ/mol, MM + QM/MM), the energy of the scan
-restraints, the QM heat of formation (kcal/mol), the watched distances and
-the minimizer's time; and scan_frames.pdb, the residues within 5 A of the QM region, one model per window.  Every
-energy belongs to one minimized structure (no sampling, no entropy, no zero-point energy): this is a potential-
-energy profile along one path, not a free-energy profile.  Differences between the forward and the backward scan
-show where the path depends on its history.
+Only the residues with an atom within --free-radius of the QM region move; the other atoms stay fixed where an MM
+minimization of the equilibrated system left them, so that each window relaxes the active site rather than the whole
+water box. The minimizations use flexible bonds (no constraints) and run until the largest force on a moving atom is
+below --fmax, or until the energy stops going down with the QM atoms below --fmax (at most --min-iter iterations per
+window): OpenMM's own criterion, the root-mean-square force over all atoms, is diluted by the fixed ones. On CUDA the
+forces are computed deterministically, so that the same --seed gives the same MM equilibration on the same GPU.
+
+Writes scan.csv, one row per window: the restraint target and the value reached (target, d; target2, d2 for the second
+coordinate), the potential energy without the restraints (kJ/mol, MM + QM/MM), the energy of the scan restraints, the
+QM heat of formation (kcal/mol), the largest force on a moving atom and on a QM atom at the end (fmax, fmax_qm,
+kJ/mol/nm), whether the minimization converged (conv), the number of QM/MM evaluations, the watched distances, the
+minimizer's time and, with --hessian, the number of imaginary frequencies and the three lowest (n_imag, freq1-3, cm-1,
+imaginary as negative); and scan_frames.pdb, the residues within 5 A of the QM region, one model per window. Every
+energy belongs to one minimized structure (no sampling, no entropy, no zero-point energy): this is a potential-energy
+profile along one path, not a free-energy profile. Differences between the forward and the backward scan show where
+the path depends on its history.
 """
 
 import argparse
@@ -72,24 +81,30 @@ def main():
     ap.add_argument("--step2", type=float, default=0.2)
     ap.add_argument("--back", action="store_true", help="scan back to the start afterwards")
     ap.add_argument("--release", action="store_true", help="at the end, minimize without restraints from the last "
-                    "point of the scan (from each point of the last row of a grid)")
-    ap.add_argument("--release-iter", type=int, default=3000, help="minimizer iterations of each --release")
+                    "point of the scan (from each point of the last row of a grid) and from its local minima")
+    ap.add_argument("--release-iter", type=int, default=20000, help="most minimizer iterations of each --release")
+    ap.add_argument("--hessian", action="store_true", help="frequencies of the QM atoms at each structure minimized "
+                    "without restraints")
     ap.add_argument("--watch", default="", help="distances to report, e.g. E:195:HG-E:57:NE2")
     ap.add_argument("--free-radius", type=float, default=10.0, help="residues within this distance (A) of the QM "
-                    "region move freely; the others are restrained")
-    ap.add_argument("--hold", type=float, default=50.0, help="restraint on the other atoms (kJ/mol/A^2)")
-    ap.add_argument("--min-iter", type=int, default=200, help="minimizer iterations per window")
-    ap.add_argument("--min-iter-start", type=int, default=1000, help="minimizer iterations for the reactant")
-    ap.add_argument("--min-tol", type=float, default=5.0, help="minimizer tolerance (kJ/mol/nm)")
+                    "region move; the others are fixed")
+    ap.add_argument("--fmax", type=float, default=10.0, help="converged when the largest force on a moving atom is "
+                    "below this (kJ/mol/nm; 10 = 0.24 kcal/mol/A)")
+    ap.add_argument("--min-iter", type=int, default=5000, help="most minimizer iterations per window")
+    ap.add_argument("--min-iter-start", type=int, default=20000, help="most minimizer iterations for the reactant "
+                    "and for the MM minimization")
     ap.add_argument("--mm-equil-ps", type=float, default=20.0)
     ap.add_argument("--temperature", type=float, default=300.0)
     ap.add_argument("--platform", default="CUDA")
+    ap.add_argument("--precision", default="mixed", help="of the CUDA platform: mixed or double")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--out", default="scan")
     a = ap.parse_args()
 
     plat = mm.Platform.getPlatformByName(a.platform)
-    props = {"Precision": "mixed"} if a.platform == "CUDA" else {}
+    props = {"Precision": a.precision} if a.platform == "CUDA" else {}
+    if "DeterministicForces" in plat.getPropertyNames():
+        props["DeterministicForces"] = "true"        # the same seed gives the same trajectory
     ff = app.ForceField("amber14-all.xml", "amber14/tip3p.xml")
     pdb = app.PDBFile(a.pdb)
     mod = app.Modeller(pdb.topology, pdb.positions)
@@ -110,9 +125,34 @@ def main():
     print(f"system: {top.getNumAtoms()} atoms, box {top.getPeriodicBoxVectors()[0][0].value_in_unit(u.angstrom):.1f} A",
           flush=True)
 
-    def make_system():
+    def make_system(flexible=False):
+        if flexible:            # for the minimizations: no constraints, so that the forces vanish at a minimum
+            return ff.createSystem(top, nonbondedMethod=app.PME, nonbondedCutoff=1.0 * u.nanometer,
+                                   constraints=None, rigidWater=False)
         return ff.createSystem(top, nonbondedMethod=app.PME, nonbondedCutoff=1.0 * u.nanometer,
                                constraints=app.HBonds)
+
+    kjnm = u.kilojoule_per_mole / u.nanometer
+
+    def relax(context, moving, iters, focus=None):
+        """L-BFGS in pieces of 250 iterations until the largest force on a moving atom is below --fmax, or until the
+        energy stops going down (by less than 1e-3 kJ/mol over two pieces: the MM energy in single or mixed precision
+        is not smoother than that), at most iters iterations.  Returns the largest force on a moving atom and on a
+        focus atom (kJ/mol/nm) and whether it converged: below --fmax, or stopped with the focus atoms below it."""
+        done, e_last, flat = 0, np.inf, 0
+        while True:
+            n = min(250, iters - done)
+            mm.LocalEnergyMinimizer.minimize(context, 0.1 * a.fmax / np.sqrt(3), n)
+            done += n
+            st = context.getState(getEnergy=True, getForces=True)
+            f = np.linalg.norm(st.getForces(asNumpy=True).value_in_unit(kjnm), axis=1)
+            fm = float(f[moving].max())
+            ff = float(f[focus].max()) if focus is not None else float("nan")
+            e = st.getPotentialEnergy().value_in_unit(u.kilojoule_per_mole)
+            flat = flat + 1 if e > e_last - 1e-3 else 0
+            if fm < a.fmax or flat >= 2 or done >= iters:
+                return fm, ff, fm < a.fmax or (flat >= 2 and (focus is None or ff < a.fmax))
+            e_last = min(e, e_last)
 
     # MM equilibration, as run_qmmm_md.py
     t0 = time.perf_counter()
@@ -123,22 +163,27 @@ def main():
     sim.minimizeEnergy()
     sim.context.setVelocitiesToTemperature(a.temperature * u.kelvin, a.seed)
     sim.step(int(a.mm_equil_ps * 500))
-    print(f"MM equilibration {a.mm_equil_ps} ps: {time.perf_counter() - t0:.1f} s", flush=True)
-    # minimize the whole system with MM, so that the atoms held below sit at a minimum of their energy: held at an
-    # equilibrated (thermal) snapshot instead, they keep trading MM energy for restraint energy from window to window
+    print(f"MM equilibration {a.mm_equil_ps} ps: {time.perf_counter() - t0:.1f} s (deterministic forces: "
+          f"{props.get('DeterministicForces', 'false')})", flush=True)
+    # minimize the whole system with MM, so that the atoms fixed below sit at a minimum of their energy
     t0 = time.perf_counter()
-    e1 = sim.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(u.kilojoule_per_mole)
-    sim.minimizeEnergy(tolerance=a.min_tol * u.kilojoule_per_mole / u.nanometer)
-    st = sim.context.getState(getEnergy=True, getPositions=True, enforcePeriodicBox=False)
+    xeq = sim.context.getState(getPositions=True).getPositions()
+    mmsim = app.Simulation(top, make_system(flexible=True), mm.VerletIntegrator(0.5 * u.femtoseconds), plat, props)
+    mmsim.context.setPositions(xeq)
+    e1 = mmsim.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(u.kilojoule_per_mole)
+    f, _, ok = relax(mmsim.context, np.arange(top.getNumAtoms()), a.min_iter_start)
+    st = mmsim.context.getState(getEnergy=True, getPositions=True, enforcePeriodicBox=False)
     x0 = st.getPositions()
-    print(f"MM minimization: {st.getPotentialEnergy().value_in_unit(u.kilojoule_per_mole) - e1:.0f} kJ/mol, "
-          f"{time.perf_counter() - t0:.1f} s", flush=True)
+    print(f"MM minimization (flexible bonds): {st.getPotentialEnergy().value_in_unit(u.kilojoule_per_mole) - e1:.3f} "
+          f"kJ/mol, largest force {f:.1f} kJ/mol/nm, {time.perf_counter() - t0:.1f} s" + ("" if ok else
+          " NOT CONVERGED"), flush=True)
+    del mmsim, sim
 
     # QM region and restraint
     wanted = parse_residues(a.qm_residues)
     qm = [x.index for x in top.atoms() for spec, sc in wanted
           if residue_matches(x.residue, spec) and not (sc and x.name in BACKBONE)]
-    system = make_system()
+    system = make_system(flexible=True)
     nb = [f for f in system.getForces() if isinstance(f, mm.NonbondedForce)][0]
     qcharge = a.qm_charge
     if qcharge is None:
@@ -157,25 +202,18 @@ def main():
         rest.setUsesPeriodicBoundaryConditions(True)
         rest.setForceGroup(30)
         system.addForce(rest)
-    # hold the residues away from the active site
+    # fix the residues away from the active site (the minimizer does not move particles without mass)
     xa = np.array(x0.value_in_unit(u.angstrom))
     dmin = np.full(top.getNumAtoms(), np.inf)
     for i in qm:
         dmin = np.minimum(dmin, np.linalg.norm(xa - xa[i], axis=1))
     free_res = {x.residue.index for x in top.atoms() if dmin[x.index] < a.free_radius}
-    hold = mm.CustomExternalForce("0.5*k_hold*periodicdistance(x, y, z, x0, y0, z0)^2")
-    hold.addGlobalParameter("k_hold", a.hold * 100.0)
-    for p_ in ("x0", "y0", "z0"):
-        hold.addPerParticleParameter(p_)
-    nheld = 0
+    moving = np.array([x.index for x in top.atoms() if x.residue.index in free_res])
     for x in top.atoms():
         if x.residue.index not in free_res:
-            hold.addParticle(x.index, (xa[x.index] / 10.0).tolist())
-            nheld += 1
-    hold.setForceGroup(29)
-    system.addForce(hold)
-    print(f"free: {top.getNumAtoms() - nheld} atoms in {len(free_res)} residues within {a.free_radius} A of the QM "
-          f"region; held: {nheld}", flush=True)
+            system.setParticleMass(x.index, 0.0)
+    print(f"moving: {len(moving)} atoms in {len(free_res)} residues within {a.free_radius} A of the QM region; fixed: "
+          f"{top.getNumAtoms() - len(moving)}", flush=True)
     watch = [(find_atom(top, p.split("-")[0]), find_atom(top, p.split("-")[1]), p)
              for p in a.watch.split(",") if p.strip()]
     sim = app.Simulation(top, system, mm.VerletIntegrator(0.5 * u.femtoseconds), plat, props)
@@ -198,51 +236,78 @@ def main():
 
     rows = []
 
+    def frequencies():
+        """frequencies (cm-1, imaginary as negative) of the QM atoms with everything else fixed, from central
+        differences of the forces (steps of 0.001 nm)"""
+        x = sim.context.getState(getPositions=True).getPositions(asNumpy=True).value_in_unit(u.nanometer)
+        idx, h = np.array(qm), 1e-3
+        hes = np.zeros((3 * len(idx), 3 * len(idx)))
+        for k, i in enumerate(idx):
+            for c in range(3):
+                f = []
+                for sgn in (1, -1):
+                    y = x.copy()
+                    y[i, c] += sgn * h
+                    sim.context.setPositions(y)
+                    f.append(sim.context.getState(getForces=True).getForces(asNumpy=True).value_in_unit(kjnm)[idx]
+                             .ravel())
+                hes[:, 3 * k + c] = -(f[0] - f[1]) / (2 * h)
+        sim.context.setPositions(x)
+        m = np.repeat([system.getParticleMass(int(i)).value_in_unit(u.dalton) for i in idx], 3)
+        lam = np.linalg.eigvalsh(0.5 * (hes + hes.T) / np.sqrt(np.outer(m, m)))   # kJ/mol/nm^2/Da = 1e24 s^-2
+        return np.sign(lam) * np.sqrt(np.abs(lam) * 1e24) / (2 * np.pi * 2.99792458e10)
+
     def window(label, targets, iters):
         """targets: one value per coordinate (A), or None for no restraint"""
-        t1 = time.perf_counter()
+        t1, calls = time.perf_counter(), qmmm.calls
         for n in range(len(coords)):
             if targets is None:
                 sim.context.setParameter(f"k_c{n}", 0.0)
             else:
                 sim.context.setParameter(f"k_c{n}", a.k * 100.0)        # kJ/mol/A^2 -> kJ/mol/nm^2
                 sim.context.setParameter(f"r0_c{n}", targets[n] / 10.0)
-        sim.minimizeEnergy(tolerance=a.min_tol * u.kilojoule_per_mole / u.nanometer, maxIterations=iters)
+        fmax, fqm, ok = relax(sim.context, moving, iters, qm)
         st = sim.context.getState(getEnergy=True, getPositions=True, enforcePeriodicBox=False)
         e_all = st.getPotentialEnergy().value_in_unit(u.kilojoule_per_mole)
         e_rest = sim.context.getState(getEnergy=True, groups={30}).getPotentialEnergy().value_in_unit(
-            u.kilojoule_per_mole)
-        e_hold = sim.context.getState(getEnergy=True, groups={29}).getPotentialEnergy().value_in_unit(
             u.kilojoule_per_mole)
         x = np.array(st.getPositions().value_in_unit(u.angstrom))
         tg = targets if targets is not None else [float("nan")] * len(coords)
         row = dict(window=label, target=tg[0], d=value(x, coords[0]))
         if len(coords) > 1:
             row.update(target2=tg[1], d2=value(x, coords[1]))
-        row.update(e=e_all - e_rest - e_hold, e_rest=e_rest, e_hold=e_hold, heat=qmmm.last.get("heat", float("nan")),
-                   seconds=time.perf_counter() - t1, **{w[2]: dist(x, w[0], w[1]) for w in watch})
-        rows.append(row)
-        app.PDBFile.writeModel(sub.topology, st.getPositions(asNumpy=True)[keep], frames, modelIndex=len(rows),
+        row.update(e=e_all - e_rest, e_rest=e_rest, heat=qmmm.last.get("heat", float("nan")), fmax=fmax,
+                   fmax_qm=fqm, conv=float(ok), evals=float(qmmm.calls - calls), seconds=time.perf_counter() - t1)
+        app.PDBFile.writeModel(sub.topology, st.getPositions(asNumpy=True)[keep], frames, modelIndex=len(rows) + 1,
                                keepIds=True)
+        nu = frequencies() if a.hessian and targets is None else np.full(3, np.nan)
+        row.update(n_imag=float(np.sum(nu < 0)) if a.hessian and targets is None else float("nan"),
+                   freq1=nu[0], freq2=nu[1], freq3=nu[2], **{w[2]: dist(x, w[0], w[1]) for w in watch})
+        rows.append(row)
         print(f"{label:>8s} target {row['target']:6.3f}  d {row['d']:6.3f}  "
               + (f"target2 {row['target2']:6.3f}  d2 {row['d2']:6.3f}  " if len(coords) > 1 else "")
-              + f"E {row['e'] - rows[0]['e']:9.2f} kJ/mol  "
-              f"restraint {e_rest:7.2f}  " + "  ".join(f"{w[2]} {row[w[2]]:.3f}" for w in watch)
-              + f"  ({row['seconds']:.0f} s)", flush=True)
+              + f"E {row['e'] - rows[0]['e']:9.2f} kJ/mol  restraint {e_rest:7.2f}  fmax {fmax:6.1f} (QM {fqm:5.1f})"
+              + ("" if row["conv"] else " NOT CONVERGED") + "  "
+              + "  ".join(f"{w[2]} {row[w[2]]:.3f}" for w in watch)
+              + f"  ({row['seconds']:.0f} s, {row['evals']:.0f} evaluations)"
+              + (f"  imaginary {row['n_imag']:.0f}, lowest {', '.join(f'{v:.0f}' for v in nu[:6])} cm-1"
+                 if not np.isnan(row["n_imag"]) else ""), flush=True)
 
     window("reactant", None, a.min_iter_start)
     d0 = rows[0]["d"]
     n = int(round(abs(d0 - a.to) / a.step))
     targets = [d0 + np.sign(a.to - d0) * a.step * (k + 1) for k in range(n)]
-    ends = {}                               # positions of the points --release starts from
+    xs = {}                                 # positions of the scan points, for --release
 
     def remember():
-        ends[rows[-1]["window"]] = sim.context.getState(getPositions=True).getPositions(asNumpy=True)
+        if a.release:
+            xs[rows[-1]["window"]] = sim.context.getState(getPositions=True).getPositions(asNumpy=True).value_in_unit(
+                u.nanometer).astype(np.float32)
 
     if len(coords) == 1:
         for k, r in enumerate(targets):
             window(f"f{k + 1}", [float(r)], a.min_iter)
-        remember()
+            remember()
         if a.back:
             for k, r in enumerate(targets[-2::-1] + [d0]):
                 window(f"b{k + 1}", [float(r)], a.min_iter)
@@ -254,18 +319,27 @@ def main():
         for i, r in enumerate(rs):
             for j, s in enumerate(col if i % 2 == 0 else col[::-1]):
                 window(f"g{i}_{j if i % 2 == 0 else m - j}", [float(r), float(s)], a.min_iter)
-                if i == len(rs) - 1:
-                    remember()
+                remember()
         if a.back:
             # along the last row to the first value of the second coordinate, then up the first column
             path = [(rs[-1], s) for s in (col[-2::-1] if n % 2 == 0 else [])] + [(r, col[0]) for r in rs[-2::-1]]
             for k, (r, s) in enumerate(path):
                 window(f"b{k + 1}", [float(r), float(s)], a.min_iter)
     if a.release:
-        # no restraints: does the structure stay where the scan left it, or does it go back?
-        for label, x in sorted(ends.items()):
-            sim.context.setPositions(x)
-            window(f"r_{label}", None, a.release_iter)
+        # no restraints, from the end of the scan and from its local minima: does the structure stay?
+        pts = {((int(w[1:]), 0) if w[0] == "f" else tuple(int(v) for v in w[1:].split("_"))): r
+               for r in rows for w in [r["window"]] if w in xs}
+        if len(coords) == 1:
+            pts[(0, 0)] = rows[0]
+        last = max(i for i, _ in pts)
+
+        def lowest(p):
+            return all(pts[p]["e"] < pts[q]["e"] for q in ((p[0] + di, p[1] + dj) for di in (-1, 0, 1)
+                                                          for dj in (-1, 0, 1) if di or dj) if q in pts)
+
+        for p in sorted(p for p in pts if pts[p]["window"] in xs and (p[0] == last or lowest(p))):
+            sim.context.setPositions(xs[pts[p]["window"]])
+            window(f"r_{pts[p]['window']}", None, a.release_iter)
     app.PDBFile.writeFooter(sub.topology, frames)
     frames.close()
     keys = list(rows[0])
