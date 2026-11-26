@@ -32,8 +32,10 @@ below --fmax, or until the energy stops going down with the QM atoms below --fma
 window): OpenMM's own criterion, the root-mean-square force over all atoms, is diluted by the fixed ones. The QM/MM
 windows use their own L-BFGS (minimize above) with no atom moving more than --max-step per iteration: OpenMM's
 minimizer starts each call with a step of 1 nm over all coordinates together, which can move a QM atom by Angstroms
-(with it, the first QM/MM minimization stopped on an SCF that did not converge). An SCF that does not converge all the
-same is started afresh at the last accepted structure, and the step shortened. On CUDA the forces are computed
+(with it, the first QM/MM minimization stopped on an SCF that did not converge); its steps are kept on the forces, not
+on the energy, whose noise is larger than the energy left in the last iterations. An SCF that does not converge all
+the same is started afresh at the last accepted structure, and the step shortened. --probe N checks at the reactant
+and at the first N windows that do not converge whether the energy agrees with the forces (scan_probe.csv). On CUDA the forces are computed
 deterministically, so that the same --seed gives the same MM equilibration on the same GPU.
 
 Writes scan.csv, one row per window: the restraint target and the value reached (target, d; target2, d2 for the second
@@ -62,17 +64,23 @@ from openmm_mopac import add_qmmm  # noqa: E402
 from run_qmmm_md import PROTEIN, BACKBONE, parse_residues, residue_matches, find_atom  # noqa: E402
 
 
-def minimize(evaluate, restart, x, iters, fmax, max_step, focus, memory=10):
-    """L-BFGS on the positions x (n, 3; nm), every step scaled down so that no atom moves more than max_step (nm), then
-    halved until the energy goes down (Armijo).  OpenMM's minimizer starts every call with a step of 1 nm over all the
-    coordinates together, along the gradient: with most of the force on a few QM atoms, one of them can land Angstroms
-    away, where the SCF may not converge.
+def minimize(evaluate, restart, x, iters, fmax, max_step, focus, memory=10, rise=0.1, patience=300):
+    """L-BFGS on the positions x (n, 3; nm), every step scaled down so that no atom moves more than max_step (nm).
+    OpenMM's minimizer starts every call with a step of 1 nm over all the coordinates together, along the gradient:
+    with most of the force on a few QM atoms, one of them can land Angstroms away, where the SCF may not converge.
+    A step is kept on the forces, not on the energy: when the force along it at the new point has not turned against it
+    by more than 0.9 of its value at the start (Wolfe's curvature condition; for a quadratic, the energy then went down)
+    and the energy did not go up by more than rise (kJ/mol); otherwise it is shortened to where the force along it is
+    estimated to vanish (secant), or halved.  The energy alone cannot steer the last iterations: a force of 20 kJ/mol/nm
+    on a stretch of a bond to hydrogen (k ~ 4e5 kJ/mol/nm^2) is worth F^2/2k = 5e-4 kJ/mol, less than the noise of the
+    MM energy in mixed precision (~1e-3 kJ/mol in a CPU test), and an Armijo search on the energy stopped most windows
+    of a T4 run (552409e4) with 12-40 kJ/mol/nm left on a QM atom.
     evaluate(x) returns the energy (kJ/mol) and its gradient (n, 3; kJ/mol/nm), or None when the SCF did not converge;
     restart(x) then starts the SCF afresh at the last accepted x, and the step is cut to a quarter.  Stops when the
-    largest force is below fmax; when no step lowers the energy, or the energy went down by less than 1e-3 kJ/mol over
-    100 iterations (in mixed precision it is not smoother than that), converged then if the atoms in focus are below
-    fmax; or after iters iterations.  Returns x, the largest force, the largest on the focus atoms, whether it
-    converged, and the number of SCFs that did not converge."""
+    largest force is below fmax; when no step is kept even downhill, or the largest force has not reached a new low in
+    patience iterations, converged then if the atoms in focus are below fmax; or after iters iterations.  Returns x,
+    the largest force, the largest on the focus atoms, whether it converged, and the number of SCFs that did not
+    converge."""
     fails = 0
     eg = evaluate(x)
     if eg is None:                      # far from the last structure (a --release): fresh LMOs
@@ -82,9 +90,12 @@ def minimize(evaluate, restart, x, iters, fmax, max_step, focus, memory=10):
         if eg is None:
             raise RuntimeError("the SCF did not converge at the starting structure")
     e, g = eg
-    mem, best, it, stalled = [], [e], 0, False
+    mem, it, stalled, low, it_low = [], 0, False, np.inf, 0
     while True:
         f = np.linalg.norm(g, axis=1)
+        if f.max() < low:
+            low, it_low = f.max(), it
+        stalled = stalled or it - it_low > patience
         if f.max() < fmax or stalled or it >= iters:
             return x, f.max(), f[focus].max(), bool(f.max() < fmax or (stalled and f[focus].max() < fmax)), fails
         # direction: two-loop recursion (Nocedal and Wright, algorithm 7.4)
@@ -101,17 +112,21 @@ def minimize(evaluate, restart, x, iters, fmax, max_step, focus, memory=10):
             mem = []
             p = -1e-5 * g
         p *= min(1.0, max_step / np.linalg.norm(p, axis=1).max())
-        slope = p.ravel().dot(g.ravel())
-        t = 1.0
-        while t >= 1e-3:
+        slope = p.ravel().dot(g.ravel())    # < 0
+        t, kept = 1.0, False
+        for _ in range(12):
             eg = evaluate(x + t * p)
-            if eg is not None and eg[0] <= e + 1e-4 * t * slope:
-                break
             if eg is None:
                 fails += 1
                 restart(x)
-            t *= 0.25 if eg is None else 0.5
-        if t < 1e-3:                        # no step lowers the energy: once more downhill, then stop
+                t *= 0.25
+                continue
+            d1 = eg[1].ravel().dot(p.ravel())
+            if d1 <= -0.9 * slope and eg[0] <= e + rise:
+                kept = True
+                break
+            t *= min(0.9, max(0.1, slope / (slope - d1))) if d1 > 0 else 0.5
+        if not kept:                        # once more downhill, then stop
             stalled = not mem
             mem = []
             continue
@@ -120,8 +135,6 @@ def minimize(evaluate, restart, x, iters, fmax, max_step, focus, memory=10):
             mem = (mem + [(s, y, 1.0 / s.dot(y))])[-memory:]
         x, (e, g) = x + t * p, eg
         it += 1
-        best.append(min(best[-1], e))
-        stalled = len(best) > 100 and best[-101] - best[-1] < 1e-3
 
 
 def main():
@@ -158,6 +171,8 @@ def main():
                     "below this (kJ/mol/nm; 10 = 0.24 kcal/mol/A)")
     ap.add_argument("--max-step", type=float, default=0.1, help="largest move of an atom in one iteration of the QM/MM "
                     "minimizer (A)")
+    ap.add_argument("--probe", type=int, default=0, help="check energies against forces (MOPAC and OpenMM parts "
+                    "apart) at the reactant and at the first N windows that do not converge")
     ap.add_argument("--min-iter", type=int, default=5000, help="most minimizer iterations per window")
     ap.add_argument("--min-iter-start", type=int, default=20000, help="most minimizer iterations for the reactant "
                     "and for the MM minimization")
@@ -254,6 +269,8 @@ def main():
     if qcharge is None:
         qcharge = int(round(sum(nb.getParticleParameters(i)[0].value_in_unit(u.elementary_charge) for i in qm)))
     qmmm = add_qmmm(system, top, x0, qm, qcharge, a.libmopac, ron=a.ron, roff=a.roff, tolerance=a.tolerance)
+    QMG, MMG = {28}, set(range(32)) - {28}              # force groups: MOPAC; OpenMM (MM and the scan restraints)
+    next(f for f in system.getForces() if f.getName() == "MOPAC QM/MM").setForceGroup(28)
     print(f"QM region: {len(qm)} atoms + {len(qmmm.region.links)} link atoms, charge {qcharge}", flush=True)
     coords = [[find_atom(top, s) for s in a.scan.split("-")]]
     if a.scan2:
@@ -299,6 +316,17 @@ def main():
 
     rows = []
 
+    def computed(**kw):
+        """sim.context.getState, the SCF started afresh once where it did not converge (for the structures the
+        minimizer kept, and small displacements of them)"""
+        try:
+            return sim.context.getState(**kw)
+        except mm.OpenMMException as err:
+            if "did not converge" not in str(err):
+                raise
+        qmmm.restart(sim.context.getState(getPositions=True).getPositions(asNumpy=True).value_in_unit(u.nanometer))
+        return sim.context.getState(**kw)
+
     def frequencies():
         """frequencies (cm-1, imaginary as negative) of the QM atoms with everything else fixed, from central
         differences of the forces (steps of 0.001 nm)"""
@@ -312,13 +340,60 @@ def main():
                     y = x.copy()
                     y[i, c] += sgn * h
                     sim.context.setPositions(y)
-                    f.append(sim.context.getState(getForces=True).getForces(asNumpy=True).value_in_unit(kjnm)[idx]
-                             .ravel())
+                    f.append(computed(getForces=True).getForces(asNumpy=True).value_in_unit(kjnm)[idx].ravel())
                 hes[:, 3 * k + c] = -(f[0] - f[1]) / (2 * h)
         sim.context.setPositions(x)
         m = np.repeat([system.getParticleMass(int(i)).value_in_unit(u.dalton) for i in idx], 3)
         lam = np.linalg.eigvalsh(0.5 * (hes + hes.T) / np.sqrt(np.outer(m, m)))   # kJ/mol/nm^2/Da = 1e24 s^-2
         return np.sign(lam) * np.sqrt(np.abs(lam) * 1e24) / (2 * np.pi * 2.99792458e10)
+
+    atoms = list(top.atoms())
+    probes = []
+
+    def probe(label):
+        """At the structure a window ended on: the MOPAC energy again and from a fresh session, then the derivatives
+        of the MOPAC and the OpenMM energies along the force (over all moving atoms, and on the atom with the largest
+        force alone) by central differences, next to the forces' own values.  Where the two agree at a step h, the
+        energy is consistent with the forces at that scale; the difference times 2h is the error of the energy."""
+        y0 = sim.context.getState(getPositions=True).getPositions(asNumpy=True).value_in_unit(u.nanometer)
+
+        def parts(y):
+            sim.context.setPositions(y)
+            out = []
+            for grp in (QMG, MMG):
+                st = computed(getEnergy=True, getForces=True, groups=grp)
+                out += [st.getPotentialEnergy().value_in_unit(u.kilojoule_per_mole),
+                        st.getForces(asNumpy=True).value_in_unit(kjnm)[moving]]
+            return out
+
+        eq, fq, em, fm = parts(y0)
+        eq2, fq2, _, _ = parts(y0)
+        qmmm.restart(y0)
+        eq3, fq3, _, _ = parts(y0)
+        ft = fq + fm
+        i = int(np.argmax(np.linalg.norm(ft, axis=1)))
+        at_ = atoms[moving[i]]
+        print(f"probe {label}: largest force {np.linalg.norm(ft[i]):.1f} kJ/mol/nm on {at_.residue.chain.id}:"
+              f"{at_.residue.name}{at_.residue.id}:{at_.name} ({'QM' if moving[i] in qm else 'MM'}; MOPAC part "
+              f"{np.linalg.norm(fq[i]):.1f}, OpenMM part {np.linalg.norm(fm[i]):.1f}); MOPAC energy again "
+              f"{eq2 - eq:+.1e} kJ/mol (forces {np.abs(fq2 - fq).max():.1e}), from a fresh session {eq3 - eq:+.1e} "
+              f"(forces {np.abs(fq3 - fq).max():.1e})", flush=True)
+        one = np.zeros_like(ft)
+        one[i] = ft[i] / np.linalg.norm(ft[i])
+        for name, dv in (("all moving atoms", ft / np.linalg.norm(ft)), ("that atom alone", one)):
+            for h in (1e-5, 1e-4, 1e-3):
+                yp, yn = y0.copy(), y0.copy()
+                yp[moving] += h * dv
+                yn[moving] -= h * dv
+                ep, en = parts(yp), parts(yn)
+                r = dict(window=label, direction=name, h=h, mopac_num=(ep[0] - en[0]) / (2 * h),
+                         mopac_forces=-float(np.sum(fq * dv)), openmm_num=(ep[2] - en[2]) / (2 * h),
+                         openmm_forces=-float(np.sum(fm * dv)))
+                probes.append(r)
+                print(f"  along the force, {name}, h {h:.0e} nm: dE/dh MOPAC {r['mopac_num']:10.4f} (forces "
+                      f"{r['mopac_forces']:10.4f}), OpenMM {r['openmm_num']:10.4f} (forces {r['openmm_forces']:10.4f}) "
+                      f"kJ/mol/nm", flush=True)
+        sim.context.setPositions(y0)
 
     def window(label, targets, iters):
         """targets: one value per coordinate (A), or None for no restraint"""
@@ -349,7 +424,7 @@ def main():
         xm, fmax, fqm, ok, fails = minimize(evaluate, lambda xm: qmmm.restart(at(xm)), y[moving].copy(), iters,
                                             a.fmax, a.max_step / 10.0, qpos)
         sim.context.setPositions(at(xm))
-        st = sim.context.getState(getEnergy=True, getPositions=True, enforcePeriodicBox=False)
+        st = computed(getEnergy=True, getPositions=True, enforcePeriodicBox=False)
         e_all = st.getPotentialEnergy().value_in_unit(u.kilojoule_per_mole)
         e_rest = sim.context.getState(getEnergy=True, groups={30}).getPotentialEnergy().value_in_unit(
             u.kilojoule_per_mole)
@@ -376,6 +451,8 @@ def main():
               + (f", {fails} SCFs not converged and started afresh" if fails else "") + ")"
               + (f"  imaginary {row['n_imag']:.0f}, lowest {', '.join(f'{v:.0f}' for v in nu[:6])} cm-1"
                  if not np.isnan(row["n_imag"]) else ""), flush=True)
+        if a.probe and (label == "reactant" or not ok) and len({p["window"] for p in probes}) <= a.probe:
+            probe(label)
 
     window("reactant", None, a.min_iter_start)
     d0 = rows[0]["d"]
@@ -431,6 +508,11 @@ def main():
         fh.write(",".join(keys) + "\n")
         for r in rows:
             fh.write(",".join(r[k] if isinstance(r[k], str) else f"{r[k]:.6f}" for k in keys) + "\n")
+    if probes:
+        with open(f"{a.out}_probe.csv", "w") as fh:
+            fh.write(",".join(probes[0]) + "\n")
+            for r in probes:
+                fh.write(",".join(v if isinstance(v, str) else f"{v:.8g}" for v in r.values()) + "\n")
     qmmm.close()
 
 

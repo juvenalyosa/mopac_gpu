@@ -627,20 +627,35 @@ going down is therefore counted as converged when the force on every QM atom is 
 largest forces (`fmax`, `fmax_qm`) and the verdict (`conv`).
 
 The MM minimization uses OpenMM's minimizer; the QM/MM windows use their own L-BFGS over the moving atoms
-(`minimize` in the script), every step scaled down so that no atom moves more than `--max-step` (0.1 A), then halved
-until the energy goes down. OpenMM's minimizer (`CommonMinimizeKernel` on the GPU platforms) starts every call with a
-step of 1 nm over all coordinates together, along the gradient, and has no limit on the step: with most of the force
-on a few QM atoms, one of them can move by Angstroms. With it, the first QM/MM minimization of a trypsin-BPTI test on
-an L4 stopped on an SCF that did not converge (`mozyme_qmmm_step: the SCF did not converge`). When an SCF does not
-converge all the same, the MOPAC session is opened again at the last accepted structure (`MopacQMMMForce.restart`:
-LMOs from the Lewis structure, as at the first step, instead of those the failed SCF left) and the step cut to a
-quarter; `scan.csv` counts these (`scf_fail`). On CUDA the forces are computed deterministically
-(`DeterministicForces`), so that the same `--seed` gives the same MM equilibration on the same GPU; without it, the
-same seeds gave reactants 0.01–0.11 A apart in the OG–C distance on an L4.
+(`minimize` in the script), every step scaled down so that no atom moves more than `--max-step` (0.1 A). OpenMM's
+minimizer (`CommonMinimizeKernel` on the GPU platforms) starts every call with a step of 1 nm over all coordinates
+together, along the gradient, and has no limit on the step: with most of the force on a few QM atoms, one of them can
+move by Angstroms. With it, the first QM/MM minimization of a trypsin-BPTI test on an L4 stopped on an SCF that did not
+converge (`mozyme_qmmm_step: the SCF did not converge`). When an SCF does not converge all the same, the MOPAC session
+is opened again at the last accepted structure (`MopacQMMMForce.restart`: LMOs from the Lewis structure, as at the
+first step, instead of those the failed SCF left) and the step cut to a quarter; `scan.csv` counts these
+(`scf_fail`). With the step cap, no SCF failed in the 766 windows of five maps on a T4.
+
+A step is kept on the forces rather than on the energy: when the force along it at the new point has not turned
+against it by more than 0.9 of its starting value (Wolfe's curvature condition; for a quadratic energy, the energy then
+went down) and the energy has not risen by more than 0.1 kJ/mol; otherwise the step is shortened to where the force
+along it should vanish. With an Armijo search on the energy instead (commit 552409e4), 532 of those 766 windows
+stopped unconverged, with a median of 19 kJ/mol/nm left on a QM atom (10–90 %: 12–42). On a stretch of a bond to
+hydrogen (k ≈ 4·10⁵ kJ/mol/nm²) such a force is worth F²/2k ≈ 5·10⁻⁴ kJ/mol, below the noise of the MM energy
+measured in a CPU test (~10⁻³ kJ/mol); on toy potentials with 0.01–0.05 kJ/mol of noise added to the energy, the
+Armijo search stopped at 17–24 kJ/mol/nm for a target of 2 and the search on the forces reached it. Whether the noise,
+or a disagreement between the energy and the forces of the QM part, stopped the windows with larger forces left (up
+to 365 kJ/mol/nm; 10 of the 14 above 100 lie within 0.35 A of the middle of the proton transfer, where 30 % of all
+windows lie) is what `--probe N` measures, at the reactant and at the first N windows that do not converge: the MOPAC energy repeated and from a fresh session, and the derivatives of
+the MOPAC and OpenMM energies along the force by central differences next to the forces (`scan_probe.csv`).
+
+On CUDA the forces are computed deterministically (`DeterministicForces`), so that the same `--seed` gives the same
+MM equilibration on the same GPU; without it, the same seeds gave reactants 0.01–0.11 A apart in the OG–C distance on
+an L4.
 
 `scan.csv` gives, per window, the targets and the values reached, the energy without the restraints, the QM heat, the
-forces left, the number of QM/MM evaluations and of SCFs that did not converge, the lowest frequencies (with `--hessian`) and the distances named in
-`--watch`; `scan_frames.pdb` the residues within 5 A of the QM region. The energies belong to single minimized
+forces left, the number of QM/MM evaluations and of SCFs that did not converge, the lowest frequencies (with
+`--hessian`) and the distances named in `--watch`; `scan_frames.pdb` the residues within 5 A of the QM region. The energies belong to single minimized
 structures: a potential-energy map along one path, not a free energy; a difference between the forward and the
 backward scan shows where the path depends on its history, and replicas from different MM snapshots show how much the
 map depends on the snapshot. Example: the wiki, QM/MM example 59 (Ser195 of trypsin attacking the carbonyl carbon of
