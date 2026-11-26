@@ -608,8 +608,8 @@ the reference to measure the energies of the reaction from (the minimized starti
 `--hessian` checks each structure minimized without restraints: the frequencies of the QM atoms with everything else
 fixed, from central differences of the forces; a minimum has none imaginary.
 
-Only residues with an atom within `--free-radius` (10 A) of the QM region move; the other atoms are fixed (zero mass,
-which OpenMM's minimizer leaves in place) where an MM minimization of the equilibrated system left them, so that each
+Only residues with an atom within `--free-radius` (10 A) of the QM region move; the other atoms stay fixed where an MM
+minimization of the equilibrated system left them, so that each
 window relaxes the active site and not the whole water box (minimizing all of trypsin-BPTI in water lowered the energy
 by thousands of kJ/mol per window, from the relaxation of the box). In earlier versions the outer atoms were held by
 harmonic restraints, first at the equilibrated snapshot itself: there they kept moving toward it for several windows,
@@ -624,12 +624,22 @@ each window after a fixed number of iterations. In single or mixed precision the
 10⁻³ kJ/mol: in a test of the MM part alone (trypsin-BPTI in water, CPU platform), L-BFGS stopped with forces of
 25–120 kJ/mol/nm left on a few atoms, the energy changing along them by less than that. A window whose energy stops
 going down is therefore counted as converged when the force on every QM atom is below `--fmax`; `scan.csv` gives both
-largest forces (`fmax`, `fmax_qm`) and the verdict (`conv`). On CUDA the forces are computed deterministically
+largest forces (`fmax`, `fmax_qm`) and the verdict (`conv`).
+
+The MM minimization uses OpenMM's minimizer; the QM/MM windows use their own L-BFGS over the moving atoms
+(`minimize` in the script), every step scaled down so that no atom moves more than `--max-step` (0.1 A), then halved
+until the energy goes down. OpenMM's minimizer (`CommonMinimizeKernel` on the GPU platforms) starts every call with a
+step of 1 nm over all coordinates together, along the gradient, and has no limit on the step: with most of the force
+on a few QM atoms, one of them can move by Angstroms. With it, the first QM/MM minimization of a trypsin-BPTI test on
+an L4 stopped on an SCF that did not converge (`mozyme_qmmm_step: the SCF did not converge`). When an SCF does not
+converge all the same, the MOPAC session is opened again at the last accepted structure (`MopacQMMMForce.restart`:
+LMOs from the Lewis structure, as at the first step, instead of those the failed SCF left) and the step cut to a
+quarter; `scan.csv` counts these (`scf_fail`). On CUDA the forces are computed deterministically
 (`DeterministicForces`), so that the same `--seed` gives the same MM equilibration on the same GPU; without it, the
 same seeds gave reactants 0.01–0.11 A apart in the OG–C distance on an L4.
 
 `scan.csv` gives, per window, the targets and the values reached, the energy without the restraints, the QM heat, the
-forces left, the number of QM/MM evaluations, the lowest frequencies (with `--hessian`) and the distances named in
+forces left, the number of QM/MM evaluations and of SCFs that did not converge, the lowest frequencies (with `--hessian`) and the distances named in
 `--watch`; `scan_frames.pdb` the residues within 5 A of the QM region. The energies belong to single minimized
 structures: a potential-energy map along one path, not a free energy; a difference between the forward and the
 backward scan shows where the path depends on its history, and replicas from different MM snapshots show how much the

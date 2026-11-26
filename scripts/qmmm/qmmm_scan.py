@@ -29,15 +29,19 @@ Only the residues with an atom within --free-radius of the QM region move; the o
 minimization of the equilibrated system left them, so that each window relaxes the active site rather than the whole
 water box. The minimizations use flexible bonds (no constraints) and run until the largest force on a moving atom is
 below --fmax, or until the energy stops going down with the QM atoms below --fmax (at most --min-iter iterations per
-window): OpenMM's own criterion, the root-mean-square force over all atoms, is diluted by the fixed ones. On CUDA the
-forces are computed deterministically, so that the same --seed gives the same MM equilibration on the same GPU.
+window): OpenMM's own criterion, the root-mean-square force over all atoms, is diluted by the fixed ones. The QM/MM
+windows use their own L-BFGS (minimize above) with no atom moving more than --max-step per iteration: OpenMM's
+minimizer starts each call with a step of 1 nm over all coordinates together, which can move a QM atom by Angstroms
+(with it, the first QM/MM minimization stopped on an SCF that did not converge). An SCF that does not converge all the
+same is started afresh at the last accepted structure, and the step shortened. On CUDA the forces are computed
+deterministically, so that the same --seed gives the same MM equilibration on the same GPU.
 
 Writes scan.csv, one row per window: the restraint target and the value reached (target, d; target2, d2 for the second
 coordinate), the potential energy without the restraints (kJ/mol, MM + QM/MM), the energy of the scan restraints, the
 QM heat of formation (kcal/mol), the largest force on a moving atom and on a QM atom at the end (fmax, fmax_qm,
-kJ/mol/nm), whether the minimization converged (conv), the number of QM/MM evaluations, the watched distances, the
-minimizer's time and, with --hessian, the number of imaginary frequencies and the three lowest (n_imag, freq1-3, cm-1,
-imaginary as negative); and scan_frames.pdb, the residues within 5 A of the QM region, one model per window. Every
+kJ/mol/nm), whether the minimization converged (conv), the number of QM/MM evaluations and of SCFs that did not
+converge (scf_fail), the minimizer's time, with --hessian the number of imaginary frequencies and the three lowest
+(n_imag, freq1-3, cm-1, imaginary as negative), and the watched distances; and scan_frames.pdb, the residues within 5 A of the QM region, one model per window. Every
 energy belongs to one minimized structure (no sampling, no entropy, no zero-point energy): this is a potential-energy
 profile along one path, not a free-energy profile. Differences between the forward and the backward scan show where
 the path depends on its history.
@@ -56,6 +60,68 @@ import openmm.unit as u
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from openmm_mopac import add_qmmm  # noqa: E402
 from run_qmmm_md import PROTEIN, BACKBONE, parse_residues, residue_matches, find_atom  # noqa: E402
+
+
+def minimize(evaluate, restart, x, iters, fmax, max_step, focus, memory=10):
+    """L-BFGS on the positions x (n, 3; nm), every step scaled down so that no atom moves more than max_step (nm), then
+    halved until the energy goes down (Armijo).  OpenMM's minimizer starts every call with a step of 1 nm over all the
+    coordinates together, along the gradient: with most of the force on a few QM atoms, one of them can land Angstroms
+    away, where the SCF may not converge.
+    evaluate(x) returns the energy (kJ/mol) and its gradient (n, 3; kJ/mol/nm), or None when the SCF did not converge;
+    restart(x) then starts the SCF afresh at the last accepted x, and the step is cut to a quarter.  Stops when the
+    largest force is below fmax; when no step lowers the energy, or the energy went down by less than 1e-3 kJ/mol over
+    100 iterations (in mixed precision it is not smoother than that), converged then if the atoms in focus are below
+    fmax; or after iters iterations.  Returns x, the largest force, the largest on the focus atoms, whether it
+    converged, and the number of SCFs that did not converge."""
+    fails = 0
+    eg = evaluate(x)
+    if eg is None:                      # far from the last structure (a --release): fresh LMOs
+        fails += 1
+        restart(x)
+        eg = evaluate(x)
+        if eg is None:
+            raise RuntimeError("the SCF did not converge at the starting structure")
+    e, g = eg
+    mem, best, it, stalled = [], [e], 0, False
+    while True:
+        f = np.linalg.norm(g, axis=1)
+        if f.max() < fmax or stalled or it >= iters:
+            return x, f.max(), f[focus].max(), bool(f.max() < fmax or (stalled and f[focus].max() < fmax)), fails
+        # direction: two-loop recursion (Nocedal and Wright, algorithm 7.4)
+        q = g.ravel().copy()
+        alpha = []
+        for s, y, rho in reversed(mem):
+            alpha.append(rho * s.dot(q))
+            q -= alpha[-1] * y
+        q *= mem[-1][0].dot(mem[-1][1]) / mem[-1][1].dot(mem[-1][1]) if mem else 1e-5    # 1e5 kJ/mol/nm^2, a bond
+        for (s, y, rho), al in zip(mem, reversed(alpha)):
+            q += (al - rho * y.dot(q)) * s
+        p = -q.reshape(x.shape)
+        if p.ravel().dot(g.ravel()) >= 0:   # not downhill: steepest descent
+            mem = []
+            p = -1e-5 * g
+        p *= min(1.0, max_step / np.linalg.norm(p, axis=1).max())
+        slope = p.ravel().dot(g.ravel())
+        t = 1.0
+        while t >= 1e-3:
+            eg = evaluate(x + t * p)
+            if eg is not None and eg[0] <= e + 1e-4 * t * slope:
+                break
+            if eg is None:
+                fails += 1
+                restart(x)
+            t *= 0.25 if eg is None else 0.5
+        if t < 1e-3:                        # no step lowers the energy: once more downhill, then stop
+            stalled = not mem
+            mem = []
+            continue
+        s, y = (t * p).ravel(), (eg[1] - g).ravel()
+        if s.dot(y) > 1e-10:
+            mem = (mem + [(s, y, 1.0 / s.dot(y))])[-memory:]
+        x, (e, g) = x + t * p, eg
+        it += 1
+        best.append(min(best[-1], e))
+        stalled = len(best) > 100 and best[-101] - best[-1] < 1e-3
 
 
 def main():
@@ -90,6 +156,8 @@ def main():
                     "region move; the others are fixed")
     ap.add_argument("--fmax", type=float, default=10.0, help="converged when the largest force on a moving atom is "
                     "below this (kJ/mol/nm; 10 = 0.24 kcal/mol/A)")
+    ap.add_argument("--max-step", type=float, default=0.1, help="largest move of an atom in one iteration of the QM/MM "
+                    "minimizer (A)")
     ap.add_argument("--min-iter", type=int, default=5000, help="most minimizer iterations per window")
     ap.add_argument("--min-iter-start", type=int, default=20000, help="most minimizer iterations for the reactant "
                     "and for the MM minimization")
@@ -134,24 +202,21 @@ def main():
 
     kjnm = u.kilojoule_per_mole / u.nanometer
 
-    def relax(context, moving, iters, focus=None):
-        """L-BFGS in pieces of 250 iterations until the largest force on a moving atom is below --fmax, or until the
+    def relax(context, iters):
+        """MM only: OpenMM's L-BFGS in pieces of 250 iterations until the largest force is below --fmax, or until the
         energy stops going down (by less than 1e-3 kJ/mol over two pieces: the MM energy in single or mixed precision
-        is not smoother than that), at most iters iterations.  Returns the largest force on a moving atom and on a
-        focus atom (kJ/mol/nm) and whether it converged: below --fmax, or stopped with the focus atoms below it."""
+        is not smoother than that), at most iters iterations.  Returns the largest force (kJ/mol/nm)."""
         done, e_last, flat = 0, np.inf, 0
         while True:
             n = min(250, iters - done)
             mm.LocalEnergyMinimizer.minimize(context, 0.1 * a.fmax / np.sqrt(3), n)
             done += n
             st = context.getState(getEnergy=True, getForces=True)
-            f = np.linalg.norm(st.getForces(asNumpy=True).value_in_unit(kjnm), axis=1)
-            fm = float(f[moving].max())
-            ff = float(f[focus].max()) if focus is not None else float("nan")
+            fm = float(np.linalg.norm(st.getForces(asNumpy=True).value_in_unit(kjnm), axis=1).max())
             e = st.getPotentialEnergy().value_in_unit(u.kilojoule_per_mole)
             flat = flat + 1 if e > e_last - 1e-3 else 0
             if fm < a.fmax or flat >= 2 or done >= iters:
-                return fm, ff, fm < a.fmax or (flat >= 2 and (focus is None or ff < a.fmax))
+                return fm, fm < a.fmax or flat >= 2
             e_last = min(e, e_last)
 
     # MM equilibration, as run_qmmm_md.py
@@ -171,7 +236,7 @@ def main():
     mmsim = app.Simulation(top, make_system(flexible=True), mm.VerletIntegrator(0.5 * u.femtoseconds), plat, props)
     mmsim.context.setPositions(xeq)
     e1 = mmsim.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(u.kilojoule_per_mole)
-    f, _, ok = relax(mmsim.context, np.arange(top.getNumAtoms()), a.min_iter_start)
+    f, ok = relax(mmsim.context, a.min_iter_start)
     st = mmsim.context.getState(getEnergy=True, getPositions=True, enforcePeriodicBox=False)
     x0 = st.getPositions()
     print(f"MM minimization (flexible bonds): {st.getPotentialEnergy().value_in_unit(u.kilojoule_per_mole) - e1:.3f} "
@@ -202,16 +267,14 @@ def main():
         rest.setUsesPeriodicBoundaryConditions(True)
         rest.setForceGroup(30)
         system.addForce(rest)
-    # fix the residues away from the active site (the minimizer does not move particles without mass)
+    # the residues away from the active site stay fixed (the minimizer moves only these)
     xa = np.array(x0.value_in_unit(u.angstrom))
     dmin = np.full(top.getNumAtoms(), np.inf)
     for i in qm:
         dmin = np.minimum(dmin, np.linalg.norm(xa - xa[i], axis=1))
     free_res = {x.residue.index for x in top.atoms() if dmin[x.index] < a.free_radius}
     moving = np.array([x.index for x in top.atoms() if x.residue.index in free_res])
-    for x in top.atoms():
-        if x.residue.index not in free_res:
-            system.setParticleMass(x.index, 0.0)
+    qpos = np.searchsorted(moving, qm)                  # the QM atoms among the moving ones
     print(f"moving: {len(moving)} atoms in {len(free_res)} residues within {a.free_radius} A of the QM region; fixed: "
           f"{top.getNumAtoms() - len(moving)}", flush=True)
     watch = [(find_atom(top, p.split("-")[0]), find_atom(top, p.split("-")[1]), p)
@@ -266,7 +329,26 @@ def main():
             else:
                 sim.context.setParameter(f"k_c{n}", a.k * 100.0)        # kJ/mol/A^2 -> kJ/mol/nm^2
                 sim.context.setParameter(f"r0_c{n}", targets[n] / 10.0)
-        fmax, fqm, ok = relax(sim.context, moving, iters, qm)
+        y = sim.context.getState(getPositions=True).getPositions(asNumpy=True).value_in_unit(u.nanometer)
+
+        def at(xm):
+            y[moving] = xm
+            return y
+
+        def evaluate(xm):
+            sim.context.setPositions(at(xm))
+            try:
+                st = sim.context.getState(getEnergy=True, getForces=True)
+            except mm.OpenMMException as err:
+                if "did not converge" not in str(err):
+                    raise
+                return None
+            return (st.getPotentialEnergy().value_in_unit(u.kilojoule_per_mole),
+                    -st.getForces(asNumpy=True).value_in_unit(kjnm)[moving])
+
+        xm, fmax, fqm, ok, fails = minimize(evaluate, lambda xm: qmmm.restart(at(xm)), y[moving].copy(), iters,
+                                            a.fmax, a.max_step / 10.0, qpos)
+        sim.context.setPositions(at(xm))
         st = sim.context.getState(getEnergy=True, getPositions=True, enforcePeriodicBox=False)
         e_all = st.getPotentialEnergy().value_in_unit(u.kilojoule_per_mole)
         e_rest = sim.context.getState(getEnergy=True, groups={30}).getPotentialEnergy().value_in_unit(
@@ -277,7 +359,8 @@ def main():
         if len(coords) > 1:
             row.update(target2=tg[1], d2=value(x, coords[1]))
         row.update(e=e_all - e_rest, e_rest=e_rest, heat=qmmm.last.get("heat", float("nan")), fmax=fmax,
-                   fmax_qm=fqm, conv=float(ok), evals=float(qmmm.calls - calls), seconds=time.perf_counter() - t1)
+                   fmax_qm=fqm, conv=float(ok), evals=float(qmmm.calls - calls), scf_fail=float(fails),
+                   seconds=time.perf_counter() - t1)
         app.PDBFile.writeModel(sub.topology, st.getPositions(asNumpy=True)[keep], frames, modelIndex=len(rows) + 1,
                                keepIds=True)
         nu = frequencies() if a.hessian and targets is None else np.full(3, np.nan)
@@ -289,7 +372,8 @@ def main():
               + f"E {row['e'] - rows[0]['e']:9.2f} kJ/mol  restraint {e_rest:7.2f}  fmax {fmax:6.1f} (QM {fqm:5.1f})"
               + ("" if row["conv"] else " NOT CONVERGED") + "  "
               + "  ".join(f"{w[2]} {row[w[2]]:.3f}" for w in watch)
-              + f"  ({row['seconds']:.0f} s, {row['evals']:.0f} evaluations)"
+              + f"  ({row['seconds']:.0f} s, {row['evals']:.0f} evaluations"
+              + (f", {fails} SCFs not converged and started afresh" if fails else "") + ")"
               + (f"  imaginary {row['n_imag']:.0f}, lowest {', '.join(f'{v:.0f}' for v in nu[:6])} cm-1"
                  if not np.isnan(row["n_imag"]) else ""), flush=True)
 
@@ -338,7 +422,7 @@ def main():
                                                           for dj in (-1, 0, 1) if di or dj) if q in pts)
 
         for p in sorted(p for p in pts if pts[p]["window"] in xs and (p[0] == last or lowest(p))):
-            sim.context.setPositions(xs[pts[p]["window"]])
+            sim.context.setPositions(xs[pts[p]["window"]].astype(float))
             window(f"r_{pts[p]['window']}", None, a.release_iter)
     app.PDBFile.writeFooter(sub.topology, frames)
     frames.close()

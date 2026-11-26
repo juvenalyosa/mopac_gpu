@@ -174,8 +174,10 @@ class MopacQMMMForce:
         self.group_size = np.bincount(self.group_of)
         self.group_first = np.unique(self.group_of, return_index=True)[1]
         x0 = self._qm_coords(positions_nm * 10.0)
+        self._session_args = (libmopac, nums, dict(charge=qm_charge, model=model, tolerance=tolerance, guess=guess))
         self.session = QMSession(libmopac, nums, x0, charge=qm_charge, model=model, tolerance=tolerance,
                                  guess=guess)
+        self.restarts = 0
         self.calls = 0
         self.scf_iterations = 0          # sum over the calls
         self.last = {}
@@ -210,6 +212,15 @@ class MopacQMMMForce:
                 except Exception as e:  # noqa: BLE001
                     print("QM/MM: fused MM-charge kernels not used (%s); CuPy array code" % e, flush=True)
         self.mmk_checked = False
+
+    def restart(self, positions_nm):
+        """Close the MOPAC session and open a new one at these positions (nm, all particles): its SCF starts again
+        from the Lewis structure, as the first one did.  After an SCF that did not converge, the next step would
+        start from the LMOs it left."""
+        libmopac, nums, kw = self._session_args
+        self.session.close()
+        self.session = QMSession(libmopac, nums, self._qm_coords(np.asarray(positions_nm) * 10.0), **kw)
+        self.restarts += 1
 
     def _qm_coords(self, pos_a):
         xq = pos_a[self.qm_idx]
