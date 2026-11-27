@@ -34,23 +34,28 @@ windows use their own L-BFGS (minimize above) with no atom moving more than --ma
 minimizer starts each call with a step of 1 nm over all coordinates together, which can move a QM atom by Angstroms
 (with it, the first QM/MM minimization stopped on an SCF that did not converge); its steps are kept on the forces, not
 on the energy, whose noise is larger than the energy left in the last iterations. An SCF that does not converge all
-the same is started afresh at the last accepted structure, and the step shortened. --probe N checks at the reactant
-and at the first N windows that do not converge whether the energy agrees with the forces (scan_probe.csv). On CUDA the forces are computed
-deterministically, so that the same --seed gives the same MM equilibration on the same GPU.
+the same is started afresh at the last accepted structure, and the step shortened; a line search that keeps no step
+is repeated downhill, then with the SCF at the current structure started afresh, and its trials go to the log.
+--probe N checks at the reactant and at the first N windows that do not converge whether the energy agrees with the
+forces (scan_probe.csv). The hydrogens and ions are placed with the same random numbers for every --seed and the
+hydrogens minimized on OpenMM's Reference platform, so that all replicas solvate the same system, and on CUDA the
+forces are computed deterministically, so that the same --seed gives the same MM equilibration on the same GPU.
 
 Writes scan.csv, one row per window: the restraint target and the value reached (target, d; target2, d2 for the second
 coordinate), the potential energy without the restraints (kJ/mol, MM + QM/MM), the energy of the scan restraints, the
 QM heat of formation (kcal/mol), the largest force on a moving atom and on a QM atom at the end (fmax, fmax_qm,
-kJ/mol/nm), whether the minimization converged (conv), the number of QM/MM evaluations and of SCFs that did not
-converge (scf_fail), the minimizer's time, with --hessian the number of imaginary frequencies and the three lowest
-(n_imag, freq1-3, cm-1, imaginary as negative), and the watched distances; and scan_frames.pdb, the residues within 5 A of the QM region, one model per window. Every
-energy belongs to one minimized structure (no sampling, no entropy, no zero-point energy): this is a potential-energy
-profile along one path, not a free-energy profile. Differences between the forward and the backward scan show where
+kJ/mol/nm), whether the minimization converged (conv), the number of QM/MM evaluations, of SCFs that did not
+converge (scf_fail) and of line searches that kept no step (no_step), the minimizer's time, with --hessian the number
+of imaginary frequencies and the three lowest (n_imag, freq1-3, cm-1, imaginary as negative), and the watched
+distances; and scan_frames.pdb, the residues within 5 A of the QM region, one model per window. Every energy belongs
+to one minimized structure (no sampling, no entropy, no zero-point energy): this is a potential-energy profile along
+one path, not a free-energy profile. Differences between the forward and the backward scan show where
 the path depends on its history.
 """
 
 import argparse
 import os
+import random
 import sys
 import time
 
@@ -64,7 +69,7 @@ from openmm_mopac import add_qmmm  # noqa: E402
 from run_qmmm_md import PROTEIN, BACKBONE, parse_residues, residue_matches, find_atom  # noqa: E402
 
 
-def minimize(evaluate, restart, x, iters, fmax, max_step, focus, memory=10, rise=0.1, patience=300):
+def minimize(evaluate, restart, x, iters, fmax, max_step, focus, memory=10, rise=0.1, patience=300, note=None):
     """L-BFGS on the positions x (n, 3; nm), every step scaled down so that no atom moves more than max_step (nm).
     OpenMM's minimizer starts every call with a step of 1 nm over all the coordinates together, along the gradient:
     with most of the force on a few QM atoms, one of them can land Angstroms away, where the SCF may not converge.
@@ -76,12 +81,16 @@ def minimize(evaluate, restart, x, iters, fmax, max_step, focus, memory=10, rise
     MM energy in mixed precision (~1e-3 kJ/mol in a CPU test), and an Armijo search on the energy stopped most windows
     of a T4 run (552409e4) with 12-40 kJ/mol/nm left on a QM atom.
     evaluate(x) returns the energy (kJ/mol) and its gradient (n, 3; kJ/mol/nm), or None when the SCF did not converge;
-    restart(x) then starts the SCF afresh at the last accepted x, and the step is cut to a quarter.  Stops when the
-    largest force is below fmax; when no step is kept even downhill, or the largest force has not reached a new low in
-    patience iterations, converged then if the atoms in focus are below fmax; or after iters iterations.  Returns x,
-    the largest force, the largest on the focus atoms, whether it converged, and the number of SCFs that did not
-    converge."""
-    fails = 0
+    restart(x) then starts the SCF afresh at the last accepted x, and the step is cut to a quarter.  When no step is
+    kept, the search is repeated downhill without the L-BFGS memory, and then once more with the energy and forces of
+    x from an SCF started afresh: each trial starts its SCF from the LMOs of the one before, so after a long trial the
+    SCF may sit in another solution.  note(text), if given, gets the trials of every search that kept no step, and the
+    energy of x again before and after the fresh start (a change before it means the SCF had moved).  Stops
+    when the largest force is below fmax; when no step is kept after that, or the largest force has not reached a new
+    low in patience iterations, converged then if the atoms in focus are below fmax; or after iters iterations.
+    Returns x, the largest force, the largest on the focus atoms, whether it converged, the number of SCFs that did not
+    converge and the number of searches that kept no step."""
+    fails, misses = 0, 0
     eg = evaluate(x)
     if eg is None:                      # far from the last structure (a --release): fresh LMOs
         fails += 1
@@ -90,14 +99,15 @@ def minimize(evaluate, restart, x, iters, fmax, max_step, focus, memory=10, rise
         if eg is None:
             raise RuntimeError("the SCF did not converge at the starting structure")
     e, g = eg
-    mem, it, stalled, low, it_low = [], 0, False, np.inf, 0
+    mem, it, stalled, low, it_low, fresh = [], 0, False, np.inf, 0, False
     while True:
         f = np.linalg.norm(g, axis=1)
         if f.max() < low:
             low, it_low = f.max(), it
         stalled = stalled or it - it_low > patience
         if f.max() < fmax or stalled or it >= iters:
-            return x, f.max(), f[focus].max(), bool(f.max() < fmax or (stalled and f[focus].max() < fmax)), fails
+            return (x, f.max(), f[focus].max(), bool(f.max() < fmax or (stalled and f[focus].max() < fmax)), fails,
+                    misses)
         # direction: two-loop recursion (Nocedal and Wright, algorithm 7.4)
         q = g.ravel().copy()
         alpha = []
@@ -113,7 +123,7 @@ def minimize(evaluate, restart, x, iters, fmax, max_step, focus, memory=10, rise
             p = -1e-5 * g
         p *= min(1.0, max_step / np.linalg.norm(p, axis=1).max())
         slope = p.ravel().dot(g.ravel())    # < 0
-        t, kept = 1.0, False
+        t, kept, trials = 1.0, False, []
         for _ in range(12):
             eg = evaluate(x + t * p)
             if eg is None:
@@ -122,14 +132,40 @@ def minimize(evaluate, restart, x, iters, fmax, max_step, focus, memory=10, rise
                 t *= 0.25
                 continue
             d1 = eg[1].ravel().dot(p.ravel())
+            trials.append((t, eg[0] - e, d1 / -slope))
             if d1 <= -0.9 * slope and eg[0] <= e + rise:
                 kept = True
                 break
             t *= min(0.9, max(0.1, slope / (slope - d1))) if d1 > 0 else 0.5
-        if not kept:                        # once more downhill, then stop
-            stalled = not mem
-            mem = []
+        if not kept:                        # once more downhill, then with a fresh SCF, then stop
+            misses += 1
+            if note:
+                step = np.linalg.norm(p, axis=1).max() * 10.0
+                note(f"no step kept ({'L-BFGS' if mem else 'downhill'}, largest force {f.max():.1f} kJ/mol/nm); "
+                     "trials (largest move, energy change, force along the step / at the start): "
+                     + ", ".join(f"{tt * step:.1e} A {de:+.3f} kJ/mol {r:+.2f}" for tt, de, r in trials))
+            if mem:
+                mem = []
+            elif not fresh:
+                again = evaluate(x)             # from the LMOs the trials left
+                fails += again is None
+                restart(x)
+                eg = evaluate(x)
+                if eg is None:
+                    fails += 1
+                    stalled = True
+                    continue
+                if note:
+                    note("at the same structure, energy again "
+                         + (f"{again[0] - e:+.2e} kJ/mol (forces differ by up to {np.abs(again[1] - g).max():.1e})"
+                            if again else "not computed (SCF did not converge)")
+                         + f", from an SCF started afresh {eg[0] - e:+.2e} kJ/mol (forces differ by up to "
+                         f"{np.abs(eg[1] - g).max():.1e} kJ/mol/nm)")
+                (e, g), fresh = eg, True
+            else:
+                stalled = True
             continue
+        fresh = False
         s, y = (t * p).ravel(), (eg[1] - g).ravel()
         if s.dot(y) > 1e-10:
             mem = (mem + [(s, y, 1.0 / s.dot(y))])[-memory:]
@@ -202,7 +238,10 @@ def main():
             want[(f[0], f[1]) if len(f) == 2 else (None, f[0])] = name.strip()
         variants = [next((v for k, v in want.items() if residue_matches(r, k)), None)
                     for r in mod.topology.residues()]
-    mod.addHydrogens(ff, pH=7.0, variants=variants)
+    # Modeller places hydrogens and ions at random and minimizes the hydrogens on the default platform, which is not
+    # deterministic on a GPU: seeded and on the Reference platform, the same system for every --seed
+    random.seed(0)
+    mod.addHydrogens(ff, pH=7.0, variants=variants, platform=mm.Platform.getPlatformByName("Reference"))
     mod.addSolvent(ff, padding=a.padding * u.nanometer, neutralize=True)
     top, pos = mod.topology, mod.positions
     print(f"system: {top.getNumAtoms()} atoms, box {top.getPeriodicBoxVectors()[0][0].value_in_unit(u.angstrom):.1f} A",
@@ -421,8 +460,9 @@ def main():
             return (st.getPotentialEnergy().value_in_unit(u.kilojoule_per_mole),
                     -st.getForces(asNumpy=True).value_in_unit(kjnm)[moving])
 
-        xm, fmax, fqm, ok, fails = minimize(evaluate, lambda xm: qmmm.restart(at(xm)), y[moving].copy(), iters,
-                                            a.fmax, a.max_step / 10.0, qpos)
+        xm, fmax, fqm, ok, fails, misses = minimize(evaluate, lambda xm: qmmm.restart(at(xm)), y[moving].copy(),
+                                                    iters, a.fmax, a.max_step / 10.0, qpos,
+                                                    note=lambda s: print(f"{label:>8s}: {s}", flush=True))
         sim.context.setPositions(at(xm))
         st = computed(getEnergy=True, getPositions=True, enforcePeriodicBox=False)
         e_all = st.getPotentialEnergy().value_in_unit(u.kilojoule_per_mole)
@@ -435,7 +475,7 @@ def main():
             row.update(target2=tg[1], d2=value(x, coords[1]))
         row.update(e=e_all - e_rest, e_rest=e_rest, heat=qmmm.last.get("heat", float("nan")), fmax=fmax,
                    fmax_qm=fqm, conv=float(ok), evals=float(qmmm.calls - calls), scf_fail=float(fails),
-                   seconds=time.perf_counter() - t1)
+                   no_step=float(misses), seconds=time.perf_counter() - t1)
         app.PDBFile.writeModel(sub.topology, st.getPositions(asNumpy=True)[keep], frames, modelIndex=len(rows) + 1,
                                keepIds=True)
         nu = frequencies() if a.hessian and targets is None else np.full(3, np.nan)
@@ -448,7 +488,8 @@ def main():
               + ("" if row["conv"] else " NOT CONVERGED") + "  "
               + "  ".join(f"{w[2]} {row[w[2]]:.3f}" for w in watch)
               + f"  ({row['seconds']:.0f} s, {row['evals']:.0f} evaluations"
-              + (f", {fails} SCFs not converged and started afresh" if fails else "") + ")"
+              + (f", {fails} SCFs not converged and started afresh" if fails else "")
+              + (f", {misses} line searches kept no step" if misses else "") + ")"
               + (f"  imaginary {row['n_imag']:.0f}, lowest {', '.join(f'{v:.0f}' for v in nu[:6])} cm-1"
                  if not np.isnan(row["n_imag"]) else ""), flush=True)
         if a.probe and (label == "reactant" or not ok) and len({p["window"] for p in probes}) <= a.probe:

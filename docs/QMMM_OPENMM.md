@@ -643,20 +643,35 @@ along it should vanish. With an Armijo search on the energy instead (commit 5524
 stopped unconverged, with a median of 19 kJ/mol/nm left on a QM atom (10–90 %: 12–42). On a stretch of a bond to
 hydrogen (k ≈ 4·10⁵ kJ/mol/nm²) such a force is worth F²/2k ≈ 5·10⁻⁴ kJ/mol, below the noise of the MM energy
 measured in a CPU test (~10⁻³ kJ/mol); on toy potentials with 0.01–0.05 kJ/mol of noise added to the energy, the
-Armijo search stopped at 17–24 kJ/mol/nm for a target of 2 and the search on the forces reached it. Whether the noise,
-or a disagreement between the energy and the forces of the QM part, stopped the windows with larger forces left (up
-to 365 kJ/mol/nm; 10 of the 14 above 100 lie within 0.35 A of the middle of the proton transfer, where 30 % of all
-windows lie) is what `--probe N` measures, at the reactant and at the first N windows that do not converge: the MOPAC energy repeated and from a fresh session, and the derivatives of
-the MOPAC and OpenMM energies along the force by central differences next to the forces (`scan_probe.csv`).
+Armijo search stopped at 17–24 kJ/mol/nm for a target of 2 and the search on the forces reached it. With the search
+on the forces (commit 9a0c007a, an A100), 728 of the 740 windows of five maps converged and no SCF failed.
 
-On CUDA the forces are computed deterministically (`DeterministicForces`), so that the same `--seed` gives the same
-MM equilibration on the same GPU; without it, the same seeds gave reactants 0.01–0.11 A apart in the OG–C distance on
-an L4.
+`--probe N` checks, at the reactant and at the first N windows that do not converge, the MOPAC energy repeated and
+from a fresh session, and the derivatives of the MOPAC and OpenMM energies along the force by central differences next
+to the forces (`scan_probe.csv`). In that A100 run it measured the reactant and two windows that did not converge: the
+derivative of the MOPAC energy agreed with the forces to within 6.1 % for displacements of 10⁻⁵ and 10⁻⁴ nm in all
+three; at 10⁻³ nm it was off by up to a factor of 2.8 in one of them, and a fresh session at the same structure changed
+the MOPAC forces by up to 6.5 kJ/mol/nm there (1.1 at the reactant). The 12 windows that did not converge (fmax_qm
+17–255 kJ/mol/nm; 4 of them at the corner of the map with the proton held about 1.03 A from NE2, 4 near the middle of the
+proton transfer) stopped because no step was kept, downhill either. Each trial of a line search starts its SCF from the
+LMOs of the trial before, so after a long trial the SCF may sit in another solution; a search that keeps no step is
+now repeated once more with the energy and forces of the current structure from an SCF started afresh, its trials go
+to the log, and `scan.csv` counts such searches (`no_step`).
+
+OpenMM's `Modeller` places the hydrogens it adds and the ions with Python's random numbers, and minimizes the
+hydrogens on the default platform, which is not deterministic on a GPU or on the multithreaded CPU platform: the
+short test and replica 1 of the A100 run, both seed 1, had 46 583 and 46 658 atoms. The script seeds the random
+numbers, the same for every `--seed`, and minimizes the hydrogens on the Reference platform, so that all replicas
+solvate the same system (two builds of trypsin-BPTI on a Mac then gave the same coordinates; seeded but on the CPU or
+OpenCL platform, 36 596 and 36 599 atoms). On CUDA the forces are computed deterministically
+(`DeterministicForces`), so that the same `--seed` gives the same MM equilibration on the same GPU. An earlier
+observation, the same seeds giving reactants 0.01–0.11 A apart in the OG–C distance on an L4, was made with neither, and
+does not tell which of the two caused it.
 
 `scan.csv` gives, per window, the targets and the values reached, the energy without the restraints, the QM heat, the
-forces left, the number of QM/MM evaluations and of SCFs that did not converge, the lowest frequencies (with
-`--hessian`) and the distances named in `--watch`; `scan_frames.pdb` the residues within 5 A of the QM region. The energies belong to single minimized
-structures: a potential-energy map along one path, not a free energy; a difference between the forward and the
+forces left, the number of QM/MM evaluations, of SCFs that did not converge and of line searches that kept no step,
+the lowest frequencies (with `--hessian`) and the distances named in `--watch`; `scan_frames.pdb` the residues within
+5 A of the QM region. The energies belong to single minimized structures: a potential-energy map along one path, not a free energy; a difference between the forward and the
 backward scan shows where the path depends on its history, and replicas from different MM snapshots show how much the
 map depends on the snapshot. Example: the wiki, QM/MM example 59 (Ser195 of trypsin attacking the carbonyl carbon of
 Lys15 of BPTI while His57 takes its proton).
